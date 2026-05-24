@@ -1,0 +1,6 @@
+[project]
+name = "uenv-core"
+version = "0.1.0"
+description = "UEnv Environment ABC and MCPEnvironment"
+requires-python = ">=3.10"
+dependencies = []

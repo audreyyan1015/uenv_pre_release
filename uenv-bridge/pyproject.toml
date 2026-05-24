@@ -1,0 +1,12 @@
+[project]
+name = "uenv-bridge"
+version = "0.1.0"
+description = "UEnv Bridge - Training framework adapters"
+requires-python = ">=3.10"
+dependencies = [
+    "grpcio>=1.60",
+    "protobuf>=4.25",
+]
+
+[project.scripts]
+uenv-bridge = "uenv.bridge.cli:main"

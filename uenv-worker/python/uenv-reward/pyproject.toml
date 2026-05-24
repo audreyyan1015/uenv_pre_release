@@ -1,0 +1,6 @@
+[project]
+name = "uenv-reward"
+version = "0.1.0"
+description = "UEnv Reward System"
+requires-python = ">=3.10"
+dependencies = []

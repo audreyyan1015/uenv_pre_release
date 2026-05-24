@@ -1,0 +1,43 @@
+syntax = "proto3";
+package uenv.server.v1;
+
+import "uenv/v1/episode.proto";
+import "uenv/v1/common.proto";
+
+service UEnvService {
+    rpc SubmitEpisode(uenv.v1.EpisodeRequest) returns (uenv.v1.EpisodeResult);
+    rpc SubmitEpisodeStream(stream uenv.v1.EpisodeRequest) returns (stream uenv.v1.EpisodeResult);
+}
+
+service AdminService {
+    rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+    rpc DrainWorker(DrainWorkerRequest) returns (DrainWorkerResponse);
+    rpc CancelEpisode(CancelEpisodeRequest) returns (CancelEpisodeResponse);
+}
+
+message ListWorkersRequest {}
+message WorkerInfo {
+    string worker_id = 1;
+    repeated string supported_env_types = 2;
+    int32 load = 3;
+    int32 max_load = 4;
+    string status = 5;
+}
+message ListWorkersResponse {
+    repeated WorkerInfo workers = 1;
+}
+
+message DrainWorkerRequest {
+    string worker_id = 1;
+    int32 grace_period_sec = 2;
+}
+message DrainWorkerResponse {
+    bool accepted = 1;
+}
+
+message CancelEpisodeRequest {
+    string request_id = 1;
+}
+message CancelEpisodeResponse {
+    bool cancelled = 1;
+}

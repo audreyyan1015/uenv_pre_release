@@ -1,0 +1,62 @@
+syntax = "proto3";
+package uenv.v1;
+
+import "uenv/v1/common.proto";
+
+// ─── EpisodeRequest ──────────────────────────────────────────
+message EpisodeRequest {
+    string request_id = 1;
+    string env_type   = 2;              // "math" | "code" | "agent"
+    bytes payload     = 3;              // 框架无关的 JSON 序列化 payload
+    ExecutionMode mode = 4;
+    int32 max_steps   = 5;
+    ResourceSpec resource_spec = 6;
+    string model_endpoint = 7;          // 推理服务 HTTP/gRPC 地址
+    optional int32 seed = 8;            // 可复现性
+}
+
+// ─── StepRecord ──────────────────────────────────────────────
+message StepRecord {
+    int32 step_index              = 1;
+    bytes observation             = 2;
+    bytes action                  = 3;
+    double reward                 = 4;
+    bool terminated               = 5;
+    bool truncated                = 6;
+    map<string, string> info      = 7;
+    int64 duration_ms             = 8;
+}
+
+// ─── Trajectory ──────────────────────────────────────────────
+message Trajectory {
+    repeated StepRecord steps     = 1;
+    double total_reward           = 2;
+    int32 total_steps             = 3;
+}
+
+// ─── EpisodeResult ────────────────────────────────────────────
+message EpisodeResult {
+    string request_id     = 1;
+    string status         = 2;   // "completed" | "failed" | "timeout"
+    Trajectory trajectory = 3;
+
+    message Summary {
+        double total_reward   = 1;
+        int32 total_steps     = 2;
+        int64 total_duration_ms = 3;
+        string terminate_reason = 4;
+    }
+    Summary summary       = 4;
+    optional ErrorCode error_code = 5;
+    string error_message  = 6;
+}
+
+// ─── StreamReport ─────────────────────────────────────────────
+message StreamReport {
+    string request_id    = 1;
+    int32 current_step   = 2;
+    int32 total_steps    = 3;
+    double current_reward = 4;
+    string phase         = 5;  // "running" | "step_complete" | "episode_complete"
+    optional StepRecord last_step = 6;
+}

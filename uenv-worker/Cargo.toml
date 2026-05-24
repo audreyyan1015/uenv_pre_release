@@ -1,0 +1,24 @@
+[package]
+name = "uenv-worker"
+version = "0.1.0"
+edition = "2024"
+description = "UEnv Worker - Execute environment episodes"
+
+[[bin]]
+name = "uenv-worker"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+snafu = "0.8"
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+reqwest = { version = "0.12", features = ["json"] }

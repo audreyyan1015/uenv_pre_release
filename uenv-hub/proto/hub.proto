@@ -1,0 +1,53 @@
+syntax = "proto3";
+package uenv.hub.v1;
+
+import "uenv/v1/common.proto";
+
+service HubService {
+    rpc GetEnvDefinition(GetEnvDefinitionRequest) returns (GetEnvDefinitionResponse);
+    rpc SearchEnv(SearchEnvRequest) returns (SearchEnvResponse);
+    rpc PublishEnv(PublishEnvRequest) returns (PublishEnvResponse);
+}
+
+message EnvMeta {
+    string env_type = 1;
+    string version = 2;
+    string description = 3;
+    uenv.v1.ResourceSpec resource_requirements = 4;
+    repeated string supported_backends = 5;
+    string image_url = 6;
+    string config_schema = 7;
+    int64 created_at = 8;
+    int64 updated_at = 9;
+}
+
+message GetEnvDefinitionRequest {
+    string env_type = 1;
+    string version = 2;
+}
+
+message GetEnvDefinitionResponse {
+    EnvMeta meta = 1;
+    bytes env_artifact = 2;
+}
+
+message SearchEnvRequest {
+    string query = 1;
+    int32 page = 2;
+    int32 page_size = 3;
+}
+
+message SearchEnvResponse {
+    repeated EnvMeta results = 1;
+    int32 total = 2;
+}
+
+message PublishEnvRequest {
+    EnvMeta meta = 1;
+    bytes env_artifact = 2;
+}
+
+message PublishEnvResponse {
+    bool accepted = 1;
+    string version = 2;
+}

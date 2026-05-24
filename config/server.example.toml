@@ -1,0 +1,9 @@
+port = 50051
+
+[scheduler]
+strategy = "weighted"
+
+[pool]
+max_idle = 16
+warmup_enabled = true
+warmup_env_types = ["math", "code"]
