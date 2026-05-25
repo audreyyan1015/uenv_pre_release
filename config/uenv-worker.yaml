@@ -1,0 +1,32 @@
+# UEnv Worker 配置示例（ADR-002 YAML）
+# 默认路径：/etc/uenv/worker.yaml；开发环境可用 ./config/uenv-worker.yaml
+# 优先级：CLI > 环境变量 > 配置文件 > 默认值
+
+server:
+  endpoint: "localhost:50051"   # UENV_SERVER_ENDPOINT
+
+worker:
+  id: "auto"                    # UENV_WORKER_ID
+  listen: "0.0.0.0:50052"       # UENV_WORKER_LISTEN
+  max_concurrent: 4             # UENV_MAX_CONCURRENT
+
+scheduler:
+  mode: "remote"                # UENV_SCHEDULER_MODE: remote | mock
+
+env:
+  types: ["gsm8k"]              # UENV_ENV_TYPES — Phase 0 仅 gsm8k
+  backend: "process"            # UENV_BACKEND
+  plugin_dir: "./plugins"       # UENV_PLUGIN_DIR
+
+pool:
+  warmup_size: 2                # UENV_WARMUP_POOL_SIZE
+  max_idle_time: 300            # UENV_MAX_IDLE_TIME
+  cool_timeout: 60              # UENV_COOL_TIMEOUT
+  max_episode_count: 1000       # UENV_MAX_EPISODE_COUNT
+
+logging:
+  level: "INFO"                 # UENV_LOG_LEVEL
+  file: "/var/log/uenv/worker.log"  # UENV_LOG_FILE
+
+wal:
+  dir: "/tmp/uenv/wal"          # UENV_WAL_DIR

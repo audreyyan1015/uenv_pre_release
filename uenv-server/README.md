@@ -1,102 +1,30 @@
-# uenv-server — UEnv 调度服务
+# uenv-server — UEnv 全栈调度服务
 
-UEnv Server 是 UEnv 分布式环境框架的**控制平面**，负责 Episode 的调度编排、Worker 注册、实例池管理等元数据操作。不参与 step 级数据流，确保不会成为性能瓶颈。
+UEnv Server 是 UEnv **全栈方案** 的控制平面：接收 Bridge 提交的 Episode，维护 Worker 注册表与调度决策。
 
-## 职责
+> **Worker Pool MVP（M1–M6）不依赖本 crate 完整实现。** MVP 联调请使用 [`uenv-mock-scheduler`](../uenv-mock-scheduler/)。M7 起与真实 Server 集成。
 
-- **环境注册表**：维护 env_type → worker 的全局映射
-- **调度器**：接收 EpisodeRequest，过滤候选 Worker，打分排序选择最优
-- **实例池**：管理环境实例的生命周期（预热 / 复用 / 销毁）
-- **后端管理器**：管理 Process / Podman 后端的启动和停止
-- **状态管理**：维护 Episode 状态机和 Worker 生命周期
-- **容错**：Write-Ahead Log 保证调度决策持久化
+Layer 2 Worker Pool 权威文档：[Docs/worker-pool-layer-design.md](../Docs/worker-pool-layer-design.md)
 
-## 架构
+## 与 Worker Pool 职责边界
 
-```
-┌────────────────────────────────────────────┐
-│  uenv-server                                │
-│                                              │
-│  gRPC (port 50051)                          │
-│  ┌──────────────────────────────────────┐   │
-│  │ UEnvService (Bridge → Server)       │   │
-│  │   SubmitEpisode / SubmitStream / ... │   │
-│  └──────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────┐   │
-│  │ AdminService (运维管理)               │   │
-│  │   ListWorkers / DrainWorker / ...    │   │
-│  └──────────────────────────────────────┘   │
-│                                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐   │
-│  │ 注册表    │ │ 调度器   │ │ 实例池   │   │
-│  │ env_type→ │ │ 过滤+打分 │ │ 预热+复用 │   │
-│  └──────────┘ └──────────┘ └──────────┘   │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐   │
-│  │ 后端管理器│ │ 状态机  │ │ WAL      │   │
-│  │Process/  │ │Episode/ │ │ 持久化   │   │
-│  │ Podman   │ │ Worker  │ │          │   │
-│  └──────────┘ └──────────┘ └──────────┘   │
-└────────────────────────────────────────────┘
-```
+| 能力 | uenv-server（全栈） | uenv-worker（Worker Pool） |
+|------|---------------------|----------------------------|
+| Bridge → Server Episode 提交 | ✅ `UEnvService` | — |
+| Scheduler 主动 `DispatchEpisode` | M7+ | ✅ Worker gRPC Server |
+| Worker 注册 / 心跳 / 结果上报 | M7+ ControlPlane | ✅ ControlPlane Client |
+| 环境实例 Backend / 预热池 | **已 deprecated** | ✅ `backend/`、`pool/` |
+| Worker WAL | **已 deprecated** | ✅ `wal/` |
+| Mock 联调 | — | ✅ `uenv-mock-scheduler` |
 
-## 调度策略
-
-| 策略 | 权重 | 说明 |
-|:-----|:-----|:------|
-| 负载均衡 | 50% | 优先选择负载最低的 Worker |
-| 类型亲和 | 30% | 优先选择已加载该环境的 Worker |
-| 延迟优化 | 20% | 优先选择网络延迟最低的 Worker |
-
-## gRPC 服务
-
-### UEnvService（Bridge 调用）
-
-| RPC | 模式 | 说明 |
-|:----|:-----|:------|
-| SubmitEpisode | Unary | 同步提交单个 Episode |
-| SubmitEpisodeStream | Bidi Streaming | 流式提交/返回 |
-
-### AdminService（运维操作）
-
-| RPC | 说明 |
-|:----|:------|
-| ListWorkers | 列出所有注册的 Worker |
-| DrainWorker | 排空指定 Worker（优雅下线） |
-| CancelEpisode | 取消正在执行的 Episode |
+`src/wal.rs` 与 `src/backend.rs` 已标记 **deprecated**，避免与 Worker 侧模块职责冲突。
 
 ## 快速使用
 
 ```bash
-# 启动
-cargo run -- start --port 50051
-
-# 查看 Worker 列表
-cargo run -- list-workers
-
-# 排空 Worker
-cargo run -- drain worker-1 --grace 30
+uenv-server serve --port 50051   # 长期运行入口统一为 serve（逐步迁移）
 ```
 
 ## 配置
 
-参考 ../config/server.example.toml：
-
-```toml
-port = 50051
-
-[scheduler]
-strategy = "weighted"
-
-[pool]
-max_idle = 16
-warmup_enabled = true
-warmup_env_types = ["math", "code"]
-```
-
-## 依赖
-
-- **通信**: tonic (gRPC), prost (Protobuf)
-- **运行时**: tokio
-- **配置**: serde, serde_json
-- **日志**: tracing, tracing-subscriber
-- **并发**: dashmap, parking_lot
+见 `config/server.example.toml`（全栈 Server 配置，与 Worker YAML 分离）。

@@ -3,32 +3,62 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "=== Generating Rust gRPC code ==="
+echo "=== Generating Rust gRPC code (requires protoc + protoc-gen-prost + protoc-gen-tonic) ==="
+
+mkdir -p "$ROOT/uenv-server/src/gen" "$ROOT/uenv-worker/src/gen" \
+    "$ROOT/uenv-mock-scheduler/src/gen" "$ROOT/uenv-hub/src/gen" \
+    "$ROOT/uenv-bridge/src/gen"
 
 # uenv-server
-protoc -I="$ROOT/uenv-server/proto" -I="$ROOT/proto" \
+protoc -I="$ROOT/proto" -I="$ROOT/uenv-server/proto" \
     "$ROOT/uenv-server/proto/server.proto" \
-    --rust_out="$ROOT/uenv-server/src/gen" \
+    "$ROOT/proto/uenv/v1/episode.proto" \
+    "$ROOT/proto/uenv/v1/common.proto" \
+    "$ROOT/proto/uenv/v1/wal.proto" \
+    --prost_out="$ROOT/uenv-server/src/gen" \
     --tonic_out="$ROOT/uenv-server/src/gen"
 
 # uenv-worker
-protoc -I="$ROOT/uenv-worker/proto" -I="$ROOT/proto" \
-    "$ROOT/uenv-worker/proto/worker.proto" \
-    --rust_out="$ROOT/uenv-worker/src/gen" \
+protoc -I="$ROOT/proto" -I="$ROOT/uenv-worker/proto" \
+    "$ROOT/uenv-worker/proto/worker_service.proto" \
+    "$ROOT/proto/uenv/v1/episode.proto" \
+    "$ROOT/proto/uenv/v1/common.proto" \
+    "$ROOT/proto/uenv/v1/wal.proto" \
+    --prost_out="$ROOT/uenv-worker/src/gen" \
     --tonic_out="$ROOT/uenv-worker/src/gen"
 
+# uenv-mock-scheduler
+protoc -I="$ROOT/proto" \
+    "$ROOT/proto/uenv/v1/scheduler.proto" \
+    "$ROOT/proto/uenv/v1/episode.proto" \
+    "$ROOT/proto/uenv/v1/common.proto" \
+    "$ROOT/proto/uenv/v1/wal.proto" \
+    --prost_out="$ROOT/uenv-mock-scheduler/src/gen" \
+    --tonic_out="$ROOT/uenv-mock-scheduler/src/gen"
+
 # uenv-hub
-protoc -I="$ROOT/uenv-hub/proto" -I="$ROOT/proto" \
+protoc -I="$ROOT/proto" -I="$ROOT/uenv-hub/proto" \
     "$ROOT/uenv-hub/proto/hub.proto" \
-    --rust_out="$ROOT/uenv-hub/src/gen" \
+    "$ROOT/proto/uenv/v1/episode.proto" \
+    "$ROOT/proto/uenv/v1/common.proto" \
+    --prost_out="$ROOT/uenv-hub/src/gen" \
     --tonic_out="$ROOT/uenv-hub/src/gen"
 
 echo "=== Generating Python gRPC code ==="
 
-# uenv-adapter
-protoc -I="$ROOT/uenv-server/proto" -I="$ROOT/proto" \
+# uenv-bridge (design 术语 uenv-adapter = uenv-bridge)
+protoc -I="$ROOT/proto" -I="$ROOT/uenv-server/proto" \
     "$ROOT/uenv-server/proto/server.proto" \
-    --python_out="$ROOT/uenv-adapter/src/gen" \
-    --grpc_python_out="$ROOT/uenv-adapter/src/gen"
+    "$ROOT/proto/uenv/v1/episode.proto" \
+    "$ROOT/proto/uenv/v1/common.proto" \
+    --python_out="$ROOT/uenv-bridge/src/gen" \
+    --grpc_python_out="$ROOT/uenv-bridge/src/gen"
+
+echo "=== Generating L2 plugin proto (worker only) ==="
+
+protoc -I="$ROOT/plugin_proto" \
+    "$ROOT/plugin_proto/uenv/plugin/v1/plugin.proto" \
+    --prost_out="$ROOT/uenv-worker/src/gen" \
+    --tonic_out="$ROOT/uenv-worker/src/gen"
 
 echo "=== Done ==="

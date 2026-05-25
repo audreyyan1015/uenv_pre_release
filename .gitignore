@@ -1,0 +1,15 @@
+/Docs
+**/target/
+**/src/gen/
+*.rs.bk
+__pycache__/
+*.pyc
+.env
+*.env
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

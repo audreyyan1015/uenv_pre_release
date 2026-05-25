@@ -1,5 +1,7 @@
 # uenv-bridge — UEnv 训练框架适配器
 
+> **术语对照**：Worker Pool 设计文档中的 `uenv-adapter` 与本 crate **`uenv-bridge`** 指同一层（训练框架 ↔ gRPC 协议转换）。目录名暂不强制重命名。
+
 uenv-bridge 是 UEnv 分布式环境框架的**训练框架接入层**，负责将各训练框架的原生协议转换为统一的 gRPC EpisodeRequest，让同一套环境实现可在不同框架间无缝切换。
 
 ## 职责

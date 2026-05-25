@@ -1,0 +1,7 @@
+# UEnv Mock Scheduler 配置示例
+
+listen: "0.0.0.0:50051"         # UENV_MOCK_LISTEN
+fixture_dir: "./fixtures/gsm8k"
+logging:
+  level: "INFO"
+  file: "/var/log/uenv/mock-scheduler.log"  # UENV_LOG_FILE

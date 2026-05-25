@@ -2,17 +2,28 @@ syntax = "proto3";
 package uenv.v1;
 
 import "uenv/v1/common.proto";
+import "google/protobuf/timestamp.proto";
 
 // ─── EpisodeRequest ──────────────────────────────────────────
 message EpisodeRequest {
-    string request_id = 1;
-    string env_type   = 2;              // "math" | "code" | "agent"
-    bytes payload     = 3;              // 框架无关的 JSON 序列化 payload
-    ExecutionMode mode = 4;
-    int32 max_steps   = 5;
-    ResourceSpec resource_spec = 6;
-    string model_endpoint = 7;          // 推理服务 HTTP/gRPC 地址
-    optional int32 seed = 8;            // 可复现性
+    string episode_id = 1;
+    uint32 attempt_id = 2;
+    string env_type   = 3;              // Phase 0: "gsm8k"
+    bytes payload     = 4;
+    ExecutionMode mode = 5;
+    int32 max_steps   = 6;
+    ResourceSpec resource_spec = 7;
+    string model_endpoint = 8;
+    optional int32 seed = 9;
+    string correlation_id = 10;
+    int32 timeout_seconds = 11;
+    bytes reward_config = 12;
+
+    // Dispatch lease (§7.7)
+    string dispatch_lease_id = 13;
+    google.protobuf.Timestamp lease_expire_at = 14;
+    uint64 scheduler_epoch = 15;
+    bytes dispatch_token = 16;
 }
 
 // ─── StepRecord ──────────────────────────────────────────────
@@ -36,9 +47,10 @@ message Trajectory {
 
 // ─── EpisodeResult ────────────────────────────────────────────
 message EpisodeResult {
-    string request_id     = 1;
-    string status         = 2;   // "completed" | "failed" | "timeout"
-    Trajectory trajectory = 3;
+    string episode_id     = 1;
+    uint32 attempt_id     = 2;
+    string status         = 3;   // "completed" | "failed" | "timeout"
+    Trajectory trajectory = 4;
 
     message Summary {
         double total_reward   = 1;
@@ -46,17 +58,20 @@ message EpisodeResult {
         int64 total_duration_ms = 3;
         string terminate_reason = 4;
     }
-    Summary summary       = 4;
-    optional ErrorCode error_code = 5;
-    string error_message  = 6;
+    Summary summary       = 5;
+    optional ErrorCode error_code = 6;
+    string error_message  = 7;
+    string trajectory_checksum = 8;
+    bool integrity_verified = 9;
 }
 
 // ─── StreamReport ─────────────────────────────────────────────
 message StreamReport {
-    string request_id    = 1;
-    int32 current_step   = 2;
-    int32 total_steps    = 3;
-    double current_reward = 4;
-    string phase         = 5;  // "running" | "step_complete" | "episode_complete"
-    optional StepRecord last_step = 6;
+    string episode_id    = 1;
+    uint32 attempt_id    = 2;
+    int32 current_step   = 3;
+    int32 total_steps    = 4;
+    double current_reward = 5;
+    string phase         = 6;  // "running" | "step_complete" | "episode_complete"
+    optional StepRecord last_step = 7;
 }
