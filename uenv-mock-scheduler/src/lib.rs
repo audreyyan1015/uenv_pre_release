@@ -1,4 +1,6 @@
-//! Mock Scheduler — ControlPlane 占位（M1 实现业务逻辑）
+//! Mock Scheduler - ControlPlane implementation for Worker Pool MVP.
 
 pub mod cli;
 pub mod config;
+pub mod proto;
+pub mod service;
