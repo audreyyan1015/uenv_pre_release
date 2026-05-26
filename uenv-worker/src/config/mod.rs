@@ -4,6 +4,7 @@
 pub struct WorkerConfig {
     pub server: ServerConfig,
     pub worker: WorkerSection,
+    pub scheduler: SchedulerConfig,
     pub env: EnvConfig,
     pub pool: PoolConfig,
     pub logging: LoggingConfig,
@@ -20,6 +21,11 @@ pub struct WorkerSection {
     pub id: String,
     pub listen: String,
     pub max_concurrent: u32,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+pub struct SchedulerConfig {
+    pub mode: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]

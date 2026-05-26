@@ -1,9 +1,57 @@
-//! WorkerRuntime 占位（M2 实现）
+use std::net::SocketAddr;
 
-pub struct WorkerRuntime;
+use tonic::transport::Server;
+
+use crate::control_plane::client::ControlPlaneClient;
+use crate::grpc_server::worker_service::WorkerGrpcServiceImpl;
+use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcServiceServer;
+
+pub struct WorkerRuntime {
+    pub listen: String,
+    pub server_endpoint: String,
+    pub worker_id: String,
+    pub max_concurrent: u32,
+    pub supported_env_types: Vec<String>,
+}
 
 impl WorkerRuntime {
-    pub fn new() -> Self {
-        Self
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        let control_plane = ControlPlaneClient::new(
+            self.server_endpoint.clone(),
+            self.listen.clone(),
+            self.supported_env_types,
+            self.max_concurrent,
+            self.worker_id,
+        );
+        control_plane.register().await?;
+        control_plane.spawn_heartbeat_loop();
+
+        let service = WorkerGrpcServiceImpl::new(control_plane);
+        let addr: SocketAddr = self.listen.parse()?;
+        Server::builder()
+            .add_service(WorkerGrpcServiceServer::new(service))
+            .serve_with_shutdown(addr, shutdown_signal())
+            .await?;
+        Ok(())
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                if let Some(sig) = &mut term {
+                    let _ = sig.recv().await;
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }

@@ -8,6 +8,7 @@ pub mod logging;
 pub mod metrics;
 pub mod plugin;
 pub mod pool;
+pub mod proto;
 pub mod registry;
 pub mod runtime;
 pub mod state;

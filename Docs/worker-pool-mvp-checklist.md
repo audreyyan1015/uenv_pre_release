@@ -3,7 +3,7 @@
 > **文档版本**：v1.3  
 > **依据**：[worker-pool-layer-design.md](./worker-pool-layer-design.md)（v1.3）  
 > **用途**：分阶段交付 Worker Pool 层，支持排期与验收  
-> **最后更新**：2026-05-25  
+> **最后更新**：2026-05-26  
 > **v1.3 变更**：对齐 design §2.5 CLI、§2.6 YAML/JSON 配置、§2.2 平台级 `/var/log/uenv/` 日志目录与 `tail -f` 验收项  
 > **v1.2 变更**：插件 Runtime 1 进程 = 1 实例；Dispatch 租约字段；插件崩溃语义；L1/L2 协议边界  
 > **v1.1 变更**：集中式调度 + Worker gRPC Server；M1.7 混沌测试；WAL schema；M5/M6 metrics；Proto/UDS MVP
@@ -271,16 +271,16 @@ replay_state: REPLAY_STATE_PENDING
 
 ### 任务
 
-- [ ] `WorkerRuntime`：`main` + Tokio 运行时 + 优雅退出（SIGTERM）
-- [ ] CLI（§2.5）：`uenv-worker serve [--config PATH]`、`uenv-worker version`、`uenv-worker health`
-- [ ] `WorkerGrpcServer`：监听 `UENV_WORKER_LISTEN`（默认 `0.0.0.0:50052`）；实现 `DispatchEpisode`、`HealthCheck`
-- [ ] `ControlPlaneClient` trait：`register`、`heartbeat_loop`、`report_result`（**无** `subscribe_dispatch`）
-- [ ] 连接 `UENV_SERVER_ENDPOINT`（Mock ControlPlane `:50051`）；注册时上报 `endpoint`
-- [ ] `UENV_SCHEDULER_MODE=remote` 开发期默认连 Mock；保留配置项供 M7 切换真实 Server
-- [ ] Worker 状态机骨架：`Created → Ready`（注册成功且 gRPC Server 就绪）
-- [ ] `DispatchEpisode` 收到后 **暂不执行环境**：校验 `dispatch_lease_id` / `lease_expire_at`；构造最小合法 `EpisodeResult` 并 `ReportResult`
-- [ ] 支持 duplicate dispatch 幂等 + **lease_conflict** 拒绝（占位）
-- [ ] 集成测试：Mock Scheduler **主动** Dispatch → Worker 回报（含租约字段）
+- [x] `WorkerRuntime`：`main` + Tokio 运行时 + 优雅退出（SIGTERM）
+- [x] CLI（§2.5）：`uenv-worker serve [--config PATH]`、`uenv-worker version`、`uenv-worker health`
+- [x] `WorkerGrpcServer`：监听 `UENV_WORKER_LISTEN`（默认 `0.0.0.0:50052`）；实现 `DispatchEpisode`、`HealthCheck`
+- [x] `ControlPlaneClient` trait：`register`、`heartbeat_loop`、`report_result`（**无** `subscribe_dispatch`）
+- [x] 连接 `UENV_SERVER_ENDPOINT`（Mock ControlPlane `:50051`）；注册时上报 `endpoint`
+- [x] `UENV_SCHEDULER_MODE=remote` 开发期默认连 Mock；保留配置项供 M7 切换真实 Server
+- [x] Worker 状态机骨架：`Created → Ready`（注册成功且 gRPC Server 就绪）
+- [x] `DispatchEpisode` 收到后 **暂不执行环境**：校验 `dispatch_lease_id` / `lease_expire_at`；构造最小合法 `EpisodeResult` 并 `ReportResult`
+- [x] 支持 duplicate dispatch 幂等 + **lease_conflict** 拒绝（占位）
+- [x] 集成测试：Mock Scheduler **主动** Dispatch → Worker 回报（含租约字段）
 
 ### M2 退出标准
 
@@ -291,6 +291,17 @@ replay_state: REPLAY_STATE_PENDING
 | 3 | Worker **未实现** subscribe 拉任务 RPC |
 | 4 | CI 中集成测试自动通过 |
 | 5 | `uenv-worker serve --help` 与 `uenv-worker version` 可用 |
+
+### M2 现状总结（2026-05-26）
+
+- 已完成 `WorkerRuntime` 运行时骨架：`uenv-worker serve` 可启动 Worker gRPC Server 与 ControlPlane Client，并支持优雅退出（Unix 下含 SIGTERM，Windows 开发环境下可用 Ctrl+C）。
+- 已完成 `WorkerGrpcServer`：监听 `UENV_WORKER_LISTEN`（默认 `0.0.0.0:50052`），实现 `DispatchEpisode` 与 `HealthCheck`。
+- 已完成 `ControlPlaneClient`：实现 `register`、`heartbeat_loop`、`report_result`，连接 `UENV_SERVER_ENDPOINT`（Mock 为 `:50051`）并在注册时上报 `endpoint`。
+- 已落实协议边界：Worker 侧未实现 `subscribe_dispatch` 拉任务模型，保持「Scheduler 主动 Dispatch，Worker 被动接收」控制面方向。
+- 已完成 M2 占位执行语义：`DispatchEpisode` 路径校验 `dispatch_lease_id` 与 `lease_expire_at`；当前不执行真实环境，仅构造最小合法 `EpisodeResult` 并主动 `ReportResult`。
+- 已完成重复与租约冲突占位处理：支持 duplicate dispatch 幂等处理，并对 lease 不一致请求返回 `lease_conflict` 拒绝语义。
+- 已补齐对接测试：新增 `uenv-worker/tests/m2_runtime_with_mock.rs`，覆盖 Mock 主动 Dispatch -> Worker 回报链路，并通过重复 `idempotency_key` 验证上报幂等行为。
+- 已完成编译与测试验证：`cargo check -p uenv-worker` 通过；`cargo test -p uenv-worker --test m2_runtime_with_mock` 通过（1 passed）。
 
 ---
 
