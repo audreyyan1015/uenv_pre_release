@@ -4,10 +4,12 @@ use sha2::{Digest, Sha256};
 
 use crate::episode::model_client::ModelClient;
 use crate::plugin::host::PluginHost;
+use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::v1::{EpisodeRequest, EpisodeResult, StepRecord, StreamReport, Trajectory};
 
 #[derive(Clone)]
 pub struct EpisodeExecutor {
+    warmup_pool: WarmupPool,
     plugin_host: PluginHost,
     model_client: ModelClient,
 }
@@ -19,11 +21,13 @@ pub struct ExecuteOutput {
     pub duration_ms: u64,
     pub env_step_duration_ms: u64,
     pub model_callback_duration_ms: u64,
+    pub warmup_hit: bool,
 }
 
 impl EpisodeExecutor {
-    pub fn new(plugin_host: PluginHost) -> Self {
+    pub fn new(plugin_host: PluginHost, warmup_pool: WarmupPool) -> Self {
         Self {
+            warmup_pool,
             plugin_host,
             model_client: ModelClient::new(),
         }
@@ -34,8 +38,11 @@ impl EpisodeExecutor {
         episode: &EpisodeRequest,
     ) -> Result<ExecuteOutput, Box<dyn std::error::Error + Send + Sync>> {
         let start = Instant::now();
-        let instance = self.plugin_host.spawn(&episode.env_type).await?;
-        let observation = self.plugin_host.reset(&instance.instance_id, episode.seed).await?;
+        let lease = self.warmup_pool.acquire(&episode.env_type).await?;
+        let observation = self
+            .plugin_host
+            .reset(&lease.instance_id, episode.seed)
+            .await?;
 
         let model_start = Instant::now();
         let action = self
@@ -45,12 +52,15 @@ impl EpisodeExecutor {
         let model_callback_duration_ms = model_start.elapsed().as_millis() as u64;
 
         let step_start = Instant::now();
-        let step = self
-            .plugin_host
-            .step(&instance.instance_id, action.clone())
-            .await?;
+        let step = match self.plugin_host.step(&lease.instance_id, action.clone()).await {
+            Ok(step) => step,
+            Err(err) => {
+                let _ = self.warmup_pool.release(lease.clone()).await;
+                return Err(err);
+            }
+        };
         let env_step_duration_ms = step_start.elapsed().as_millis() as u64;
-        self.plugin_host.close(&instance.instance_id).await?;
+        self.warmup_pool.release(lease.clone()).await?;
 
         let step_record = StepRecord {
             step_index: 1,
@@ -101,6 +111,7 @@ impl EpisodeExecutor {
             duration_ms,
             env_step_duration_ms,
             model_callback_duration_ms,
+            warmup_hit: lease.warmup_hit,
         })
     }
 }

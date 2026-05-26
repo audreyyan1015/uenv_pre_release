@@ -40,6 +40,10 @@ async fn main() {
                 max_concurrent: cfg.worker.max_concurrent,
                 supported_env_types: cfg.env.types.clone(),
                 plugin_dir: cfg.env.plugin_dir.clone(),
+                warmup_size: cfg.pool.warmup_size,
+                max_idle_time_secs: cfg.pool.max_idle_time,
+                cool_timeout_secs: cfg.pool.cool_timeout,
+                max_episode_count: cfg.pool.max_episode_count,
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

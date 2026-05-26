@@ -10,6 +10,7 @@ use tonic::{Request, Response, Status};
 use crate::control_plane::client::ControlPlaneClient;
 use crate::episode::executor::EpisodeExecutor;
 use crate::metrics::MetricsExporter;
+use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::v1::{EpisodeResult, StreamReport};
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcService;
 use crate::proto::worker::v1::{DispatchEpisodeRequest, HealthCheckRequest, HealthCheckResponse};
@@ -19,6 +20,7 @@ pub struct WorkerGrpcServiceImpl {
     control_plane: ControlPlaneClient,
     executor: EpisodeExecutor,
     metrics: MetricsExporter,
+    warmup_pool: WarmupPool,
     semaphore: Arc<Semaphore>,
     active_leases: Arc<Mutex<HashMap<(String, u32), String>>>,
     completed: Arc<Mutex<HashSet<(String, u32)>>>,
@@ -29,12 +31,14 @@ impl WorkerGrpcServiceImpl {
         control_plane: ControlPlaneClient,
         executor: EpisodeExecutor,
         metrics: MetricsExporter,
+        warmup_pool: WarmupPool,
         max_concurrent: u32,
     ) -> Self {
         Self {
             control_plane,
             executor,
             metrics,
+            warmup_pool,
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             active_leases: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashSet::new())),
@@ -67,14 +71,6 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                 return Err(Status::failed_precondition("lease_expired"));
             }
         }
-        tracing::info!(
-            trace_id = %trace_id,
-            episode_id = %episode.episode_id,
-            worker_id = "worker",
-            attempt_id = episode.attempt_id,
-            msg = "dispatch"
-        );
-
         let key = (episode.episode_id.clone(), episode.attempt_id);
         {
             let completed = self.completed.lock().await;
@@ -111,6 +107,20 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             exec.duration_ms,
             exec.env_step_duration_ms,
             exec.model_callback_duration_ms,
+        );
+        if exec.warmup_hit {
+            self.metrics.inc_warmup_hit();
+        } else {
+            self.metrics.inc_warmup_miss();
+        }
+        self.metrics.set_pool_sizes(self.warmup_pool.status_counts().await);
+        tracing::info!(
+            trace_id = %trace_id,
+            episode_id = %episode.episode_id,
+            worker_id = "worker",
+            attempt_id = episode.attempt_id,
+            warmup_hit = exec.warmup_hit,
+            msg = "dispatch"
         );
         self.metrics.dec_active();
         drop(permit);

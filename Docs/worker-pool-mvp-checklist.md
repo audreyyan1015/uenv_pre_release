@@ -430,14 +430,14 @@ replay_state: REPLAY_STATE_PENDING
 
 ### 任务
 
-- [ ] `WarmupPool`：按 `env_type` 队列；状态机 Creating/Warm/Active/Idle/Cooling/Evicting/Destroyed
-- [ ] 启动时预创建 `UENV_WARMUP_POOL_SIZE` 个 `gsm8k` 实例
-- [ ] Episode 开始：出池前 `health_check`；池取 **进程级** 实例；结束：`reset`/cleanup 后归还 Warm（进程不退出）
-- [ ] `max_episode_count` / `max_idle_time` / `cool_timeout` 基础回收
-- [ ] **no double allocation**：同一 `instance_id`（PID）不被双 Episode 占用
-- [ ] 插件进程崩溃：实例从池移除并补池（§6.4）
-- [ ] 日志：池命中 `warmup_hit=true` vs 冷创建 `warmup_hit=false`
-- [ ] 指标（**M6 必达**）：`warmup_pool_hit_total`、`warmup_pool_miss_total`、`uenv_instance_pool_size{status}`
+- [x] `WarmupPool`：按 `env_type` 队列；状态机 Creating/Warm/Active/Idle/Cooling/Evicting/Destroyed
+- [x] 启动时预创建 `UENV_WARMUP_POOL_SIZE` 个 `gsm8k` 实例
+- [x] Episode 开始：出池前 `health_check`；池取 **进程级** 实例；结束：`reset`/cleanup 后归还 Warm（进程不退出）
+- [x] `max_episode_count` / `max_idle_time` / `cool_timeout` 基础回收
+- [x] **no double allocation**：同一 `instance_id`（PID）不被双 Episode 占用
+- [x] 插件进程崩溃：实例从池移除并补池（§6.4）
+- [x] 日志：池命中 `warmup_hit=true` vs 冷创建 `warmup_hit=false`
+- [x] 指标（**M6 必达**）：`warmup_pool_hit_total`、`warmup_pool_miss_total`、`uenv_instance_pool_size{status}`
 
 ### M6 退出标准
 
@@ -448,6 +448,16 @@ replay_state: REPLAY_STATE_PENDING
 | 3 | `warmup_pool_hit_total` 在第 2 次 Episode 递增；`/metrics` 可验证 |
 | 4 | 无双分配：自动化测试覆盖 allocate→release→reallocate |
 | 5 | 设计 §9.3-2、§9.3-3 在 Mock 下可验证 |
+
+### M6 现状总结（2026-05-26）
+
+- 已完成 `WarmupPool` 固定容量实现：按 `env_type` 维护池队列，并实现 `Creating/Warm/Active/Idle/Cooling/Evicting/Destroyed` 状态流转。
+- 已在 `WorkerRuntime` 启动阶段接入预热：按 `pool.warmup_size`（`UENV_WARMUP_POOL_SIZE`）预创建实例。
+- 已将 `EpisodeExecutor` 改造为池化执行：`acquire -> reset(seed) -> step -> release`，不再每轮执行后销毁进程实例。
+- 已落地回收语义：支持 `max_episode_count` 上限淘汰、`max_idle_time/cool_timeout` 空闲回收、health_check/reset 失败销毁并补池。
+- 已落实复用安全：池内维护 active 集合，实例借出时强校验，防止同一 `instance_id` 双分配。
+- 已接入 M6 日志与指标：`dispatch` 日志新增 `warmup_hit` 字段；指标新增 `uenv_warmup_pool_hit_total`、`uenv_warmup_pool_miss_total`、`uenv_instance_pool_size{status}`。
+- 已补充测试：新增 `uenv-worker/tests/m6_warmup_pool.rs` 覆盖 allocate→release→reallocate（Unix 平台）；当前 Windows 环境运行结果为 `0 tests`（`cfg(unix)` 约束）。
 
 ---
 

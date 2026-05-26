@@ -6,6 +6,7 @@ use std::path::Path;
 use prost::Message;
 use uenv_worker::episode::executor::EpisodeExecutor;
 use uenv_worker::plugin::host::PluginHost;
+use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
 use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult};
 
 #[tokio::test]
@@ -24,7 +25,19 @@ async fn m5_single_round_gsm8k_matches_expected_reward_and_status() {
     let expected = EpisodeResult::decode(expected_bytes.as_slice()).expect("decode expected result");
 
     let host = PluginHost::load_from_dir(plugin_dir).expect("load plugin host");
-    let executor = EpisodeExecutor::new(host);
+    let pool = WarmupPool::new(
+        host.clone(),
+        WarmupPoolConfig {
+            warmup_size: 1,
+            max_idle_time_secs: 300,
+            cool_timeout_secs: 60,
+            max_episode_count: 1000,
+        },
+    );
+    pool.prewarm(&["gsm8k".to_string()])
+        .await
+        .expect("prewarm pool");
+    let executor = EpisodeExecutor::new(host, pool);
     let output = executor
         .execute_single_round(&request)
         .await
