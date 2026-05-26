@@ -39,6 +39,7 @@ async fn main() {
                 worker_id: cfg.worker.id.clone(),
                 max_concurrent: cfg.worker.max_concurrent,
                 supported_env_types: cfg.env.types.clone(),
+                plugin_dir: cfg.env.plugin_dir.clone(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

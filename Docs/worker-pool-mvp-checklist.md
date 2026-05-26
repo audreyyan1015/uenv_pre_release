@@ -350,15 +350,15 @@ replay_state: REPLAY_STATE_PENDING
 
 ### 任务
 
-- [ ] `plugins/gsm8k/manifest.yaml`：`env_type`、版本、`supported_backends: [process]`、`ipc: proto-uds`
-- [ ] **L2** aRPC IDL（`plugin_proto/`，**Protobuf**）：`reset` / `step` / `close` / `health_check` — 与 L1 `proto/` 分离
-- [ ] `PluginHost`：扫描 `UENV_PLUGIN_DIR`；`spawn` 返回 `instance_id` + PID + UDS（**1 spawn = 1 进程 = 1 instance**）
-- [ ] `ProcessBackend::create`：启动 **一个** 插件子进程；**不** 实现单进程多 session
-- [ ] `PluginHost`：订阅子进程退出（`waitpid`）；退出时标记实例 Broken（§6.4）
-- [ ] GSM8K 插件最小实现：固定一道题，`step` 比较答案给 0/1 reward，`reset` 返回题干
-- [ ] 单元测试：不经过 gRPC，`PluginHost` 对 **独立进程** reset/step/close
-- [ ] 单元测试：**故意 kill 插件进程** → Worker 存活；返回错误；实例不可复用
-- [ ] 健康检查：失败实例不进入预热池（M6 前置）
+- [x] `plugins/gsm8k/manifest.yaml`：`env_type`、版本、`supported_backends: [process]`、`ipc: proto-uds`
+- [x] **L2** aRPC IDL（`plugin_proto/`，**Protobuf**）：`reset` / `step` / `close` / `health_check` — 与 L1 `proto/` 分离
+- [x] `PluginHost`：扫描 `UENV_PLUGIN_DIR`；`spawn` 返回 `instance_id` + PID + UDS（**1 spawn = 1 进程 = 1 instance**）
+- [x] `ProcessBackend::create`：启动 **一个** 插件子进程；**不** 实现单进程多 session
+- [x] `PluginHost`：订阅子进程退出（`waitpid`）；退出时标记实例 Broken（§6.4）
+- [x] GSM8K 插件最小实现：固定一道题，`step` 比较答案给 0/1 reward，`reset` 返回题干
+- [x] 单元测试：不经过 gRPC，`PluginHost` 对 **独立进程** reset/step/close
+- [x] 单元测试：**故意 kill 插件进程** → Worker 存活；返回错误；实例不可复用
+- [x] 健康检查：失败实例不进入预热池（M6 前置）
 
 ### M4 退出标准
 
@@ -370,6 +370,15 @@ replay_state: REPLAY_STATE_PENDING
 | 4 | 未引入 Cap'n Proto / cdylib；未实现 1 process → N sessions |
 | 5 | kill 插件进程后 Worker 仍运行；`PluginHost` 已销毁该 `instance_id` |
 | 6 | `plugin_proto/` 与 `proto/` 分离，README 说明 L1/L2 边界 |
+
+### M4 现状总结（2026-05-26）
+
+- 已完成 `plugins/gsm8k/manifest.yaml` 字段对齐，补充 `version` 与 `supported_backends: [process]`，保持 `ipc: proto-uds`。
+- 已完成 `PluginHost` 主体：扫描 `UENV_PLUGIN_DIR` 下 `manifest.yaml`，按 `env_type` 建索引，`spawn` 返回 `instance_id` + PID + UDS 路径。
+- 已完成 `ProcessBackend::create`：严格一实例一子进程，按 `entry` 启动插件并注入 `--uds-path`，未实现单进程多 session。
+- 已完成 L2 调用链：`plugin/arpc` 新增 `connect_uds/reset/step/close/health_check`，并新增 `uenv-gsm8k-plugin` 子进程服务（固定题目奖励 0/1）。
+- 已落实崩溃语义：`PluginHost` 为子进程注册退出监听，实例退出后标记不可继续使用；`terminate_for_test` 路径验证 kill 后调用失败。
+- 已完成 M4 测试与编译验证：新增 `uenv-worker/tests/m4_plugin_host_process.rs`（Unix 平台启用）；`cargo check -p uenv-worker` 通过；`cargo test -p uenv-worker --test m4_plugin_host_process` 在当前 Windows 环境为 `0 tests`（`cfg(unix)` 约束）。
 
 ---
 

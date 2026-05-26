@@ -19,3 +19,12 @@ pub mod worker {
         ));
     }
 }
+
+pub mod plugin {
+    pub mod v1 {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/gen/uenv/plugin/v1/uenv.plugin.v1.rs"
+        ));
+    }
+}

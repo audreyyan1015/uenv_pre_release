@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use tonic::transport::Server;
 
 use crate::control_plane::client::ControlPlaneClient;
+use crate::plugin::host::PluginHost;
 use crate::grpc_server::worker_service::WorkerGrpcServiceImpl;
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcServiceServer;
 
@@ -12,10 +13,21 @@ pub struct WorkerRuntime {
     pub worker_id: String,
     pub max_concurrent: u32,
     pub supported_env_types: Vec<String>,
+    pub plugin_dir: String,
 }
 
 impl WorkerRuntime {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
+        let loaded_envs = plugin_host.supported_envs().await;
+        tracing::info!(
+            trace_id = "runtime",
+            worker_id = %self.worker_id,
+            episode_id = "-",
+            plugin_dir = %self.plugin_dir,
+            loaded_envs = %loaded_envs.join(","),
+            msg = "plugin_host_loaded"
+        );
         tracing::info!(
             trace_id = "runtime",
             worker_id = %self.worker_id,

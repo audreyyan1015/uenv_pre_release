@@ -24,8 +24,9 @@ snafu = "0.8"
 async-trait = "0.1"
 futures = "0.3"
 bytes = "1"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }
 reqwest = { version = "0.12", features = ["json"] }
+tower = "0.5"
 
 [dev-dependencies]
 uenv-mock-scheduler = { path = "../uenv-mock-scheduler" }

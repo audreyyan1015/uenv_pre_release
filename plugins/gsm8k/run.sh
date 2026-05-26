@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
-# GSM8K plugin entry placeholder — MVP M4 实现子进程 + UDS
-echo "gsm8k plugin: not yet implemented" >&2
-exit 1
+set -euo pipefail
+
+if [[ -z "${UENV_GSM8K_PLUGIN_BIN:-}" ]]; then
+  echo "UENV_GSM8K_PLUGIN_BIN is required" >&2
+  exit 1
+fi
+
+exec "${UENV_GSM8K_PLUGIN_BIN}" "$@"

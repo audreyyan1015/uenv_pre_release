@@ -1867,6 +1867,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uenv-mock-scheduler",
