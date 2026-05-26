@@ -3,8 +3,10 @@ use std::net::SocketAddr;
 use tonic::transport::Server;
 
 use crate::control_plane::client::ControlPlaneClient;
-use crate::plugin::host::PluginHost;
+use crate::episode::executor::EpisodeExecutor;
 use crate::grpc_server::worker_service::WorkerGrpcServiceImpl;
+use crate::metrics::MetricsExporter;
+use crate::plugin::host::PluginHost;
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcServiceServer;
 
 pub struct WorkerRuntime {
@@ -17,7 +19,7 @@ pub struct WorkerRuntime {
 }
 
 impl WorkerRuntime {
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
         let loaded_envs = plugin_host.supported_envs().await;
         tracing::info!(
@@ -46,7 +48,12 @@ impl WorkerRuntime {
         control_plane.register().await?;
         control_plane.spawn_heartbeat_loop();
 
-        let service = WorkerGrpcServiceImpl::new(control_plane);
+        let service = WorkerGrpcServiceImpl::new(
+            control_plane,
+            EpisodeExecutor::new(plugin_host.clone()),
+            MetricsExporter::new(),
+            self.max_concurrent.max(1),
+        );
         let addr: SocketAddr = self.listen.parse()?;
         Server::builder()
             .add_service(WorkerGrpcServiceServer::new(service))

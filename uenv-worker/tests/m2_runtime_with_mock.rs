@@ -38,6 +38,12 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
         worker_id: "m2-worker".to_string(),
         max_concurrent: 1,
         supported_env_types: vec!["gsm8k".to_string()],
+        plugin_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join("plugins")
+            .to_string_lossy()
+            .to_string(),
     };
     tokio::spawn(async move {
         let _ = runtime.run().await;
@@ -79,3 +85,4 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
         .into_inner();
     assert!(duplicated.duplicate);
 }
+#![cfg(unix)]

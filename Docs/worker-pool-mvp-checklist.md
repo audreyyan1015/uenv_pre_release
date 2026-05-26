@@ -390,14 +390,14 @@ replay_state: REPLAY_STATE_PENDING
 
 ### 任务
 
-- [ ] `EpisodeExecutor`：实现 §4.2 流程（单轮模式）；绑定 **进程级实例**；校验 **当前 dispatch_lease_id**
-- [ ] `ModelClient`：Mock 模式可返回 fixture 中预设 `action`（不依赖真实 vLLM）
+- [x] `EpisodeExecutor`：实现 §4.2 流程（单轮模式）；绑定 **进程级实例**；校验 **当前 dispatch_lease_id**
+- [x] `ModelClient`：Mock 模式可返回 fixture 中预设 `action`（不依赖真实 vLLM）
 - [ ] `RewardEngine`：最小 `RuleReward`（答案匹配）
-- [ ] 构建 `EpisodeResult`：`trajectory`、`trajectory_checksum`（SHA-256）、`integrity_verified=true`
-- [ ] `StreamReport`：`STEP_COMPLETE` 至少 1 次（若 proto 要求）
-- [ ] `ConcurrencyPool`：尊重 `UENV_MAX_CONCURRENT`（M5 可先 serial=1）
-- [ ] **禁止**默认 `env.step()` 重试；model callback 可配置重试
-- [ ] `MetricsExporter`：暴露 M5 最小集（`episode_total`、`episode_duration_ms`、`env_step_duration_ms`、`model_callback_duration_ms`、`active_episode_count`、`heartbeat_lag_ms`）
+- [x] 构建 `EpisodeResult`：`trajectory`、`trajectory_checksum`（SHA-256）、`integrity_verified=true`
+- [x] `StreamReport`：`STEP_COMPLETE` 至少 1 次（若 proto 要求）
+- [x] `ConcurrencyPool`：尊重 `UENV_MAX_CONCURRENT`（M5 可先 serial=1）
+- [x] **禁止**默认 `env.step()` 重试；model callback 可配置重试
+- [x] `MetricsExporter`：暴露 M5 最小集（`episode_total`、`episode_duration_ms`、`env_step_duration_ms`、`model_callback_duration_ms`、`active_episode_count`、`heartbeat_lag_ms`）
 - [ ] 集成测试：Mock **主动** Dispatch → Worker 执行 → Result 与 `expected_result` 比对 reward/status
 
 ### M5 退出标准
@@ -408,6 +408,17 @@ replay_state: REPLAY_STATE_PENDING
 | 2 | `EpisodeResult` 含非空 trajectory 且 checksum 校验通过 |
 | 3 | 日志记录 `duration_ms`、`reward`；`/metrics` 可 scrape 且含 M5 最小指标 |
 | 4 | 代码审查确认无 `env.step()` 默认重试循环 |
+
+### M5 现状总结（2026-05-26）
+
+- 已完成 `EpisodeExecutor` 单轮执行主链路：`spawn(process instance) -> reset -> model action -> step -> close`，并在执行前复用 `dispatch_lease_id` 校验。
+- 已完成 `ModelClient` Mock 推理：优先从 `reward_config.target` 解析预设答案作为 action，兜底支持从 payload 中读取 `answer` 字段。
+- 已完成结果构建：`EpisodeResult` 含非空 `trajectory`，并对 `Trajectory` 做 SHA-256 生成 `trajectory_checksum`，`integrity_verified=true`。
+- 已完成 `DispatchEpisode` 流改造：至少上报 1 次 `StreamReport`（`phase=step_complete`，携带 `last_step`）。
+- 已完成并发门控：在 Worker gRPC 服务中引入 `Semaphore`，由 `UENV_MAX_CONCURRENT` 控制并发执行上限（M5 默认可配为 1）。
+- 已完成最小指标聚合器 `MetricsExporter`：支持 `episode_total`、`episode_duration_ms`、`env_step_duration_ms`、`model_callback_duration_ms`、`active_episode_count`、`heartbeat_lag_ms` 的内存聚合与 Prometheus 文本导出。
+- 已确认执行路径无 `env.step()` 默认重试循环：`step` 仅执行一次，失败直接返回错误并由上层处理。
+- 待完成：`RewardEngine` 独立模块化（当前奖励语义由 GSM8K 插件 + ModelClient 协同达成）；Mock 主动 Dispatch 到 `expected_result` 的端到端集成断言仍需在 Unix 测试环境补齐。
 
 ---
 

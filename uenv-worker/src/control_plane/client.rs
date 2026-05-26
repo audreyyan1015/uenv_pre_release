@@ -44,7 +44,7 @@ impl ControlPlaneClient {
         }
     }
 
-    pub async fn register(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await;
         let response = client
@@ -88,7 +88,10 @@ impl ControlPlaneClient {
         });
     }
 
-    async fn heartbeat_once(&self, interval_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+    async fn heartbeat_once(
+        &self,
+        interval_ms: u64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let (tx, rx) = mpsc::channel(4);
         let identity = self.identity.read().await.clone();
@@ -133,7 +136,7 @@ impl ControlPlaneClient {
         &self,
         idempotency_key: String,
         result: EpisodeResult,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await.clone();
         let worker_id_for_log = identity.worker_id.clone();

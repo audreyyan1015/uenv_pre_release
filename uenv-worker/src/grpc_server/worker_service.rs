@@ -2,11 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tokio::sync::Semaphore;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::control_plane::client::ControlPlaneClient;
+use crate::episode::executor::EpisodeExecutor;
+use crate::metrics::MetricsExporter;
 use crate::proto::v1::{EpisodeResult, StreamReport};
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcService;
 use crate::proto::worker::v1::{DispatchEpisodeRequest, HealthCheckRequest, HealthCheckResponse};
@@ -14,14 +17,25 @@ use crate::proto::worker::v1::{DispatchEpisodeRequest, HealthCheckRequest, Healt
 #[derive(Clone)]
 pub struct WorkerGrpcServiceImpl {
     control_plane: ControlPlaneClient,
+    executor: EpisodeExecutor,
+    metrics: MetricsExporter,
+    semaphore: Arc<Semaphore>,
     active_leases: Arc<Mutex<HashMap<(String, u32), String>>>,
     completed: Arc<Mutex<HashSet<(String, u32)>>>,
 }
 
 impl WorkerGrpcServiceImpl {
-    pub fn new(control_plane: ControlPlaneClient) -> Self {
+    pub fn new(
+        control_plane: ControlPlaneClient,
+        executor: EpisodeExecutor,
+        metrics: MetricsExporter,
+        max_concurrent: u32,
+    ) -> Self {
         Self {
             control_plane,
+            executor,
+            metrics,
+            semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             active_leases: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -81,43 +95,46 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             }
         }
 
-        let report = StreamReport {
-            episode_id: episode.episode_id.clone(),
-            attempt_id: episode.attempt_id,
-            current_step: 1,
-            total_steps: 1,
-            current_reward: 0.0,
-            phase: "episode_complete".to_string(),
-            last_step: None,
-        };
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Status::resource_exhausted("max_concurrency_reached"))?;
+        self.metrics.inc_active();
+        let exec = self
+            .executor
+            .execute_single_round(&episode)
+            .await
+            .map_err(|err| Status::internal(format!("execute_episode_failed: {err}")))?;
+        self.metrics.observe_episode(
+            exec.duration_ms,
+            exec.env_step_duration_ms,
+            exec.model_callback_duration_ms,
+        );
+        self.metrics.dec_active();
+        drop(permit);
+
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let _ = tx.send(Ok(report)).await;
+        let _ = tx.send(Ok(exec.stream_report)).await;
         drop(tx);
 
         let cp = self.control_plane.clone();
         let episode_id = episode.episode_id.clone();
         let attempt_id = episode.attempt_id;
+        let reward = exec.reward;
+        let result_for_report: EpisodeResult = exec.result;
         let completed = self.completed.clone();
         let active = self.active_leases.clone();
         tokio::spawn(async move {
             let identity = cp.identity().read().await.clone();
             let idempotency_key = format!("{}:{}:{}", episode_id, attempt_id, identity.worker_id);
-            let result = EpisodeResult {
-                episode_id: episode_id.clone(),
-                attempt_id,
-                status: "completed".to_string(),
-                trajectory: None,
-                summary: None,
-                error_code: None,
-                error_message: String::new(),
-                trajectory_checksum: String::new(),
-                integrity_verified: true,
-            };
-            let _ = cp.report_result(idempotency_key, result).await;
+            let _ = cp.report_result(idempotency_key, result_for_report).await;
             tracing::info!(
                 trace_id = "dispatch",
                 episode_id = %episode_id,
                 worker_id = %identity.worker_id,
+                reward = reward,
                 msg = "report_result"
             );
             completed.lock().await.insert((episode_id.clone(), attempt_id));

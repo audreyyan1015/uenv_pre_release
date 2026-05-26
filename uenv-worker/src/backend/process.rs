@@ -12,7 +12,10 @@ impl ProcessBackend {
         Self
     }
 
-    pub fn create(entry: &Path, uds_path: &Path) -> Result<Child, Box<dyn std::error::Error>> {
+    pub fn create(
+        entry: &Path,
+        uds_path: &Path,
+    ) -> Result<Child, Box<dyn std::error::Error + Send + Sync>> {
         let mut cmd = if entry
             .extension()
             .and_then(|ext| ext.to_str())

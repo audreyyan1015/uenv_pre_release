@@ -41,7 +41,9 @@ pub struct PluginHost {
 }
 
 impl PluginHost {
-    pub fn load_from_dir(plugin_dir: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load_from_dir(
+        plugin_dir: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let plugin_dir = plugin_dir.as_ref().to_path_buf();
         let manifests = scan_manifests(&plugin_dir)?;
         Ok(Self {
@@ -64,7 +66,7 @@ impl PluginHost {
     pub async fn spawn(
         &self,
         env_type: &str,
-    ) -> Result<PluginInstance, Box<dyn std::error::Error>> {
+    ) -> Result<PluginInstance, Box<dyn std::error::Error + Send + Sync>> {
         let (manifest, instance_id, uds_path) = {
             let mut state = self.state.lock().await;
             let manifest = state
@@ -119,7 +121,10 @@ impl PluginHost {
         Ok(instance)
     }
 
-    pub async fn health_check(&self, instance_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    pub async fn health_check(
+        &self,
+        instance_id: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let uds_path = {
             let state = self.state.lock().await;
             let managed = state
@@ -140,7 +145,7 @@ impl PluginHost {
         &self,
         instance_id: &str,
         seed: Option<i32>,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let uds_path = self.running_socket(instance_id).await?;
         let mut client = PluginRpcClient::connect_uds(&uds_path).await?;
         client.reset(seed).await
@@ -150,13 +155,13 @@ impl PluginHost {
         &self,
         instance_id: &str,
         action: Vec<u8>,
-    ) -> Result<crate::proto::plugin::v1::StepResponse, Box<dyn std::error::Error>> {
+    ) -> Result<crate::proto::plugin::v1::StepResponse, Box<dyn std::error::Error + Send + Sync>> {
         let uds_path = self.running_socket(instance_id).await?;
         let mut client = PluginRpcClient::connect_uds(&uds_path).await?;
         client.step(action).await
     }
 
-    pub async fn close(&self, instance_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn close(&self, instance_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let managed = {
             let mut state = self.state.lock().await;
             state.instances.remove(instance_id)
@@ -181,7 +186,7 @@ impl PluginHost {
     pub async fn terminate_for_test(
         &self,
         instance_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut child = {
             let mut state = self.state.lock().await;
             let managed = state
@@ -202,7 +207,10 @@ impl PluginHost {
         state.instances.get(instance_id).map(|m| m.metadata.state)
     }
 
-    async fn running_socket(&self, instance_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    async fn running_socket(
+        &self,
+        instance_id: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         let state = self.state.lock().await;
         let managed = state
             .instances
@@ -236,7 +244,9 @@ impl PluginHost {
     }
 }
 
-fn scan_manifests(plugin_dir: &Path) -> Result<HashMap<String, PluginManifest>, Box<dyn std::error::Error>> {
+fn scan_manifests(
+    plugin_dir: &Path,
+) -> Result<HashMap<String, PluginManifest>, Box<dyn std::error::Error + Send + Sync>> {
     let mut manifests = HashMap::new();
     for entry in fs::read_dir(plugin_dir)? {
         let entry = entry?;
