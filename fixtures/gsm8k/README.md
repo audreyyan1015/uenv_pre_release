@@ -1,3 +1,13 @@
-# GSM8K Mock fixture 占位目录
+# GSM8K Mock Fixtures
 
-M1 将在此放置 `episode_001.pb` 等 Protobuf fixture（见 worker-pool-mvp-checklist.md M1.3）。
+This directory contains M1.3 fixtures for `uenv-mock-scheduler`.
+
+- `episode_001.pb`: binary `EpisodeRequest` fixture (loaded by scheduler at startup).
+- `expected_result_001.pb`: optional expected `EpisodeResult` sample for future automated verification.
+- `episode_001.textproto`: human-readable fixture fields for review.
+
+Generate or refresh binaries:
+
+```bash
+cargo run -p uenv-mock-scheduler --example gen_gsm8k_fixture
+```

@@ -1,21 +1,48 @@
-# uenv-mock-scheduler — Mock ControlPlane（Worker Pool MVP）
+# uenv-mock-scheduler
 
-独立 crate，模拟 UEnv Scheduler 控制面：接受 Worker `RegisterWorker` / `Heartbeat` / `ReportResult`，并 **主动** 向 Worker 发起 `DispatchEpisode`（checklist M1.2）。
+Mock ControlPlane for Worker Pool MVP.
+
+It accepts worker `RegisterWorker` / `WorkerHeartbeat` / `ReportResult`, and actively dispatches fixture-backed `DispatchEpisode` requests to registered workers.
 
 ## CLI
 
 ```bash
-# 启动 Mock ControlPlane（M1 实现业务逻辑）
 uenv-mock-scheduler serve --config config/uenv-mock-scheduler.yaml
-
-# 版本
 uenv-mock-scheduler version
 ```
 
-## 配置
+## Logging
 
-见 `config/uenv-mock-scheduler.yaml`。
+- Default log file: `/var/log/uenv/mock-scheduler.log`
+- CLI override: `--log-file ./mock-scheduler.log`
+- Env override: `UENV_LOG_FILE=./mock-scheduler.log`
 
-## 与 uenv-server 关系
+```bash
+tail -f /var/log/uenv/mock-scheduler.log
+```
 
-Worker Pool MVP（M1–M6）**不依赖**完整 `uenv-server`；使用本 crate 联调 Worker。M7 起与真实 Server 集成。
+## Fault Injection (M1.5)
+
+- `UENV_MOCK_DISPATCH_DELAY_MS`: delay before each active dispatch.
+- `UENV_MOCK_DROP_HEARTBEAT_N`: drop ACK for first N heartbeat messages.
+- `UENV_MOCK_DUPLICATE_DISPATCH`: duplicate each dispatch when set to `1` or `true`.
+- `UENV_MOCK_SERVER_EPOCH`: inject fixed `server_epoch` value in control-plane responses.
+
+Mapping to M1.7 scenarios:
+
+- `duplicate_dispatch` -> `UENV_MOCK_DUPLICATE_DISPATCH=1`
+- `heartbeat_timeout` -> `UENV_MOCK_DROP_HEARTBEAT_N=<N>`
+- dispatch delay / timing perturbation -> `UENV_MOCK_DISPATCH_DELAY_MS=<ms>`
+- `stale_worker_id` / `server_epoch` change -> `UENV_MOCK_SERVER_EPOCH=<epoch>`
+
+## Manual Probe (grpcurl)
+
+```bash
+# register worker
+grpcurl -plaintext -d '{"worker_id":"w1","supported_env_types":["gsm8k"],"endpoint":"127.0.0.1:50052","max_concurrent":1}' \
+  127.0.0.1:50051 uenv.scheduler.v1.ControlPlaneService/RegisterWorker
+
+# list workers
+grpcurl -plaintext -d '{"env_types":["gsm8k"]}' \
+  127.0.0.1:50051 uenv.scheduler.v1.ControlPlaneService/ListWorkers
+```

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +22,13 @@ use crate::proto::v1::EpisodeRequest;
 use crate::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
 use crate::proto::worker::v1::DispatchEpisodeRequest;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FaultInjectionConfig {
+    pub dispatch_delay_ms: u64,
+    pub drop_heartbeat_n: u32,
+    pub duplicate_dispatch: bool,
+}
+
 #[derive(Clone)]
 struct WorkerRecord {
     worker_id: String,
@@ -34,9 +41,13 @@ struct WorkerRecord {
 #[derive(Default)]
 struct State {
     next_worker_seq: usize,
+    next_lease_seq: u64,
     server_epoch: u64,
     workers: HashMap<String, WorkerRecord>,
     seen_idempotency: HashSet<String>,
+    fixture_queue: VecDeque<EpisodeRequest>,
+    fault_injection: FaultInjectionConfig,
+    dropped_heartbeat_ack_count: u32,
 }
 
 #[derive(Clone)]
@@ -45,10 +56,17 @@ pub struct MockSchedulerService {
 }
 
 impl MockSchedulerService {
-    fn new(server_epoch: u64) -> Self {
+    fn new(
+        server_epoch: u64,
+        fixture_queue: VecDeque<EpisodeRequest>,
+        fault_injection: FaultInjectionConfig,
+    ) -> Self {
         Self {
             state: Arc::new(RwLock::new(State {
                 server_epoch,
+                next_lease_seq: 1,
+                fixture_queue,
+                fault_injection,
                 ..State::default()
             })),
         }
@@ -79,7 +97,7 @@ impl ControlPlaneService for MockSchedulerService {
                 max_load: req.max_concurrent as i32,
             },
         );
-        info!(worker_id = %worker_id, "register");
+        info!(worker_id = %worker_id, endpoint = %state.workers.get(&worker_id).map(|w| w.endpoint.clone()).unwrap_or_default(), trace_id = "", "register");
         Ok(Response::new(RegisterWorkerResponse {
             accepted: true,
             worker_id,
@@ -101,15 +119,28 @@ impl ControlPlaneService for MockSchedulerService {
             while let Some(next) = stream.next().await {
                 match next {
                     Ok(heartbeat) => {
-                        let server_epoch = {
+                        let (server_epoch, should_drop_ack, dropped_cnt) = {
                             let mut s = state.write().await;
                             if let Some(w) = s.workers.get_mut(&heartbeat.worker_id) {
                                 w.load = heartbeat.load;
                                 w.max_load = heartbeat.max_load;
                             }
-                            s.server_epoch
+                            let should_drop_ack =
+                                s.dropped_heartbeat_ack_count < s.fault_injection.drop_heartbeat_n;
+                            if should_drop_ack {
+                                s.dropped_heartbeat_ack_count += 1;
+                            }
+                            (s.server_epoch, should_drop_ack, s.dropped_heartbeat_ack_count)
                         };
-                        info!(worker_id = %heartbeat.worker_id, load = heartbeat.load, "heartbeat");
+                        info!(worker_id = %heartbeat.worker_id, load = heartbeat.load, trace_id = "", "heartbeat");
+                        if should_drop_ack {
+                            warn!(
+                                worker_id = %heartbeat.worker_id,
+                                dropped_ack_count = dropped_cnt,
+                                "fault_injection_drop_heartbeat_ack"
+                            );
+                            continue;
+                        }
                         let resp = HeartbeatResponse {
                             ok: true,
                             drain: None,
@@ -145,6 +176,7 @@ impl ControlPlaneService for MockSchedulerService {
         info!(
             worker_id = %req.worker_id,
             episode_id = %episode_id,
+            trace_id = "",
             duplicate = duplicate,
             "report_result"
         );
@@ -200,81 +232,116 @@ async fn load_fixtures(fixture_dir: &str) -> std::io::Result<Vec<EpisodeRequest>
     Ok(fixtures)
 }
 
-async fn dispatch_loop(state: Arc<RwLock<State>>, fixture_dir: String) {
-    let fixtures = match load_fixtures(&fixture_dir).await {
-        Ok(v) if !v.is_empty() => v,
-        Ok(_) => {
-            warn!("no fixtures found in {fixture_dir}");
-            return;
-        }
+async fn dispatch_once(worker: WorkerRecord, episode: EpisodeRequest, duplicate: bool) {
+    let endpoint = worker.endpoint.clone();
+    let uri = format!("http://{endpoint}");
+    let channel = match Channel::from_shared(uri.clone()) {
+        Ok(c) => c,
         Err(err) => {
-            warn!("load fixtures failed: {err}");
+            warn!("invalid worker endpoint {uri}: {err}");
             return;
         }
     };
-
-    let mut idx = 0usize;
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let workers: Vec<WorkerRecord> = {
-            let s = state.read().await;
-            s.workers.values().cloned().collect()
-        };
-        if workers.is_empty() {
-            continue;
+    let channel = match channel.connect().await {
+        Ok(c) => c,
+        Err(err) => {
+            warn!("connect worker failed {uri}: {err}");
+            return;
         }
-        let fixture = fixtures[idx % fixtures.len()].clone();
-        idx += 1;
-        for worker in workers {
-            let episode = fixture.clone();
-            let endpoint = worker.endpoint.clone();
-            tokio::spawn(async move {
-                let uri = format!("http://{endpoint}");
-                let channel = match Channel::from_shared(uri.clone()) {
-                    Ok(c) => c,
-                    Err(err) => {
-                        warn!("invalid worker endpoint {uri}: {err}");
-                        return;
-                    }
-                };
-                let channel = match channel.connect().await {
-                    Ok(c) => c,
-                    Err(err) => {
-                        warn!("connect worker failed {uri}: {err}");
-                        return;
-                    }
-                };
-                let mut client = WorkerGrpcServiceClient::new(channel);
-                let request = DispatchEpisodeRequest {
-                    episode: Some(episode),
-                };
-                match client.dispatch_episode(request).await {
-                    Ok(resp) => {
-                        info!(worker_id = %worker.worker_id, "dispatch");
-                        let mut stream = resp.into_inner();
-                        while let Ok(Some(report)) = stream.message().await {
-                            info!(
-                                episode_id = %report.episode_id,
-                                current_step = report.current_step,
-                                phase = %report.phase,
-                                "stream_report"
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        warn!("dispatch failed for {}: {err}", worker.worker_id);
-                    }
-                }
-            });
+    };
+    let mut client = WorkerGrpcServiceClient::new(channel);
+    let dispatch_episode_id = episode.episode_id.clone();
+    let dispatch_env_type = episode.env_type.clone();
+    let dispatch_trace_id = episode.correlation_id.clone();
+    let dispatch_lease_id = episode.dispatch_lease_id.clone();
+    let request = DispatchEpisodeRequest {
+        episode: Some(episode),
+    };
+    match client.dispatch_episode(request).await {
+        Ok(resp) => {
+            info!(
+                worker_id = %worker.worker_id,
+                episode_id = %dispatch_episode_id,
+                env_type = %dispatch_env_type,
+                trace_id = %dispatch_trace_id,
+                dispatch_lease_id = %dispatch_lease_id,
+                duplicate = duplicate,
+                "dispatch"
+            );
+            let mut stream = resp.into_inner();
+            while let Ok(Some(report)) = stream.message().await {
+                info!(
+                    episode_id = %report.episode_id,
+                    current_step = report.current_step,
+                    phase = %report.phase,
+                    "stream_report"
+                );
+            }
+        }
+        Err(err) => {
+            warn!("dispatch failed for {}: {err}", worker.worker_id);
         }
     }
 }
 
-pub async fn run(listen: String, fixture_dir: String, server_epoch: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn dispatch_loop(state: Arc<RwLock<State>>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let next_dispatch = {
+            let mut s = state.write().await;
+            let workers: Vec<WorkerRecord> = s.workers.values().cloned().collect();
+            if workers.is_empty() {
+                None
+            } else if s.fixture_queue.is_empty() {
+                warn!("fixture queue is empty; skip dispatch");
+                None
+            } else {
+                let worker = workers[0].clone();
+                let mut episode = s.fixture_queue.pop_front().expect("queue checked non-empty");
+                episode.dispatch_lease_id = format!("lease-{}", s.next_lease_seq);
+                s.next_lease_seq += 1;
+                let requeue = episode.clone();
+                s.fixture_queue.push_back(requeue);
+                Some((worker, episode, s.fault_injection))
+            }
+        };
+        let Some((worker, episode, fi)) = next_dispatch else {
+            continue;
+        };
+        tokio::spawn(async move {
+            if fi.dispatch_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(fi.dispatch_delay_ms)).await;
+            }
+            let first = episode.clone();
+            dispatch_once(worker.clone(), first, false).await;
+            if fi.duplicate_dispatch {
+                warn!(
+                    worker_id = %worker.worker_id,
+                    episode_id = %episode.episode_id,
+                    "fault_injection_duplicate_dispatch"
+                );
+                dispatch_once(worker, episode, true).await;
+            }
+        });
+    }
+}
+
+pub async fn run(
+    listen: String,
+    fixture_dir: String,
+    server_epoch: u64,
+    fault_injection: FaultInjectionConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fixtures = load_fixtures(&fixture_dir).await?;
+    if fixtures.is_empty() {
+        warn!("no fixtures found in {fixture_dir}");
+    } else {
+        info!(fixture_count = fixtures.len(), "fixtures loaded");
+    }
     let addr: SocketAddr = listen.parse()?;
-    let svc = MockSchedulerService::new(server_epoch);
+    let svc = MockSchedulerService::new(server_epoch, VecDeque::from(fixtures), fault_injection);
     let state = svc.state.clone();
-    tokio::spawn(dispatch_loop(state, fixture_dir));
+    tokio::spawn(dispatch_loop(state));
 
     info!("mock scheduler listening on {addr}");
     Server::builder()
