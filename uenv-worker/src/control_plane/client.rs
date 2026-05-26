@@ -64,6 +64,13 @@ impl ControlPlaneClient {
             identity.worker_id = response.worker_id;
         }
         identity.server_epoch = response.server_epoch;
+        tracing::info!(
+            trace_id = "control_plane",
+            episode_id = "-",
+            worker_id = %identity.worker_id,
+            server_epoch = identity.server_epoch,
+            msg = "register"
+        );
         Ok(())
     }
 
@@ -104,6 +111,13 @@ impl ControlPlaneClient {
         if let Some(resp) = stream.message().await? {
             let mut identity = self.identity.write().await;
             identity.server_epoch = resp.server_epoch;
+            tracing::info!(
+                trace_id = "control_plane",
+                episode_id = "-",
+                worker_id = %identity.worker_id,
+                server_epoch = identity.server_epoch,
+                msg = "heartbeat"
+            );
             if resp.next_heartbeat_interval_ms > 0 {
                 let _ = interval_ms;
             }
@@ -122,6 +136,7 @@ impl ControlPlaneClient {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await.clone();
+        let worker_id_for_log = identity.worker_id.clone();
         let _ = client
             .report_result(ReportResultRequest {
                 idempotency_key,
@@ -130,6 +145,12 @@ impl ControlPlaneClient {
                 result: Some(result),
             })
             .await?;
+        tracing::info!(
+            trace_id = "control_plane",
+            episode_id = "reported",
+            worker_id = %worker_id_for_log,
+            msg = "report_result"
+        );
         Ok(())
     }
 

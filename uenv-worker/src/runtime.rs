@@ -16,6 +16,14 @@ pub struct WorkerRuntime {
 
 impl WorkerRuntime {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        tracing::info!(
+            trace_id = "runtime",
+            worker_id = %self.worker_id,
+            episode_id = "-",
+            listen = %self.listen,
+            server_endpoint = %self.server_endpoint,
+            msg = "worker_start"
+        );
         let control_plane = ControlPlaneClient::new(
             self.server_endpoint.clone(),
             self.listen.clone(),
@@ -32,6 +40,12 @@ impl WorkerRuntime {
             .add_service(WorkerGrpcServiceServer::new(service))
             .serve_with_shutdown(addr, shutdown_signal())
             .await?;
+        tracing::info!(
+            trace_id = "runtime",
+            worker_id = "shutdown",
+            episode_id = "-",
+            msg = "worker_stop"
+        );
         Ok(())
     }
 }

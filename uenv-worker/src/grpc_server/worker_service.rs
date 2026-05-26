@@ -40,6 +40,7 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
         let episode = req
             .episode
             .ok_or_else(|| Status::invalid_argument("missing episode"))?;
+        let trace_id = episode.correlation_id.clone();
         if episode.dispatch_lease_id.is_empty() {
             return Err(Status::failed_precondition("missing dispatch_lease_id"));
         }
@@ -52,6 +53,13 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                 return Err(Status::failed_precondition("lease_expired"));
             }
         }
+        tracing::info!(
+            trace_id = %trace_id,
+            episode_id = %episode.episode_id,
+            worker_id = "worker",
+            attempt_id = episode.attempt_id,
+            msg = "dispatch"
+        );
 
         let key = (episode.episode_id.clone(), episode.attempt_id);
         {
@@ -106,6 +114,12 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                 integrity_verified: true,
             };
             let _ = cp.report_result(idempotency_key, result).await;
+            tracing::info!(
+                trace_id = "dispatch",
+                episode_id = %episode_id,
+                worker_id = %identity.worker_id,
+                msg = "report_result"
+            );
             completed.lock().await.insert((episode_id.clone(), attempt_id));
             active.lock().await.remove(&(episode_id, attempt_id));
         });

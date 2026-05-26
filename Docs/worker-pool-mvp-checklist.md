@@ -313,15 +313,15 @@ replay_state: REPLAY_STATE_PENDING
 
 ### 任务
 
-- [ ] `cli` 模块（clap）：`serve`、`version`、`health`；全局 `--config`、`--log-level`、`--log-file`
-- [ ] `config` 模块：YAML **与** JSON 双格式（按扩展名识别）；默认路径 `/etc/uenv/worker.yaml` 或 §2.6 查找序；优先级 CLI > env > 文件 > 默认
-- [ ] 提供示例配置：`config/uenv-worker.yaml` 与 `config/uenv-worker.json`（字段与 design §2.6 一致）
-- [ ] 配置文件 ↔ 环境变量映射（§2.6 表格）单元测试
-- [ ] `logging` 模块：写入 `logging.file` / `UENV_LOG_FILE`，默认 `/var/log/uenv/worker.log`；格式 `timestamp LEVEL target k=v msg="..."`（ADR-001）
-- [ ] 禁止 `UENV_LOG_FORMAT=json` 或忽略该变量；禁止 multiline stacktrace 落盘
-- [ ] Worker 启动/关闭、注册、Dispatch、Report 打 INFO；含 `trace_id`、`episode_id`、`worker_id`
-- [ ] 单元测试：日志行解析含 `trace_id`、`episode_id`、`worker_id`；单行断言
-- [ ] 集成测试：`uenv-worker serve --config config/uenv-worker.yaml` 启动成功
+- [x] `cli` 模块（clap）：`serve`、`version`、`health`；全局 `--config`、`--log-level`、`--log-file`
+- [x] `config` 模块：YAML **与** JSON 双格式（按扩展名识别）；默认路径 `/etc/uenv/worker.yaml` 或 §2.6 查找序；优先级 CLI > env > 文件 > 默认
+- [x] 提供示例配置：`config/uenv-worker.yaml` 与 `config/uenv-worker.json`（字段与 design §2.6 一致）
+- [x] 配置文件 ↔ 环境变量映射（§2.6 表格）单元测试
+- [x] `logging` 模块：写入 `logging.file` / `UENV_LOG_FILE`，默认 `/var/log/uenv/worker.log`；格式 `timestamp LEVEL target k=v msg="..."`（ADR-001）
+- [x] 禁止 `UENV_LOG_FORMAT=json` 或忽略该变量；禁止 multiline stacktrace 落盘
+- [x] Worker 启动/关闭、注册、Dispatch、Report 打 INFO；含 `trace_id`、`episode_id`、`worker_id`
+- [x] 单元测试：日志行解析含 `trace_id`、`episode_id`、`worker_id`；单行断言
+- [x] 集成测试：`uenv-worker serve --config config/uenv-worker.yaml` 启动成功
 
 ### M3 退出标准
 
@@ -331,6 +331,14 @@ replay_state: REPLAY_STATE_PENDING
 | 2 | `tail -f /var/log/uenv/worker.log` 可实时看到 register / dispatch 等 INFO 行 |
 | 3 | `UENV_*` 环境变量与 `uenv-worker.yaml` / `.json` 均可加载；CLI 参数覆盖生效 |
 | 4 | 配置项 `env.types`、`worker.max_concurrent`、`worker.listen` 等可从 YAML 或 JSON 读取 |
+
+### M3 现状总结（2026-05-26）
+
+- 已完成 `cli` 全局参数：`--config`、`--log-level`、`--log-file`，并保持 `serve` / `version` / `health` 子命令。
+- 已完成 `config` 模块：支持 YAML/JSON 按扩展名加载；默认查找序支持 `./uenv-worker.yaml`、`/etc/uenv/worker.yaml`、`./uenv-worker.json`、`/etc/uenv/worker.json`（开发环境兼容 `./config/uenv-worker.{yaml,json}`）；优先级为 CLI > env > 文件 > 默认值。
+- 已落地 ADR-001 日志实现：写入 `logging.file`（可由 `UENV_LOG_FILE` 覆盖），默认指向 `/var/log/uenv/worker.log`；使用单行文本日志并输出 `trace_id`、`episode_id`、`worker_id` 等关键字段。
+- 已落实 `UENV_LOG_FORMAT=json` 约束：检测到该值时仅告警并忽略，不启用 JSON 落盘。
+- 已补齐测试：`config` 环境变量映射单测、日志字段解析单测，以及 `m3_serve_with_yaml_config_starts` 集成测试（覆盖 `uenv-worker serve --config ...` 启动路径）。
 
 ---
 
