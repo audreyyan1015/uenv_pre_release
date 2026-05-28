@@ -469,11 +469,31 @@ replay_state: REPLAY_STATE_PENDING
 
 ### 任务
 
-- [ ] `ControlPlaneClient` 远程实现与 Mock 共用 trait
-- [ ] 配置切换：`UENV_SERVER_ENDPOINT` 指向真实 Server；`UENV_WORKER_LISTEN` 可被 Server 访问
+- [x] `ControlPlaneClient` 远程实现与 Mock 共用 trait
+- [x] 配置切换：`UENV_SERVER_ENDPOINT` 指向真实 Server；`UENV_WORKER_LISTEN` 可被 Server 访问
 - [ ] 联调清单：Register（含 endpoint）、Heartbeat、**Server 主动 Dispatch**、Report；与 Server 日志交叉验证
-- [ ] 确认 Server 经 Worker Pool **只读查询** worker 清单后直连 Dispatch（若 Server 未就绪 Pool，文档记录临时路径）
-- [ ] 文档：Mock vs Remote 切换步骤、常见错误码、`server_epoch` 行为
+- [x] 确认 Server 经 Worker Pool **只读查询** worker 清单后直连 Dispatch（若 Server 未就绪 Pool，文档记录临时路径）
+- [x] 文档：Mock vs Remote 切换步骤、常见错误码、`server_epoch` 行为
+
+### M7 联调说明（2026-05-28）
+
+- `uenv-worker` 已将控制面抽象为统一 trait：`scheduler.mode=mock|remote` 走同一 `register/heartbeat/report` 生命周期。
+- 启动切换：
+  - Mock：`UENV_SCHEDULER_MODE=mock`，`UENV_SERVER_ENDPOINT=<mock_control_plane_host:port>`
+  - Remote：`UENV_SCHEDULER_MODE=remote`，`UENV_SERVER_ENDPOINT=<uenv_server_host:port>`，`UENV_WORKER_LISTEN=<server 可回连地址>`
+- `server_epoch` 行为：
+  - Register 时读取服务端 epoch 并写入 Worker 运行时身份；
+  - Heartbeat 响应若返回新 epoch，则本地覆盖；
+  - ReportResult 透传当前本地 epoch。
+- 常见错误码（当前实现）：
+  - `UNAVAILABLE`：`UENV_SERVER_ENDPOINT` 不可达 / 服务未启动；
+  - `FAILED_PRECONDITION`：派发租约冲突、租约过期、缺少租约字段；
+  - `RESOURCE_EXHAUSTED`：Worker 达到并发上限；
+  - `INTERNAL`：执行器报错或结果上报失败。
+- 临时路径（Server 侧仍未完成 Worker Pool 查询/直连闭环时）：
+  - 保持 Worker 通过 `WorkerRegistration` 注册可回连 endpoint；
+  - 由 Server 调度层只读查询活跃 worker 清单并直接调用 Worker `DispatchEpisode`；
+  - 不通过 Worker Pool 做二次转发，避免控制面方向反转。
 
 ### M7 退出标准
 

@@ -1,11 +1,12 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::routing::get;
 use axum::Router;
 use tonic::transport::Server;
 
-use crate::control_plane::client::ControlPlaneClient;
+use crate::control_plane::client::{ControlPlane, SchedulerControlPlaneClient, SchedulerMode};
 use crate::episode::executor::EpisodeExecutor;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
 use crate::metrics::MetricsExporter;
@@ -15,6 +16,7 @@ use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcServiceServe
 use crate::wal::WalWriter;
 
 pub struct WorkerRuntime {
+    pub scheduler_mode: String,
     pub listen: String,
     pub server_endpoint: String,
     pub worker_id: String,
@@ -62,13 +64,15 @@ impl WorkerRuntime {
         );
         warmup_pool.prewarm(&self.supported_env_types).await?;
 
-        let control_plane = ControlPlaneClient::new(
+        let scheduler_mode: SchedulerMode = self.scheduler_mode.parse()?;
+        let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
+            scheduler_mode,
             self.server_endpoint.clone(),
             self.listen.clone(),
             self.supported_env_types.clone(),
             self.max_concurrent,
             self.worker_id,
-        );
+        ));
         control_plane.register().await?;
         control_plane.spawn_heartbeat_loop();
 

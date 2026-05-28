@@ -37,6 +37,7 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
     let worker_addr = free_addr().await;
     let obs_addr = free_addr().await;
     let runtime = WorkerRuntime {
+        scheduler_mode: "mock".to_string(),
         listen: worker_addr.to_string(),
         server_endpoint: scheduler_addr.to_string(),
         worker_id: "m2-worker".to_string(),
@@ -49,9 +50,9 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
             .to_string_lossy()
             .to_string(),
         warmup_size: 1,
-        max_idle_time_secs: 60,
+        max_idle_time_secs: 300,
         cool_timeout_secs: 60,
-        max_episode_count: 10,
+        max_episode_count: 1000,
         metrics_listen: obs_addr.to_string(),
         health_listen: obs_addr.to_string(),
         wal_dir: std::env::temp_dir()
