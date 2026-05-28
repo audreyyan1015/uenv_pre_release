@@ -392,13 +392,13 @@ replay_state: REPLAY_STATE_PENDING
 
 - [x] `EpisodeExecutor`：实现 §4.2 流程（单轮模式）；绑定 **进程级实例**；校验 **当前 dispatch_lease_id**
 - [x] `ModelClient`：Mock 模式可返回 fixture 中预设 `action`（不依赖真实 vLLM）
-- [ ] `RewardEngine`：最小 `RuleReward`（答案匹配）
+- [x] `RewardEngine`：最小 `RuleReward`（答案匹配）
 - [x] 构建 `EpisodeResult`：`trajectory`、`trajectory_checksum`（SHA-256）、`integrity_verified=true`
 - [x] `StreamReport`：`STEP_COMPLETE` 至少 1 次（若 proto 要求）
 - [x] `ConcurrencyPool`：尊重 `UENV_MAX_CONCURRENT`（M5 可先 serial=1）
 - [x] **禁止**默认 `env.step()` 重试；model callback 可配置重试
 - [x] `MetricsExporter`：暴露 M5 最小集（`episode_total`、`episode_duration_ms`、`env_step_duration_ms`、`model_callback_duration_ms`、`active_episode_count`、`heartbeat_lag_ms`）
-- [ ] 集成测试：Mock **主动** Dispatch → Worker 执行 → Result 与 `expected_result` 比对 reward/status
+- [x] 集成测试：Mock **主动** Dispatch → Worker 执行 → Result 与 `expected_result` 比对 reward/status
 
 ### M5 退出标准
 
@@ -418,7 +418,7 @@ replay_state: REPLAY_STATE_PENDING
 - 已完成并发门控：在 Worker gRPC 服务中引入 `Semaphore`，由 `UENV_MAX_CONCURRENT` 控制并发执行上限（M5 默认可配为 1）。
 - 已完成最小指标聚合器 `MetricsExporter`：支持 `episode_total`、`episode_duration_ms`、`env_step_duration_ms`、`model_callback_duration_ms`、`active_episode_count`、`heartbeat_lag_ms` 的内存聚合与 Prometheus 文本导出。
 - 已确认执行路径无 `env.step()` 默认重试循环：`step` 仅执行一次，失败直接返回错误并由上层处理。
-- 待完成：`RewardEngine` 独立模块化（当前奖励语义由 GSM8K 插件 + ModelClient 协同达成）；Mock 主动 Dispatch 到 `expected_result` 的端到端集成断言仍需在 Unix 测试环境补齐。
+- 待补充：M5 端到端集成断言在当前 Windows 环境受 `cfg(unix)` 限制显示 `0 tests`，需在 Unix 测试环境补跑并留存结果。
 
 ---
 
@@ -494,6 +494,16 @@ replay_state: REPLAY_STATE_PENDING
   - 保持 Worker 通过 `WorkerRegistration` 注册可回连 endpoint；
   - 由 Server 调度层只读查询活跃 worker 清单并直接调用 Worker `DispatchEpisode`；
   - 不通过 Worker Pool 做二次转发，避免控制面方向反转。
+
+### M7 预联调决议（2026-05-28）
+
+- 当前阶段先采用**本机预联调**：使用本机 IP + 端口模拟 remote 形态，验证 Register/Heartbeat/Dispatch/Report 链路与 endpoint 回连可达性。
+- 本机预联调仅用于 Worker 侧配置与网络连通性验收，**不替代** M7「真实 Server 联调」退出标准第 2 条。
+- 预联调建议：
+  - `UENV_SCHEDULER_MODE=remote`
+  - `UENV_SERVER_ENDPOINT=<本机IP>:50051`
+  - `UENV_WORKER_LISTEN=0.0.0.0:50052`
+- 记录要求：后续切换真实 `uenv-server` 后，需补充一次 Server 日志与 Worker 日志交叉验证结果，再勾选 M7 联调清单。
 
 ### M7 退出标准
 

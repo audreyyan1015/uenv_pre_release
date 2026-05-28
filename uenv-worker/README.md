@@ -74,6 +74,19 @@ UENV_METRICS_LISTEN=0.0.0.0:19090
 UENV_HEALTH_LISTEN=0.0.0.0:19090
 ```
 
+## 本机预联调（当前决议）
+
+在真实 `uenv-server` 未就绪前，先使用**本机 IP + 端口**模拟 remote 形态进行预联调：
+
+```bash
+UENV_SCHEDULER_MODE=remote
+UENV_SERVER_ENDPOINT=<LOCAL_IP>:50051
+UENV_WORKER_LISTEN=0.0.0.0:50052
+```
+
+- 目的：验证 Register / Heartbeat / Dispatch / Report 链路与 endpoint 回连可达性。
+- 边界：该方案仅是预联调，**不等同于** M7「真实 Server 联调」验收完成；后续仍需与真实 `uenv-server` 补做一次日志交叉验证。
+
 - `GET /metrics`：Prometheus 文本指标（含 `uenv_warmup_pool_hit_total`、`uenv_warmup_pool_miss_total`、`uenv_instance_pool_size{status}`）
 - `GET /health`：返回 `ok`
 

@@ -1,5 +1,5 @@
 {
-  "server": { "endpoint": "localhost:50051" },
+  "server": { "endpoint": "192.168.56.1:50051" },
   "worker": {
     "id": "auto",
     "listen": "0.0.0.0:50052",

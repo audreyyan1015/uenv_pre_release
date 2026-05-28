@@ -3,6 +3,7 @@ use std::time::Instant;
 use sha2::{Digest, Sha256};
 
 use crate::episode::model_client::ModelClient;
+use crate::episode::reward_engine::RewardEngine;
 use crate::plugin::host::PluginHost;
 use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::v1::{EpisodeRequest, EpisodeResult, StepRecord, StreamReport, Trajectory};
@@ -12,6 +13,7 @@ pub struct EpisodeExecutor {
     warmup_pool: WarmupPool,
     plugin_host: PluginHost,
     model_client: ModelClient,
+    reward_engine: RewardEngine,
 }
 
 pub struct ExecuteOutput {
@@ -30,6 +32,7 @@ impl EpisodeExecutor {
             warmup_pool,
             plugin_host,
             model_client: ModelClient::new(),
+            reward_engine: RewardEngine::new(),
         }
     }
 
@@ -91,11 +94,17 @@ impl EpisodeExecutor {
             err
         })?;
 
+        let reward = self.reward_engine.evaluate_rule_reward(
+            &action,
+            &episode.reward_config,
+            step.reward,
+        )?;
+
         let step_record = StepRecord {
             step_index: 1,
             observation,
             action,
-            reward: step.reward,
+            reward,
             terminated: step.terminated,
             truncated: step.truncated,
             info: step.info,
@@ -103,7 +112,7 @@ impl EpisodeExecutor {
         };
         let trajectory = Trajectory {
             steps: vec![step_record.clone()],
-            total_reward: step.reward,
+            total_reward: reward,
             total_steps: 1,
         };
         let checksum = checksum_trajectory(&trajectory)?;
@@ -114,7 +123,7 @@ impl EpisodeExecutor {
             status: "completed".to_string(),
             trajectory: Some(trajectory),
             summary: Some(crate::proto::v1::episode_result::Summary {
-                total_reward: step.reward,
+                total_reward: reward,
                 total_steps: 1,
                 total_duration_ms: duration_ms as i64,
                 terminate_reason: "single_round_done".to_string(),
@@ -131,12 +140,12 @@ impl EpisodeExecutor {
                 attempt_id: episode.attempt_id,
                 current_step: 1,
                 total_steps: 1,
-                current_reward: step.reward,
+                current_reward: reward,
                 phase: "step_complete".to_string(),
                 last_step: Some(step_record),
             },
             result,
-            reward: step.reward,
+            reward,
             duration_ms,
             env_step_duration_ms,
             model_callback_duration_ms,
