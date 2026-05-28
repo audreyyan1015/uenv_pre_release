@@ -24,6 +24,7 @@ struct StubState {
     capacity_full: bool,
     expire_lease: bool,
     supersede_after_first: bool,
+    stream_interrupted: bool,
 }
 
 #[derive(Clone, Default)]
@@ -74,6 +75,11 @@ impl WorkerGrpcService for WorkerStub {
             last_step: None,
         };
         let _ = tx.send(Ok(report)).await;
+        if self.state.stream_interrupted {
+            let _ = tx
+                .send(Err(Status::unavailable("stream_interrupted")))
+                .await;
+        }
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
@@ -429,4 +435,51 @@ async fn m17_lease_superseded() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     // first dispatch accepted, subsequent duplicate treated as superseded
     assert_eq!(*worker_state.dispatch_count.lock().await, 1);
+}
+
+#[tokio::test]
+async fn m17_partial_stream_interruption_report_result_still_ack() {
+    let worker_state = StubState {
+        stream_interrupted: true,
+        ..Default::default()
+    };
+    let worker_addr = spawn_worker_stub(worker_state).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", FaultInjectionConfig::default(), 1).await;
+    let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
+        .await
+        .expect("connect");
+    let worker_id = unique_worker_id("stream-int");
+    cp.register_worker(RegisterWorkerRequest {
+        worker_id: worker_id.clone(),
+        supported_env_types: vec!["gsm8k".to_string()],
+        resource: None,
+        endpoint: worker_addr.to_string(),
+        max_concurrent: 1,
+    })
+    .await
+    .expect("register");
+
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    let result = EpisodeResult {
+        episode_id: "gsm8k-episode-001".to_string(),
+        attempt_id: 1,
+        status: "completed".to_string(),
+        trajectory: None,
+        summary: None,
+        error_code: None,
+        error_message: String::new(),
+        trajectory_checksum: String::new(),
+        integrity_verified: false,
+    };
+    let ack = cp
+        .report_result(ReportResultRequest {
+            idempotency_key: "idem-stream-int".to_string(),
+            worker_id,
+            server_epoch: 1,
+            result: Some(result),
+        })
+        .await
+        .expect("report")
+        .into_inner();
+    assert!(ack.ack);
 }

@@ -221,3 +221,121 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    use async_trait::async_trait;
+    use tokio::sync::RwLock;
+
+    use crate::control_plane::client::{ControlPlane, RuntimeIdentity};
+    use crate::plugin::host::PluginHost;
+    use crate::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
+    use crate::proto::v1::EpisodeRequest;
+    use crate::proto::worker::v1::DispatchEpisodeRequest;
+
+    #[derive(Clone)]
+    struct FakeControlPlane {
+        identity: Arc<RwLock<RuntimeIdentity>>,
+        connected: bool,
+    }
+
+    #[async_trait]
+    impl ControlPlane for FakeControlPlane {
+        async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        fn spawn_heartbeat_loop(&self) {}
+
+        async fn report_result(
+            &self,
+            _idempotency_key: String,
+            _result: EpisodeResult,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        fn identity(&self) -> Arc<RwLock<RuntimeIdentity>> {
+            self.identity.clone()
+        }
+
+        async fn worker_id(&self) -> String {
+            self.identity.read().await.worker_id.clone()
+        }
+
+        fn is_connected(&self) -> bool {
+            self.connected
+        }
+
+        fn spawn_replay_loop(&self, _wal: WalWriter, _metrics: MetricsExporter) {}
+    }
+
+    fn make_service(policy: DisconnectDispatchPolicy) -> WorkerGrpcServiceImpl {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let plugin_dir = repo_root.join("plugins");
+        let host = PluginHost::load_from_dir(plugin_dir).expect("load plugin host");
+        let pool = WarmupPool::new(
+            host.clone(),
+            WarmupPoolConfig {
+                warmup_size: 1,
+                max_idle_time_secs: 300,
+                cool_timeout_secs: 60,
+                max_episode_count: 1000,
+            },
+        );
+        let control_plane: Arc<dyn ControlPlane> = Arc::new(FakeControlPlane {
+            identity: Arc::new(RwLock::new(RuntimeIdentity {
+                worker_id: "fake-worker".to_string(),
+                server_epoch: 1,
+            })),
+            connected: false,
+        });
+        let wal_dir = repo_root.join("target/tmp-test-wal/disconnect-policy");
+        std::fs::create_dir_all(&wal_dir).expect("create wal dir");
+        let wal = WalWriter::new(&wal_dir).expect("create wal");
+        WorkerGrpcServiceImpl::new(
+            control_plane,
+            EpisodeExecutor::new(host, pool.clone()),
+            MetricsExporter::new(),
+            pool,
+            1,
+            wal,
+            policy,
+        )
+    }
+
+    #[tokio::test]
+    async fn m8_disconnect_policy_reject_returns_unavailable() {
+        let service = make_service(DisconnectDispatchPolicy::Reject);
+        let req = DispatchEpisodeRequest {
+            episode: Some(EpisodeRequest {
+                episode_id: "ep-reject".to_string(),
+                attempt_id: 1,
+                ..Default::default()
+            }),
+        };
+        let err = service
+            .dispatch_episode(Request::new(req))
+            .await
+            .expect_err("reject should fail");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(err.message(), "control_plane_disconnected");
+    }
+
+    #[tokio::test]
+    async fn m8_disconnect_policy_queue_does_not_fail_on_connection_gate() {
+        let service = make_service(DisconnectDispatchPolicy::Queue);
+        let req = DispatchEpisodeRequest { episode: None };
+        let err = service
+            .dispatch_episode(Request::new(req))
+            .await
+            .expect_err("queue still fails on request validation");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.message(), "missing episode");
+    }
+}

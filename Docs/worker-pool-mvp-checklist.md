@@ -519,6 +519,12 @@ replay_state: REPLAY_STATE_PENDING
 - [x] 暴露可抓取观测端点：`GET /metrics`、`GET /health`（默认监听 `0.0.0.0:19090`）。
 - [x] 增加联调配置切换项：`UENV_METRICS_LISTEN`、`UENV_HEALTH_LISTEN`，并补齐 YAML/JSON 样例与 README 联调说明。
 
+### M7 本机预联调结果（2026-05-28）
+
+- 在本机完成一轮预联调回归：执行 `cargo test -p uenv-mock-scheduler --test m1_contract_chaos_tests -- --nocapture`，`8 passed, 0 failed`。
+- 其中 `m16_register_heartbeat_dispatch_report_chain` 覆盖 Register → Heartbeat →（Scheduler 主动）Dispatch → ReportResult 全链路，确认本机联调链路可跑通。
+- 说明：当前 Windows 环境下 `uenv-worker` 的 `proto-uds` 插件执行链路受 `cfg(unix)` 约束；本次预联调先以 Worker stub 验证控制面链路，真实 Server + Unix 插件执行联调仍按 M7 退出标准补验。
+
 ---
 
 ## M8：容错（WAL 持久化 + 重连）
@@ -531,10 +537,10 @@ replay_state: REPLAY_STATE_PENDING
 
 - [x] `WalWriter`：按 §7.5 schema 写入；`EpisodeResult` 载荷 + `request_checksum` / `result_checksum` + CRC32
 - [x] `idempotency_key` 重放：`episode_id` + `attempt_id` + `worker_id`
-- [ ] 断连检测：拒绝或排队新 `DispatchEpisode`（策略可配置）；在途执行至完成
+- [x] 断连检测：拒绝或排队新 `DispatchEpisode`（策略可配置）；在途执行至完成
 - [x] 指数退避重连 ControlPlane；重连后 WAL 重放至 `replay_state=acked`
 - [x] 指标：`uenv_wal_pending_records`
-- [ ] 使用 M1.7 `report_result_retry`、`heartbeat_timeout`、`partial_stream_interruption` 做集成测试
+- [x] 使用 M1.7 `report_result_retry`、`heartbeat_timeout`、`partial_stream_interruption` 做集成测试
 
 
 ### M8 现状总结（2026-05-27）
@@ -547,7 +553,8 @@ eplay_state=pending），再调用 ReportResult；ACK 成功后删除对应 WAL 
 - 已补齐断连策略开关：支持 UENV_DISPATCH_ON_DISCONNECT=reject|queue，可在控制面断连时拒绝新任务或继续接收并依赖 WAL 重放。
 - 已新增观测指标：uenv_wal_pending_records，并在写 WAL、重放成功后实时更新。
 - 已补充验证：新增 wal 模块单测（roundtrip/ack、损坏跳过）；cargo check -p uenv-worker 与 cargo test -p uenv-worker wal:: 通过。
-- 待补充：基于 M1.7 的 heartbeat_timeout / partial_stream_interruption 端到端集成回归用例（当前已具备机制与基础测试）。
+- 已补充断连策略验证：新增 `m8_disconnect_policy_reject_returns_unavailable` 与 `m8_disconnect_policy_queue_does_not_fail_on_connection_gate`，验证 `UENV_DISPATCH_ON_DISCONNECT=reject|queue` 在控制面断连时的分支行为。
+- 已补充 M1.7 场景复用回归：`m1_contract_chaos_tests` 新增 `m17_partial_stream_interruption_report_result_still_ack`，并与 `m16_register_heartbeat_dispatch_report_chain`（含 `report_result_retry`）/`m17_heartbeat_timeout_drop_ack` 一并通过。
 ### M8 退出标准
 
 | # | 标准 |
@@ -560,17 +567,19 @@ eplay_state=pending），再调用 ReportResult；ACK 成功后删除对应 WAL 
 
 ## M9+：增强项（非 MVP 阻塞）
 
-以下放在 MVP 之后，按需排期：
+### 当前实现情况总结（截至 2026-05-28）
 
-| 项 | 说明 |
-|----|------|
-| `WarmupSizer` 动态容量 | §5.4，依赖 M6 已采集的 hit/miss 与 QPS |
-| `PodmanBackend` | §6.2 生产后端 |
-| Cap'n Proto / cdylib 插件 | §3.0 非 MVP 路径 |
-| 多 Episode 并发压测 | `UENV_MAX_CONCURRENT` > 1 |
-| 第二环境类型 | 打破仅 GSM8K 限制 |
-| OpenTelemetry | §10.3；日志仍遵守 ADR-001 不落盘 JSON |
-| 扩展 metrics | 在 M5/M6 最小集之上增加直方图 bucket 调优等 |
+- Worker 层已具备从接入控制面到执行 Episode 的闭环能力：可完成注册、心跳、接收主动派发、执行并回报结果。
+- 预热池能力已上线并作为默认执行路径：启动时可按配置预创建实例并维持可复用池，派发时优先复用已预热实例，未命中时走补充路径，执行后回收实例以支持后续任务复用。
+- 当前默认参数已在示例配置中固化：`warmup_size=2`、`max_idle_time=300`、`cool_timeout=60`、`max_episode_count=1000`、`max_concurrent=4`（可按环境覆盖）。
+- 派发负载执行策略已落地：Scheduler 主动 `DispatchEpisode` 到 Worker，Worker 按并发上限与可用实例容量承载执行；可观测侧已能区分预热命中/未命中并输出基础运行指标。
+- 容错能力已具备 MVP 可用形态：支持结果落盘、断连后重放与幂等上报，具备断连期间派发策略开关（reject/queue）。
+
+### 未实现与跨层待补全
+
+- 尚未完成“跨服务器真实链路”验收：当前已完成本机预联调与混沌回归，但 M7 仍缺真实 `uenv-server` 环境下的日志交叉验证闭环。
+- Hub 层尚未真实接入：当前未形成 Worker 与 Hub 的生产级交互链路（如由 Hub 统一驱动实例初始化/资源编排/发布流转），相关能力需其他层补全后联调。
+- Worker 仍处于 MVP 阶段：后续仍需按设计继续覆盖动态预热策略、更多后端与环境类型、生产级压测与观测增强等升级项。
 
 ---
 
