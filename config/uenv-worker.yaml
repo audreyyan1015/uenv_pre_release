@@ -30,3 +30,7 @@ logging:
 
 wal:
   dir: "/tmp/uenv/wal"          # UENV_WAL_DIR
+
+observability:
+  metrics_listen: "0.0.0.0:19090"  # UENV_METRICS_LISTEN，GET /metrics
+  health_listen: "0.0.0.0:19090"   # UENV_HEALTH_LISTEN，GET /health

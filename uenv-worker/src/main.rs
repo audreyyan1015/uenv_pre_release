@@ -1,6 +1,7 @@
 use clap::Parser;
 use uenv_worker::cli::{Cli, Commands};
 use uenv_worker::config::{CliOverrides, WorkerConfig};
+use uenv_worker::grpc_server::worker_service::DisconnectDispatchPolicy;
 use uenv_worker::logging;
 use uenv_worker::runtime::WorkerRuntime;
 
@@ -44,6 +45,17 @@ async fn main() {
                 max_idle_time_secs: cfg.pool.max_idle_time,
                 cool_timeout_secs: cfg.pool.cool_timeout,
                 max_episode_count: cfg.pool.max_episode_count,
+                metrics_listen: cfg.observability.metrics_listen.clone(),
+                health_listen: cfg.observability.health_listen.clone(),
+                wal_dir: cfg.wal.dir.clone(),
+                disconnect_dispatch_policy: match std::env::var("UENV_DISPATCH_ON_DISCONNECT")
+                    .unwrap_or_else(|_| "queue".to_string())
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "reject" => DisconnectDispatchPolicy::Reject,
+                    _ => DisconnectDispatchPolicy::Queue,
+                },
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

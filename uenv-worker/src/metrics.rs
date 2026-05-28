@@ -18,6 +18,7 @@ pub struct MetricsExporter {
     pool_size_cooling: Arc<AtomicU64>,
     pool_size_evicting: Arc<AtomicU64>,
     pool_size_destroyed: Arc<AtomicU64>,
+    wal_pending_records: Arc<AtomicU64>,
 }
 
 impl MetricsExporter {
@@ -82,6 +83,7 @@ uenv_active_episode_count {}\n\
 uenv_heartbeat_lag_ms {}\n\
 uenv_warmup_pool_hit_total {}\n\
 uenv_warmup_pool_miss_total {}\n\
+uenv_wal_pending_records {}\n\
 uenv_instance_pool_size{{status=\"creating\"}} {}\n\
 uenv_instance_pool_size{{status=\"warm\"}} {}\n\
 uenv_instance_pool_size{{status=\"active\"}} {}\n\
@@ -97,6 +99,7 @@ uenv_instance_pool_size{{status=\"destroyed\"}} {}\n",
             self.heartbeat_lag_ms.load(Ordering::Relaxed),
             self.warmup_pool_hit_total.load(Ordering::Relaxed),
             self.warmup_pool_miss_total.load(Ordering::Relaxed),
+            self.wal_pending_records.load(Ordering::Relaxed),
             self.pool_size_creating.load(Ordering::Relaxed),
             self.pool_size_warm.load(Ordering::Relaxed),
             self.pool_size_active.load(Ordering::Relaxed),
@@ -105,5 +108,9 @@ uenv_instance_pool_size{{status=\"destroyed\"}} {}\n",
             self.pool_size_evicting.load(Ordering::Relaxed),
             self.pool_size_destroyed.load(Ordering::Relaxed),
         )
+    }
+
+    pub fn set_wal_pending_records(&self, pending: u64) {
+        self.wal_pending_records.store(pending, Ordering::Relaxed);
     }
 }

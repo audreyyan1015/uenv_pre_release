@@ -1,13 +1,16 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 
+use crate::metrics::MetricsExporter;
 use crate::proto::scheduler::v1::control_plane_service_client::ControlPlaneServiceClient;
 use crate::proto::scheduler::v1::{HeartbeatRequest, RegisterWorkerRequest, ReportResultRequest};
 use crate::proto::v1::EpisodeResult;
+use crate::wal::WalWriter;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeIdentity {
@@ -22,6 +25,7 @@ pub struct ControlPlaneClient {
     supported_env_types: Vec<String>,
     max_concurrent: u32,
     identity: Arc<RwLock<RuntimeIdentity>>,
+    connected: Arc<AtomicBool>,
 }
 
 impl ControlPlaneClient {
@@ -41,6 +45,7 @@ impl ControlPlaneClient {
                 worker_id,
                 server_epoch: 0,
             })),
+            connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -64,6 +69,7 @@ impl ControlPlaneClient {
             identity.worker_id = response.worker_id;
         }
         identity.server_epoch = response.server_epoch;
+        self.connected.store(true, Ordering::Relaxed);
         tracing::info!(
             trace_id = "control_plane",
             episode_id = "-",
@@ -79,7 +85,12 @@ impl ControlPlaneClient {
         tokio::spawn(async move {
             let mut interval_ms: u64 = 5_000;
             loop {
-                let _ = this.heartbeat_once(interval_ms).await;
+                if let Err(err) = this.heartbeat_once(interval_ms).await {
+                    this.connected.store(false, Ordering::Relaxed);
+                    tracing::warn!(error = %err, msg = "heartbeat_failed");
+                } else {
+                    this.connected.store(true, Ordering::Relaxed);
+                }
                 tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                 if let Some(v) = this.latest_interval_ms().await {
                     interval_ms = v.max(500);
@@ -132,7 +143,7 @@ impl ControlPlaneClient {
         Some(5_000)
     }
 
-    pub async fn report_result(
+    pub async fn report_result_once(
         &self,
         idempotency_key: String,
         result: EpisodeResult,
@@ -148,6 +159,7 @@ impl ControlPlaneClient {
                 result: Some(result),
             })
             .await?;
+        self.connected.store(true, Ordering::Relaxed);
         tracing::info!(
             trace_id = "control_plane",
             episode_id = "reported",
@@ -157,7 +169,58 @@ impl ControlPlaneClient {
         Ok(())
     }
 
+    pub fn spawn_replay_loop(&self, wal: WalWriter, metrics: MetricsExporter) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut backoff_ms: u64 = 500;
+            loop {
+                let pending = wal.load_pending();
+                metrics.set_wal_pending_records(wal.pending_count());
+                if pending.is_empty() {
+                    backoff_ms = 500;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                let mut any_failed = false;
+                for rec in pending {
+                    match this
+                        .report_result_once(rec.idempotency_key.clone(), rec.result.clone())
+                        .await
+                    {
+                        Ok(_) => {
+                            let _ = wal.mark_acked(&rec.idempotency_key);
+                            metrics.set_wal_pending_records(wal.pending_count());
+                        }
+                        Err(err) => {
+                            any_failed = true;
+                            this.connected.store(false, Ordering::Relaxed);
+                            tracing::warn!(
+                                idempotency_key = %rec.idempotency_key,
+                                error = %err,
+                                msg = "wal_replay_report_failed"
+                            );
+                        }
+                    }
+                }
+                if any_failed {
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(10_000);
+                } else {
+                    backoff_ms = 500;
+                }
+            }
+        });
+    }
+
     pub fn identity(&self) -> Arc<RwLock<RuntimeIdentity>> {
         self.identity.clone()
+    }
+
+    pub async fn worker_id(&self) -> String {
+        self.identity.read().await.worker_id.clone()
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 }

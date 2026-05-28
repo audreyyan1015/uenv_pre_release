@@ -482,6 +482,13 @@ replay_state: REPLAY_STATE_PENDING
 | 1 | 同一 Worker 二进制在 Mock / Remote 两种模式下均可启动（gRPC Server + ControlPlane） |
 | 2 | 与真实 Server 完成 ≥1 次 GSM8K Episode：**Server Dispatch → Worker 执行 → Report** |
 
+### M7 Worker 侧联调前补充（2026-05-26）
+
+- [x] 补齐执行链路分阶段日志：`acquire/reset/model_callback/step/release`，失败日志含 `phase`、`error_code`、`episode_id`、`trace_id`。
+- [x] `dispatch` 日志使用真实注册 `worker_id`，并统一记录 `phase=dispatch_received/dispatch_completed` 与 `warmup_hit`。
+- [x] 暴露可抓取观测端点：`GET /metrics`、`GET /health`（默认监听 `0.0.0.0:19090`）。
+- [x] 增加联调配置切换项：`UENV_METRICS_LISTEN`、`UENV_HEALTH_LISTEN`，并补齐 YAML/JSON 样例与 README 联调说明。
+
 ---
 
 ## M8：容错（WAL 持久化 + 重连）
@@ -492,13 +499,22 @@ replay_state: REPLAY_STATE_PENDING
 
 ### 任务
 
-- [ ] `WalWriter`：按 §7.5 schema 写入；`EpisodeResult` 载荷 + `request_checksum` / `result_checksum` + CRC32
-- [ ] `idempotency_key` 重放：`episode_id` + `attempt_id` + `worker_id`
+- [x] `WalWriter`：按 §7.5 schema 写入；`EpisodeResult` 载荷 + `request_checksum` / `result_checksum` + CRC32
+- [x] `idempotency_key` 重放：`episode_id` + `attempt_id` + `worker_id`
 - [ ] 断连检测：拒绝或排队新 `DispatchEpisode`（策略可配置）；在途执行至完成
-- [ ] 指数退避重连 ControlPlane；重连后 WAL 重放至 `replay_state=acked`
-- [ ] 指标：`uenv_wal_pending_records`
+- [x] 指数退避重连 ControlPlane；重连后 WAL 重放至 `replay_state=acked`
+- [x] 指标：`uenv_wal_pending_records`
 - [ ] 使用 M1.7 `report_result_retry`、`heartbeat_timeout`、`partial_stream_interruption` 做集成测试
 
+
+### M8 现状总结（2026-05-27）
+- 已实现 WalWriter 落盘：按 uenv.v1.WalRecord 写入 equest_checksum / esult_checksum，并为记录增加 CRC32 校验；WAL 文件损坏时会跳过并打 ERROR 日志。
+- 已实现先落盘后上报：DispatchEpisode 执行完成后先写 WAL（eplay_state=pending），再调用 ReportResult；ACK 成功后删除对应 WAL 记录。
+- 已实现重连重放：新增后台 WAL replay loop，对未 ACK 记录按指数退避重试上报（500ms -> 10s），直到 ACK。
+- 已补齐断连策略开关：支持 UENV_DISPATCH_ON_DISCONNECT=reject|queue，可在控制面断连时拒绝新任务或继续接收并依赖 WAL 重放。
+- 已新增观测指标：uenv_wal_pending_records，并在写 WAL、重放成功后实时更新。
+- 已补充验证：新增 wal 模块单测（roundtrip/ack、损坏跳过）；cargo check -p uenv-worker 与 cargo test -p uenv-worker wal:: 通过。
+- 待补充：基于 M1.7 的 heartbeat_timeout / partial_stream_interruption 端到端集成回归用例（当前已具备机制与基础测试）。
 ### M8 退出标准
 
 | # | 标准 |

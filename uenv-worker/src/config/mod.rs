@@ -10,6 +10,8 @@ pub struct WorkerConfig {
     pub pool: PoolConfig,
     pub logging: LoggingConfig,
     pub wal: WalConfig,
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -55,6 +57,21 @@ pub struct WalConfig {
     pub dir: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ObservabilityConfig {
+    pub metrics_listen: String,
+    pub health_listen: String,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            metrics_listen: "0.0.0.0:19090".to_string(),
+            health_listen: "0.0.0.0:19090".to_string(),
+        }
+    }
+}
+
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
@@ -87,6 +104,7 @@ impl Default for WorkerConfig {
             wal: WalConfig {
                 dir: "/tmp/uenv/wal".to_string(),
             },
+            observability: ObservabilityConfig::default(),
         }
     }
 }
@@ -178,6 +196,12 @@ impl WorkerConfig {
         }
         if let Ok(v) = std::env::var("UENV_WAL_DIR") {
             self.wal.dir = v;
+        }
+        if let Ok(v) = std::env::var("UENV_METRICS_LISTEN") {
+            self.observability.metrics_listen = v;
+        }
+        if let Ok(v) = std::env::var("UENV_HEALTH_LISTEN") {
+            self.observability.health_listen = v;
         }
     }
 }

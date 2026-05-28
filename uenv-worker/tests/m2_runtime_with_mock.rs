@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -7,6 +9,7 @@ use uenv_mock_scheduler::service::{FaultInjectionConfig, run as run_mock_schedul
 use uenv_worker::proto::scheduler::v1::control_plane_service_client::ControlPlaneServiceClient;
 use uenv_worker::proto::scheduler::v1::{ListWorkersRequest, ReportResultRequest};
 use uenv_worker::proto::v1::EpisodeResult;
+use uenv_worker::grpc_server::worker_service::DisconnectDispatchPolicy;
 use uenv_worker::runtime::WorkerRuntime;
 
 async fn free_addr() -> SocketAddr {
@@ -32,6 +35,7 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let worker_addr = free_addr().await;
+    let obs_addr = free_addr().await;
     let runtime = WorkerRuntime {
         listen: worker_addr.to_string(),
         server_endpoint: scheduler_addr.to_string(),
@@ -44,6 +48,17 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
             .join("plugins")
             .to_string_lossy()
             .to_string(),
+        warmup_size: 1,
+        max_idle_time_secs: 60,
+        cool_timeout_secs: 60,
+        max_episode_count: 10,
+        metrics_listen: obs_addr.to_string(),
+        health_listen: obs_addr.to_string(),
+        wal_dir: std::env::temp_dir()
+            .join("uenv-worker-m2-wal")
+            .to_string_lossy()
+            .to_string(),
+        disconnect_dispatch_policy: DisconnectDispatchPolicy::Queue,
     };
     tokio::spawn(async move {
         let _ = runtime.run().await;
@@ -85,4 +100,3 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
         .into_inner();
     assert!(duplicated.duplicate);
 }
-#![cfg(unix)]

@@ -38,29 +38,58 @@ impl EpisodeExecutor {
         episode: &EpisodeRequest,
     ) -> Result<ExecuteOutput, Box<dyn std::error::Error + Send + Sync>> {
         let start = Instant::now();
-        let lease = self.warmup_pool.acquire(&episode.env_type).await?;
+        let trace_id = episode.correlation_id.clone();
+        let lease = self
+            .warmup_pool
+            .acquire(&episode.env_type)
+            .await
+            .map_err(|err| {
+                log_phase_error(&trace_id, &episode.episode_id, "acquire", "ERR_POOL_ACQUIRE_FAILED", &*err);
+                err
+            })?;
+        tracing::info!(
+            trace_id = %trace_id,
+            episode_id = %episode.episode_id,
+            worker_id = "worker",
+            phase = "acquire",
+            warmup_hit = lease.warmup_hit,
+            instance_id = %lease.instance_id,
+            msg = "episode_phase"
+        );
         let observation = self
             .plugin_host
             .reset(&lease.instance_id, episode.seed)
-            .await?;
+            .await
+            .map_err(|err| {
+                log_phase_error(&trace_id, &episode.episode_id, "reset", "ERR_ENV_RESET_FAILED", &*err);
+                err
+            })?;
 
         let model_start = Instant::now();
         let action = self
             .model_client
             .infer_action(&episode.payload, &episode.reward_config)
-            .await?;
+            .await
+            .map_err(|err| {
+                log_phase_error(&trace_id, &episode.episode_id, "model_callback", "ERR_MODEL_CALL_FAILED", &*err);
+                err
+            })?;
         let model_callback_duration_ms = model_start.elapsed().as_millis() as u64;
 
         let step_start = Instant::now();
         let step = match self.plugin_host.step(&lease.instance_id, action.clone()).await {
             Ok(step) => step,
             Err(err) => {
+                log_phase_error(&trace_id, &episode.episode_id, "step", "ERR_ENV_STEP_FAILED", &*err);
                 let _ = self.warmup_pool.release(lease.clone()).await;
                 return Err(err);
             }
         };
         let env_step_duration_ms = step_start.elapsed().as_millis() as u64;
-        self.warmup_pool.release(lease.clone()).await?;
+        self.warmup_pool.release(lease.clone()).await.map_err(|err| {
+            log_phase_error(&trace_id, &episode.episode_id, "release", "ERR_POOL_RELEASE_FAILED", &*err);
+            err
+        })?;
 
         let step_record = StepRecord {
             step_index: 1,
@@ -114,6 +143,24 @@ impl EpisodeExecutor {
             warmup_hit: lease.warmup_hit,
         })
     }
+}
+
+fn log_phase_error(
+    trace_id: &str,
+    episode_id: &str,
+    phase: &str,
+    error_code: &str,
+    err: &(dyn std::error::Error + Send + Sync),
+) {
+    tracing::error!(
+        trace_id = %trace_id,
+        episode_id = %episode_id,
+        worker_id = "worker",
+        phase = %phase,
+        error_code = %error_code,
+        error = %err,
+        msg = "episode_phase_failed"
+    );
 }
 
 fn checksum_trajectory(

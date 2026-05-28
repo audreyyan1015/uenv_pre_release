@@ -21,5 +21,9 @@
     "level": "INFO",
     "file": "/var/log/uenv/worker.log"
   },
-  "wal": { "dir": "/tmp/uenv/wal" }
+  "wal": { "dir": "/tmp/uenv/wal" },
+  "observability": {
+    "metrics_listen": "0.0.0.0:19090",
+    "health_listen": "0.0.0.0:19090"
+  }
 }

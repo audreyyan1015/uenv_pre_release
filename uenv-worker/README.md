@@ -60,6 +60,23 @@ uenv-mock-scheduler serve --fixture-dir ./fixtures/gsm8k
 uenv-worker serve --config config/uenv-worker.yaml
 ```
 
+## M7 联调前配置切换（Worker 侧）
+
+```bash
+# 真实 Server 控制面地址
+UENV_SERVER_ENDPOINT=<uenv-server-host:50051>
+
+# Worker gRPC 对外可达地址（供 Scheduler 直连 DispatchEpisode）
+UENV_WORKER_LISTEN=0.0.0.0:50052
+
+# 可观测端口（Prometheus + 健康检查）
+UENV_METRICS_LISTEN=0.0.0.0:19090
+UENV_HEALTH_LISTEN=0.0.0.0:19090
+```
+
+- `GET /metrics`：Prometheus 文本指标（含 `uenv_warmup_pool_hit_total`、`uenv_warmup_pool_miss_total`、`uenv_instance_pool_size{status}`）
+- `GET /health`：返回 `ok`
+
 ## 术语对照
 
 | 设计文档 | 本仓库 |
