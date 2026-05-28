@@ -34,6 +34,7 @@ async fn main() {
     match cli.command {
         Commands::Serve => {
             let runtime = WorkerRuntime {
+                scheduler_mode: cfg.scheduler.mode.clone(),
                 listen: cfg.worker.listen.clone(),
                 server_endpoint: cfg.server.endpoint.clone(),
                 worker_id: cfg.worker.id.clone(),

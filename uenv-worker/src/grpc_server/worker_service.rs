@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::control_plane::client::ControlPlaneClient;
+use crate::control_plane::client::ControlPlane;
 use crate::episode::executor::EpisodeExecutor;
 use crate::metrics::MetricsExporter;
 use crate::pool::warmup_pool::WarmupPool;
@@ -17,7 +17,7 @@ use crate::proto::worker::v1::{DispatchEpisodeRequest, HealthCheckRequest, Healt
 
 #[derive(Clone)]
 pub struct WorkerGrpcServiceImpl {
-    control_plane: ControlPlaneClient,
+    control_plane: Arc<dyn ControlPlane>,
     executor: EpisodeExecutor,
     metrics: MetricsExporter,
     warmup_pool: WarmupPool,
@@ -28,7 +28,7 @@ pub struct WorkerGrpcServiceImpl {
 
 impl WorkerGrpcServiceImpl {
     pub fn new(
-        control_plane: ControlPlaneClient,
+        control_plane: Arc<dyn ControlPlane>,
         executor: EpisodeExecutor,
         metrics: MetricsExporter,
         warmup_pool: WarmupPool,
@@ -129,7 +129,7 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
         let _ = tx.send(Ok(exec.stream_report)).await;
         drop(tx);
 
-        let cp = self.control_plane.clone();
+        let cp = Arc::clone(&self.control_plane);
         let episode_id = episode.episode_id.clone();
         let attempt_id = episode.attempt_id;
         let reward = exec.reward;

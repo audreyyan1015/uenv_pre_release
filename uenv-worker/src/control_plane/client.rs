@@ -1,6 +1,8 @@
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -15,8 +17,38 @@ pub struct RuntimeIdentity {
     pub server_epoch: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedulerMode {
+    Mock,
+    Remote,
+}
+
+impl FromStr for SchedulerMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mock" => Ok(Self::Mock),
+            "remote" => Ok(Self::Remote),
+            other => Err(format!("unsupported scheduler mode: {other}")),
+        }
+    }
+}
+
+#[async_trait]
+pub trait ControlPlane: Send + Sync {
+    async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn spawn_heartbeat_loop(&self);
+    async fn report_result(
+        &self,
+        idempotency_key: String,
+        result: EpisodeResult,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn identity(&self) -> Arc<RwLock<RuntimeIdentity>>;
+}
+
 #[derive(Clone)]
-pub struct ControlPlaneClient {
+pub struct SchedulerControlPlaneClient {
     endpoint: String,
     listen: String,
     supported_env_types: Vec<String>,
@@ -24,14 +56,29 @@ pub struct ControlPlaneClient {
     identity: Arc<RwLock<RuntimeIdentity>>,
 }
 
-impl ControlPlaneClient {
+impl SchedulerControlPlaneClient {
     pub fn new(
+        mode: SchedulerMode,
         endpoint: String,
         listen: String,
         supported_env_types: Vec<String>,
         max_concurrent: u32,
         worker_id: String,
-    ) -> Self {
+        ) -> Self {
+        match mode {
+            SchedulerMode::Mock => tracing::info!(
+                trace_id = "control_plane",
+                episode_id = "-",
+                endpoint = %endpoint,
+                msg = "control_plane_mode_mock"
+            ),
+            SchedulerMode::Remote => tracing::info!(
+                trace_id = "control_plane",
+                episode_id = "-",
+                endpoint = %endpoint,
+                msg = "control_plane_mode_remote"
+            ),
+        }
         Self {
             endpoint,
             listen,
@@ -159,5 +206,28 @@ impl ControlPlaneClient {
 
     pub fn identity(&self) -> Arc<RwLock<RuntimeIdentity>> {
         self.identity.clone()
+    }
+}
+
+#[async_trait]
+impl ControlPlane for SchedulerControlPlaneClient {
+    async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        SchedulerControlPlaneClient::register(self).await
+    }
+
+    fn spawn_heartbeat_loop(&self) {
+        SchedulerControlPlaneClient::spawn_heartbeat_loop(self);
+    }
+
+    async fn report_result(
+        &self,
+        idempotency_key: String,
+        result: EpisodeResult,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        SchedulerControlPlaneClient::report_result(self, idempotency_key, result).await
+    }
+
+    fn identity(&self) -> Arc<RwLock<RuntimeIdentity>> {
+        SchedulerControlPlaneClient::identity(self)
     }
 }
