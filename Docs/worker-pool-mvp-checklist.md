@@ -528,8 +528,11 @@ replay_state: REPLAY_STATE_PENDING
 
 
 ### M8 现状总结（2026-05-27）
-- 已实现 WalWriter 落盘：按 uenv.v1.WalRecord 写入 equest_checksum / esult_checksum，并为记录增加 CRC32 校验；WAL 文件损坏时会跳过并打 ERROR 日志。
-- 已实现先落盘后上报：DispatchEpisode 执行完成后先写 WAL（eplay_state=pending），再调用 ReportResult；ACK 成功后删除对应 WAL 记录。
+- 已实现 WalWriter 落盘：按 uenv.v1.WalRecord 写入 
+equest_checksum / 
+esult_checksum，并为记录增加 CRC32 校验；WAL 文件损坏时会跳过并打 ERROR 日志。
+- 已实现先落盘后上报：DispatchEpisode 执行完成后先写 WAL（
+eplay_state=pending），再调用 ReportResult；ACK 成功后删除对应 WAL 记录。
 - 已实现重连重放：新增后台 WAL replay loop，对未 ACK 记录按指数退避重试上报（500ms -> 10s），直到 ACK。
 - 已补齐断连策略开关：支持 UENV_DISPATCH_ON_DISCONNECT=reject|queue，可在控制面断连时拒绝新任务或继续接收并依赖 WAL 重放。
 - 已新增观测指标：uenv_wal_pending_records，并在写 WAL、重放成功后实时更新。
