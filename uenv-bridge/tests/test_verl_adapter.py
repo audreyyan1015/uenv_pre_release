@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from uenv.bridge.clients import FakeEpisodeClient, GrpcEpisodeClient, GrpcEpisodeClientConfig, DryRunEpisodeClient
+from uenv.bridge.protocol import request_to_jsonable
+from uenv.bridge.verl import VeRLAdapter, VeRLAdapterConfig
+
+
+def make_batch() -> dict:
+    return {
+        "meta_info": {
+            "batch_id": "batch-0001",
+            "global_steps": 7,
+            "temperature": 0.7,
+            "max_response_length": 128,
+        },
+        "batch": {
+            "input_ids": [[1, 2, 3], [4, 5, 0]],
+            "attention_mask": [[1, 1, 1], [1, 1, 0]],
+            "position_ids": [[0, 1, 2], [0, 1, 2]],
+        },
+        "non_tensor_batch": {
+            "uid": ["uid-1", "uid-2"],
+            "prompt_id": ["prompt-1", "prompt-2"],
+            "task_name": ["math", "code"],
+            "raw_prompt": ["What is 2 + 2?", "Write add(a, b)."],
+            "data_source": ["gsm8k", "humaneval"],
+            "reward_model": [
+                {"style": "rule", "ground_truth": "4"},
+                {"style": "unit_test", "tests": ["assert add(2, 3) == 5"]},
+            ],
+            "extra_info": [{"index": 1}, {"index": 2}],
+        },
+    }
+
+
+class VeRLAdapterTest(unittest.TestCase):
+    def test_to_episode_requests_preserves_metadata(self) -> None:
+        adapter = VeRLAdapter()
+        requests = adapter.to_episode_requests(make_batch())
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0].env_type, "math")
+        self.assertEqual(requests[0].max_steps, 10)
+        self.assertEqual(requests[1].env_type, "code")
+        self.assertEqual(requests[1].max_steps, 80)
+
+        payload0 = json.loads(requests[0].payload.decode("utf-8"))
+        self.assertEqual(payload0["framework"], "verl")
+        self.assertEqual(payload0["correlation_id"], "batch-0001-0")
+        self.assertEqual(payload0["metadata"]["batch_id"], "batch-0001")
+        self.assertEqual(payload0["metadata"]["sample_index"], 0)
+        self.assertEqual(payload0["metadata"]["uid"], "uid-1")
+        self.assertEqual(payload0["metadata"]["prompt_id"], "prompt-1")
+        self.assertEqual(payload0["metadata"]["global_steps"], 7)
+        self.assertEqual(payload0["reward_config"]["reward_type"], "rubric")
+        self.assertEqual(payload0["episode_config"]["initial_observation"]["input_ids"], [1, 2, 3])
+
+    def test_execute_batch_with_fake_client_returns_ordered_results(self) -> None:
+        adapter = VeRLAdapter(client=FakeEpisodeClient(reward=2.5))
+        output = adapter.execute_batch(make_batch())
+
+        self.assertEqual(output["batch_id"], "batch-0001")
+        self.assertEqual(len(output["results"]), 2)
+        self.assertEqual(output["results"][0]["reward"], 2.5)
+        self.assertEqual(output["results"][1]["reward"], 2.5)
+        self.assertTrue(output["results"][0]["done"])
+        self.assertIsNone(output["results"][0]["uenv_error"])
+
+    def test_fake_math_reward_uses_rubric_ground_truth(self) -> None:
+        sample = {
+            "task_name": "math",
+            "raw_prompt": "What is 2 + 2? The expected final answer is 4.",
+            "data_source": "gsm8k",
+            "reward_model": {"style": "rule", "ground_truth": "4"},
+        }
+        adapter = VeRLAdapter(client=FakeEpisodeClient(reward=0.0, math_reward=True))
+        result = adapter.execute_episode(sample)
+
+        self.assertEqual(result["reward"], 1.0)
+        self.assertTrue(result["done"])
+
+    def test_dry_run_client_writes_episode_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = DryRunEpisodeClient(temp_dir)
+            adapter = VeRLAdapter(client=client)
+            requests = adapter.to_episode_requests(make_batch())
+            list(client.submit_episode_stream(requests))
+
+            output = Path(temp_dir) / "episode_requests.json"
+            self.assertTrue(output.exists())
+            written = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(len(written), 2)
+            self.assertEqual(json.loads(written[0]["payload"])["metadata"]["sample_index"], 0)
+
+    def test_request_to_jsonable_decodes_payload(self) -> None:
+        request = VeRLAdapter().to_episode_requests(make_batch())[0]
+        payload = request_to_jsonable(request)
+        self.assertIsInstance(payload["payload"], str)
+        self.assertIn("batch-0001-0", payload["payload"])
+
+    def test_verl_config_loads_from_mapping(self) -> None:
+        config = VeRLAdapterConfig.from_mapping(
+            {
+                "mapping": {
+                    "default_env_type": "agent",
+                    "task_to_env_type": {"logic": "math"},
+                    "default_max_steps": 12,
+                    "math_max_steps": 4,
+                    "seed_base": 100,
+                },
+                "model_endpoint": {
+                    "url": "http://localhost:8000/v1",
+                    "model_name": "test-policy",
+                },
+                "server": {"grpc": {"timeout_seconds": 9}},
+            }
+        )
+
+        self.assertEqual(config.default_env_type, "agent")
+        self.assertEqual(config.task_to_env_type["logic"], "math")
+        self.assertEqual(config.default_model_endpoint, "http://localhost:8000/v1")
+        self.assertEqual(config.default_model_name, "test-policy")
+        self.assertEqual(config.default_timeout_seconds, 9)
+        self.assertEqual(config.default_max_steps, 12)
+        self.assertEqual(config.math_max_steps, 4)
+        self.assertEqual(config.seed_base, 100)
+
+    def test_verl_config_loads_from_default_yaml(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "verl-adapter.yaml"
+        config = VeRLAdapterConfig.from_file(config_path)
+        self.assertEqual(config.task_to_env_type["gsm8k"], "math")
+        self.assertEqual(config.default_model_name, "policy-model")
+
+    def test_grpc_config_loads_from_mapping(self) -> None:
+        config = GrpcEpisodeClientConfig.from_mapping(
+            {
+                "server": {
+                    "endpoint": "dns:///uenv-server:50051",
+                    "tls": {"enabled": True},
+                    "grpc": {
+                        "timeout_seconds": 7,
+                        "max_send_message_mb": 16,
+                        "max_receive_message_mb": 32,
+                        "compression": "gzip",
+                    },
+                }
+            }
+        )
+
+        self.assertEqual(config.endpoint, "dns:///uenv-server:50051")
+        self.assertEqual(config.timeout_seconds, 7)
+        self.assertEqual(config.max_send_message_mb, 16)
+        self.assertEqual(config.max_receive_message_mb, 32)
+        self.assertEqual(config.compression, "gzip")
+        self.assertTrue(config.tls_enabled)
+
+    def test_grpc_episode_client_requires_stub(self) -> None:
+        client = GrpcEpisodeClient(GrpcEpisodeClientConfig(endpoint="dns:///uenv-server:50051"))
+        request = VeRLAdapter().to_episode_requests(make_batch())[0]
+        with self.assertRaisesRegex(RuntimeError, "requires a generated UEnvService stub"):
+            client.submit_episode(request)
+
+
+if __name__ == "__main__":
+    unittest.main()
