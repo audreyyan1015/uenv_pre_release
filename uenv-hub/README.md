@@ -1,99 +1,90 @@
-# uenv-hub — UEnv 环境注册中心
+# uenv-hub — UEnv Environment Registry (UEnvHub)
 
-UEnvHub 是 UEnv 分布式环境框架的**持久化环境注册中心**，属于离线目录服务，不参与运行时调度。Worker 启动时从 Hub 拉取环境定义和元数据。
+UEnvHub is UEnv's **persistent environment metadata registry** — the "training
+environment registry" analogous to Docker Hub / npm / Hugging Face Hub. It is an
+**offline directory service**: it does not participate in runtime scheduling, it
+durably stores environment metadata, versions, image references, resource
+requirements and config/interface schemas.
 
-## 职责
+This implements **Phase 3** of the PRD: HTTP REST API + persistent SQLite.
 
-- **环境元数据管理**：存储环境类型、版本、描述、资源需求等信息
-- **镜像索引**：维护环境镜像地址和摘要的映射
-- **版本管理**：基于 semver 的版本控制和兼容性追踪
-- **环境发现**：支持搜索和查询已注册的环境
+## Workspace layout (4 crates)
 
-## 架构
+| Crate | Responsibility | Doc tasks |
+|-------|----------------|-----------|
+| [`uenv-hub-types`](uenv-hub-types) | Shared API DTOs (server/client/CLI contract) | shared |
+| [`uenv-hub-core`](uenv-hub-core) | Data layer + domain: models, SQLite repository, version/manifest/interface validation, seed, templates | L1–L13 |
+| [`uenv-hub-server`](uenv-hub-server) | axum HTTP API: routes, auth/RBAC, service orchestration, errors, observability, rate-limit/CORS, templates | S1–S12 |
+| [`uenv-hub-client`](uenv-hub-client) | Client SDK (HTTP + retry + ETag cache) and the `uenv` CLI (`env` / `hub` subcommands) | S7, S8, S13, S14 |
 
 ```
-┌────────────────────────────────────────────┐
-│  uenv-hub                                   │
-│                                              │
-│  gRPC (port 50053)                          │
-│  ┌──────────────────────────────────────┐   │
-│  │ HubService                            │   │
-│  │   GetEnvDefinition / SearchEnv /      │   │
-│  │   PublishEnv                          │   │
-│  └──────────────────────────────────────┘   │
-│                                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐   │
-│  │ 元数据   │ │ 存储    │ │ 版本管理 │   │
-│  │ 索引     │ │ Git/S3  │ │ semver   │   │
-│  └──────────┘ └──────────┘ └──────────┘   │
-└────────────────────────────────────────────┘
+uenv-cli ──► uenv-hub-client (SDK) ──HTTP──► uenv-hub-server ──► uenv-hub-core ──► SQLite (WAL)
 ```
 
-## 四级注册链路
-
-| 级别 | 执行者 | 职责 |
-|:-----|:-------|:------|
-| UEnvHub 发布 | 环境开发者 | 推送环境元数据（名称/版本/资源需求/镜像地址） |
-| Worker 本地注册 | Worker 启动 | @register_env 加载环境类到本地注册表 |
-| Server 全局注册 | UEnv Server | Worker 上报 supported_envs，更新全局路由表 |
-| 元数据同步 | UEnv Server | 从 Hub 拉取元数据充实注册表 |
-
-## gRPC 服务
-
-| RPC | 说明 |
-|:----|:------|
-| GetEnvDefinition | 获取指定环境的定义和工件 |
-| SearchEnv | 搜索已注册的环境 |
-| PublishEnv | 发布新环境或新版本 |
-
-## 数据模型
-
-```protobuf
-message EnvMeta {
-    string env_type = 1;
-    string version = 2;
-    string description = 3;
-    ResourceSpec resources = 4;
-    repeated string backends = 5;
-    string image_url = 6;
-    string config_schema = 7;
-}
-```
-
-## 快速使用
+## Build & test
 
 ```bash
-# 启动
-cargo run -- start --port 50053
-
-# 发布环境
-cargo run -- push math-env 1.0.0
-
-# 搜索环境
-cargo run -- search math
+cargo build              # build everything
+cargo test               # unit + repository + e2e integration tests
 ```
 
-## 配置
+## Run the server
 
-参考 ../config/hub.example.toml：
+```bash
+# Dev (no auth), ephemeral DB next to cwd:
+UENV_HUB_AUTH__REQUIRE_TOKEN=false cargo run -p uenv-hub-server
 
-```toml
-port = 50053
-
-[storage]
-backend = "git"
-path = "./env-index"
+# With a config file (see config/hub.example.toml):
+cargo run -p uenv-hub-server -- --config config/hub.example.toml
 ```
 
-## 存储后端演进
+Public endpoints: `GET /healthz`, `GET /version`, `GET /metrics`.
+Full API: see [docs/api.md](docs/api.md).
 
-| Phase | 后端 | 说明 |
-|:------|:-----|:------|
-| Phase 2 | Git + YAML | 轻量级，YAML manifest |
-| Phase 3 | HTTP API | REST API + 对象存储 |
-| Phase 4 | 生态化 | Web UI + 评分 + 社区发布 |
+## Use the CLI
 
-## 依赖
+```bash
+cargo build -p uenv-hub-client          # builds the `uenv` binary
+export UENV_HUB_ENDPOINT=http://localhost:8080
 
-- **通信**: tonic (gRPC), prost (Protobuf)
-- **运行时**: tokio
+uenv hub status
+uenv env list
+uenv env init mymath --template math    # scaffold an OpenEnv-style project
+cd mymath && uenv env validate          # local manifest + schema validation
+uenv env publish --manifest manifest.toml
+uenv env yank mymath --version 0.1.0 --reason "broken"
+```
+
+## Configuration
+
+Defaults < TOML file (`--config`) < environment (`UENV_HUB_` prefix, `__`
+nesting). Example: [`config/hub.example.toml`](config/hub.example.toml).
+
+| Env var | Meaning |
+|---------|---------|
+| `UENV_HUB_SERVER__HOST` / `__PORT` | bind address |
+| `UENV_HUB_DATABASE__URL` | `sqlite://...` path |
+| `UENV_HUB_AUTH__REQUIRE_TOKEN` | enforce API tokens (default true) |
+| `UENV_HUB_AUTH__BOOTSTRAP_ADMIN_TOKEN` | create admin token on first boot |
+| `UENV_HUB_RATE_LIMIT__*`, `UENV_HUB_CORS__*` | limits / CORS |
+
+## Documentation
+
+* [docs/api.md](docs/api.md) — full HTTP API reference (per-endpoint params, request/response schemas, examples, flows, CLI).
+* [docs/openapi.yaml](docs/openapi.yaml) — machine-readable OpenAPI 3.0 spec (import into Swagger UI / Postman / codegen).
+* [docs/data-model.md](docs/data-model.md) — SQLite schema, constraints, migrations.
+* [docs/errors.md](docs/errors.md) — error codes ↔ HTTP status.
+
+## Deployment
+
+See [deploy/](deploy): `Dockerfile`, `docker-compose.yml`, `uenv-hub.service`
+(systemd). Ops scripts in [scripts/](scripts): `backup.sh` (VACUUM INTO),
+`seed-export.sh` / `seed-import.sh`.
+
+## Relationship to OpenEnv
+
+The environment construction conventions (Gymnasium-style `reset()/step()/state`,
+strongly-typed Action/Observation/State, `FROM <base-image>` layering, project
+layout) follow [OpenEnv](https://github.com/meta-pytorch/OpenEnv). UEnvHub adds
+the centralized, controllable **metadata registry** that OpenEnv leaves to
+Hugging Face Spaces. Publishers write a `manifest.toml` (see `uenv env init`).

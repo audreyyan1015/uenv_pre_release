@@ -1,0 +1,28 @@
+services:
+  uenv-hub:
+    build:
+      # Build context is the workspace root so the Dockerfile can see all crates.
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: uenv-hub:latest
+    ports:
+      - "8080:8080"
+    environment:
+      UENV_HUB_SERVER__HOST: "0.0.0.0"
+      UENV_HUB_SERVER__PORT: "8080"
+      UENV_HUB_DATABASE__URL: "sqlite:///var/lib/uenv-hub/hub.db"
+      UENV_HUB_AUTH__REQUIRE_TOKEN: "true"
+      # On first boot this creates an admin token; rotate it afterwards.
+      UENV_HUB_AUTH__BOOTSTRAP_ADMIN_TOKEN: "uenvh_change_me"
+      RUST_LOG: "info"
+    volumes:
+      - uenv-hub-data:/var/lib/uenv-hub
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  uenv-hub-data:
