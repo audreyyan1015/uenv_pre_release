@@ -352,6 +352,62 @@ UENV_ADAPTER_CORE_DEFAULT_REWARD=0.0
 
 `fixed` 和 `math_proxy` 都是临时调试模式。真实 Serve 接入后，reward mode 应替换为 Serve backed implementation。
 
+## VeRL image 环境准备
+
+如果协作者也想本地跑真实 VeRL smoke test，可以直接构建包含 `uenv-bridge`、Rust、Cargo 和 `protoc` 的镜像。构建只需要容器运行时和网络；GPU 只在后续运行真实 GRPO 时需要。
+
+前置条件：
+
+- Linux host。
+- `podman` 或 `docker`。
+- 能访问 `docker.io/verlai/verl:vllm011.latest`，或通过 `BASE_IMAGE` 指向已有 VeRL base image。
+- 如果要跑真实训练，需要 NVIDIA GPU 和可用的 container GPU runtime。
+
+构建默认镜像：
+
+```bash
+cd uenv-bridge
+./scripts/build_verl_bridge_image.sh
+```
+
+默认会生成：
+
+```text
+localhost/uenv-bridge-verl:latest
+```
+
+如果使用 Docker 或自定义镜像名：
+
+```bash
+cd uenv-bridge
+CONTAINER_TOOL=docker IMAGE=uenv-bridge-verl:latest ./scripts/build_verl_bridge_image.sh
+```
+
+构建脚本会做一个轻量验证：确认镜像内可以 import `verl` 和 `uenv.bridge`，并检查 `rustc`、`cargo`、`protoc` 是否可用。如果只想构建不验证：
+
+```bash
+cd uenv-bridge
+./scripts/build_verl_bridge_image.sh --no-verify
+```
+
+跑真实 GRPO 前还需要准备模型和 GSM8K parquet 数据。现有训练脚本默认从 `MODEL_CACHE` 查找或下载模型，并要求 `VERL_WORKSPACE` 下存在 `data/gsm8k/train.parquet` 和 `data/gsm8k/test.parquet`：
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:latest \
+VERL_WORKSPACE=/path/to/verl/workspace \
+MODEL_CACHE=/path/to/models \
+TRAINING_STEPS=1 \
+SAMPLE_COUNT=2 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+ADAPTER_CORE_REWARD_MODE=fixed \
+ADAPTER_CORE_FAKE_REWARD=0.37 \
+./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+```
+
+没有 VeRL image 或 GPU 的协作者仍然可以做 Layer 1 到 Layer 3 的轻量验证；只有 Layer 4 的真实 GRPO smoke test 需要这个镜像和 GPU。
+
 ## 四层验证测试
 
 Bridge 当前按四层验证。越靠前越轻量，越靠后越接近真实 VeRL + Serve 联动。Serve 侧协作者主要关注 Layer 4；Layer 1 到 Layer 3 是 bridge 侧在联调前确认自身链路可用的基线测试。
