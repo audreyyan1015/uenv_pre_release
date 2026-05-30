@@ -4,7 +4,7 @@ all: proto build
 
 # ─── Protobuf ────────────────────────────────────────────────
 PROTO_ROOT   = proto
-PROTO_SERVER = uenv-server/proto/server.proto
+PROTO_SERVER = proto/uenv/v1/server.proto
 PROTO_WORKER = uenv-worker/proto/worker_service.proto
 PROTO_HUB    = uenv-hub/proto/hub.proto
 PROTO_SCHED  = $(PROTO_ROOT)/uenv/v1/scheduler.proto
@@ -13,8 +13,10 @@ PROTO_PLUGIN = plugin_proto/uenv/plugin/v1/plugin.proto
 proto: proto-server proto-worker proto-mock-scheduler proto-hub proto-bridge proto-plugin
 
 proto-server:
-	protoc -I=$(PROTO_ROOT) -I=uenv-server/proto \
-		$(PROTO_SERVER) \
+	protoc -I=$(PROTO_ROOT) -I=uenv-worker/proto \
+		$(PROTO_ROOT)/uenv/v1/server.proto \
+		$(PROTO_ROOT)/uenv/v1/scheduler.proto \
+		$(PROTO_WORKER) \
 		$(PROTO_ROOT)/uenv/v1/episode.proto \
 		$(PROTO_ROOT)/uenv/v1/common.proto \
 		$(PROTO_ROOT)/uenv/v1/wal.proto \
@@ -24,6 +26,7 @@ proto-server:
 proto-worker:
 	protoc -I=$(PROTO_ROOT) -I=uenv-worker/proto \
 		$(PROTO_WORKER) \
+		$(PROTO_SCHED) \
 		$(PROTO_ROOT)/uenv/v1/episode.proto \
 		$(PROTO_ROOT)/uenv/v1/common.proto \
 		$(PROTO_ROOT)/uenv/v1/wal.proto \
@@ -48,10 +51,12 @@ proto-hub:
 		--tonic_out=uenv-hub/src/gen
 
 proto-bridge:
-	protoc -I=$(PROTO_ROOT) -I=uenv-server/proto \
+	protoc -I=$(PROTO_ROOT) \
 		$(PROTO_SERVER) \
+		$(PROTO_ROOT)/uenv/v1/scheduler.proto \
 		$(PROTO_ROOT)/uenv/v1/episode.proto \
 		$(PROTO_ROOT)/uenv/v1/common.proto \
+		$(PROTO_ROOT)/uenv/v1/wal.proto \
 		--python_out=uenv-bridge/src/gen \
 		--grpc_python_out=uenv-bridge/src/gen
 

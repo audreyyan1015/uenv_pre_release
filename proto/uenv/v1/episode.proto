@@ -66,12 +66,33 @@ message EpisodeResult {
 }
 
 // ─── StreamReport ─────────────────────────────────────────────
+// PRD §4.2：Episode 执行中的实时进度反馈（Server 消费 DispatchEpisode 流）
+enum ReportType {
+    REPORT_TYPE_UNSPECIFIED = 0;
+    PROGRESS                = 1;
+    STEP_COMPLETE           = 2;
+    REWARD_SIGNAL           = 3;
+    LOG                     = 4;
+    PACING                  = 5;
+}
+
 message StreamReport {
-    string episode_id    = 1;
-    uint32 attempt_id    = 2;
-    int32 current_step   = 3;
-    int32 total_steps    = 4;
+    string episode_id     = 1;
+    uint32 attempt_id     = 2;
+    int32 current_step    = 3;
+    int32 total_steps     = 4;
     double current_reward = 5;
-    string phase         = 6;  // "running" | "step_complete" | "episode_complete"
+    // MVP 兼容字段；新实现应同时设置 report_type
+    string phase          = 6;  // "running" | "step_complete" | "episode_complete"
     optional StepRecord last_step = 7;
+
+    // PRD §4.2 扩展（Phase 1+ 逐步落地）
+    ReportType report_type = 8;
+    int64 step_latency_ms  = 9;
+    int64 model_latency_ms = 10;
+    double estimated_remaining_seconds = 11;
+    int32 worker_active_episodes = 12;
+    int32 worker_capacity = 13;
+    string correlation_id = 14;
+    string worker_id      = 15;
 }

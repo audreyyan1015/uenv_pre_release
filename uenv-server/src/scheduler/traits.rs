@@ -12,7 +12,7 @@
 //   2. Worker 当前负载是否已满（current_load < capacity）
 //   3. 调度算法（轮询、最小负载等）
 
-use crate::proto::EpisodeRequest;
+use crate::proto::v1::EpisodeRequest;
 
 /// Scheduler trait：调度器的抽象接口。
 /// 所有调度算法（RoundRobin、LeastLoad 等）都实现这个 trait。

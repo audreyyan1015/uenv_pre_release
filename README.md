@@ -96,7 +96,7 @@ pip install ./uenv-bridge
 | Worker ↔ Plugin | `plugin_proto/` (L2 UDS) | reset/step/close/health_check |
 | Worker ↔ 推理服务 | HTTP/gRPC | 模型回调，不经 Server |
 
-Proto 权威路径：`proto/`（L1）、`plugin_proto/`（L2）。见 [proto/README.md](./proto/README.md)。
+Proto 权威路径：`proto/`（L1）、`plugin_proto/`（L2）。见 [proto/README.md](./proto/README.md) 与 **[PROTOCOL.md](./PROTOCOL.md)**（通信协议与数据结构规范）。
 
 ---
 
