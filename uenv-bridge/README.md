@@ -1,14 +1,13 @@
 # uenv-bridge
 
-`uenv-bridge` 是 UEnv 面向训练框架的适配层。目前主要接入目标是VeRL。它负责把 VeRL 的 `DataProto` batch 转成 UEnv 可以理解的 episode
-请求，再把 UEnv/Serve 的结果转回 VeRL 训练所需的 reward。
+`uenv-bridge` 是 UEnv 面向训练框架的适配层。目前主要接入目标是 VeRL。它负责把 VeRL 的 `DataProto` batch 转成 UEnv 可以理解的 episode 请求，再把 UEnv/Serve 的结果转回 VeRL 训练所需的 reward。
 
 当前实现已经验证过真实 VeRL 训练链路：
 
 - 真实 `verl.trainer.main_ppo` 1-step GRPO。
 - 真实 `verl.trainer.main_ppo` 2-step GRPO。
 - VeRL reward worker 通过本地 gRPC 调 Rust adapter core。
-- Rust adapter core 返回 reward 后，VeRL 指标中能看到 `critic/score/*` 和  `critic/rewards/*`。
+- Rust adapter core 返回 reward 后，VeRL 指标中能看到 `critic/score/*` 和 `critic/rewards/*`。
 
 ## 当前架构
 
@@ -54,7 +53,7 @@ reward.reward_manager.name=UEnvBridgeRewardManager
 reward.reward_manager.module.path=/tmp/uenv-bridge/src/uenv/bridge/verl_reward_manager.py
 ```
 
-`UEnvBridgeRewardManager` 接收 VeRL 传入的单条 `DataProto`，解码 rollout response token，写入 `uenv_response_text`，再调用 VeRLAdapter`。
+`UEnvBridgeRewardManager` 接收 VeRL 传入的单条 `DataProto`，解码 rollout response token，写入 `uenv_response_text`，再调用 `VeRLAdapter`。
 
 ### Python: VeRLAdapter
 
@@ -131,64 +130,13 @@ export UENV_ADAPTER_CORE_AUTO_START=1
 export UENV_ADAPTER_CORE_BINARY=/tmp/uenv-bridge/core/target/debug/uenv-adapter-core
 ```
 
-## Python 到 Rust core 的 gRPC 协议
+## Bridge 内部通道
 
-协议文件：
-
-- `proto/adapter_core.proto`
-
-服务：
-
-```protobuf
-service AdapterCoreService {
-  rpc ExecuteBatch(ExecuteBatchRequest) returns (ExecuteBatchResponse);
-  rpc ExecuteBatchStream(stream SampleEnvelope) returns (stream SampleResult);
-  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-}
-```
-
-请求核心结构：
-
-```protobuf
-message SampleEnvelope {
-  string request_id = 1;
-  string batch_id = 2;
-  uint32 sample_index = 3;
-  string framework = 4;
-  string env_type = 5;
-  bytes payload_json = 6;
-  bytes meta_json = 7;
-}
-```
-
-响应核心结构：
-
-```protobuf
-message SampleResult {
-  string request_id = 1;
-  string batch_id = 2;
-  uint32 sample_index = 3;
-  string status = 4;
-  double reward = 5;
-  bool done = 6;
-  string termination_reason = 7;
-  bytes trajectory_json = 8;
-  string error_code = 9;
-  string error_message = 10;
-}
-```
-
-`request_id` 必须原样返回。Bridge 依靠它把异步/批量结果对齐回原始 VeRL sample。
+Python reward manager 与 Rust adapter core 的本地通信由 `proto/adapter_core.proto` 定义。这个协议只用于 bridge 内部调试和验证；Serve 接入时只需要关注下一节的 `EpisodeService` 边界。
 
 ## Serve 侧应该如何接入
 
-Serve 侧不要实现 Python gRPC 服务。当前约定是：
-
-```text
-Python bridge -> local gRPC -> Rust adapter core -> Rust function call -> Serve
-```
-
-Serve 侧需要向 `core` 提供 Rust 实现，满足这个 trait：
+Serve 侧需要向 `core` 提供 Rust 可调用的 batch episode 实现，满足这个 trait：
 
 ```rust
 #[async_trait]
@@ -210,19 +158,11 @@ pub trait EpisodeService: Send + Sync {
 
 ### 与当前 uenv-server 的关系
 
-当前 `main` 分支中的 `uenv-server/proto/server.proto` 是 server 对外和
-worker 侧的 gRPC 协议，包含 `UEnvService`、`WorkerRegistration`、
-`WorkerExecution` 和 `AdminService`。Bridge 当前不直接调用这些 gRPC
-service；Bridge 对 Serve 的要求是 Rust adapter core 能通过本地函数调用拿到
-episode 结果。
+当前 `main` 分支中的 `uenv-server/proto/server.proto` 是 server 对外和 worker 侧的 gRPC 协议，包含 `UEnvService`、`WorkerRegistration`、`WorkerExecution` 和 `AdminService`。Bridge 不要求 Serve 直接暴露给 Python；Bridge 对 Serve 的要求是 Rust adapter core 能通过本地函数调用拿到 episode 结果。
 
-如果 Serve 侧继续保持 gRPC-first 的实现，也可以在 Rust adapter core 这一侧
-提供一个 wrapper：wrapper 对内实现 `EpisodeService`，对外再调用 Serve
-已有的 scheduler/env/worker 逻辑。Bridge 只依赖 `EpisodeService`
-这个函数边界，不要求 Serve 协作者修改 Python reward manager 或
-`SampleEnvelope/SampleResult`。
+如果 Serve 侧继续保持 gRPC-first 的实现，可以在 Rust adapter core 这一侧提供一个 wrapper：wrapper 对内实现 `EpisodeService`，对外再调用 Serve 已有的 scheduler/env/worker 逻辑。Bridge 只依赖 `EpisodeService` 这个函数边界。
 
-server 侧需要关心的函数只有这一类：
+Serve 对接函数签名：
 
 ```rust
 async fn submit_episode_batch(
@@ -233,18 +173,14 @@ async fn submit_episode_batch(
 函数语义：
 
 - 输入数量为 `N`，返回结果数量也必须为 `N`。
-- 每个 `EpisodeResult.request_id` 必须原样等于对应的
-  `EpisodeRequest.request_id`。
-- batch 内单个 episode 失败时，推荐返回该 request 的 failed
-  `EpisodeResult`，不要让整个 batch panic。
+- 每个 `EpisodeResult.request_id` 必须原样等于对应的 `EpisodeRequest.request_id`。
+- batch 内单个 episode 失败时，推荐返回该 request 的 failed `EpisodeResult`，不要让整个 batch panic。
 - `EpisodeResult.summary.total_reward` 是 VeRL 训练最终读取的 reward。
 - `trajectory.steps` 在 math 类 MVP 中可以为空，但 `summary` 必须完整。
 
 ### Bridge EpisodeRequest 到 server proto 的建议映射
 
-如果 Serve 侧需要把 `uenv-bridge/core/src/protocol.rs` 里的
-`EpisodeRequest` 映射到 `uenv-server/proto/server.proto` 里的
-`uenv.v1.EpisodeRequest`，建议按下面规则处理：
+如果 Serve 侧需要把 `uenv-bridge/core/src/protocol.rs` 里的 `EpisodeRequest` 映射到 `uenv-server/proto/server.proto` 里的 `uenv.v1.EpisodeRequest`，建议按下面规则处理：
 
 ```text
 bridge EpisodeRequest.request_id
@@ -306,11 +242,6 @@ server EpisodeResult.error
   -> bridge EpisodeResult.error_code / error_message
 ```
 
-`SampleEnvelope` / `SampleResult` 不是 PRD 中的业务对象，也不是 Serve
-侧需要实现的接口。它们只是 Python bridge 和 Rust adapter core 之间的本地
-gRPC envelope，用来携带 `request_id`、`batch_id`、`sample_index` 和 JSON
-payload，并保证 VeRL batch 结果可以按原顺序写回。
-
 Serve 侧要做的事情：
 
 1. 接收 `Vec<EpisodeRequest>`。
@@ -368,18 +299,14 @@ EpisodeResult {
 
 ### Trajectory 在当前 MVP 中的要求
 
-当前 VeRL GRPO reward 链路只依赖 `EpisodeResult.summary.total_reward`，Bridge
-会把它写入 VeRL 的 `rm_scores`，advantage 仍由 VeRL 原生逻辑计算。因此
-Serve 侧 MVP 可以先返回空 `trajectory.steps`，但必须保证：
+当前 VeRL GRPO reward 链路只依赖 `EpisodeResult.summary.total_reward`，Bridge 会把它写入 VeRL 的 `rm_scores`，advantage 仍由 VeRL 原生逻辑计算。因此 Serve 侧 MVP 可以先返回空 `trajectory.steps`，但必须保证：
 
 - `EpisodeResult.request_id` 与输入 `EpisodeRequest.request_id` 一致。
 - `EpisodeResult.summary.total_reward` 是本 episode 的最终 reward。
 - `EpisodeResult.summary.terminate_reason` 能解释 reward 来源或终止原因。
 - `EpisodeResult.trajectory.total_reward` / `total_steps` 与 summary 保持合理一致。
 
-完整 `StepRecord` trajectory 仍然重要，但它属于后续 CodeEnv/AgentEnv 调试、
-回放、过程奖励和审计能力。真实 Serve 接入后可以逐步填充
-`trajectory.steps`；当前 math 类 GRPO smoke test 不依赖完整 trajectory。
+完整 `StepRecord` trajectory 仍然重要，但它属于后续 CodeEnv/AgentEnv 调试、回放、过程奖励和审计能力。真实 Serve 接入后可以逐步填充 `trajectory.steps`；当前 math 类 GRPO smoke test 不依赖完整 trajectory。
 
 Serve 完成后，应新增真实实现，例如：
 
@@ -427,10 +354,7 @@ UENV_ADAPTER_CORE_DEFAULT_REWARD=0.0
 
 ## 四层验证测试
 
-Bridge 当前按四层验证。越靠前越轻量，越靠后越接近真实 VeRL + Serve
-联动。Serve 侧协作者主要关注第 2、3、4 层，并通过替换
-[core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`
-实现接入真实 Serve 函数调用。
+Bridge 当前按四层验证。越靠前越轻量，越靠后越接近真实 VeRL + Serve 联动。Serve 侧协作者主要关注 Layer 4；Layer 1 到 Layer 3 是 bridge 侧在联调前确认自身链路可用的基线测试。
 
 ### Layer 1: Python adapter 转换与单测
 
@@ -474,12 +398,12 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 流程：
 
 ```text
-SampleEnvelope
+normalized sample
   -> Rust adapter core
   -> EpisodeRequest
   -> EpisodeService(fake/math_proxy)
   -> EpisodeResult
-  -> SampleResult
+  -> normalized reward result
 ```
 
 运行方式：
@@ -510,10 +434,8 @@ cargo test
 fixture batch
   -> Python VeRLAdapter
   -> RustCoreEpisodeClient(auto_start=True)
-  -> local gRPC SampleEnvelope
   -> Rust adapter core
   -> EpisodeService(fake)
-  -> SampleResult
   -> Python EpisodeResult
 ```
 
@@ -551,10 +473,7 @@ PYTHONPATH=src ./scripts/verify_rust_core_grpc_loop.py --reward 0.37
 verl.trainer.main_ppo
   -> UEnvBridgeRewardManager
   -> VeRLAdapter
-  -> RustCoreEpisodeClient
-  -> local gRPC
   -> Rust adapter core
-  -> Rust function call
   -> Serve EpisodeService implementation
   -> EpisodeResult
   -> rm_scores
@@ -621,9 +540,6 @@ ROLLOUT_N=2 \
 ADAPTER_CORE_REWARD_MODE=math_proxy \
 ./scripts/run_verl_grpo_1step_with_bridge_reward.sh
 ```
-
-Serve 侧真正要实现的是 [core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`，不是 Python `GrpcEpisodeClient`，也不是
-`SampleEnvelope/SampleResult`。`SampleEnvelope/SampleResult` 只属于 Python 到 Rust core 的本地 gRPC envelope。
 
 ## 常用开发命令
 
@@ -707,12 +623,11 @@ tmp/verl_bridge_reward_records/<RUN_ID>/
 
 其中：
 
-- `episode_requests.jsonl`: Bridge 发给 Rust core 的 sample payload。
-- `episode_results.jsonl`: Rust core 返回给 VeRL 的 reward/result。
+- `episode_requests.jsonl`: 本次训练提交给 adapter core 的请求记录。
+- `episode_results.jsonl`: adapter core 返回给 VeRL 的 reward/result 记录。
 
 ## 当前限制
 
 - Serve 真实实现还未接入，当前 Rust core 使用 fake/math proxy service。
-- `trajectory_json` 目前只保留占位 JSON，后续应由 Serve 返回真实轨迹。
-- Python `GrpcEpisodeClient` 是早期直连 Serve proto 的预留骨架；当前目标链路不使用它。
+- trajectory 目前可以为空 steps，后续应由 Serve 返回真实轨迹。
 - 当前 reward 写入 VeRL 的 `rm_scores`，advantage 仍由 VeRL 自己计算。
