@@ -322,6 +322,215 @@ UENV_ADAPTER_CORE_DEFAULT_REWARD=0.0
 
 `fixed` 和 `math_proxy` 都是临时调试模式。真实 Serve 接入后，reward mode 应替换为 Serve backed implementation。
 
+## 四层验证测试
+
+Bridge 当前按四层验证。越靠前越轻量，越靠后越接近真实 VeRL + Serve
+联动。Serve 侧协作者主要关注第 2、3、4 层，并通过替换
+[core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`
+实现接入真实 Serve 函数调用。
+
+### Layer 1: Python adapter 转换与单测
+
+前置条件：
+
+- Python >= 3.10。
+- 已安装 Python 最小依赖：`grpcio`、`grpcio-tools`、`protobuf`、`pyyaml`。
+- 不需要 VeRL image、GPU、真实 Serve 或 Rust core。
+
+流程：
+
+```text
+dict fixture / fake DataProto-like batch
+  -> VeRLAdapter.to_episode_requests()
+  -> FakeEpisodeClient / DryRunEpisodeClient
+  -> VeRLAdapter.results_to_dataproto()
+  -> Python dict result / rm_scores-like fields
+```
+
+运行方式：
+
+```bash
+cd uenv-bridge
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+预期结果：
+
+- 当前应看到 `13` 个 Python tests 通过。
+- request 中的 `request_id`、`batch_id`、`sample_index` 和 metadata 能被保留。
+- fake/dry-run client 返回的结果能按原 sample 顺序写回 reward 字段。
+
+### Layer 2: Rust adapter core 单测
+
+前置条件：
+
+- Rust/Cargo。
+- `protoc`，通常由系统包 `protobuf-compiler` 提供。
+- 不需要 VeRL image、GPU、真实 Serve 或 Python bridge。
+
+流程：
+
+```text
+SampleEnvelope
+  -> Rust adapter core
+  -> EpisodeRequest
+  -> EpisodeService(fake/math_proxy)
+  -> EpisodeResult
+  -> SampleResult
+```
+
+运行方式：
+
+```bash
+cd uenv-bridge/core
+cargo test
+```
+
+预期结果：
+
+- 当前应看到 `5` 个 Rust tests 通过。
+- Rust core 能校验 batch result 数量和 `request_id` 对齐。
+- `FakeEpisodeService` 和 `MathProxyEpisodeService` 能产出可回传的 `EpisodeResult.summary.total_reward`。
+
+### Layer 3: Python 到 Rust core 的本地 gRPC 闭环
+
+前置条件：
+
+- Layer 1 的 Python 依赖。
+- Layer 2 的 Rust/Cargo 和 `protoc`。
+- 已构建或可自动构建 `core/target/debug/uenv-adapter-core`。
+- 不需要 VeRL image、GPU 或真实 Serve。
+
+流程：
+
+```text
+fixture batch
+  -> Python VeRLAdapter
+  -> RustCoreEpisodeClient(auto_start=True)
+  -> local gRPC SampleEnvelope
+  -> Rust adapter core
+  -> EpisodeService(fake)
+  -> SampleResult
+  -> Python EpisodeResult
+```
+
+运行方式：
+
+```bash
+cd uenv-bridge
+./scripts/generate_adapter_core_proto.sh
+PYTHONPATH=src ./scripts/verify_rust_core_grpc_loop.py --reward 0.37
+```
+
+预期结果：
+
+- Python client 能自动启动本地 Rust core。
+- gRPC `HealthCheck` 通过。
+- fixture batch 能得到类似下面的 reward 输出：
+
+```json
+{"rewards": [0.37, 0.37]}
+```
+
+### Layer 4: 真实 VeRL + Serve 联动 smoke test
+
+前置条件：
+
+- 可运行的 VeRL image，例如 `localhost/uenv-bridge-verl:latest`。
+- GPU、模型缓存/模型路径、GSM8K sample 数据。
+- Layer 3 的 Rust core 本地 gRPC 链路可用。
+- Serve 侧已经实现 [core/src/server_api.rs](core/src/server_api.rs) 中的
+  `EpisodeService`，并在 Rust adapter core binary 中替换
+  `FakeEpisodeService` / `MathProxyEpisodeService`。
+- Serve 返回的 `EpisodeResult.request_id` 必须和输入 `EpisodeRequest.request_id`
+  一致，`summary.total_reward` 必须是该 sample 的最终 reward。
+
+流程：
+
+```text
+verl.trainer.main_ppo
+  -> UEnvBridgeRewardManager
+  -> VeRLAdapter
+  -> RustCoreEpisodeClient
+  -> local gRPC
+  -> Rust adapter core
+  -> Rust function call
+  -> Serve EpisodeService implementation
+  -> EpisodeResult
+  -> rm_scores
+  -> VeRL GRPO advantage/update
+```
+
+运行方式：
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:latest \
+TRAINING_STEPS=1 \
+SAMPLE_COUNT=2 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+ADAPTER_CORE_REWARD_MODE=serve \
+./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+```
+
+多步联动可以把 `TRAINING_STEPS` 调大，例如：
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:latest \
+TRAINING_STEPS=2 \
+SAMPLE_COUNT=4 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+ADAPTER_CORE_REWARD_MODE=serve \
+./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+```
+
+这里假设 Serve 接入 PR 暴露 `serve` 作为真实启动开关；如果实际使用其他
+mode，需要替换 `ADAPTER_CORE_REWARD_MODE`。当前仓库尚未实现 `serve` mode，
+因此在 Serve 接入前直接运行会失败；`fixed` 和 `math_proxy` 只是
+bridge-only 基线，不代表真实 Serve 联动通过。
+
+预期结果：
+
+- Serve 日志能看到 Rust adapter core 调用了真实 `EpisodeService`。
+- `episode_requests.jsonl` 中的每个 `request_id` 都能在 Serve 侧和
+  `episode_results.jsonl` 中对应起来。
+- VeRL 日志中的 `critic/score/mean` / `critic/rewards/mean` 等于 Serve
+  返回 reward 的 batch 平均值，而不是固定 fake reward。
+- 1-step 和 2-step GRPO 都能正常结束，`Training Progress` 达到 `100%`。
+- `tmp/verl_bridge_reward_records/<RUN_ID>/episode_requests.jsonl` 和 `episode_results.jsonl` 行数应匹配 `TRAINING_STEPS * TRAIN_BATCH_SIZE * ROLLOUT_N`。
+
+在真实 Serve implementation 合入前，可以先用下面两个命令作为 bridge-only
+基线，确认 VeRL -> Python bridge -> Rust core -> reward 回写链路没有问题：
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:latest \
+TRAINING_STEPS=1 \
+SAMPLE_COUNT=2 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+ADAPTER_CORE_REWARD_MODE=fixed \
+ADAPTER_CORE_FAKE_REWARD=0.37 \
+./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+```
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:latest \
+TRAINING_STEPS=2 \
+SAMPLE_COUNT=4 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+ADAPTER_CORE_REWARD_MODE=math_proxy \
+./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+```
+
+Serve 侧真正要实现的是 [core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`，不是 Python `GrpcEpisodeClient`，也不是
+`SampleEnvelope/SampleResult`。`SampleEnvelope/SampleResult` 只属于 Python 到 Rust core 的本地 gRPC envelope。
+
 ## 常用开发命令
 
 生成 Python gRPC stub：
@@ -352,7 +561,7 @@ cd uenv-bridge
 ./scripts/verify_rust_core_grpc_loop.py --reward 0.37
 ```
 
-跑真实 VeRL 1-step：
+跑真实 VeRL 1-step bridge-only 基线：
 
 ```bash
 IMAGE=localhost/uenv-bridge-verl:latest \
@@ -365,7 +574,7 @@ ADAPTER_CORE_FAKE_REWARD=0.37 \
 ./scripts/run_verl_grpo_1step_with_bridge_reward.sh
 ```
 
-跑真实 VeRL 2-step，使用 Rust math proxy reward：
+跑真实 VeRL 2-step bridge-only 基线，使用 Rust math proxy reward：
 
 ```bash
 IMAGE=localhost/uenv-bridge-verl:latest \
@@ -379,13 +588,15 @@ ADAPTER_CORE_REWARD_MODE=math_proxy \
 
 ## 已验证结果
 
-已在 `localhost/uenv-bridge-verl:latest` 中验证：
+已在 `localhost/uenv-bridge-verl:latest` 中验证以下 bridge-only 基线：
 
 - Python unit tests: 13 passed。
 - Rust unit tests: 5 passed。
 - fixture -> Python -> Rust core gRPC 闭环。
 - 真实 VeRL 1-step GRPO，Rust core fixed reward 返回到 `critic/score/mean`。
 - 真实 VeRL 2-step GRPO，Rust core math proxy reward 每步返回到 `critic/score/mean`。
+
+真实 Serve 联动需要 Serve 侧 `EpisodeService` 接入 Rust core 后再验收。
 
 多步验证记录示例：
 

@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .serve(addr)
                 .await?;
         }
-        _ => {
+        "fixed" => {
             let reward = env_f64("UENV_ADAPTER_CORE_FAKE_REWARD", 0.0);
             let core = AdapterCore::new(FakeEpisodeService::new(reward));
             let service = AdapterCoreServiceImpl::new(core);
@@ -39,6 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .add_service(AdapterCoreServiceServer::new(service))
                 .serve(addr)
                 .await?;
+        }
+        other => {
+            return Err(format!(
+                "unsupported UENV_ADAPTER_CORE_REWARD_MODE={other}; expected fixed or math_proxy"
+            )
+            .into());
         }
     }
     Ok(())
