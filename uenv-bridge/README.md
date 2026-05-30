@@ -208,6 +208,109 @@ pub trait EpisodeService: Send + Sync {
 
 - `core/src/protocol.rs`
 
+### 与当前 uenv-server 的关系
+
+当前 `main` 分支中的 `uenv-server/proto/server.proto` 是 server 对外和
+worker 侧的 gRPC 协议，包含 `UEnvService`、`WorkerRegistration`、
+`WorkerExecution` 和 `AdminService`。Bridge 当前不直接调用这些 gRPC
+service；Bridge 对 Serve 的要求是 Rust adapter core 能通过本地函数调用拿到
+episode 结果。
+
+如果 Serve 侧继续保持 gRPC-first 的实现，也可以在 Rust adapter core 这一侧
+提供一个 wrapper：wrapper 对内实现 `EpisodeService`，对外再调用 Serve
+已有的 scheduler/env/worker 逻辑。Bridge 只依赖 `EpisodeService`
+这个函数边界，不要求 Serve 协作者修改 Python reward manager 或
+`SampleEnvelope/SampleResult`。
+
+server 侧需要关心的函数只有这一类：
+
+```rust
+async fn submit_episode_batch(
+    requests: Vec<EpisodeRequest>,
+) -> Result<Vec<EpisodeResult>, CoreError>;
+```
+
+函数语义：
+
+- 输入数量为 `N`，返回结果数量也必须为 `N`。
+- 每个 `EpisodeResult.request_id` 必须原样等于对应的
+  `EpisodeRequest.request_id`。
+- batch 内单个 episode 失败时，推荐返回该 request 的 failed
+  `EpisodeResult`，不要让整个 batch panic。
+- `EpisodeResult.summary.total_reward` 是 VeRL 训练最终读取的 reward。
+- `trajectory.steps` 在 math 类 MVP 中可以为空，但 `summary` 必须完整。
+
+### Bridge EpisodeRequest 到 server proto 的建议映射
+
+如果 Serve 侧需要把 `uenv-bridge/core/src/protocol.rs` 里的
+`EpisodeRequest` 映射到 `uenv-server/proto/server.proto` 里的
+`uenv.v1.EpisodeRequest`，建议按下面规则处理：
+
+```text
+bridge EpisodeRequest.request_id
+  -> server EpisodeRequest.request_id
+
+bridge EpisodeRequest.env_type
+  -> server EpisodeRequest.env_type
+
+bridge EpisodeRequest.payload.protocol_version
+  -> server EpisodeRequest.protocol_version
+
+bridge EpisodeRequest.payload.framework
+  -> server EpisodeRequest.framework
+
+bridge EpisodeRequest.payload.correlation_id or batch_id
+  -> server EpisodeRequest.correlation_id
+
+bridge EpisodeRequest.payload.env_config
+  -> server EpisodeRequest.env_config as JSON bytes
+
+bridge EpisodeRequest.model_endpoint
+  -> server EpisodeRequest.model_endpoint.url
+
+bridge EpisodeRequest.max_steps / seed
+  -> server EpisodeRequest.episode_config.max_steps / seed
+
+bridge EpisodeRequest.payload.episode_config.initial_observation
+  -> server EpisodeRequest.episode_config.initial_observation as JSON bytes
+
+bridge EpisodeRequest.payload.reward_config.reward_type
+  -> server EpisodeRequest.reward_config.reward_type
+
+bridge EpisodeRequest.payload.reward_config.rubric_config
+  -> server EpisodeRequest.reward_config.rubric_config as JSON bytes
+
+bridge EpisodeRequest.payload.metadata
+  -> server EpisodeRequest.metadata as JSON bytes
+```
+
+server 返回结果时，Bridge 需要的最小字段是：
+
+```text
+server EpisodeResult.request_id
+  -> bridge EpisodeResult.request_id
+
+server EpisodeResult.status
+  -> bridge EpisodeResult.status
+
+server EpisodeResult.summary.total_reward
+  -> bridge EpisodeResult.summary.total_reward
+
+server EpisodeResult.summary.termination_reason
+  -> bridge EpisodeResult.summary.terminate_reason
+
+server EpisodeResult.trajectory
+  -> bridge EpisodeResult.trajectory, MVP 可以先为空 steps
+
+server EpisodeResult.error
+  -> bridge EpisodeResult.error_code / error_message
+```
+
+`SampleEnvelope` / `SampleResult` 不是 PRD 中的业务对象，也不是 Serve
+侧需要实现的接口。它们只是 Python bridge 和 Rust adapter core 之间的本地
+gRPC envelope，用来携带 `request_id`、`batch_id`、`sample_index` 和 JSON
+payload，并保证 VeRL batch 结果可以按原顺序写回。
+
 Serve 侧要做的事情：
 
 1. 接收 `Vec<EpisodeRequest>`。
