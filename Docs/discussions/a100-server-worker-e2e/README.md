@@ -176,6 +176,7 @@ export UENV_PLUGIN_DIR=./plugins
 ## 7. 相关文档
 
 - [PROTOCOL.md](../../PROTOCOL.md) — 统一协议规范
+- **[260530-full-stack-integration-gaps.md](../260530-full-stack-integration-gaps.md)** — Bridge merge 后全栈缺口复核（**推荐阅读**）
 - [worker-pool-mvp-checklist.md](../worker-pool-mvp-checklist.md) — M7 退出标准
 - [260528-1722-worker-next-phase-plan.md](../260528-1722-worker-next-phase-plan.md) — 下一阶段规划
 - [secrets/README.md](../../secrets/README.md) — A100 SSH 与 mock-scheduler 联调（proto 统一前编写，Server 联调以本文为准）
