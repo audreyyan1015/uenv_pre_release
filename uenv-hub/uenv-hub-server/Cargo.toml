@@ -1,0 +1,38 @@
+[package]
+name = "uenv-hub-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UEnvHub HTTP REST API server (axum)"
+
+[[bin]]
+name = "uenv-hub-server"
+path = "src/main.rs"
+
+[dependencies]
+uenv-hub-types.workspace = true
+uenv-hub-core.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+figment.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+clap.workspace = true
+tar.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+uenv-hub-client.workspace = true
+tempfile.workspace = true

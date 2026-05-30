@@ -1,0 +1,29 @@
+[package]
+name = "uenv-hub-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UEnvHub data layer & domain logic (models, repository, validation)"
+
+[dependencies]
+uenv-hub-types.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+semver.workspace = true
+jsonschema.workspace = true
+argon2.workspace = true
+password-hash.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+tar.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

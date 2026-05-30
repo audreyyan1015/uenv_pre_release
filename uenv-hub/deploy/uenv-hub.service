@@ -1,0 +1,29 @@
+[Unit]
+Description=UEnvHub environment registry server
+Documentation=https://github.com/your-org/uenv
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uenv
+Group=uenv
+# Adjust the binary path to your install location.
+ExecStart=/usr/local/bin/uenv-hub-server --config /etc/uenv-hub/hub.toml
+Restart=on-failure
+RestartSec=2
+
+# Environment overrides (alternatively put everything in hub.toml).
+Environment=RUST_LOG=info
+Environment=UENV_HUB_DATABASE__URL=sqlite:///var/lib/uenv-hub/hub.db
+
+# Hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/uenv-hub
+StateDirectory=uenv-hub
+
+[Install]
+WantedBy=multi-user.target

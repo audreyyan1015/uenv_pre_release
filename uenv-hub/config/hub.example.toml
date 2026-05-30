@@ -1,0 +1,32 @@
+# UEnvHub server configuration (Phase 3: HTTP API + SQLite).
+#
+# Precedence: built-in defaults < this file < environment variables.
+# Env vars use the prefix `UENV_HUB_` and `__` as the nesting separator, e.g.
+#   UENV_HUB_SERVER__PORT=8080
+#   UENV_HUB_DATABASE__URL=sqlite:///var/lib/uenv-hub/hub.db
+#   UENV_HUB_AUTH__REQUIRE_TOKEN=true
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[database]
+# SQLite URL. WAL + foreign_keys are enabled automatically by the server.
+url = "sqlite://uenv-hub.db"
+max_connections = 16
+
+[auth]
+# When true, every request needs a valid API token (Authorization: Bearer ...).
+require_token = true
+# If set AND no tokens exist yet, an admin token with this exact value is
+# created on first startup. Remove / rotate it after bootstrapping.
+# bootstrap_admin_token = "uenvh_change_me"
+
+[rate_limit]
+enabled = true
+requests_per_second = 50
+burst = 100
+
+[cors]
+# Use ["*"] to allow any origin, or list explicit origins.
+allow_origins = ["*"]

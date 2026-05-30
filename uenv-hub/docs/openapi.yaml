@@ -1,0 +1,653 @@
+openapi: 3.0.3
+info:
+  title: UEnvHub API
+  version: 0.1.0
+  description: >
+    Persistent environment metadata registry for the UEnv framework
+    (Phase 3: HTTP REST + SQLite). See docs/api.md for prose and docs/errors.md
+    for the error code table.
+  license:
+    name: Apache-2.0
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: health
+  - name: query
+  - name: search
+  - name: sync
+  - name: publish
+  - name: templates
+  - name: admin
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness + DB probe
+      security: []
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+        '503':
+          description: Database unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus exposition format
+          content:
+            text/plain: { schema: { type: string } }
+
+  /version:
+    get:
+      tags: [health]
+      summary: Server version info
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionInfo' }
+
+  /api/v1/envs:
+    get:
+      tags: [query, sync]
+      summary: List environments (or incremental sync when `since` is set)
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 20 } }
+        - { name: namespace, in: query, schema: { type: string } }
+        - { name: author, in: query, schema: { type: string } }
+        - { name: tag, in: query, schema: { type: string } }
+        - name: since
+          in: query
+          description: When present, returns a SyncResponse instead of a page.
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: A page of environments, or a SyncResponse if `since` is set.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/EnvSummaryPage'
+                  - $ref: '#/components/schemas/SyncResponse'
+        '304': { description: Not Modified }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [publish]
+      summary: Create an environment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEnvRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvDetail' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /api/v1/envs/{env_type}:
+    parameters:
+      - { name: env_type, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [query]
+      summary: Environment detail
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { schema: { type: string } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvDetail' }
+        '304': { description: Not Modified }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [publish]
+      summary: Update environment metadata
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnvPatchRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnvDetail' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [publish]
+      summary: Soft-delete an environment (admin)
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/v1/envs/{env_type}/versions:
+    parameters:
+      - { name: env_type, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [query]
+      summary: List versions (newest first)
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { schema: { type: string } } }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VersionSummary' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [publish]
+      summary: Publish a new version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishVersionRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublishVersionResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /api/v1/envs/{env_type}/versions/{version}:
+    parameters:
+      - { name: env_type, in: path, required: true, schema: { type: string } }
+      - name: version
+        in: path
+        required: true
+        description: A concrete semver or the literal `latest`.
+        schema: { type: string }
+    get:
+      tags: [query]
+      summary: Full manifest for a version
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { schema: { type: string } } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FullManifest' }
+        '304': { description: Not Modified }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/v1/envs/{env_type}/versions/{version}/interface:
+    parameters:
+      - { name: env_type, in: path, required: true, schema: { type: string } }
+      - { name: version, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [query]
+      summary: Interface schema (action/observation/state)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterfaceSchema' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/v1/envs/{env_type}/versions/{version}/examples:
+    parameters:
+      - { name: env_type, in: path, required: true, schema: { type: string } }
+      - { name: version, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [query]
+      summary: Example EpisodeRequests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Example' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/v1/envs/{env_type}/versions/{version}/yank:
+    parameters:
+      - { name: env_type, in: path, required: true, schema: { type: string } }
+      - { name: version, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [publish]
+      summary: Yank a version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/YankRequest' }
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /api/v1/envs/{env_type}/resolve:
+    parameters:
+      - { name: env_type, in: path, required: true, schema: { type: string } }
+      - name: constraint
+        in: query
+        required: true
+        description: 'semver constraint, e.g. ^1.0 or ">=2.0, <3.0"'
+        schema: { type: string }
+    get:
+      tags: [query]
+      summary: Resolve a version constraint to the highest matching version
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FullManifest' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /api/v1/search:
+    get:
+      tags: [search]
+      summary: Search environments
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: author, in: query, schema: { type: string } }
+        - { name: namespace, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResponse' }
+
+  /api/v1/templates:
+    get:
+      tags: [templates]
+      summary: List scaffold templates
+      responses:
+        '200':
+          description: OK
+          headers: { ETag: { schema: { type: string } } }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TemplateSummary' }
+
+  /api/v1/templates/{name}/archive:
+    parameters:
+      - { name: name, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [templates]
+      summary: Download a template archive (tar.gz)
+      responses:
+        '200':
+          description: gzip archive
+          headers:
+            ETag: { description: archive sha256, schema: { type: string } }
+            Content-Disposition: { schema: { type: string } }
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/v1/admin/tokens:
+    post:
+      tags: [admin]
+      summary: Create an API token (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTokenRequest' }
+      responses:
+        '201':
+          description: Created; plaintext token returned once.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateTokenResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /api/v1/admin/tokens/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    delete:
+      tags: [admin]
+      summary: Revoke an API token (admin)
+      responses:
+        '204': { description: No Content }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /api/v1/admin/audit-log:
+    get:
+      tags: [admin]
+      summary: Query the audit log (admin)
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AuditEntry' }
+        '403': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 'API token via `Authorization: Bearer <token>` (or X-Api-Token header).'
+
+  responses:
+    Error:
+      description: Structured error envelope
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    Role:
+      type: string
+      enum: [admin, publisher, reader]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - VERSION_ALREADY_EXISTS
+                - ENV_ALREADY_EXISTS
+                - INVALID_MANIFEST
+                - INVALID_VERSION
+                - INVALID_CONSTRAINT
+                - SCHEMA_VALIDATION_FAILED
+                - RATE_LIMITED
+                - CONFLICT
+                - INTERNAL_ERROR
+            message: { type: string }
+            details: {}
+        request_id: { type: string, nullable: true }
+
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        db: { type: string, example: up }
+        details: { type: object, additionalProperties: { type: string } }
+
+    VersionInfo:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: string }
+        git_sha: { type: string, nullable: true }
+
+    ImageSpec:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string }
+        digest: { type: string, nullable: true }
+        size_bytes: { type: integer, format: int64, nullable: true }
+        arch: { type: string, nullable: true }
+        base_image_ref: { type: string, nullable: true }
+
+    ResourceSpec:
+      type: object
+      properties:
+        cpu: { type: number, nullable: true }
+        memory_mb: { type: integer, format: int64, nullable: true }
+        gpu: { type: integer, format: int64, nullable: true }
+        gpu_type: { type: string, nullable: true }
+        disk_mb: { type: integer, format: int64, nullable: true }
+
+    InterfaceSchema:
+      type: object
+      description: Action / Observation / State JSON Schemas (each an arbitrary JSON Schema).
+      properties:
+        action: {}
+        observation: {}
+        state: {}
+
+    Example:
+      type: object
+      required: [request]
+      properties:
+        title: { type: string, nullable: true }
+        request: {}
+
+    Dependencies:
+      type: object
+      properties:
+        requirements_path: { type: string, nullable: true }
+        install_script: { type: string, nullable: true }
+        requires:
+          type: array
+          items: { type: string }
+          description: 'Other dependencies as `env_type@constraint`.'
+
+    EnvSummary:
+      type: object
+      properties:
+        env_type: { type: string }
+        namespace: { type: string }
+        description: { type: string, nullable: true }
+        author: { type: string, nullable: true }
+        latest_version: { type: string, nullable: true }
+        tags: { type: array, items: { type: string } }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+
+    EnvDetail:
+      allOf:
+        - $ref: '#/components/schemas/EnvSummary'
+        - type: object
+          properties:
+            homepage: { type: string, nullable: true }
+            repository: { type: string, nullable: true }
+            license: { type: string, nullable: true }
+            latest_manifest:
+              allOf: [ { $ref: '#/components/schemas/FullManifest' } ]
+              nullable: true
+
+    EnvSummaryPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/EnvSummary' } }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64 }
+
+    VersionSummary:
+      type: object
+      properties:
+        version: { type: string }
+        changelog: { type: string, nullable: true }
+        is_yanked: { type: boolean }
+        published_at: { type: integer, format: int64 }
+
+    FullManifest:
+      type: object
+      properties:
+        env_type: { type: string }
+        version: { type: string }
+        changelog: { type: string, nullable: true }
+        entrypoint: { type: string, nullable: true }
+        supported_backends: { type: array, items: { type: string } }
+        dependencies:
+          allOf: [ { $ref: '#/components/schemas/Dependencies' } ]
+          nullable: true
+        min_uenv_version: { type: string, nullable: true }
+        base_image: { type: string, nullable: true }
+        health_check_path: { type: string, nullable: true }
+        image:
+          allOf: [ { $ref: '#/components/schemas/ImageSpec' } ]
+          nullable: true
+        config_schema: {}
+        default_config: {}
+        resources: { $ref: '#/components/schemas/ResourceSpec' }
+        interface: { $ref: '#/components/schemas/InterfaceSchema' }
+        examples: { type: array, items: { $ref: '#/components/schemas/Example' } }
+        is_yanked: { type: boolean }
+        yank_reason: { type: string, nullable: true }
+        published_at: { type: integer, format: int64 }
+
+    CreateEnvRequest:
+      type: object
+      required: [env_type]
+      properties:
+        env_type: { type: string }
+        namespace: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        author: { type: string, nullable: true }
+        homepage: { type: string, nullable: true }
+        repository: { type: string, nullable: true }
+        license: { type: string, nullable: true }
+        tags: { type: array, items: { type: string } }
+
+    EnvPatchRequest:
+      type: object
+      properties:
+        description: { type: string, nullable: true }
+        author: { type: string, nullable: true }
+        homepage: { type: string, nullable: true }
+        repository: { type: string, nullable: true }
+        license: { type: string, nullable: true }
+        tags: { type: array, items: { type: string }, nullable: true }
+
+    PublishVersionRequest:
+      type: object
+      required: [version]
+      properties:
+        version: { type: string }
+        changelog: { type: string, nullable: true }
+        image:
+          allOf: [ { $ref: '#/components/schemas/ImageSpec' } ]
+          nullable: true
+        base_image: { type: string, nullable: true }
+        health_check_path: { type: string, nullable: true }
+        entrypoint: { type: string, nullable: true }
+        supported_backends: { type: array, items: { type: string } }
+        config_schema: {}
+        default_config: {}
+        resources: { $ref: '#/components/schemas/ResourceSpec' }
+        interface: { $ref: '#/components/schemas/InterfaceSchema' }
+        examples: { type: array, items: { $ref: '#/components/schemas/Example' } }
+        dependencies:
+          allOf: [ { $ref: '#/components/schemas/Dependencies' } ]
+          nullable: true
+        min_uenv_version: { type: string, nullable: true }
+
+    PublishVersionResponse:
+      type: object
+      properties:
+        env_type: { type: string }
+        version: { type: string }
+        published_at: { type: integer, format: int64 }
+        manifest_url: { type: string }
+
+    YankRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string }
+
+    SearchResponse:
+      type: object
+      properties:
+        results: { type: array, items: { $ref: '#/components/schemas/EnvSummary' } }
+        total: { type: integer, format: int64 }
+        page: { type: integer }
+        per_page: { type: integer }
+
+    SyncResponse:
+      type: object
+      properties:
+        manifests: { type: array, items: { $ref: '#/components/schemas/FullManifest' } }
+        server_time: { type: integer, format: int64 }
+
+    TemplateSummary:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string, nullable: true }
+        version: { type: string }
+        archive_sha256: { type: string, nullable: true }
+        updated_at: { type: integer, format: int64 }
+
+    CreateTokenRequest:
+      type: object
+      required: [name, role]
+      properties:
+        name: { type: string }
+        owner: { type: string, nullable: true }
+        role: { $ref: '#/components/schemas/Role' }
+        namespaces: { type: array, items: { type: string } }
+        expires_at: { type: integer, format: int64, nullable: true }
+
+    CreateTokenResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        token: { type: string }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        timestamp: { type: integer, format: int64 }
+        actor: { type: string, nullable: true }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string, nullable: true }
+        details: {}
+        source_ip: { type: string, nullable: true }
