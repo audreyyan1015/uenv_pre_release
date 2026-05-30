@@ -1,102 +1,60 @@
-# uenv-server — UEnv 调度服务
+# uenv-server
 
-UEnv Server 是 UEnv 分布式环境框架的**控制平面**，负责 Episode 的调度编排、Worker 注册、实例池管理等元数据操作。不参与 step 级数据流，确保不会成为性能瓶颈。
-
-## 职责
-
-- **环境注册表**：维护 env_type → worker 的全局映射
-- **调度器**：接收 EpisodeRequest，过滤候选 Worker，打分排序选择最优
-- **实例池**：管理环境实例的生命周期（预热 / 复用 / 销毁）
-- **后端管理器**：管理 Process / Podman 后端的启动和停止
-- **状态管理**：维护 Episode 状态机和 Worker 生命周期
-- **容错**：Write-Ahead Log 保证调度决策持久化
+UEnv 系统的调度中枢。负责接收训练框架提交的 episode 请求，将其分发给合适的 Worker 执行，并将结果返回。
 
 ## 架构
 
 ```
-┌────────────────────────────────────────────┐
-│  uenv-server                                │
-│                                              │
-│  gRPC (port 50051)                          │
-│  ┌──────────────────────────────────────┐   │
-│  │ UEnvService (Bridge → Server)       │   │
-│  │   SubmitEpisode / SubmitStream / ... │   │
-│  └──────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────┐   │
-│  │ AdminService (运维管理)               │   │
-│  │   ListWorkers / DrainWorker / ...    │   │
-│  └──────────────────────────────────────┘   │
-│                                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐   │
-│  │ 注册表    │ │ 调度器   │ │ 实例池   │   │
-│  │ env_type→ │ │ 过滤+打分 │ │ 预热+复用 │   │
-│  └──────────┘ └──────────┘ └──────────┘   │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐   │
-│  │ 后端管理器│ │ 状态机  │ │ WAL      │   │
-│  │Process/  │ │Episode/ │ │ 持久化   │   │
-│  │ Podman   │ │ Worker  │ │          │   │
-│  └──────────┘ └──────────┘ └──────────┘   │
-└────────────────────────────────────────────┘
+训练框架 (Python)  --[UEnvService]---------->  uenv-server  --[WorkerExecution]-->  Worker
+运维工具           --[AdminService]-------->  uenv-server
+Worker             --[WorkerRegistration]-->  uenv-server
 ```
+
+- **UEnvService**：训练框架调用的主接口，提交 episode、获取结果
+- **WorkerRegistration**：Worker 启动时向 Server 注册自己
+- **WorkerExecution**：Server 主动调用 Worker 分发任务（Server 是客户端）
+- **AdminService**：查询 Server 状态、管理 Worker
+
+## 目录结构
+
+```
+uenv-server/
+├── proto/server.proto       # gRPC 接口定义（所有消息类型和 4 个 service）
+├── src/
+│   ├── main.rs              # 启动入口，注册三个 gRPC service
+│   ├── proto.rs             # tonic::include_proto! 引入生成代码
+│   ├── service.rs           # UEnvService / AdminService / WorkerRegistration 实现
+│   ├── state.rs             # ServerState（调度器 + 活跃 episode 表）
+│   └── scheduler/
+│       ├── traits.rs        # Scheduler trait 和相关数据类型
+│       └── mod.rs           # RoundRobinScheduler 实现
+├── build.rs                 # 调用 tonic-build 从 server.proto 生成 Rust 代码
+└── Cargo.toml
+```
+
+## 构建与运行
+
+```bash
+cargo build
+./target/debug/uenv-server                   # 默认监听 [::]:50051
+./target/debug/uenv-server -b 0.0.0.0:8080  # 指定绑定地址
+```
+
+## Worker 接入
+
+Worker 启动后需调用 `WorkerRegistration.RegisterWorker` 注册自己：
+
+| 字段 | 说明 |
+|------|------|
+| `worker_id` | 唯一标识，如 UUID |
+| `endpoint` | Worker 的 gRPC 地址（`host:port`），Server 回调用此地址 |
+| `supported_env_types` | 支持的环境类型，如 `["math", "gsm8k"]` |
+| `capacity` | 最大并发 episode 数 |
+
+注册成功后，Server 开始向该 Worker 分发匹配 `env_type` 的 episode。
+
+Worker 需实现 `WorkerExecution.DispatchEpisode`：接收 `DispatchRequest`，通过 stream 上报进度，最后发一条 `report_type=EPISODE_RESULT` 的消息，其 `payload` 为 prost 序列化的 `EpisodeResult`。
 
 ## 调度策略
 
-| 策略 | 权重 | 说明 |
-|:-----|:-----|:------|
-| 负载均衡 | 50% | 优先选择负载最低的 Worker |
-| 类型亲和 | 30% | 优先选择已加载该环境的 Worker |
-| 延迟优化 | 20% | 优先选择网络延迟最低的 Worker |
-
-## gRPC 服务
-
-### UEnvService（Bridge 调用）
-
-| RPC | 模式 | 说明 |
-|:----|:-----|:------|
-| SubmitEpisode | Unary | 同步提交单个 Episode |
-| SubmitEpisodeStream | Bidi Streaming | 流式提交/返回 |
-
-### AdminService（运维操作）
-
-| RPC | 说明 |
-|:----|:------|
-| ListWorkers | 列出所有注册的 Worker |
-| DrainWorker | 排空指定 Worker（优雅下线） |
-| CancelEpisode | 取消正在执行的 Episode |
-
-## 快速使用
-
-```bash
-# 启动
-cargo run -- start --port 50051
-
-# 查看 Worker 列表
-cargo run -- list-workers
-
-# 排空 Worker
-cargo run -- drain worker-1 --grace 30
-```
-
-## 配置
-
-参考 ../config/server.example.toml：
-
-```toml
-port = 50051
-
-[scheduler]
-strategy = "weighted"
-
-[pool]
-max_idle = 16
-warmup_enabled = true
-warmup_env_types = ["math", "code"]
-```
-
-## 依赖
-
-- **通信**: tonic (gRPC), prost (Protobuf)
-- **运行时**: tokio
-- **配置**: serde, serde_json
-- **日志**: tracing, tracing-subscriber
-- **并发**: dashmap, parking_lot
+Round-Robin：从支持对应 `env_type` 且 `current_load < capacity` 的 Worker 中轮询选取。若所有候选 Worker 均满载，每 500ms 重试一次直到超时（默认 300s）。
