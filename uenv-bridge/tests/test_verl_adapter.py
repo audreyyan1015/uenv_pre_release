@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
+import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from uenv.bridge.clients import FakeEpisodeClient, GrpcEpisodeClient, GrpcEpisodeClientConfig, DryRunEpisodeClient
+from uenv.bridge.clients import (
+    FakeEpisodeClient,
+    GrpcEpisodeClient,
+    GrpcEpisodeClientConfig,
+    DryRunEpisodeClient,
+    RustCoreClientConfig,
+    RustCoreEpisodeClient,
+)
 from uenv.bridge.protocol import request_to_jsonable
 from uenv.bridge.verl import VeRLAdapter, VeRLAdapterConfig
 
@@ -36,6 +45,47 @@ def make_batch() -> dict:
             "extra_info": [{"index": 1}, {"index": 2}],
         },
     }
+
+
+class FakeRustCoreStub:
+    def __init__(self, reward: float = 3.0) -> None:
+        self.reward = reward
+        self.last_request = None
+
+    def ExecuteBatch(self, request):
+        self.last_request = request
+        return {
+            "request_id": request["request_id"],
+            "batch_id": request["batch_id"],
+            "results": [
+                {
+                    "request_id": sample["request_id"],
+                    "batch_id": sample["batch_id"],
+                    "sample_index": sample["sample_index"],
+                    "status": "completed",
+                    "reward": self.reward,
+                    "done": True,
+                    "termination_reason": "fake_core",
+                    "trajectory_json": b"[]",
+                    "error_code": "",
+                    "error_message": "",
+                }
+                for sample in request["samples"]
+            ],
+        }
+
+
+class MissingGeneratedStubRustCoreClient(RustCoreEpisodeClient):
+    def _build_generated_stub(self):
+        return None
+
+
+class AutoStartTestRustCoreClient(RustCoreEpisodeClient):
+    def _build_generated_stub(self):
+        return FakeRustCoreStub()
+
+    def _wait_for_health(self) -> None:
+        return None
 
 
 class VeRLAdapterTest(unittest.TestCase):
@@ -135,6 +185,78 @@ class VeRLAdapterTest(unittest.TestCase):
         config = VeRLAdapterConfig.from_file(config_path)
         self.assertEqual(config.task_to_env_type["gsm8k"], "math")
         self.assertEqual(config.default_model_name, "policy-model")
+
+
+    def test_rust_core_config_loads_from_mapping(self) -> None:
+        config = RustCoreClientConfig.from_mapping(
+            {
+                "core": {
+                    "endpoint": "127.0.0.1:55102",
+                    "timeout_seconds": 11,
+                    "auto_start": True,
+                    "binary": "./target/release/uenv-adapter-core",
+                }
+            }
+        )
+
+        self.assertEqual(config.endpoint, "127.0.0.1:55102")
+        self.assertEqual(config.timeout_seconds, 11)
+        self.assertEqual(config.startup_timeout_seconds, 30)
+        self.assertTrue(config.auto_start)
+        self.assertEqual(config.binary, "./target/release/uenv-adapter-core")
+
+    def test_rust_core_episode_client_submits_batch_to_stub(self) -> None:
+        stub = FakeRustCoreStub(reward=4.0)
+        client = RustCoreEpisodeClient(RustCoreClientConfig(), stub=stub)
+        adapter = VeRLAdapter(client=client)
+        output = adapter.execute_batch(make_batch())
+
+        self.assertEqual(output["batch_id"], "batch-0001")
+        self.assertEqual(len(output["results"]), 2)
+        self.assertEqual(output["results"][0]["reward"], 4.0)
+        self.assertEqual(output["results"][1]["reward"], 4.0)
+        self.assertEqual(stub.last_request["batch_id"], "batch-0001")
+        self.assertEqual(stub.last_request["samples"][0]["framework"], "verl")
+        self.assertEqual(stub.last_request["samples"][0]["sample_index"], 0)
+        self.assertEqual(json.loads(stub.last_request["samples"][0]["payload_json"])["metadata"]["uid"], "uid-1")
+
+    def test_rust_core_episode_client_requires_stub(self) -> None:
+        client = MissingGeneratedStubRustCoreClient(RustCoreClientConfig())
+        request = VeRLAdapter().to_episode_requests(make_batch())[0]
+        with self.assertRaisesRegex(RuntimeError, "requires an AdapterCoreService stub"):
+            client.submit_episode(request)
+
+    def test_rust_core_auto_start_sets_addr_and_closes_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "fake-core"
+            log_path = Path(temp_dir) / "env.log"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, time\n"
+                f"pathlib.Path({str(log_path)!r}).write_text(os.environ.get('UENV_ADAPTER_CORE_ADDR', ''))\n"
+                "while True: time.sleep(0.1)\n",
+                encoding="utf-8",
+            )
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+
+            proc = None
+            client = AutoStartTestRustCoreClient(
+                RustCoreClientConfig(endpoint="127.0.0.1:59999", auto_start=True, binary=str(binary)),
+            )
+            try:
+                for _ in range(20):
+                    if log_path.exists():
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(log_path.read_text(encoding="utf-8"), "127.0.0.1:59999")
+                proc = client._process
+                self.assertIsNotNone(proc)
+                self.assertIsNone(proc.poll())
+            finally:
+                client.close()
+            self.assertIsNotNone(proc)
+            if proc is not None:
+                self.assertIsNotNone(proc.poll())
 
     def test_grpc_config_loads_from_mapping(self) -> None:
         config = GrpcEpisodeClientConfig.from_mapping(

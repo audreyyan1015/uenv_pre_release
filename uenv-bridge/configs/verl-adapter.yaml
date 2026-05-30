@@ -4,6 +4,13 @@ adapter:
   protocol_version: "1.0"
   mode: embedded
 
+core:
+  endpoint: "127.0.0.1:55101"
+  auto_start: false
+  binary: "./core/target/release/uenv-adapter-core"
+  timeout_seconds: 300
+  startup_timeout_seconds: 30
+
 server:
   endpoint: "dns:///uenv-server:50051"
   tls:

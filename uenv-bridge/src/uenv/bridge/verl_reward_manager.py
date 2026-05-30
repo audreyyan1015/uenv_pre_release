@@ -9,7 +9,7 @@ from typing import Iterable
 
 import numpy as np
 
-from uenv.bridge.clients import EpisodeClient
+from uenv.bridge.clients import EpisodeClient, RustCoreClientConfig, RustCoreEpisodeClient
 from uenv.bridge.protocol import EpisodeRequest, EpisodeResult, EpisodeSummary, StepRecord, Trajectory, request_to_jsonable
 from uenv.bridge.verl import VeRLAdapter
 from verl import DataProto
@@ -98,6 +98,11 @@ class RecordingEpisodeClientWrapper:
         for request in requests:
             yield self.submit_episode(request)
 
+    def close(self) -> None:
+        close = getattr(self.delegate, "close", None)
+        if callable(close):
+            close()
+
     def _record(self, request: EpisodeRequest, response: EpisodeResult) -> None:
         if self.output_dir is None:
             return
@@ -122,14 +127,45 @@ class RecordingEpisodeClientWrapper:
 class UEnvBridgeRewardManager(RewardManagerBase):
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         super().__init__(config, tokenizer, compute_score)
-        client = MathProxyEpisodeClient(
-            default_reward=float(os.getenv("UENV_BRIDGE_FAKE_DEFAULT_REWARD", "0.0")),
-            format_reward=float(os.getenv("UENV_BRIDGE_FAKE_FORMAT_REWARD", "0.1")),
-            nonempty_reward=float(os.getenv("UENV_BRIDGE_FAKE_NONEMPTY_REWARD", "0.05")),
-            shaping=os.getenv("UENV_BRIDGE_FAKE_SHAPING", "1") not in {"0", "false", "False"},
-        )
-        self.adapter = VeRLAdapter(client=RecordingEpisodeClientWrapper(client, os.getenv("UENV_BRIDGE_RECORD_DIR")))
+        client = self._build_episode_client()
+        self.client = RecordingEpisodeClientWrapper(client, os.getenv("UENV_BRIDGE_RECORD_DIR"))
+        self.adapter = VeRLAdapter(client=self.client)
         self.verbose = os.getenv("UENV_BRIDGE_VERBOSE", "1") not in {"0", "false", "False"}
+        if self.verbose:
+            print(
+                "UEnvBridgeRewardManager "
+                f"client={os.getenv('UENV_BRIDGE_CLIENT', 'rust_core')} "
+                f"endpoint={os.getenv('UENV_ADAPTER_CORE_ENDPOINT', '127.0.0.1:55101')}",
+                flush=True,
+            )
+
+    def _build_episode_client(self) -> EpisodeClient:
+        mode = os.getenv("UENV_BRIDGE_CLIENT", "rust_core").lower()
+        if mode == "math_proxy":
+            return MathProxyEpisodeClient(
+                default_reward=float(os.getenv("UENV_BRIDGE_FAKE_DEFAULT_REWARD", "0.0")),
+                format_reward=float(os.getenv("UENV_BRIDGE_FAKE_FORMAT_REWARD", "0.1")),
+                nonempty_reward=float(os.getenv("UENV_BRIDGE_FAKE_NONEMPTY_REWARD", "0.05")),
+                shaping=os.getenv("UENV_BRIDGE_FAKE_SHAPING", "1") not in {"0", "false", "False"},
+            )
+        if mode != "rust_core":
+            raise ValueError(f"Unsupported UENV_BRIDGE_CLIENT={mode!r}; expected rust_core or math_proxy")
+
+        return RustCoreEpisodeClient(
+            RustCoreClientConfig(
+                endpoint=os.getenv("UENV_ADAPTER_CORE_ENDPOINT", "127.0.0.1:55101"),
+                timeout_seconds=float(os.getenv("UENV_ADAPTER_CORE_TIMEOUT_SECONDS", "300")),
+                startup_timeout_seconds=float(os.getenv("UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS", "30")),
+                auto_start=os.getenv("UENV_ADAPTER_CORE_AUTO_START", "1") not in {"0", "false", "False"},
+                binary=os.getenv("UENV_ADAPTER_CORE_BINARY") or "/tmp/uenv-bridge/core/target/debug/uenv-adapter-core",
+            )
+        )
+
+    def __del__(self) -> None:
+        try:
+            self.client.close()
+        except Exception:
+            pass
 
     async def run_single(self, data: DataProto) -> dict:
         # In VeRL naming, batch["responses"] is the policy model's rollout

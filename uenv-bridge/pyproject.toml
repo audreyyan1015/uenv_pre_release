@@ -5,6 +5,7 @@ description = "UEnv Bridge - Training framework adapters"
 requires-python = ">=3.10"
 dependencies = [
     "grpcio>=1.60",
+    "grpcio-tools>=1.60",
     "protobuf>=4.25",
     "pyyaml>=6.0",
 ]

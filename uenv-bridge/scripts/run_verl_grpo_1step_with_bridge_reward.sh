@@ -8,8 +8,10 @@ MODEL_CACHE=${MODEL_CACHE:-/data/ronghao/models}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 HOST_MODEL_PATH=${HOST_MODEL_PATH:-${MODEL_CACHE}/modelscope/Qwen/Qwen2___5-0___5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct}
-DATA_DIR=${DATA_DIR:-${REPO_DIR}/tmp/verl_grpo_1step_data}
-LOG_DIR=${LOG_DIR:-${REPO_DIR}/tmp/verl_grpo_1step_bridge_reward_logs}
+TRAINING_STEPS=${TRAINING_STEPS:-1}
+DATA_DIR=${DATA_DIR:-${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_data}
+CONTAINER_DATA_DIR=/tmp/uenv-bridge/tmp/verl_grpo_${TRAINING_STEPS}step_data
+LOG_DIR=${LOG_DIR:-${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_bridge_reward_logs}
 RECORD_ROOT=${RECORD_ROOT:-${REPO_DIR}/tmp/verl_bridge_reward_records}
 SAMPLE_COUNT=${SAMPLE_COUNT:-2}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
@@ -17,9 +19,15 @@ ROLLOUT_N=${ROLLOUT_N:-2}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-4}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen25_05b_gsm8k_grpo_1step_bridge_reward}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen25_05b_gsm8k_grpo_${TRAINING_STEPS}step_bridge_reward}
 RUN_ID=${RUN_ID:-$(date +%Y%m%d_%H%M%S)}
 LOG_FILE=${LOG_FILE:-${LOG_DIR}/${RUN_ID}.log}
+ADAPTER_CORE_ENDPOINT=${ADAPTER_CORE_ENDPOINT:-127.0.0.1:55101}
+ADAPTER_CORE_FAKE_REWARD=${ADAPTER_CORE_FAKE_REWARD:-0.37}
+ADAPTER_CORE_REWARD_MODE=${ADAPTER_CORE_REWARD_MODE:-fixed}
+ADAPTER_CORE_FORMAT_REWARD=${ADAPTER_CORE_FORMAT_REWARD:-0.2}
+ADAPTER_CORE_NONEMPTY_REWARD=${ADAPTER_CORE_NONEMPTY_REWARD:-0.05}
+ADAPTER_CORE_DEFAULT_REWARD=${ADAPTER_CORE_DEFAULT_REWARD:-0.0}
 
 mkdir -p "${MODEL_CACHE}" "${DATA_DIR}" "${LOG_DIR}" "${RECORD_ROOT}/${RUN_ID}"
 
@@ -38,27 +46,29 @@ fi
 if [ ! -f "${DATA_DIR}/train.parquet" ] || [ ! -f "${DATA_DIR}/test.parquet" ]; then
   echo "Preparing VeRL-format GSM8K samples under ${DATA_DIR}..."
   podman run --rm --entrypoint bash \
+    --workdir /tmp/uenv-bridge \
     -e SAMPLE_COUNT="${SAMPLE_COUNT}" \
+    -e CONTAINER_DATA_DIR="${CONTAINER_DATA_DIR}" \
     -v "${VERL_WORKSPACE}:/workspace" \
     -v "${REPO_DIR}:/tmp/uenv-bridge" \
     "${IMAGE}" \
-    -lc 'cd /tmp/uenv-bridge && \
-      python scripts/prepare_verl_gsm8k_sample.py \
+    -lc 'python scripts/prepare_verl_gsm8k_sample.py \
         --input /workspace/data/gsm8k/train.parquet \
-        --output /tmp/uenv-bridge/tmp/verl_grpo_1step_data/train.parquet \
+        --output "${CONTAINER_DATA_DIR}/train.parquet" \
         --n "${SAMPLE_COUNT}" && \
       python scripts/prepare_verl_gsm8k_sample.py \
         --input /workspace/data/gsm8k/test.parquet \
-        --output /tmp/uenv-bridge/tmp/verl_grpo_1step_data/test.parquet \
+        --output "${CONTAINER_DATA_DIR}/test.parquet" \
         --n "${SAMPLE_COUNT}"'
 fi
 
-echo "Running 1-step GRPO with UEnv Bridge reward; log: ${LOG_FILE}"
+echo "Running ${TRAINING_STEPS}-step GRPO with UEnv Bridge reward; log: ${LOG_FILE}"
 echo "Bridge request records: ${RECORD_ROOT}/${RUN_ID}"
 podman run --rm \
   --device nvidia.com/gpu=all \
   --shm-size=64g \
   --entrypoint bash \
+  --workdir /workspace/verl \
   -v "${VERL_WORKSPACE}:/workspace" \
   -v "${REPO_DIR}:/tmp/uenv-bridge" \
   -v "${MODEL_CACHE}:/models" \
@@ -77,16 +87,28 @@ export MKL_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
 export UENV_BRIDGE_RECORD_DIR=/tmp/uenv-bridge/tmp/verl_bridge_reward_records/${RUN_ID}
 export UENV_BRIDGE_VERBOSE=${UENV_BRIDGE_VERBOSE:-1}
-export UENV_BRIDGE_FAKE_FORMAT_REWARD=${UENV_BRIDGE_FAKE_FORMAT_REWARD:-0.1}
-export UENV_BRIDGE_FAKE_NONEMPTY_REWARD=${UENV_BRIDGE_FAKE_NONEMPTY_REWARD:-0.05}
-export UENV_BRIDGE_FAKE_SHAPING=${UENV_BRIDGE_FAKE_SHAPING:-1}
+export UENV_BRIDGE_CLIENT=rust_core
+export UENV_ADAPTER_CORE_ENDPOINT=${ADAPTER_CORE_ENDPOINT}
+export UENV_ADAPTER_CORE_AUTO_START=1
+export UENV_ADAPTER_CORE_BINARY=/tmp/uenv-bridge/core/target/debug/uenv-adapter-core
+export UENV_ADAPTER_CORE_FAKE_REWARD=${ADAPTER_CORE_FAKE_REWARD}
+export UENV_ADAPTER_CORE_REWARD_MODE=${ADAPTER_CORE_REWARD_MODE}
+export UENV_ADAPTER_CORE_FORMAT_REWARD=${ADAPTER_CORE_FORMAT_REWARD}
+export UENV_ADAPTER_CORE_NONEMPTY_REWARD=${ADAPTER_CORE_NONEMPTY_REWARD}
+export UENV_ADAPTER_CORE_DEFAULT_REWARD=${ADAPTER_CORE_DEFAULT_REWARD}
+export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
+cd /tmp/uenv-bridge
+./scripts/generate_adapter_core_proto.sh
+cd /tmp/uenv-bridge/core
+cargo build
+cd /workspace/verl
 python3 -m verl.trainer.main_ppo \\
-  hydra.run.dir=/tmp/uenv-bridge/tmp/verl_grpo_1step_bridge_reward_logs/hydra_${RUN_ID} \\
+  hydra.run.dir=/tmp/uenv-bridge/tmp/verl_grpo_${TRAINING_STEPS}step_bridge_reward_logs/hydra_${RUN_ID} \\
   algorithm.adv_estimator=grpo \\
   algorithm.use_kl_in_reward=False \\
   algorithm.kl_ctrl.kl_coef=0.0 \\
-  data.train_files=/tmp/uenv-bridge/tmp/verl_grpo_1step_data/train.parquet \\
-  data.val_files=/tmp/uenv-bridge/tmp/verl_grpo_1step_data/test.parquet \\
+  data.train_files=${CONTAINER_DATA_DIR}/train.parquet \\
+  data.val_files=${CONTAINER_DATA_DIR}/test.parquet \\
   data.train_batch_size=${TRAIN_BATCH_SIZE} \\
   data.val_batch_size=${TRAIN_BATCH_SIZE} \\
   data.max_prompt_length=256 \\
@@ -138,10 +160,10 @@ python3 -m verl.trainer.main_ppo \\
   trainer.save_freq=-1 \\
   trainer.test_freq=-1 \\
   trainer.val_before_train=False \\
-  trainer.total_training_steps=1 \\
+  trainer.total_training_steps=${TRAINING_STEPS} \\
   trainer.total_epochs=1 \\
   trainer.resume_mode=disable \\
-  trainer.default_local_dir=/tmp/uenv-bridge/tmp/verl_grpo_1step_bridge_reward_ckpt \\
+  trainer.default_local_dir=/tmp/uenv-bridge/tmp/verl_grpo_${TRAINING_STEPS}step_bridge_reward_ckpt \\
   ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS} \\
   +ray_kwargs.ray_init.num_gpus=1 \\
   +ray_kwargs.ray_init.include_dashboard=False" 2>&1 | tee "${LOG_FILE}"

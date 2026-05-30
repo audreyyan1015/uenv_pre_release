@@ -1,4 +1,4 @@
-.PHONY: all proto build build-server build-worker build-hub test test-server test-worker test-hub clean
+.PHONY: all proto build build-server build-worker build-hub build-adapter-core test test-server test-worker test-hub test-adapter-core clean
 
 all: proto build
 
@@ -6,8 +6,10 @@ all: proto build
 PROTO_SERVER = uenv-server/proto/server.proto
 PROTO_WORKER = uenv-worker/proto/worker.proto
 PROTO_HUB    = uenv-hub/proto/hub.proto
+PROTO_ADAPTER_CORE = uenv-bridge/proto/adapter_core.proto
+PYTHON ?= python3
 
-proto: proto-server proto-worker proto-hub proto-bridge
+proto: proto-server proto-worker proto-hub proto-bridge proto-adapter-core
 
 proto-server:
 	protoc -I=uenv-server/proto \
@@ -33,8 +35,16 @@ proto-bridge:
 		--python_out=uenv-bridge/src/gen \
 		--grpc_python_out=uenv-bridge/src/gen
 
+proto-adapter-core:
+	mkdir -p uenv-bridge/src/uenv/bridge/gen
+	cd uenv-bridge && $(PYTHON) -m grpc_tools.protoc \
+		-I=proto \
+		proto/adapter_core.proto \
+		--python_out=src/uenv/bridge/gen \
+		--grpc_python_out=src/uenv/bridge/gen
+
 # ─── Build (每个 part 独立编译，target 在各自目录内) ──────────
-build: build-server build-worker build-hub
+build: build-server build-worker build-hub build-adapter-core
 
 build-server:
 	cd uenv-server && cargo build
@@ -45,8 +55,11 @@ build-worker:
 build-hub:
 	cd uenv-hub && cargo build
 
+build-adapter-core:
+	cd uenv-bridge/core && cargo build
+
 # ─── Test ─────────────────────────────────────────────────────
-test: test-server test-worker test-hub
+test: test-server test-worker test-hub test-adapter-core
 
 test-server:
 	cd uenv-server && cargo test
@@ -57,9 +70,13 @@ test-worker:
 test-hub:
 	cd uenv-hub && cargo test
 
+test-adapter-core:
+	cd uenv-bridge/core && cargo test
+
 # ─── Clean ────────────────────────────────────────────────────
 clean:
 	cd uenv-server && cargo clean
 	cd uenv-worker && cargo clean
 	cd uenv-hub && cargo clean
-	rm -rf uenv-server/src/gen uenv-worker/src/gen uenv-hub/src/gen uenv-bridge/src/gen
+	cd uenv-bridge/core && cargo clean
+	rm -rf uenv-server/src/gen uenv-worker/src/gen uenv-hub/src/gen uenv-bridge/src/gen uenv-bridge/src/uenv/bridge/gen
