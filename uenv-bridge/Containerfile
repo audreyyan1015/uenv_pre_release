@@ -1,0 +1,41 @@
+ARG BASE_IMAGE=docker.io/verlai/verl:vllm011.latest
+FROM ${BASE_IMAGE}
+
+USER root
+
+ENV UENV_BRIDGE_HOME=/workspace/uenv-bridge
+ENV PYTHONPATH=/workspace/uenv-bridge/src
+ENV CARGO_HOME=/opt/rust/cargo
+ENV RUSTUP_HOME=/opt/rust/rustup
+ENV PATH=/opt/rust/cargo/bin:$PATH
+
+WORKDIR /workspace/uenv-bridge
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      build-essential \
+      pkg-config \
+      protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --no-modify-path --default-toolchain stable && \
+    rustc --version && \
+    cargo --version && \
+    protoc --version
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY proto ./proto
+COPY core ./core
+COPY scripts ./scripts
+COPY docs ./docs
+COPY configs ./configs
+COPY tests ./tests
+
+RUN python -m pip install --no-cache-dir -e . && \
+    python -c "import uenv.bridge; print('uenv-bridge import ok')"
+
+ENTRYPOINT ["/bin/bash"]
+CMD ["-lc", "python -c 'import uenv.bridge; print(\"uenv-bridge image ready\")' && exec bash"]

@@ -1,4 +1,4 @@
-.PHONY: all proto build build-server build-worker build-mock-scheduler build-hub test test-server test-worker test-mock-scheduler test-hub clean
+.PHONY: all proto build build-server build-worker build-mock-scheduler build-hub build-adapter-core test test-server test-worker test-mock-scheduler test-hub test-adapter-core clean
 
 all: proto build
 
@@ -9,8 +9,10 @@ PROTO_WORKER = uenv-worker/proto/worker_service.proto
 PROTO_HUB    = uenv-hub/proto/hub.proto
 PROTO_SCHED  = $(PROTO_ROOT)/uenv/v1/scheduler.proto
 PROTO_PLUGIN = plugin_proto/uenv/plugin/v1/plugin.proto
+PROTO_ADAPTER_CORE = uenv-bridge/proto/adapter_core.proto
+PYTHON ?= python3
 
-proto: proto-server proto-worker proto-mock-scheduler proto-hub proto-bridge proto-plugin
+proto: proto-server proto-worker proto-mock-scheduler proto-hub proto-bridge proto-plugin proto-adapter-core
 
 proto-server:
 	protoc -I=$(PROTO_ROOT) -I=uenv-worker/proto \
@@ -66,8 +68,16 @@ proto-plugin:
 		--prost_out=uenv-worker/src/gen \
 		--tonic_out=uenv-worker/src/gen
 
-# ─── Build ───────────────────────────────────────────────────
-build: build-server build-worker build-mock-scheduler build-hub
+proto-adapter-core:
+	mkdir -p uenv-bridge/src/uenv/bridge/gen
+	cd uenv-bridge && $(PYTHON) -m grpc_tools.protoc \
+		-I=proto \
+		proto/adapter_core.proto \
+		--python_out=src/uenv/bridge/gen \
+		--grpc_python_out=src/uenv/bridge/gen
+
+# ─── Build (每个 part 独立编译，target 在各自目录内) ──────────
+build: build-server build-worker build-mock-scheduler build-hub build-adapter-core
 
 build-server:
 	cd uenv-server && cargo build
@@ -81,8 +91,11 @@ build-mock-scheduler:
 build-hub:
 	cd uenv-hub && cargo build
 
+build-adapter-core:
+	cd uenv-bridge/core && cargo build
+
 # ─── Test ─────────────────────────────────────────────────────
-test: test-server test-worker test-mock-scheduler test-hub
+test: test-server test-worker test-mock-scheduler test-hub test-adapter-core
 
 test-server:
 	cd uenv-server && cargo test
@@ -96,10 +109,14 @@ test-mock-scheduler:
 test-hub:
 	cd uenv-hub && cargo test
 
+test-adapter-core:
+	cd uenv-bridge/core && cargo test
+
 # ─── Clean ────────────────────────────────────────────────────
 clean:
 	cd uenv-server && cargo clean
 	cd uenv-worker && cargo clean
 	cd uenv-mock-scheduler && cargo clean
 	cd uenv-hub && cargo clean
-	rm -rf uenv-server/src/gen uenv-worker/src/gen uenv-mock-scheduler/src/gen uenv-hub/src/gen uenv-bridge/src/gen
+	cd uenv-bridge/core && cargo clean
+	rm -rf uenv-server/src/gen uenv-worker/src/gen uenv-mock-scheduler/src/gen uenv-hub/src/gen uenv-bridge/src/gen uenv-bridge/src/uenv/bridge/gen

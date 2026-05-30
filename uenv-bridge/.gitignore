@@ -1,0 +1,6 @@
+/docs/
+/tmp/
+/core/target/
+__pycache__/
+*.py[cod]
+.pytest_cache/

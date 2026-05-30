@@ -1,0 +1,57 @@
+adapter:
+  name: verl-adapter
+  framework: verl
+  protocol_version: "1.0"
+  mode: embedded
+
+core:
+  endpoint: "127.0.0.1:55101"
+  auto_start: false
+  binary: "./core/target/release/uenv-adapter-core"
+  timeout_seconds: 300
+  startup_timeout_seconds: 30
+
+server:
+  endpoint: "dns:///uenv-server:50051"
+  tls:
+    enabled: false
+  grpc:
+    timeout_seconds: 300
+    max_send_message_mb: 64
+    max_receive_message_mb: 64
+    compression: gzip
+
+mapping:
+  default_env_type: code
+  task_to_env_type:
+    code: code
+    humaneval: code
+    mbpp: code
+    math: math
+    gsm8k: math
+    agent: agent
+  default_max_steps: 80
+  math_max_steps: 10
+  default_timeout_seconds: 300
+  seed_base: 42
+
+model_endpoint:
+  endpoint_type: http
+  url: "http://vllm.default.svc:8000/v1"
+  model_name: policy-model
+  max_retries: 3
+  generation_config:
+    temperature: 0.7
+    max_tokens: 1024
+
+batch:
+  enabled: true
+  submit_mode: stream
+  max_batch_size: 128
+  max_in_flight: 128
+  stream_results: true
+
+logging:
+  level: INFO
+  file: "/var/log/uenv/adapter.log"
+  format: jsonl

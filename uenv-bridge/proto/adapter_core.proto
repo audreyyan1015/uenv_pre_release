@@ -1,0 +1,56 @@
+syntax = "proto3";
+package uenv.bridge.v1;
+
+// Local Python shim -> Rust adapter core API.
+//
+// The Python side owns VeRL-specific objects such as DataProto, tensors,
+// tokenizer output, and non_tensor_batch. The Rust core receives normalized
+// sample envelopes, converts them to UEnv EpisodeRequest values, and calls the
+// in-process UEnv Server API by function call.
+service AdapterCoreService {
+  rpc ExecuteBatch(ExecuteBatchRequest) returns (ExecuteBatchResponse);
+  rpc ExecuteBatchStream(stream SampleEnvelope) returns (stream SampleResult);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ExecuteBatchRequest {
+  string request_id = 1;
+  string batch_id = 2;
+  repeated SampleEnvelope samples = 3;
+}
+
+message ExecuteBatchResponse {
+  string request_id = 1;
+  string batch_id = 2;
+  repeated SampleResult results = 3;
+}
+
+message SampleEnvelope {
+  string request_id = 1;
+  string batch_id = 2;
+  uint32 sample_index = 3;
+  string framework = 4;
+  string env_type = 5;
+  bytes payload_json = 6;
+  bytes meta_json = 7;
+}
+
+message SampleResult {
+  string request_id = 1;
+  string batch_id = 2;
+  uint32 sample_index = 3;
+  string status = 4;
+  double reward = 5;
+  bool done = 6;
+  string termination_reason = 7;
+  bytes trajectory_json = 8;
+  string error_code = 9;
+  string error_message = 10;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool ok = 1;
+  string version = 2;
+}
