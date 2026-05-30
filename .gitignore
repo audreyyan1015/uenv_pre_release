@@ -15,4 +15,5 @@ __pycache__/
 Thumbs.db
 /uenv-server/target
 secrets/*
+!secrets/README.md
 /scripts
