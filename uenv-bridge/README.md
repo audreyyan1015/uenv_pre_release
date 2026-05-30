@@ -439,11 +439,8 @@ PYTHONPATH=src ./scripts/verify_rust_core_grpc_loop.py --reward 0.37
 - 可运行的 VeRL image，例如 `localhost/uenv-bridge-verl:latest`。
 - GPU、模型缓存/模型路径、GSM8K sample 数据。
 - Layer 3 的 Rust core 本地 gRPC 链路可用。
-- Serve 侧已经实现 [core/src/server_api.rs](core/src/server_api.rs) 中的
-  `EpisodeService`，并在 Rust adapter core binary 中替换
-  `FakeEpisodeService` / `MathProxyEpisodeService`。
-- Serve 返回的 `EpisodeResult.request_id` 必须和输入 `EpisodeRequest.request_id`
-  一致，`summary.total_reward` 必须是该 sample 的最终 reward。
+- Serve 侧已经实现 [core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`，并在 Rust adapter core binary 中替换 `FakeEpisodeService` / `MathProxyEpisodeService`。
+- Serve 返回的 `EpisodeResult.request_id` 必须和输入 `EpisodeRequest.request_id` 一致，`summary.total_reward` 必须是该 sample 的最终 reward。
 
 流程：
 
@@ -487,23 +484,17 @@ ADAPTER_CORE_REWARD_MODE=serve \
 ./scripts/run_verl_grpo_1step_with_bridge_reward.sh
 ```
 
-这里假设 Serve 接入 PR 暴露 `serve` 作为真实启动开关；如果实际使用其他
-mode，需要替换 `ADAPTER_CORE_REWARD_MODE`。当前仓库尚未实现 `serve` mode，
-因此在 Serve 接入前直接运行会失败；`fixed` 和 `math_proxy` 只是
-bridge-only 基线，不代表真实 Serve 联动通过。
+这里假设 Serve 接入 PR 暴露 `serve` 作为真实启动开关；如果实际使用其他 mode，需要替换 `ADAPTER_CORE_REWARD_MODE`。当前仓库尚未实现 `serve` mode，因此在 Serve 接入前直接运行会失败；`fixed` 和 `math_proxy` 只是 bridge-only 基线，不代表真实 Serve 联动通过。
 
 预期结果：
 
 - Serve 日志能看到 Rust adapter core 调用了真实 `EpisodeService`。
-- `episode_requests.jsonl` 中的每个 `request_id` 都能在 Serve 侧和
-  `episode_results.jsonl` 中对应起来。
-- VeRL 日志中的 `critic/score/mean` / `critic/rewards/mean` 等于 Serve
-  返回 reward 的 batch 平均值，而不是固定 fake reward。
+- `episode_requests.jsonl` 中的每个 `request_id` 都能在 Serve 侧和 `episode_results.jsonl` 中对应起来。
+- VeRL 日志中的 `critic/score/mean` / `critic/rewards/mean` 等于 Serve 返回 reward 的 batch 平均值，而不是固定 fake reward。
 - 1-step 和 2-step GRPO 都能正常结束，`Training Progress` 达到 `100%`。
 - `tmp/verl_bridge_reward_records/<RUN_ID>/episode_requests.jsonl` 和 `episode_results.jsonl` 行数应匹配 `TRAINING_STEPS * TRAIN_BATCH_SIZE * ROLLOUT_N`。
 
-在真实 Serve implementation 合入前，可以先用下面两个命令作为 bridge-only
-基线，确认 VeRL -> Python bridge -> Rust core -> reward 回写链路没有问题：
+在真实 Serve implementation 合入前，可以先用下面两个命令作为 bridge-only 基线，确认 VeRL -> Python bridge -> Rust core -> reward 回写链路没有问题：
 
 ```bash
 cd uenv-bridge
