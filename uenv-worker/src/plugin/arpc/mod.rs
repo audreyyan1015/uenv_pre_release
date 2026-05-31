@@ -18,13 +18,20 @@ impl PluginRpcClient {
     pub async fn connect_uds(
         path: &Path,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use hyper_util::rt::TokioIo;
         use tonic::transport::{Endpoint, Uri};
         use tokio::net::UnixStream;
         use tower::service_fn;
 
         let uds = path.to_path_buf();
         let channel = Endpoint::try_from("http://[::]:50051")?
-            .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(uds.clone())))
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let uds = uds.clone();
+                async move {
+                    let stream = UnixStream::connect(uds).await?;
+                    Ok::<_, std::io::Error>(TokioIo::new(stream))
+                }
+            }))
             .await?;
         Ok(Self {
             inner: PluginServiceClient::new(channel),

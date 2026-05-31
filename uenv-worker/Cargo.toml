@@ -30,6 +30,7 @@ tower = "0.5"
 sha2 = "0.10"
 axum = "0.8"
 crc32fast = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
 uenv-mock-scheduler = { path = "../uenv-mock-scheduler" }

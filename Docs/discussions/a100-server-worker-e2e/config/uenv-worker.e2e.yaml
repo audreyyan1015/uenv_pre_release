@@ -1,0 +1,33 @@
+# UEnv Worker — A100 实机联调专用（不修改仓库默认 config）
+server:
+  endpoint: "10.10.20.143:50051"
+
+worker:
+  id: "auto"
+  listen: "10.10.20.142:50052"
+  max_concurrent: 4
+
+scheduler:
+  mode: "remote"
+
+env:
+  types: ["gsm8k"]
+  backend: "process"
+  plugin_dir: "./plugins"
+
+pool:
+  warmup_size: 2
+  max_idle_time: 300
+  cool_timeout: 60
+  max_episode_count: 1000
+
+logging:
+  level: "INFO"
+  file: "/var/log/uenv/worker.log"
+
+wal:
+  dir: "/tmp/uenv/wal"
+
+observability:
+  metrics_listen: "0.0.0.0:19090"
+  health_listen: "0.0.0.0:19090"

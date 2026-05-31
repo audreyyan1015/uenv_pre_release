@@ -3,7 +3,7 @@
 > **文档版本**：v1.3  
 > **依据**：[worker-pool-layer-design.md](./worker-pool-layer-design.md)（v1.3）  
 > **用途**：分阶段交付 Worker Pool 层，支持排期与验收  
-> **最后更新**：2026-05-26  
+> **最后更新**：2026-05-30  
 > **v1.3 变更**：对齐 design §2.5 CLI、§2.6 YAML/JSON 配置、§2.2 平台级 `/var/log/uenv/` 日志目录与 `tail -f` 验收项  
 > **v1.2 变更**：插件 Runtime 1 进程 = 1 实例；Dispatch 租约字段；插件崩溃语义；L1/L2 协议边界  
 > **v1.1 变更**：集中式调度 + Worker gRPC Server；M1.7 混沌测试；WAL schema；M5/M6 metrics；Proto/UDS MVP
@@ -471,7 +471,7 @@ replay_state: REPLAY_STATE_PENDING
 
 - [x] `ControlPlaneClient` 远程实现与 Mock 共用 trait
 - [x] 配置切换：`UENV_SERVER_ENDPOINT` 指向真实 Server；`UENV_WORKER_LISTEN` 可被 Server 访问
-- [ ] 联调清单：Register（含 endpoint）、Heartbeat、**Server 主动 Dispatch**、Report；与 Server 日志交叉验证
+- [x] 联调清单：Register（含 endpoint）、Heartbeat、**Server 主动 Dispatch**、Report；与 Server 日志交叉验证
 - [x] 确认 Server 经 Worker Pool **只读查询** worker 清单后直连 Dispatch（若 Server 未就绪 Pool，文档记录临时路径）
 - [x] 文档：Mock vs Remote 切换步骤、常见错误码、`server_epoch` 行为
 
@@ -503,7 +503,7 @@ replay_state: REPLAY_STATE_PENDING
   - `UENV_SCHEDULER_MODE=remote`
   - `UENV_SERVER_ENDPOINT=<本机IP>:50051`
   - `UENV_WORKER_LISTEN=0.0.0.0:50052`
-- 记录要求：后续切换真实 `uenv-server` 后，需补充一次 Server 日志与 Worker 日志交叉验证结果，再勾选 M7 联调清单。
+- 记录要求：后续切换真实 `uenv-server` 后，需补充一次 Server 日志与 Worker 日志交叉验证结果，再勾选 M7 联调清单。**（已于 2026-05-30 完成，见「M7 真实 Server 实机联调结果」）**
 
 ### M7 退出标准
 
@@ -523,7 +523,50 @@ replay_state: REPLAY_STATE_PENDING
 
 - 在本机完成一轮预联调回归：执行 `cargo test -p uenv-mock-scheduler --test m1_contract_chaos_tests -- --nocapture`，`8 passed, 0 failed`。
 - 其中 `m16_register_heartbeat_dispatch_report_chain` 覆盖 Register → Heartbeat →（Scheduler 主动）Dispatch → ReportResult 全链路，确认本机联调链路可跑通。
-- 说明：当前 Windows 环境下 `uenv-worker` 的 `proto-uds` 插件执行链路受 `cfg(unix)` 约束；本次预联调先以 Worker stub 验证控制面链路，真实 Server + Unix 插件执行联调仍按 M7 退出标准补验。
+- 说明：当前 Windows 环境下 `uenv-worker` 的 `proto-uds` 插件执行链路受 `cfg(unix)` 约束；本次预联调先以 Worker stub 验证控制面链路。**真实 Server + Unix 插件执行联调已于 2026-05-30 在 A100 实机完成**（见下节）。
+
+### M7 真实 Server 实机联调结果（2026-05-30）
+
+**拓扑**：两台 A100 Linux 测试机，`uenv-server`（机器 A）+ `uenv-worker`（机器 B）；Bridge 用 grpcurl Mock `SubmitEpisode`；Hub 跳过。
+
+| 项 | 值 |
+|----|-----|
+| 代码路径 | `/root/UEnv`（独立目录，不影响机器上其他项目） |
+| 机器 A（7143） | 内网 `10.10.20.143:50051` — `uenv-server` |
+| 机器 B（7142） | 内网 `10.10.20.142:50052` — `uenv-worker` + `plugins/gsm8k` |
+| Worker 配置 | [`config/uenv-worker.e2e.yaml`](./discussions/a100-server-worker-e2e/config/uenv-worker.e2e.yaml) |
+| 详细记录 | [`discussions/a100-server-worker-e2e/records/2026-05-30-e2e-run.md`](./discussions/a100-server-worker-e2e/records/2026-05-30-e2e-run.md) |
+
+**如何测试**：
+
+1. 两台机器初始化 `/root/UEnv`，从开发机 tar+scp 同步代码（`gen/` 单独同步）；`make proto` 或同步预生成 `src/gen/` 后 `cargo build --release`。
+2. **机器 A**：`uenv-server -b 0.0.0.0:50051`
+3. **机器 B**：设置 `UENV_GSM8K_PLUGIN_BIN=/root/UEnv/target/release/uenv-gsm8k-plugin`，执行 `uenv-worker --config .../uenv-worker.e2e.yaml serve`（Worker 注册 endpoint 为 `10.10.20.142:50052`）。
+4. **机器 A**：`bash .../submit-episode-grpcurl.sh 127.0.0.1:50051`（`payload`/`reward_config` 须 base64）。
+
+**验收结果**（Episode `gsm8k-e2e-001`）：
+
+| 检查项 | 结果 |
+|--------|------|
+| Register + endpoint 回连 | ✅ Server 日志 `control_plane_register endpoint=10.10.20.142:50052` |
+| Heartbeat | ✅ Worker 持续 heartbeat ack |
+| Server → Worker Dispatch | ✅ Worker `dispatch_received` → `dispatch_completed` |
+| GSM8K 插件执行 | ✅ acquire → step → release；`warmup_hit=true` |
+| ReportResult | ✅ Server `control_plane_report_result duplicate=false` |
+| grpcurl 返回 | ✅ `status=completed`，`summary.total_reward=1.0`，`integrity_verified=true` |
+| Metrics | ✅ `uenv_episode_total 1` |
+
+**M7 退出标准对照**：
+
+| # | 标准 | 状态 |
+|---|------|------|
+| 1 | Mock / Remote 两种模式均可启动 | ✅ Remote 实机验证通过 |
+| 2 | 与真实 Server 完成 ≥1 次 GSM8K Episode | ✅ **已完成**（2026-05-30） |
+
+**联调中发现并已处理**：
+
+- `uenv-worker/src/plugin/arpc/mod.rs`：tonic 0.14 下 UDS 连接须 `hyper_util::rt::TokioIo` 包装（已合入代码库）。
+- grpcurl 提交时 proto `bytes` 字段须 base64；CLI 顺序为 `uenv-worker --config <yaml> serve`。
 
 ---
 
@@ -567,17 +610,18 @@ eplay_state=pending），再调用 ReportResult；ACK 成功后删除对应 WAL 
 
 ## M9+：增强项（非 MVP 阻塞）
 
-### 当前实现情况总结（截至 2026-05-28）
+### 当前实现情况总结（截至 2026-05-30）
 
 - Worker 层已具备从接入控制面到执行 Episode 的闭环能力：可完成注册、心跳、接收主动派发、执行并回报结果。
 - 预热池能力已上线并作为默认执行路径：启动时可按配置预创建实例并维持可复用池，派发时优先复用已预热实例，未命中时走补充路径，执行后回收实例以支持后续任务复用。
 - 当前默认参数已在示例配置中固化：`warmup_size=2`、`max_idle_time=300`、`cool_timeout=60`、`max_episode_count=1000`、`max_concurrent=4`（可按环境覆盖）。
 - 派发负载执行策略已落地：Scheduler 主动 `DispatchEpisode` 到 Worker，Worker 按并发上限与可用实例容量承载执行；可观测侧已能区分预热命中/未命中并输出基础运行指标。
 - 容错能力已具备 MVP 可用形态：支持结果落盘、断连后重放与幂等上报，具备断连期间派发策略开关（reject/queue）。
+- **M7 真实 Server 跨机联调已完成**（2026-05-30）：两台 A100 上 `uenv-server` + `uenv-worker` 完成 Register → Dispatch → GSM8K 执行 → Report 全链路；详见 M7 实机联调结果与 [`discussions/a100-server-worker-e2e/`](./discussions/a100-server-worker-e2e/)。
 
 ### 未实现与跨层待补全
 
-- 尚未完成“跨服务器真实链路”验收：当前已完成本机预联调与混沌回归，但 M7 仍缺真实 `uenv-server` 环境下的日志交叉验证闭环。
+- ~~尚未完成“跨服务器真实链路”验收~~ → **已于 2026-05-30 完成**（见 M7 实机联调结果）；后续可补充多 Episode、Drain/epoch 组合验收。
 - Hub 层尚未真实接入：当前未形成 Worker 与 Hub 的生产级交互链路（如由 Hub 统一驱动实例初始化/资源编排/发布流转），相关能力需其他层补全后联调。
 - Worker 仍处于 MVP 阶段：后续仍需按设计继续覆盖动态预热策略、更多后端与环境类型、生产级压测与观测增强等升级项。
 

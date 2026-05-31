@@ -16,21 +16,22 @@ if ! command -v grpcurl >/dev/null 2>&1; then
   exit 1
 fi
 
+PAYLOAD_B64=$(printf '%s' '{"question":"If 3 books cost $12, what is the cost of 5 books?"}' | base64 -w0)
+REWARD_B64=$(printf '%s' '{"type":"rule_reward","target":"20"}' | base64 -w0)
+
 grpcurl -plaintext \
   -import-path "$PROTO_ROOT" \
   -proto uenv/v1/server.proto \
   -import-path "$PROTO_ROOT" \
   -proto uenv/v1/episode.proto \
-  -d @ "$SERVER" uenv.v1.UEnvService/SubmitEpisode <<'EOF'
-{
-  "episode_id": "gsm8k-e2e-001",
-  "attempt_id": 1,
-  "env_type": "gsm8k",
-  "payload": "{\"question\":\"If 3 books cost $12, what is the cost of 5 books?\"}",
-  "mode": "MODE_SINGLE",
-  "max_steps": 1,
-  "correlation_id": "e2e-trace-001",
-  "timeout_seconds": 120,
-  "reward_config": "{\"type\":\"rule_reward\",\"target\":\"20\"}"
-}
-EOF
+  -d "{
+  \"episode_id\": \"gsm8k-e2e-001\",
+  \"attempt_id\": 1,
+  \"env_type\": \"gsm8k\",
+  \"payload\": \"${PAYLOAD_B64}\",
+  \"mode\": \"MODE_SINGLE\",
+  \"max_steps\": 1,
+  \"correlation_id\": \"e2e-trace-001\",
+  \"timeout_seconds\": 120,
+  \"reward_config\": \"${REWARD_B64}\"
+}" "$SERVER" uenv.v1.UEnvService/SubmitEpisode
