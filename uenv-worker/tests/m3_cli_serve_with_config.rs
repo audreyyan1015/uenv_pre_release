@@ -18,7 +18,7 @@ async fn m3_serve_with_yaml_config_starts() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root")
-        .join("fixtures/gsm8k")
+        .join("fixtures/math")
         .to_string_lossy()
         .to_string();
     tokio::spawn(async move {

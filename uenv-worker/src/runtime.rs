@@ -9,6 +9,7 @@ use tonic::transport::Server;
 use crate::control_plane::client::{ControlPlane, SchedulerControlPlaneClient, SchedulerMode};
 use crate::episode::executor::EpisodeExecutor;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
+use crate::hub;
 use crate::metrics::MetricsExporter;
 use crate::plugin::host::PluginHost;
 use crate::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
@@ -31,10 +32,44 @@ pub struct WorkerRuntime {
     pub health_listen: String,
     pub wal_dir: String,
     pub disconnect_dispatch_policy: DisconnectDispatchPolicy,
+    pub hub_enabled: bool,
+    pub hub_endpoint: Option<String>,
 }
 
 impl WorkerRuntime {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.hub_enabled {
+            if let Some(endpoint) = &self.hub_endpoint {
+                for result in hub::sync_env_types_from_hub(endpoint, &self.supported_env_types).await {
+                    match result {
+                        Ok(summary) => tracing::info!(
+                            trace_id = "runtime",
+                            worker_id = %self.worker_id,
+                            episode_id = "-",
+                            env_type = %summary.env_type,
+                            version = %summary.version,
+                            backends = %summary.supported_backends.join(","),
+                            msg = "hub_manifest_pulled"
+                        ),
+                        Err(err) => tracing::warn!(
+                            trace_id = "runtime",
+                            worker_id = %self.worker_id,
+                            episode_id = "-",
+                            error = %err,
+                            msg = "hub_pull_failed_using_local_manifest"
+                        ),
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    trace_id = "runtime",
+                    worker_id = %self.worker_id,
+                    episode_id = "-",
+                    msg = "hub_enabled_without_endpoint_using_local_manifest"
+                );
+            }
+        }
+
         let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
         let loaded_envs = plugin_host.supported_envs().await;
         tracing::info!(

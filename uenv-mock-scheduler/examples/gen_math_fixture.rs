@@ -1,4 +1,3 @@
-//! Deprecated alias — writes to `fixtures/math/`. Prefer `gen_math_fixture`.
 use std::fs;
 use std::path::PathBuf;
 
@@ -9,7 +8,6 @@ use uenv_mock_scheduler::proto::v1::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("note: gen_gsm8k_fixture is deprecated; output goes to fixtures/math/");
     let out_dir = PathBuf::from("fixtures/math");
     fs::create_dir_all(&out_dir)?;
 
@@ -40,7 +38,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dispatch_token: b"fixture-token-001".to_vec(),
     };
 
-    fs::write(out_dir.join("episode_001.pb"), episode.encode_to_vec())?;
+    let pb = episode.encode_to_vec();
+    fs::write(out_dir.join("episode_001.pb"), pb)?;
 
     let expected_result = EpisodeResult {
         episode_id: "math-episode-001".to_string(),

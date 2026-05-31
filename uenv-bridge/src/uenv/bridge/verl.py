@@ -68,7 +68,7 @@ class VeRLAdapterConfig:
             "humaneval": "code",
             "mbpp": "code",
             "math": "math",
-            "gsm8k": "gsm8k",
+            "gsm8k": "math",
             "agent": "agent",
         }
     )
@@ -285,7 +285,7 @@ class VeRLAdapter(BaseAdapter):
         env_type = self.env_type_for_sample(sample)
         max_steps = (
             self.config.math_max_steps
-            if env_type in ("math", "gsm8k")
+            if env_type == "math"
             else self.config.default_max_steps
         )
         seed = int(meta_info.get("seed", self.config.seed_base + sample_index))
@@ -350,7 +350,7 @@ class VeRLAdapter(BaseAdapter):
                 "stop_conditions": ["done", "max_steps", "timeout"],
             },
             "reward_config": {
-                "reward_type": "rubric" if env_type in ("math", "gsm8k") else "external",
+                "reward_type": "rubric" if env_type == "math" else "external",
                 "rubric_config": reward_model,
             },
             "metadata": metadata,

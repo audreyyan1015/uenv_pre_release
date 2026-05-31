@@ -964,12 +964,12 @@ Mock 阶段即应覆盖以下场景（供 M8 容错复用）：
 
 | # | 工作项 | 负责层 | 状态 |
 |---|--------|--------|------|
-| M-1 | Worker 默认 `env.types: [math]`；注册 `supported_env_types: math` | Worker | 📋 规划 |
-| M-2 | `plugins/math/` manifest + gsm8k backend 迁入（或 alias） | Worker/插件 | 📋 规划 |
-| M-3 | fixture / e2e 脚本改为 `env_type=math` + `dataset=gsm8k` | 测试/e2e | 📋 规划 |
-| M-4 | Bridge `gsm8k→math`；`l1_mapping` 写入 `payload.dataset` | Bridge | 📋 规划（暂与代码 gsm8k 不一致） |
-| M-5 | Hub Worker pull：启动时拉取 `math` manifest（P2-2） | Worker+Hub | ❌ |
-| M-6 | 废弃 `env_type=gsm8k` alias；删除 `plugins/gsm8k` 顶层目录 | 全栈 | ❌（M-1–M-4 完成后） |
+| M-1 | Worker 默认 `env.types: [math]`；注册 `supported_env_types: math` | Worker | ✅ |
+| M-2 | `plugins/math/` manifest + `uenv-math-plugin` | Worker/插件 | ✅ |
+| M-3 | fixture / e2e 脚本改为 `math` + `dataset=gsm8k` | 测试/e2e | ✅ |
+| M-4 | Bridge `gsm8k→math`；`l1_mapping` 写 `payload.dataset` | Bridge | ✅ |
+| M-5 | Hub Worker pull：`hub/mod.rs` + `UENV_HUB_ENDPOINT` | Worker+Hub | ✅ |
+| M-6 | 移除 `plugins/gsm8k`、`UENV_GSM8K_PLUGIN_BIN` alias | 全栈 | ✅ |
 
 > M7 实机记录（2026-05-30）使用 `env_type=gsm8k` **仍有效**，作为历史证据；**新联调与全栈首通以 `math` 为准**。
 

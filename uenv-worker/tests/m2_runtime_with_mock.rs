@@ -26,7 +26,7 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root")
-        .join("fixtures/gsm8k")
+        .join("fixtures/math")
         .to_string_lossy()
         .to_string();
     tokio::spawn(async move {
@@ -42,7 +42,7 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
         server_endpoint: scheduler_addr.to_string(),
         worker_id: "m2-worker".to_string(),
         max_concurrent: 1,
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         plugin_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
@@ -71,7 +71,7 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
         .expect("connect control plane");
     let listed = cp
         .list_workers(Request::new(ListWorkersRequest {
-            env_types: vec!["gsm8k".to_string()],
+            env_types: vec!["math".to_string()],
         }))
         .await
         .expect("list workers")
@@ -81,11 +81,11 @@ async fn m2_mock_dispatch_and_worker_report_loop() {
 
     let duplicated = cp
         .report_result(ReportResultRequest {
-            idempotency_key: format!("gsm8k-episode-001:1:{worker_id}"),
+            idempotency_key: format!("math-episode-001:1:{worker_id}"),
             worker_id,
             server_epoch: 1,
             result: Some(EpisodeResult {
-                episode_id: "gsm8k-episode-001".to_string(),
+                episode_id: "math-episode-001".to_string(),
                 attempt_id: 1,
                 status: "completed".to_string(),
                 trajectory: None,

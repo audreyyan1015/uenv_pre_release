@@ -10,13 +10,13 @@ use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
 use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult};
 
 #[tokio::test]
-async fn m5_single_round_gsm8k_matches_expected_reward_and_status() {
+async fn m5_single_round_math_matches_expected_reward_and_status() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root");
     let plugin_dir = repo_root.join("plugins");
-    let fixture_path = repo_root.join("fixtures/gsm8k/episode_001.pb");
-    let expected_path = repo_root.join("fixtures/gsm8k/expected_result_001.pb");
+    let fixture_path = repo_root.join("fixtures/math/episode_001.pb");
+    let expected_path = repo_root.join("fixtures/math/expected_result_001.pb");
 
     let req_bytes = fs::read(fixture_path).expect("read request fixture");
     let request = EpisodeRequest::decode(req_bytes.as_slice()).expect("decode request fixture");
@@ -34,7 +34,7 @@ async fn m5_single_round_gsm8k_matches_expected_reward_and_status() {
             max_episode_count: 1000,
         },
     );
-    pool.prewarm(&["gsm8k".to_string()])
+    pool.prewarm(&["math".to_string()])
         .await
         .expect("prewarm pool");
     let executor = EpisodeExecutor::new(host, pool);

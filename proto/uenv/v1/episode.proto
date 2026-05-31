@@ -8,7 +8,7 @@ import "google/protobuf/timestamp.proto";
 message EpisodeRequest {
     string episode_id = 1;
     uint32 attempt_id = 2;
-    string env_type   = 3;              // Phase 0: "gsm8k"
+    string env_type   = 3;              // Phase 0: "math" (MathEnv); dataset in payload
     bytes payload     = 4;
     ExecutionMode mode = 5;
     int32 max_steps   = 6;

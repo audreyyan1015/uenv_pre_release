@@ -11,7 +11,7 @@ scheduler:
   mode: "remote"
 
 env:
-  types: ["gsm8k"]
+  types: ["math"]
   backend: "process"
   plugin_dir: "./plugins"
 

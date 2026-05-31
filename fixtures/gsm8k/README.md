@@ -1,13 +1,5 @@
-# GSM8K Mock Fixtures
+# 已迁移至 `fixtures/math/`
 
-This directory contains M1.3 fixtures for `uenv-mock-scheduler`.
+Phase 0 起 L1 调度键为 **`env_type=math`**；GSM8K 通过 `payload.dataset=gsm8k` 表达。
 
-- `episode_001.pb`: binary `EpisodeRequest` fixture (loaded by scheduler at startup).
-- `expected_result_001.pb`: optional expected `EpisodeResult` sample for future automated verification.
-- `episode_001.textproto`: human-readable fixture fields for review.
-
-Generate or refresh binaries:
-
-```bash
-cargo run -p uenv-mock-scheduler --example gen_gsm8k_fixture
-```
+请使用 [`../math/`](../math/) 下的 fixture 与 `gen_math_fixture` 生成器。

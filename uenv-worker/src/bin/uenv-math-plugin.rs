@@ -33,12 +33,12 @@ struct PluginState {
 }
 
 #[derive(Default)]
-struct Gsm8kPlugin {
+struct MathPlugin {
     state: Mutex<PluginState>,
 }
 
 #[tonic::async_trait]
-impl PluginService for Gsm8kPlugin {
+impl PluginService for MathPlugin {
     async fn reset(
         &self,
         _request: Request<ResetRequest>,
@@ -89,18 +89,18 @@ impl PluginService for Gsm8kPlugin {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(unix))]
     {
-        return Err("uenv-gsm8k-plugin requires unix (UDS)".into());
+        return Err("uenv-math-plugin requires unix (UDS)".into());
     }
     #[cfg(unix)]
     {
-    let cli = Cli::parse();
-    let _ = std::fs::remove_file(&cli.uds_path);
-    let uds = UnixListener::bind(&cli.uds_path)?;
-    let incoming = UnixListenerStream::new(uds);
-    Server::builder()
-        .add_service(PluginServiceServer::new(Gsm8kPlugin::default()))
-        .serve_with_incoming(incoming)
-        .await?;
-    Ok(())
+        let cli = Cli::parse();
+        let _ = std::fs::remove_file(&cli.uds_path);
+        let uds = UnixListener::bind(&cli.uds_path)?;
+        let incoming = UnixListenerStream::new(uds);
+        Server::builder()
+            .add_service(PluginServiceServer::new(MathPlugin::default()))
+            .serve_with_incoming(incoming)
+            .await?;
+        Ok(())
     }
 }

@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use crate::protocol::{CoreError, EpisodeRequest, EpisodeResult, EpisodeSummary, ResourceSpec, Trajectory};
 
-/// Worker gsm8k 插件期望的 L1 字段形态（对齐 fixtures/gsm8k 与 e2e grpcurl 脚本）。
+/// Worker MathEnv 期望的 L1 字段形态（`env_type=math`，benchmark 在 payload.dataset）。
 #[derive(Debug, Clone)]
 pub struct L1EpisodeFields {
     pub episode_id: String,
@@ -24,6 +24,7 @@ pub fn bridge_to_l1_fields(request: &EpisodeRequest) -> Result<L1EpisodeFields, 
 
     let question = extract_question(&bridge_payload)?;
     let ground_truth = extract_ground_truth(&bridge_payload);
+    let dataset = extract_dataset(&bridge_payload);
     let correlation_id = bridge_payload
         .get("correlation_id")
         .and_then(Value::as_str)
@@ -38,6 +39,7 @@ pub fn bridge_to_l1_fields(request: &EpisodeRequest) -> Result<L1EpisodeFields, 
     let worker_payload = json!({
         "question": question,
         "request_id": request.request_id,
+        "dataset": dataset,
     });
     let worker_reward = json!({
         "type": "rule_reward",
@@ -51,14 +53,15 @@ pub fn bridge_to_l1_fields(request: &EpisodeRequest) -> Result<L1EpisodeFields, 
         CoreError::InvalidEnvelope(format!("worker reward_config serialization failed: {err}"))
     })?;
 
-    let mode = if request.env_type == "gsm8k" {
+    let env_type = request.env_type.clone();
+    let mode = if env_type == "math" {
         1 // MODE_SINGLE
     } else {
         request.mode.max(1)
     };
     let max_steps = if request.max_steps > 0 {
         request.max_steps
-    } else if request.env_type == "gsm8k" {
+    } else if env_type == "math" {
         1
     } else {
         request.max_steps
@@ -67,7 +70,7 @@ pub fn bridge_to_l1_fields(request: &EpisodeRequest) -> Result<L1EpisodeFields, 
     Ok(L1EpisodeFields {
         episode_id: request.request_id.clone(),
         attempt_id: 1,
-        env_type: request.env_type.clone(),
+        env_type,
         payload: payload_bytes,
         reward_config: reward_bytes,
         mode,
@@ -77,6 +80,27 @@ pub fn bridge_to_l1_fields(request: &EpisodeRequest) -> Result<L1EpisodeFields, 
         correlation_id,
         timeout_seconds,
     })
+}
+
+fn extract_dataset(payload: &Value) -> String {
+    let from_field = payload
+        .pointer("/metadata/data_source")
+        .or_else(|| payload.pointer("/env_config/data_source"))
+        .and_then(Value::as_str)
+        .unwrap_or("gsm8k");
+    normalize_dataset(from_field)
+}
+
+fn normalize_dataset(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("gsm8k") {
+        return "gsm8k".to_string();
+    }
+    lower
+        .rsplit('/')
+        .next()
+        .unwrap_or("gsm8k")
+        .to_string()
 }
 
 pub fn l1_result_to_bridge(
@@ -162,13 +186,14 @@ pub fn bridge_resource_spec(spec: &ResourceSpec) -> crate::l1_pb::v1::ResourceSp
 mod tests {
     use super::*;
 
-    fn gsm8k_bridge_request() -> EpisodeRequest {
+    fn math_bridge_request() -> EpisodeRequest {
         EpisodeRequest {
-            request_id: "gsm8k-req-001".to_string(),
-            env_type: "gsm8k".to_string(),
+            request_id: "math-req-001".to_string(),
+            env_type: "math".to_string(),
             payload: br#"{
                 "correlation_id": "batch-0001-0",
                 "timeout_seconds": 120,
+                "metadata": { "data_source": "gsm8k" },
                 "env_config": {
                     "raw_prompt": "If 3 books cost $12, what is the cost of 5 books?"
                 },
@@ -187,10 +212,10 @@ mod tests {
 
     #[test]
     fn bridge_to_l1_matches_e2e_fixture_shape() {
-        let fields = bridge_to_l1_fields(&gsm8k_bridge_request()).unwrap();
-        assert_eq!(fields.episode_id, "gsm8k-req-001");
+        let fields = bridge_to_l1_fields(&math_bridge_request()).unwrap();
+        assert_eq!(fields.episode_id, "math-req-001");
         assert_eq!(fields.attempt_id, 1);
-        assert_eq!(fields.env_type, "gsm8k");
+        assert_eq!(fields.env_type, "math");
         assert_eq!(fields.mode, 1);
         assert_eq!(fields.correlation_id, "batch-0001-0");
         assert_eq!(fields.timeout_seconds, 120);
@@ -200,7 +225,8 @@ mod tests {
             payload["question"],
             "If 3 books cost $12, what is the cost of 5 books?"
         );
-        assert_eq!(payload["request_id"], "gsm8k-req-001");
+        assert_eq!(payload["request_id"], "math-req-001");
+        assert_eq!(payload["dataset"], "gsm8k");
 
         let reward: Value = serde_json::from_slice(&fields.reward_config).unwrap();
         assert_eq!(reward["type"], "rule_reward");
@@ -211,10 +237,10 @@ mod tests {
     fn extract_question_prefers_extra_info() {
         let request = EpisodeRequest {
             request_id: "req-1".to_string(),
-            env_type: "gsm8k".to_string(),
+            env_type: "math".to_string(),
             payload: br#"{
                 "env_config": { "raw_prompt": "fallback prompt" },
-                "metadata": { "extra_info": { "question": "explicit question?" } },
+                "metadata": { "extra_info": { "question": "explicit question?" }, "data_source": "gsm8k" },
                 "reward_config": { "rubric_config": { "ground_truth": "1" } }
             }"#
             .to_vec(),
@@ -227,6 +253,7 @@ mod tests {
         let fields = bridge_to_l1_fields(&request).unwrap();
         let payload: Value = serde_json::from_slice(&fields.payload).unwrap();
         assert_eq!(payload["question"], "explicit question?");
+        assert_eq!(payload["dataset"], "gsm8k");
     }
 
     #[test]

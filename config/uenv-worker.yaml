@@ -14,7 +14,7 @@ scheduler:
   mode: "remote"                # UENV_SCHEDULER_MODE: remote | mock
 
 env:
-  types: ["gsm8k"]              # UENV_ENV_TYPES — Phase 0 仅 gsm8k
+  types: ["math"]              # UENV_ENV_TYPES — Phase 0 MathEnv
   backend: "process"            # UENV_BACKEND
   plugin_dir: "./plugins"       # UENV_PLUGIN_DIR
 
@@ -34,3 +34,7 @@ wal:
 observability:
   metrics_listen: "0.0.0.0:19090"  # UENV_METRICS_LISTEN，GET /metrics
   health_listen: "0.0.0.0:19090"   # UENV_HEALTH_LISTEN，GET /health
+
+hub:
+  enabled: false                   # UENV_HUB_ENABLED
+  endpoint: "http://127.0.0.1:8080"  # UENV_HUB_ENDPOINT（设置后自动启用 pull）

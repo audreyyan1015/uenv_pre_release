@@ -20,7 +20,7 @@ use uenv_mock_scheduler::service::{run, FaultInjectionConfig};
 struct StubState {
     dispatch_count: Arc<Mutex<usize>>,
     reject_all: bool,
-    reject_non_gsm8k: bool,
+    reject_non_math: bool,
     capacity_full: bool,
     expire_lease: bool,
     supersede_after_first: bool,
@@ -47,7 +47,7 @@ impl WorkerGrpcService for WorkerStub {
         if self.state.reject_all {
             return Err(Status::invalid_argument("unsupported_env_type"));
         }
-        if self.state.reject_non_gsm8k && episode.env_type != "gsm8k" {
+        if self.state.reject_non_math && episode.env_type != "math" {
             return Err(Status::invalid_argument("unsupported_env_type"));
         }
         if self.state.capacity_full {
@@ -151,7 +151,7 @@ async fn m16_register_heartbeat_dispatch_report_chain() {
     let worker_state = StubState::default();
     let worker_addr = spawn_worker_stub(worker_state.clone()).await;
     let scheduler_addr = spawn_scheduler_with_env(
-        "fixtures/gsm8k",
+        "fixtures/math",
         FaultInjectionConfig::default(),
         1,
     )
@@ -163,7 +163,7 @@ async fn m16_register_heartbeat_dispatch_report_chain() {
     let worker_id = unique_worker_id("worker");
     cp.register_worker(RegisterWorkerRequest {
         worker_id: worker_id.clone(),
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         resource: None,
         endpoint: worker_addr.to_string(),
         max_concurrent: 1,
@@ -195,7 +195,7 @@ async fn m16_register_heartbeat_dispatch_report_chain() {
     assert!(dispatch_count >= 1);
 
     let result = EpisodeResult {
-        episode_id: "gsm8k-episode-001".to_string(),
+        episode_id: "math-episode-001".to_string(),
         attempt_id: 1,
         status: "completed".to_string(),
         trajectory: None,
@@ -239,13 +239,13 @@ async fn m17_duplicate_dispatch() {
         duplicate_dispatch: true,
         ..Default::default()
     };
-    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", fi, 1).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/math", fi, 1).await;
     let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
         .await
         .expect("connect");
     cp.register_worker(RegisterWorkerRequest {
         worker_id: unique_worker_id("dup"),
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         resource: None,
         endpoint: worker_addr.to_string(),
         max_concurrent: 1,
@@ -263,14 +263,14 @@ async fn m17_heartbeat_timeout_drop_ack() {
         drop_heartbeat_n: 1,
         ..Default::default()
     };
-    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", fi, 1).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/math", fi, 1).await;
     let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
         .await
         .expect("connect");
     let worker_id = unique_worker_id("hb");
     cp.register_worker(RegisterWorkerRequest {
         worker_id: worker_id.clone(),
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         resource: None,
         endpoint: worker_addr.to_string(),
         max_concurrent: 1,
@@ -315,14 +315,14 @@ async fn m17_dispatch_delay_and_server_epoch_injection() {
         dispatch_delay_ms: 600,
         ..Default::default()
     };
-    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", fi, 77).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/math", fi, 77).await;
     let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
         .await
         .expect("connect");
     let reg = cp
         .register_worker(RegisterWorkerRequest {
             worker_id: unique_worker_id("epoch"),
-            supported_env_types: vec!["gsm8k".to_string()],
+            supported_env_types: vec!["math".to_string()],
             resource: None,
             endpoint: worker_addr.to_string(),
             max_concurrent: 1,
@@ -344,7 +344,7 @@ async fn m17_dispatch_delay_and_server_epoch_injection() {
 async fn m17_unsupported_env_type_and_capacity_full() {
     let reject_state = StubState { reject_all: true, ..Default::default() };
     let worker_addr = spawn_worker_stub(reject_state.clone()).await;
-    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", FaultInjectionConfig::default(), 1).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/math", FaultInjectionConfig::default(), 1).await;
     let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
         .await
         .expect("connect");
@@ -367,13 +367,13 @@ async fn m17_unsupported_env_type_and_capacity_full() {
         ..Default::default()
     };
     let full_worker_addr = spawn_worker_stub(full_state.clone()).await;
-    let scheduler2 = spawn_scheduler_with_env("fixtures/gsm8k", FaultInjectionConfig::default(), 1).await;
+    let scheduler2 = spawn_scheduler_with_env("fixtures/math", FaultInjectionConfig::default(), 1).await;
     let mut cp2 = ControlPlaneServiceClient::connect(format!("http://{scheduler2}"))
         .await
         .expect("connect2");
     cp2.register_worker(RegisterWorkerRequest {
         worker_id: unique_worker_id("full"),
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         resource: None,
         endpoint: full_worker_addr.to_string(),
         max_concurrent: 1,
@@ -391,13 +391,13 @@ async fn m17_lease_expired() {
         ..Default::default()
     };
     let worker_addr = spawn_worker_stub(worker_state.clone()).await;
-    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", FaultInjectionConfig::default(), 1).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/math", FaultInjectionConfig::default(), 1).await;
     let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
         .await
         .expect("connect");
     cp.register_worker(RegisterWorkerRequest {
         worker_id: unique_worker_id("lease-exp"),
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         resource: None,
         endpoint: worker_addr.to_string(),
         max_concurrent: 1,
@@ -419,13 +419,13 @@ async fn m17_lease_superseded() {
         duplicate_dispatch: true,
         ..Default::default()
     };
-    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", fi, 1).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/math", fi, 1).await;
     let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
         .await
         .expect("connect");
     cp.register_worker(RegisterWorkerRequest {
         worker_id: unique_worker_id("lease-sup"),
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         resource: None,
         endpoint: worker_addr.to_string(),
         max_concurrent: 1,
@@ -444,14 +444,14 @@ async fn m17_partial_stream_interruption_report_result_still_ack() {
         ..Default::default()
     };
     let worker_addr = spawn_worker_stub(worker_state).await;
-    let scheduler_addr = spawn_scheduler_with_env("fixtures/gsm8k", FaultInjectionConfig::default(), 1).await;
+    let scheduler_addr = spawn_scheduler_with_env("fixtures/math", FaultInjectionConfig::default(), 1).await;
     let mut cp = ControlPlaneServiceClient::connect(format!("http://{scheduler_addr}"))
         .await
         .expect("connect");
     let worker_id = unique_worker_id("stream-int");
     cp.register_worker(RegisterWorkerRequest {
         worker_id: worker_id.clone(),
-        supported_env_types: vec!["gsm8k".to_string()],
+        supported_env_types: vec!["math".to_string()],
         resource: None,
         endpoint: worker_addr.to_string(),
         max_concurrent: 1,
@@ -461,7 +461,7 @@ async fn m17_partial_stream_interruption_report_result_still_ack() {
 
     tokio::time::sleep(Duration::from_millis(1300)).await;
     let result = EpisodeResult {
-        episode_id: "gsm8k-episode-001".to_string(),
+        episode_id: "math-episode-001".to_string(),
         attempt_id: 1,
         status: "completed".to_string(),
         trajectory: None,

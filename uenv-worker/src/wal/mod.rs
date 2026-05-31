@@ -175,7 +175,7 @@ mod tests {
         let ep = EpisodeRequest {
             episode_id: "ep-1".to_string(),
             attempt_id: 1,
-            env_type: "gsm8k".to_string(),
+            env_type: "math".to_string(),
             payload: b"{}".to_vec(),
             mode: 0,
             max_steps: 1,

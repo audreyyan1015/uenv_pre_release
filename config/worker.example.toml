@@ -3,5 +3,5 @@
 
 server_addr = "http://127.0.0.1:50051"
 worker_id = "worker-1"
-supported_env_types = ["gsm8k"]
+supported_env_types = ["math"]
 max_concurrent_episodes = 8

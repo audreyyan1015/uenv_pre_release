@@ -1,7 +1,0 @@
-env_type: gsm8k
-version: "0.1.0"
-supported_backends:
-  - process
-ipc: proto-uds
-entry: ./run.sh
-description: GSM8K math environment plugin (Phase 0)

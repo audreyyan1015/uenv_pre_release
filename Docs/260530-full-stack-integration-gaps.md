@@ -11,9 +11,9 @@
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | Step 1 Server + Worker（无 Bridge） | ✅ 完成 | M7 实机 2026-05-30（**历史**：`env_type=gsm8k`） |
-| **Step 1b MathEnv 跨层对齐** | 📋 **进行中** | Worker/Bridge/fixture 收敛至 `env_type=math`（见 §0.2） |
-| Step 2 Bridge core serve mode | ⚠️ 代码就绪 | 待 **math** 语义下三联调 smoke |
-| Step 3 VeRL Layer 4 真实全栈 | ❌ 未验收 | 依赖 Step 1b + Step 2 |
+| **Step 1b MathEnv 跨层对齐** | ✅ **代码完成** | M-1～M-6 已落地；待 A100 复验 `env_type=math` |
+| Step 2 Bridge core serve mode | ⚠️ 待三联调 | serve + math 映射就绪 |
+| Step 3 VeRL Layer 4 真实全栈 | ❌ 未验收 | 依赖 Step 2 |
 | Step 4 Hub / 生产语义 | ❌ 未开始 | Y1、Y3–Y10、P2.* |
 
 ### 0.1 P0 工作清单
@@ -23,7 +23,7 @@
 | P0-1 | A100 Server–Worker 实机验收 | ✅ | 2026-05-30；当时 `env_type=gsm8k` |
 | P0-2 | `UEnvServeEpisodeService` | ✅ | `serve_client.rs` |
 | P0-3 | Bridge ↔ L1 字段映射 | ✅ | `l1_mapping.rs` |
-| P0-4 | 统一计算类 `env_type=math` | 📋 **规划修订** | PRD v7.2 + Hub seed；**取代** 临时 `gsm8k→gsm8k` |
+| P0-4 | 统一计算类 `env_type=math` | ✅ | `verl.py`、`plugins/math`、fixture/e2e |
 | P0-5 | `ADAPTER_CORE_REWARD_MODE=serve` | ✅ | `main.rs` |
 | P0-6 | payload 转换层 | ⚠️ | 已实现；需补 `payload.dataset`（M-4） |
 | P0-7 | Layer 4 smoke 脚本 `serve` | ⚠️ | 待 math 语义实机 |
@@ -35,12 +35,12 @@
 
 | # | 工作项 | 层级 | 状态 |
 |---|--------|------|------|
-| **M-1** | Worker 默认/注册 `env_type=math` | Worker | 📋 |
-| **M-2** | `plugins/math/` + gsm8k backend | Worker/插件 | 📋 |
-| **M-3** | fixture / e2e / grpcurl 改为 `math` + `dataset=gsm8k` | 测试 | 📋 |
-| **M-4** | Bridge：`gsm8k→math`；mapping 写 `payload.dataset` | Bridge | 📋 |
-| **M-5** | Worker Hub pull `math` manifest | Worker+Hub | ❌ |
-| **M-6** | 移除 `env_type=gsm8k` alias | 全栈 | ❌ |
+| **M-1** | Worker 默认/注册 `env_type=math` | Worker | ✅ |
+| **M-2** | `plugins/math/` + gsm8k backend | Worker/插件 | ✅ |
+| **M-3** | fixture / e2e / grpcurl 改为 `math` + `dataset=gsm8k` | 测试 | ✅ |
+| **M-4** | Bridge：`gsm8k→math`；mapping 写 `payload.dataset` | Bridge | ✅ |
+| **M-5** | Worker Hub pull `math` manifest | Worker+Hub | ✅ |
+| **M-6** | 移除 `env_type=gsm8k` alias | 全栈 | ✅ |
 
 **跨层语义（冻结方向）**：
 
@@ -91,7 +91,7 @@
 
 | # | 缺口 | 说明 |
 |---|------|------|
-| **B0** | **MathEnv 跨层未收敛** | 代码仍混用 `gsm8k` env_type；Bridge/Worker/Hub 未统一 | M-1–M-4 |
+| **B0** | ~~MathEnv 跨层未收敛~~ | ✅ M-1～M-6 已落地；待 A100 math 复验 |
 | **B1** | Bridge 三联调未验收 | serve 路径无实机记录 | P0-8 |
 | **B2** | `GrpcEpisodeClient` 未实现 | P1；主路径 Rust core | |
 | **B3** | Unix math 插件集成测试缺 CI 留痕 | `cfg(unix)` | |
@@ -196,4 +196,4 @@ Step 4   Hub pull + 生产语义                          ❌
 |------|------|
 | 2026-05-30 | 初版 |
 | 2026-05-31 | serve mode 实现；P0-1–P0-6 |
-| 2026-05-31 | **MathEnv 对齐修订**：PRD v7.2；G7 撤回；新增 B0、M-1–M-6、Step 1b；关闭 Y2 |
+| 2026-05-31 | **MathEnv 代码落地（M-1～M-6）**；Step 1b ✅；B0 关闭 |

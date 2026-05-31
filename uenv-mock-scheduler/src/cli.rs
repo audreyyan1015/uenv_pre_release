@@ -13,7 +13,7 @@ pub enum Commands {
     Serve {
         #[arg(long, default_value = "config/uenv-mock-scheduler.yaml")]
         config: String,
-        #[arg(long, default_value = "./fixtures/gsm8k")]
+        #[arg(long, default_value = "./fixtures/math")]
         fixture_dir: String,
         #[arg(long, default_value = "/var/log/uenv/mock-scheduler.log")]
         log_file: String,

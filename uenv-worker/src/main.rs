@@ -57,6 +57,8 @@ async fn main() {
                     "reject" => DisconnectDispatchPolicy::Reject,
                     _ => DisconnectDispatchPolicy::Queue,
                 },
+                hub_enabled: cfg.hub.enabled,
+                hub_endpoint: cfg.hub.endpoint.clone(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

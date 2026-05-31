@@ -12,6 +12,8 @@ pub struct WorkerConfig {
     pub wal: WalConfig,
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    #[serde(default)]
+    pub hub: HubConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -58,6 +60,22 @@ pub struct WalConfig {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct HubConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub endpoint: Option<String>,
+}
+
+impl Default for HubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ObservabilityConfig {
     pub metrics_listen: String,
     pub health_listen: String,
@@ -87,7 +105,7 @@ impl Default for WorkerConfig {
                 mode: "remote".to_string(),
             },
             env: EnvConfig {
-                types: vec!["gsm8k".to_string()],
+                types: vec!["math".to_string()],
                 backend: "process".to_string(),
                 plugin_dir: "./plugins".to_string(),
             },
@@ -105,6 +123,7 @@ impl Default for WorkerConfig {
                 dir: "/tmp/uenv/wal".to_string(),
             },
             observability: ObservabilityConfig::default(),
+            hub: HubConfig::default(),
         }
     }
 }
@@ -203,6 +222,13 @@ impl WorkerConfig {
         if let Ok(v) = std::env::var("UENV_HEALTH_LISTEN") {
             self.observability.health_listen = v;
         }
+        if let Ok(v) = std::env::var("UENV_HUB_ENDPOINT") {
+            self.hub.endpoint = Some(v);
+            self.hub.enabled = true;
+        }
+        if let Ok(v) = std::env::var("UENV_HUB_ENABLED") {
+            self.hub.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        }
     }
 }
 
@@ -252,14 +278,14 @@ mod tests {
     fn env_mapping_overrides_loaded_config() {
         unsafe {
             std::env::set_var("UENV_WORKER_LISTEN", "127.0.0.1:61000");
-            std::env::set_var("UENV_ENV_TYPES", "gsm8k,math");
+            std::env::set_var("UENV_ENV_TYPES", "math,code");
             std::env::set_var("UENV_MAX_CONCURRENT", "9");
             std::env::set_var("UENV_LOG_FILE", "./tmp.worker.log");
         }
         let cfg = WorkerConfig::load(&CliOverrides::default()).expect("load config");
         assert_eq!(cfg.worker.listen, "127.0.0.1:61000");
         assert_eq!(cfg.worker.max_concurrent, 9);
-        assert_eq!(cfg.env.types, vec!["gsm8k".to_string(), "math".to_string()]);
+        assert_eq!(cfg.env.types, vec!["math".to_string(), "code".to_string()]);
         assert_eq!(cfg.logging.file, "./tmp.worker.log");
         unsafe {
             std::env::remove_var("UENV_WORKER_LISTEN");

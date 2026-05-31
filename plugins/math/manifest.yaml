@@ -1,0 +1,12 @@
+env_type: math
+version: "0.1.0"
+supported_backends:
+  - process
+ipc: proto-uds
+entry: ./run.sh
+description: MathEnv — universal validation/computation environment (PRD v7.2)
+tags:
+  - math
+  - reasoning
+datasets:
+  - gsm8k

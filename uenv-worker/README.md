@@ -9,7 +9,7 @@ Worker 是 UEnv **Layer 2 Worker Pool** 的执行节点：gRPC **Server** 接收
 - **Episode 执行**：`EpisodeExecutor` 管理 reset → N×step → close（M2+）
 - **模型回调**：`ModelClient` 直连推理服务（HTTP/gRPC）
 - **预热池**：`WarmupPool` 管理进程级插件实例（M3+）
-- **插件子进程**：`ProcessBackend` + `plugins/gsm8k/`（M4+）；**非**内嵌 Python 主路径
+- **插件子进程**：`ProcessBackend` + `plugins/math/`（M4+）；**非**内嵌 Python 主路径
 - **Worker WAL**：断连重放（schema M1 冻结，持久化 M8）
 
 ## 模块结构（design §13）
@@ -47,7 +47,7 @@ uenv-worker health
 
 ## 环境插件
 
-Phase 0 唯一环境：`plugins/gsm8k/`（`manifest.yaml`, `ipc=proto-uds`）。
+Phase 0 环境：`plugins/math/`（`env_type=math`, `ipc=proto-uds`）；GSM8K 为 `payload.dataset=gsm8k`。
 
 `uenv-worker/python/` 为历史内嵌环境路径，**非 MVP 主路径**（Phase 1+ 或 legacy）。
 
@@ -56,7 +56,7 @@ Phase 0 唯一环境：`plugins/gsm8k/`（`manifest.yaml`, `ipc=proto-uds`）。
 MVP 阶段使用独立 crate `uenv-mock-scheduler` 作为 ControlPlane，无需完整 `uenv-server`：
 
 ```bash
-uenv-mock-scheduler serve --fixture-dir ./fixtures/gsm8k
+uenv-mock-scheduler serve --fixture-dir ./fixtures/math
 uenv-worker serve --config config/uenv-worker.yaml
 ```
 
