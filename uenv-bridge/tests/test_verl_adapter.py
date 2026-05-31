@@ -94,7 +94,7 @@ class VeRLAdapterTest(unittest.TestCase):
         requests = adapter.to_episode_requests(make_batch())
 
         self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[0].env_type, "math")
+        self.assertEqual(requests[0].env_type, "gsm8k")
         self.assertEqual(requests[0].max_steps, 10)
         self.assertEqual(requests[1].env_type, "code")
         self.assertEqual(requests[1].max_steps, 80)
@@ -183,7 +183,7 @@ class VeRLAdapterTest(unittest.TestCase):
     def test_verl_config_loads_from_default_yaml(self) -> None:
         config_path = Path(__file__).resolve().parents[1] / "configs" / "verl-adapter.yaml"
         config = VeRLAdapterConfig.from_file(config_path)
-        self.assertEqual(config.task_to_env_type["gsm8k"], "math")
+        self.assertEqual(config.task_to_env_type["gsm8k"], "gsm8k")
         self.assertEqual(config.default_model_name, "policy-model")
 
 

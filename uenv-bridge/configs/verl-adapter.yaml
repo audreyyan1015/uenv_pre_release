@@ -28,7 +28,7 @@ mapping:
     humaneval: code
     mbpp: code
     math: math
-    gsm8k: math
+    gsm8k: gsm8k
     agent: agent
   default_max_steps: 80
   math_max_steps: 10

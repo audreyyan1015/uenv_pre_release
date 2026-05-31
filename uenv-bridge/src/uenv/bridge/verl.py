@@ -68,7 +68,7 @@ class VeRLAdapterConfig:
             "humaneval": "code",
             "mbpp": "code",
             "math": "math",
-            "gsm8k": "math",
+            "gsm8k": "gsm8k",
             "agent": "agent",
         }
     )
@@ -283,7 +283,11 @@ class VeRLAdapter(BaseAdapter):
 
         task_name = self._task_name(sample)
         env_type = self.env_type_for_sample(sample)
-        max_steps = self.config.math_max_steps if env_type == "math" else self.config.default_max_steps
+        max_steps = (
+            self.config.math_max_steps
+            if env_type in ("math", "gsm8k")
+            else self.config.default_max_steps
+        )
         seed = int(meta_info.get("seed", self.config.seed_base + sample_index))
         raw_prompt = sample.get("raw_prompt")
         reward_model = sample.get("reward_model")
@@ -346,7 +350,7 @@ class VeRLAdapter(BaseAdapter):
                 "stop_conditions": ["done", "max_steps", "timeout"],
             },
             "reward_config": {
-                "reward_type": "rubric" if env_type == "math" else "external",
+                "reward_type": "rubric" if env_type in ("math", "gsm8k") else "external",
                 "rubric_config": reward_model,
             },
             "metadata": metadata,
@@ -365,10 +369,11 @@ class VeRLAdapter(BaseAdapter):
         )
 
     def env_type_for_sample(self, sample: dict[str, Any]) -> str:
+        # data_source（如 gsm8k）比泛化 task_name（如 math）更具体，优先匹配。
         fields = [
+            str(sample.get("data_source") or ""),
             str(sample.get("task_name") or ""),
             str(sample.get("ability") or ""),
-            str(sample.get("data_source") or ""),
         ]
         lowered = [field.lower() for field in fields if field]
 

@@ -4,6 +4,7 @@ use tonic::transport::Server;
 use uenv_adapter_core::pb::adapter_core_service_server::AdapterCoreServiceServer;
 use uenv_adapter_core::{
     AdapterCore, AdapterCoreServiceImpl, FakeEpisodeService, MathProxyEpisodeService,
+    UEnvServeEpisodeService,
 };
 
 #[tokio::main]
@@ -40,9 +41,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .serve(addr)
                 .await?;
         }
+        "serve" => {
+            let endpoint = std::env::var("UENV_SERVER_ENDPOINT")
+                .unwrap_or_else(|_| "127.0.0.1:50051".to_string());
+            let serve = UEnvServeEpisodeService::connect(&endpoint).await?;
+            let core = AdapterCore::new(serve);
+            let service = AdapterCoreServiceImpl::new(core);
+            println!("uenv-adapter-core serve mode -> {endpoint}");
+            Server::builder()
+                .add_service(AdapterCoreServiceServer::new(service))
+                .serve(addr)
+                .await?;
+        }
         other => {
             return Err(format!(
-                "unsupported UENV_ADAPTER_CORE_REWARD_MODE={other}; expected fixed or math_proxy"
+                "unsupported UENV_ADAPTER_CORE_REWARD_MODE={other}; expected fixed, math_proxy, or serve"
             )
             .into());
         }
