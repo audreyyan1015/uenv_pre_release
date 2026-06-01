@@ -143,6 +143,7 @@ impl EpisodeExecutor {
                 current_reward: reward,
                 phase: "step_complete".to_string(),
                 last_step: Some(step_record),
+                ..Default::default()
             },
             result,
             reward,

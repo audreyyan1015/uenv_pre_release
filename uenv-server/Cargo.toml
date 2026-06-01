@@ -1,16 +1,13 @@
-[workspace]
-
 [package]
 name = "uenv-server"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "uenv-server"
-path = "src/main.rs"
 
+[lib]
+name = "uenv_server"
+path = "src/lib.rs"
 [dependencies]
-clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tonic = "0.14"
@@ -30,3 +27,6 @@ thiserror = "2"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }

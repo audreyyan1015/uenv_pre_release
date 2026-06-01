@@ -283,11 +283,7 @@ class VeRLAdapter(BaseAdapter):
 
         task_name = self._task_name(sample)
         env_type = self.env_type_for_sample(sample)
-        max_steps = (
-            self.config.math_max_steps
-            if env_type == "math"
-            else self.config.default_max_steps
-        )
+        max_steps = self.config.math_max_steps if env_type == "math" else self.config.default_max_steps
         seed = int(meta_info.get("seed", self.config.seed_base + sample_index))
         raw_prompt = sample.get("raw_prompt")
         reward_model = sample.get("reward_model")
@@ -369,11 +365,10 @@ class VeRLAdapter(BaseAdapter):
         )
 
     def env_type_for_sample(self, sample: dict[str, Any]) -> str:
-        # data_source（如 gsm8k）比泛化 task_name（如 math）更具体，优先匹配。
         fields = [
-            str(sample.get("data_source") or ""),
             str(sample.get("task_name") or ""),
             str(sample.get("ability") or ""),
+            str(sample.get("data_source") or ""),
         ]
         lowered = [field.lower() for field in fields if field]
 

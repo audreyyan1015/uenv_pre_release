@@ -33,4 +33,3 @@ crc32fast = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
-uenv-mock-scheduler = { path = "../uenv-mock-scheduler" }

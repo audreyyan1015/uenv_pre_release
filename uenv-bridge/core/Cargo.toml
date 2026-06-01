@@ -1,13 +1,18 @@
-[workspace]
-
 [package]
 name = "uenv-adapter-core"
 version = "0.1.0"
 edition = "2024"
 description = "Rust adapter core for Python training-framework shims"
 
+[[bin]]
+name = "uenv-adapter-core"
+path = "src/main.rs"
+
+[lib]
+name = "uenv_adapter_core"
+path = "src/lib.rs"
+
 [dependencies]
-async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,7 +22,7 @@ tokio-stream = "0.1"
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
-prost-types = "0.14"
+uenv-server = { path = "../../uenv-server" }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

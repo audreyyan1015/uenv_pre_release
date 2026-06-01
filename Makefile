@@ -9,7 +9,7 @@ PROTO_WORKER = uenv-worker/proto/worker_service.proto
 PROTO_HUB    = uenv-hub/proto/hub.proto
 PROTO_SCHED  = $(PROTO_ROOT)/uenv/v1/scheduler.proto
 PROTO_PLUGIN = plugin_proto/uenv/plugin/v1/plugin.proto
-PROTO_ADAPTER_CORE = uenv-bridge/proto/adapter_core.proto
+PROTO_ADAPTER_CORE = $(PROTO_ROOT)/uenv/v1/adapter_core.proto
 PYTHON ?= python3
 
 proto: proto-server proto-worker proto-mock-scheduler proto-hub proto-bridge proto-plugin proto-adapter-core
@@ -70,11 +70,11 @@ proto-plugin:
 
 proto-adapter-core:
 	mkdir -p uenv-bridge/src/uenv/bridge/gen
-	cd uenv-bridge && $(PYTHON) -m grpc_tools.protoc \
-		-I=proto \
-		proto/adapter_core.proto \
-		--python_out=src/uenv/bridge/gen \
-		--grpc_python_out=src/uenv/bridge/gen
+	$(PYTHON) -m grpc_tools.protoc \
+		-I=$(PROTO_ROOT) \
+		$(PROTO_ADAPTER_CORE) \
+		--python_out=uenv-bridge/src/uenv/bridge/gen \
+		--grpc_python_out=uenv-bridge/src/uenv/bridge/gen
 
 # ─── Build (每个 part 独立编译，target 在各自目录内) ──────────
 build: build-server build-worker build-mock-scheduler build-hub build-adapter-core

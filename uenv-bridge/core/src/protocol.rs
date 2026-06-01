@@ -1,137 +1,156 @@
+// =============================================================================
+// adapter core 内部数据结构定义
+//
+// 这个文件定义的类型用于 adapter core 内部的数据流转，分为两层：
+//
+// 【batch/sample 层】
+//   Python 通过 gRPC 发来的数据以"批次（batch）"为单位，
+//   每个批次包含多个"样本（sample）"，每个样本对应一次 VeRL rollout。
+//   这一层的类型与 adapter_core.proto 中定义的消息一一对应：
+//     ExecuteBatchRequest  ←→  pb::ExecuteBatchRequest
+//     ExecuteBatchResponse ←→  pb::ExecuteBatchResponse
+//     SampleEnvelope       ←→  pb::SampleEnvelope
+//     SampleResult         ←→  pb::SampleResult
+//
+//   这些类型的作用是把 proto 生成的类型（包含 tonic/prost 专用字段）
+//   转换成普通的 Rust 结构体，方便后续逻辑处理。
+//
+// 【错误类型】
+//   CoreError 统一表示 adapter core 处理过程中可能出现的所有错误，
+//   供 gRPC service 层捕获并转换成 tonic::Status 返回给客户端。
+//
+// 注意：EpisodeRequest / EpisodeResult 等 episode 级别的类型
+// 直接使用 uenv_server::proto 中由 server.proto 生成的类型，
+// 不在这个文件中重复定义。
+// =============================================================================
+
 use serde::{Deserialize, Serialize};
 use tonic::Status;
 
 use crate::pb;
+use uenv_server::EpisodeServiceError;
 
+// -----------------------------------------------------------------------------
+// 错误类型
+// -----------------------------------------------------------------------------
+
+/// adapter core 处理过程中的错误类型。
+///
+/// thiserror::Error 宏自动实现了标准库的 Error trait，
+/// 并根据 #[error("...")] 属性生成 Display 实现。
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
+    /// 输入的 SampleEnvelope 格式不合法，例如缺少必填字段或有重复的 request_id。
     #[error("invalid envelope: {0}")]
     InvalidEnvelope(String),
+
+    /// EpisodeService 返回的结果不合法，例如数量与输入不匹配，
+    /// 或返回了未在输入中出现的 request_id。
     #[error("invalid episode result: {0}")]
     InvalidEpisodeResult(String),
+
+    /// EpisodeService 执行失败，例如调度超时或 Worker 返回错误。
     #[error("episode service failed: {0}")]
     EpisodeService(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecuteBatchRequest {
-    pub request_id: String,
-    pub batch_id: String,
-    pub samples: Vec<SampleEnvelope>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecuteBatchResponse {
-    pub request_id: String,
-    pub batch_id: String,
-    pub results: Vec<SampleResult>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SampleEnvelope {
-    pub request_id: String,
-    pub batch_id: String,
-    pub sample_index: u32,
-    pub framework: String,
-    pub env_type: String,
-    pub payload_json: Vec<u8>,
-    pub meta_json: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SampleResult {
-    pub request_id: String,
-    pub batch_id: String,
-    pub sample_index: u32,
-    pub status: String,
-    pub reward: f64,
-    pub done: bool,
-    pub termination_reason: String,
-    pub trajectory_json: Vec<u8>,
-    pub error_code: String,
-    pub error_message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ResourceSpec {
-    pub cpu_cores: i32,
-    pub memory_mb: i32,
-    pub gpu_count: i32,
-    pub gpu_type: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EpisodeRequest {
-    pub request_id: String,
-    pub env_type: String,
-    pub payload: Vec<u8>,
-    pub mode: i32,
-    pub max_steps: i32,
-    pub resource_spec: ResourceSpec,
-    pub model_endpoint: String,
-    pub seed: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct StepRecord {
-    pub step_index: i32,
-    pub observation: Vec<u8>,
-    pub action: Vec<u8>,
-    pub reward: f64,
-    pub terminated: bool,
-    pub truncated: bool,
-    pub info: std::collections::BTreeMap<String, String>,
-    pub duration_ms: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Trajectory {
-    pub steps: Vec<StepRecord>,
-    pub total_reward: f64,
-    pub total_steps: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct EpisodeSummary {
-    pub total_reward: f64,
-    pub total_steps: i32,
-    pub total_duration_ms: i64,
-    pub terminate_reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EpisodeResult {
-    pub request_id: String,
-    pub status: String,
-    pub trajectory: Trajectory,
-    pub summary: EpisodeSummary,
-    pub error_code: Option<i32>,
-    pub error_message: String,
-}
-
-impl EpisodeResult {
-    pub fn completed(request_id: String, reward: f64, terminate_reason: impl Into<String>) -> Self {
-        let terminate_reason = terminate_reason.into();
-        Self {
-            request_id,
-            status: "completed".to_string(),
-            trajectory: Trajectory {
-                steps: Vec::new(),
-                total_reward: reward,
-                total_steps: 1,
-            },
-            summary: EpisodeSummary {
-                total_reward: reward,
-                total_steps: 1,
-                total_duration_ms: 0,
-                terminate_reason,
-            },
-            error_code: None,
-            error_message: String::new(),
-        }
+/// 把 EpisodeServiceError 自动转换为 CoreError::EpisodeService。
+/// 这样在 async 函数中可以用 ? 运算符直接传播 EpisodeServiceError，
+/// 而不需要手动写 .map_err(|e| CoreError::EpisodeService(e.to_string()))。
+impl From<EpisodeServiceError> for CoreError {
+    fn from(e: EpisodeServiceError) -> Self {
+        CoreError::EpisodeService(e.to_string())
     }
 }
 
+// -----------------------------------------------------------------------------
+// batch/sample 层数据结构
+// 这些结构体是对 adapter_core.proto 消息类型的 Rust 原生镜像，
+// 去掉了 proto 生成代码中与序列化相关的额外字段。
+// -----------------------------------------------------------------------------
+
+/// 一次批量执行请求，包含来自同一个训练步骤的多个样本。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteBatchRequest {
+    /// 本次请求的唯一标识符，用于日志追踪。
+    pub request_id: String,
+    /// 批次标识符，同一批次的所有样本共享同一个 batch_id。
+    pub batch_id: String,
+    /// 批次中的所有样本，每个样本对应一次模型 rollout。
+    pub samples: Vec<SampleEnvelope>,
+}
+
+/// 一次批量执行的响应，包含每个样本对应的执行结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteBatchResponse {
+    /// 与请求中相同的 request_id，方便客户端对应请求和响应。
+    pub request_id: String,
+    /// 与请求中相同的 batch_id。
+    pub batch_id: String,
+    /// 每个样本的执行结果，顺序与输入的 samples 保持一致。
+    pub results: Vec<SampleResult>,
+}
+
+/// 单个样本的输入信息，由 Python 侧的 VeRL 训练框架填充。
+///
+/// 每个 SampleEnvelope 对应 VeRL 一次 rollout 的结果：
+/// 模型根据 prompt 生成了一段回复，该回复的文本被序列化进 payload_json，
+/// 需要通过 UEnv 环境评估得到 reward 分数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SampleEnvelope {
+    /// 本样本在当前批次中的唯一标识符，用于把执行结果映射回对应的样本。
+    pub request_id: String,
+    /// 所属批次的标识符。
+    pub batch_id: String,
+    /// 样本在批次中的下标（0-based），用于保持结果顺序。
+    pub sample_index: u32,
+    /// 产生此样本的训练框架名称，例如 "verl"。
+    pub framework: String,
+    /// 需要执行的环境类型，例如 "math"、"gsm8k"，用于调度器选择合适的 Worker。
+    pub env_type: String,
+    /// 样本的详细信息，序列化为 JSON 字节。
+    /// 包含 env_config（环境配置）、episode_config（执行配置）、
+    /// reward_config（reward 计算配置）、model_endpoint（模型端点）等字段。
+    pub payload_json: Vec<u8>,
+    /// 附加元数据，序列化为 JSON 字节，供调试和追踪使用。
+    pub meta_json: Vec<u8>,
+}
+
+/// 单个样本的执行结果，由 UEnv 环境计算得出。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SampleResult {
+    /// 与输入 SampleEnvelope 相同的 request_id，用于对应输入和输出。
+    pub request_id: String,
+    /// 所属批次的标识符。
+    pub batch_id: String,
+    /// 样本在批次中的下标，与输入的 sample_index 一致。
+    pub sample_index: u32,
+    /// 执行状态字符串，例如 "completed"、"failed"、"timeout"。
+    pub status: String,
+    /// 本次 episode 的总 reward 值，这是 VeRL 训练最终使用的分数。
+    pub reward: f64,
+    /// episode 是否已结束（completed/failed/timeout 均视为结束）。
+    pub done: bool,
+    /// episode 终止的原因，例如 "exact_match"、"env_error"。
+    pub termination_reason: String,
+    /// 完整的交互轨迹，序列化为 JSON 字节。MVP 阶段可以为空。
+    pub trajectory_json: Vec<u8>,
+    /// 错误码字符串（仅在 status 为 "failed" 时有值）。
+    pub error_code: String,
+    /// 错误信息（仅在 status 为 "failed" 时有值）。
+    pub error_message: String,
+}
+
+// -----------------------------------------------------------------------------
+// proto 类型 ↔ 内部类型的转换实现
+//
+// TryFrom / From trait 是 Rust 标准库的类型转换接口：
+//   TryFrom 表示可能失败的转换，返回 Result
+//   From    表示一定成功的转换，直接返回目标类型
+// -----------------------------------------------------------------------------
+
+/// 把 proto 生成的 ExecuteBatchRequest 转换为内部类型。
+/// 如果任意 SampleEnvelope 转换失败，整个转换失败并返回 tonic::Status 错误。
 impl TryFrom<pb::ExecuteBatchRequest> for ExecuteBatchRequest {
     type Error = Status;
 
@@ -149,6 +168,7 @@ impl TryFrom<pb::ExecuteBatchRequest> for ExecuteBatchRequest {
     }
 }
 
+/// 把内部的 ExecuteBatchResponse 转换为 proto 生成的类型，用于发送给客户端。
 impl From<ExecuteBatchResponse> for pb::ExecuteBatchResponse {
     fn from(value: ExecuteBatchResponse) -> Self {
         Self {
@@ -159,6 +179,7 @@ impl From<ExecuteBatchResponse> for pb::ExecuteBatchResponse {
     }
 }
 
+/// 把 proto 生成的 SampleEnvelope 转换为内部类型。
 impl TryFrom<pb::SampleEnvelope> for SampleEnvelope {
     type Error = Status;
 
@@ -175,6 +196,7 @@ impl TryFrom<pb::SampleEnvelope> for SampleEnvelope {
     }
 }
 
+/// 把内部的 SampleResult 转换为 proto 生成的类型，用于发送给客户端。
 impl From<SampleResult> for pb::SampleResult {
     fn from(value: SampleResult) -> Self {
         Self {
