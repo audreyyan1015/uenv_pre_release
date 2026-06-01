@@ -43,6 +43,8 @@ pub struct EnvConfig {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PoolConfig {
     pub warmup_size: u32,
+    #[serde(default)]
+    pub prewarm_on_startup: bool,
     pub max_idle_time: u32,
     pub cool_timeout: u32,
     pub max_episode_count: u32,
@@ -111,6 +113,7 @@ impl Default for WorkerConfig {
             },
             pool: PoolConfig {
                 warmup_size: 2,
+                prewarm_on_startup: false,
                 max_idle_time: 300,
                 cool_timeout: 60,
                 max_episode_count: 1000,
@@ -191,6 +194,10 @@ impl WorkerConfig {
             if let Ok(p) = v.parse::<u32>() {
                 self.pool.warmup_size = p;
             }
+        }
+        if let Ok(v) = std::env::var("UENV_PREWARM_ON_STARTUP") {
+            self.pool.prewarm_on_startup =
+                matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
         }
         if let Ok(v) = std::env::var("UENV_MAX_IDLE_TIME") {
             if let Ok(p) = v.parse::<u32>() {

@@ -8,7 +8,8 @@ Worker 是 UEnv **Layer 2 Worker Pool** 的执行节点：gRPC **Server** 接收
 
 - **Episode 执行**：`EpisodeExecutor` 管理 reset → N×step → close（M2+）
 - **模型回调**：`ModelClient` 直连推理服务（HTTP/gRPC）
-- **预热池**：`WarmupPool` 管理进程级插件实例（M3+）
+- **预热池**：`WarmupPool` 本地持有 Warm 实例；缺实例时自行 `spawn`；Episode 结束归还 Warm 复用（M6+）
+- **Hub 元数据**：`EnvResolver` 在 spawn 前拉取/合并 Hub manifest（M-5+）；制品仍用本地 `plugins/`
 - **插件子进程**：`ProcessBackend` + `plugins/math/`（M4+）；**非**内嵌 Python 主路径
 - **Worker WAL**：断连重放（schema M1 冻结，持久化 M8）
 
@@ -23,6 +24,7 @@ src/
 ├── grpc_server/         # DispatchEpisode / HealthCheck
 ├── episode/             # executor, model_client
 ├── pool/                # warmup_pool
+├── hub/                 # env_resolver, hub pull
 ├── plugin/              # host, instance, arpc (L2)
 ├── backend/             # process, podman
 ├── wal/
@@ -45,9 +47,18 @@ uenv-worker health
 
 `config/worker.example.toml` 已 **deprecated**，请迁移至 YAML/JSON。
 
-## 环境插件
+## 环境插件与按需拉起
 
 Phase 0 环境：`plugins/math/`（`env_type=math`, `ipc=proto-uds`）；GSM8K 为 `payload.dataset=gsm8k`。
+
+默认 **`prewarm_on_startup: false`**：Worker 启动不预创建实例；首条 `DispatchEpisode(env_type=math)` 时从池 acquire（池空则 spawn）。可选 Hub：
+
+```bash
+UENV_HUB_ENDPOINT=http://127.0.0.1:8080
+UENV_ENV_TYPES=math
+UENV_PREWARM_ON_STARTUP=false   # 或 true 恢复启动即 prewarm
+uenv-worker serve --config config/uenv-worker.yaml
+```
 
 `uenv-worker/python/` 为历史内嵌环境路径，**非 MVP 主路径**（Phase 1+ 或 legacy）。
 

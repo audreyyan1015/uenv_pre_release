@@ -1,6 +1,6 @@
 # UEnv 通信协议与数据结构规范
 
-> **版本**：v1（2026-05-30）  
+> **版本**：v1.1（2026-05-31）  
 > **依据**：[Docs/uenv-design-prd-v7.2.md](Docs/uenv-design-prd-v7.2.md) §4、[Docs/worker-pool-layer-design.md](Docs/worker-pool-layer-design.md) §7  
 > **Proto 权威路径**：[proto/](proto/)（L1）、[uenv-worker/proto/](uenv-worker/proto/)（Worker gRPC）、[plugin_proto/](plugin_proto/)（L2）
 
@@ -29,7 +29,7 @@ uenv-bridge (Adapter) ──gRPC──► uenv-server (UEnvService)
 | Worker ↔ Server/Mock | gRPC `ControlPlaneService` | Protobuf | 注册、心跳、结果上报 |
 | Server/Mock → Worker | gRPC `WorkerGrpcService` | Protobuf | **主动** `DispatchEpisode` |
 | Worker ↔ 插件 | Protobuf over UDS | Protobuf | L2，与 L1 隔离 |
-| Hub ↔ CLI/Server | HTTP REST | JSON | 环境元数据，非 Episode 热路径 |
+| Hub ↔ CLI/Server/Worker | HTTP REST | JSON | 环境元数据；Worker 可选启动 pull（M-5），**非 Episode 热路径** |
 | Worker ↔ 推理服务 | HTTP/gRPC | 框架自定 | 不经 Server |
 
 **冻结原则**（PRD §4.1）：
@@ -128,8 +128,8 @@ uenv-bridge (Adapter) ──gRPC──► uenv-server (UEnvService)
 message EpisodeRequest {
     string episode_id = 1;
     uint32 attempt_id = 2;
-    string env_type   = 3;              // Phase 0: "gsm8k"
-    bytes payload     = 4;                // 环境特定 JSON（如题目、配置）
+    string env_type   = 3;              // Phase 0: "math" (MathEnv)
+    bytes payload     = 4;                // UTF-8 JSON；benchmark 如 {"question":"...","dataset":"gsm8k"}
     ExecutionMode mode = 5;
     int32 max_steps   = 6;
     ResourceSpec resource_spec = 7;
@@ -149,7 +149,8 @@ message EpisodeRequest {
 
 **约定**：
 
-- `payload`、`reward_config` 为 **bytes 承载的 UTF-8 JSON**，类型约束由 Hub `interface` schema 或本地 manifest 描述
+- Phase 0 调度键为 **`env_type=math`**（MathEnv）；GSM8K 等 benchmark 通过 **`payload.dataset`**（如 `"gsm8k"`）表达，**不得**再作为独立 `env_type`
+- `payload`、`reward_config` 为 **bytes 承载的 UTF-8 JSON**，类型约束由 Hub `interface` schema 或本地 `plugins/{env_type}/manifest.yaml` 描述
 - Server 在 `DispatchEpisode` 前 MUST 填充 `dispatch_lease_id`、`lease_expire_at`、`scheduler_epoch`
 - Episode 级重试由 Scheduler 递增 `attempt_id` 触发；Worker **禁止**对 `env.step()` 默认自动重试
 
@@ -212,15 +213,16 @@ MVP 阶段 Worker 至少发送 1 条 `STEP_COMPLETE`；`PACING` 等为 Phase 1+ 
 
 ---
 
-## 5. 典型时序（GSM8K 单轮）
+## 5. 典型时序（MathEnv / gsm8k benchmark 单轮）
 
 ```
 Worker                          Server/Mock                         Bridge
   |                                 |                                  |
-  |-- RegisterWorker -------------->|                                  |
+  |-- RegisterWorker (math) ------->|                                  |
   |<-- server_epoch -----------------|                                  |
   |-- WorkerHeartbeat (stream) ----->|                                  |
   |                                 |<-------- SubmitEpisode ----------|
+  |                                 |  env_type=math, payload.dataset  |
   |                                 |  (schedule + fill lease)         |
   |<-- DispatchEpisode -------------|                                  |
   |-- StreamReport (step_complete) ->|                                  |
@@ -235,9 +237,9 @@ Worker                          Server/Mock                         Bridge
 | Crate | 实现的 Service | 作为 Client 调用 |
 |-------|----------------|------------------|
 | `uenv-server` | `UEnvService`、`AdminService`、`ControlPlaneService` | `WorkerGrpcService` |
-| `uenv-worker` | `WorkerGrpcService` | `ControlPlaneService` |
+| `uenv-worker` | `WorkerGrpcService` | `ControlPlaneService`；可选 Hub manifest pull（M-5） |
 | `uenv-mock-scheduler` | `ControlPlaneService` | `WorkerGrpcService` |
-| `uenv-bridge` | — | `UEnvService`（Python，待完善） |
+| `uenv-bridge` | — | `UEnvService`（serve mode 经 `serve_client.rs`；三联调待验收） |
 | `uenv-hub` | HTTP REST | — |
 
 ---
@@ -249,8 +251,9 @@ Worker                          Server/Mock                         Bridge
 | `UENV_SCHEDULER_MODE` | `remote` \| `mock` |
 | `UENV_SERVER_ENDPOINT` | ControlPlane 地址（Server 或 Mock） |
 | `UENV_WORKER_LISTEN` | Worker gRPC 对外地址（供 Dispatch 回连） |
-| `UENV_ENV_TYPES` | 如 `gsm8k` |
-| `UENV_PLUGIN_DIR` | 插件目录 |
+| `UENV_ENV_TYPES` | 如 `math`（Phase 0 MathEnv） |
+| `UENV_PLUGIN_DIR` | 插件目录（默认 `./plugins`，含 `math/`） |
+| `UENV_HUB_ENDPOINT` | Hub HTTP 基址；设置后可选启动 manifest pull（M-5） |
 
 完整配置见 `config/uenv-worker.yaml`。
 
@@ -260,6 +263,7 @@ Worker                          Server/Mock                         Bridge
 
 | 日期 | 变更 |
 |------|------|
+| 2026-05-31 | Phase 0 `env_type` 示例改为 **`math`**；GSM8K 通过 `payload.dataset`；补充 Hub M-5 浅层 pull 与 `UENV_HUB_ENDPOINT` |
 | 2026-05-30 | 统一 `uenv-server` 至共享 proto；删除 `uenv-server/proto/server.proto` 重复定义；`StreamReport` 增加 `ReportType`；Server 实现 `ControlPlaneService` + `WorkerGrpcService` 客户端 |
 
 ---

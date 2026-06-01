@@ -29,7 +29,7 @@ UEnv 是一个**训练框架无关的分布式环境执行框架**，为 LLM 后
 ┌──────────────────────────┐
 │  uenv-worker              │  Layer 2 Worker Pool 执行层
 └──────────┬───────────────┘
-           │ plugins/gsm8k 子进程（L2 Proto/UDS）
+           │ plugins/math 子进程（L2 Proto/UDS；dataset=gsm8k 在 payload）
            ▼
 ┌──────────────────────────┐
 │  uenv-hub                 │  环境注册（非 Worker Pool MVP 阻塞项）
@@ -48,7 +48,7 @@ uenv-mock-scheduler (或 uenv-server M7+)
   uenv-worker
        │ L2 plugin_proto / UDS
        ▼
-  plugins/gsm8k/
+  plugins/math/
 ```
 
 权威文档：[Docs/worker-pool-layer-design.md](./Docs/worker-pool-layer-design.md)

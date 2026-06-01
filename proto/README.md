@@ -37,7 +37,11 @@ Worker 侧 gRPC Server 定义见 `uenv-worker/proto/worker_service.proto`（`Wor
 
 1. L1 proto 不得出现 UDS 路径、插件 PID、L2 message 类型。
 2. `plugin_proto/` 不得被 Scheduler / Server crate 引用。
-3. Phase 0 默认 `env_type = "gsm8k"`。
+3. Phase 0 默认 **`env_type = "math"`**（MathEnv）；GSM8K benchmark 通过 L1 `payload` 内 `"dataset": "gsm8k"` 表达（见 [PROTOCOL.md](../PROTOCOL.md) §4.1）。
+
+## Hub ↔ Worker（M-5，浅层）
+
+Worker 启动时可 `GET /api/v1/envs/{env_type}/versions/latest`，解析 `env_type` / `version` / `supported_backends` 并打日志；Hub 不可达时降级本地 `plugins/`。**尚未**下载 manifest 制品或替换本地插件目录（见 [260530-full-stack-integration-gaps.md](../Docs/260530-full-stack-integration-gaps.md) P2-2）。
 
 ## 代码生成
 

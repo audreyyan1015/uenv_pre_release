@@ -63,6 +63,25 @@ impl PluginHost {
         envs
     }
 
+    pub async fn has_env_type(&self, env_type: &str) -> bool {
+        let state = self.state.lock().await;
+        state.manifests.contains_key(env_type)
+    }
+
+    pub async fn get_manifest(&self, env_type: &str) -> Option<PluginManifest> {
+        let state = self.state.lock().await;
+        state.manifests.get(env_type).cloned()
+    }
+
+    pub async fn register_manifest(
+        &self,
+        manifest: PluginManifest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut state = self.state.lock().await;
+        state.manifests.insert(manifest.env_type.clone(), manifest);
+        Ok(())
+    }
+
     pub async fn spawn(
         &self,
         env_type: &str,

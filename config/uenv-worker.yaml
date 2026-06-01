@@ -19,7 +19,8 @@ env:
   plugin_dir: "./plugins"       # UENV_PLUGIN_DIR
 
 pool:
-  warmup_size: 2                # UENV_WARMUP_POOL_SIZE
+  warmup_size: 2                # UENV_WARMUP_POOL_SIZE（目标 Warm 实例数；缺实例时按需拉起）
+  prewarm_on_startup: false     # UENV_PREWARM_ON_STARTUP；false=首条 Episode 再创建实例
   max_idle_time: 300            # UENV_MAX_IDLE_TIME
   cool_timeout: 60              # UENV_COOL_TIMEOUT
   max_episode_count: 1000       # UENV_MAX_EPISODE_COUNT
@@ -37,4 +38,4 @@ observability:
 
 hub:
   enabled: false                   # UENV_HUB_ENABLED
-  endpoint: "http://127.0.0.1:8080"  # UENV_HUB_ENDPOINT（设置后自动启用 pull）
+  endpoint: "http://127.0.0.1:8080"  # UENV_HUB_ENDPOINT（设置后自动启用；缺 manifest/首 spawn 时拉元数据）

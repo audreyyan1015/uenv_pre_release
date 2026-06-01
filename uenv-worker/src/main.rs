@@ -43,6 +43,7 @@ async fn main() {
                 supported_env_types: cfg.env.types.clone(),
                 plugin_dir: cfg.env.plugin_dir.clone(),
                 warmup_size: cfg.pool.warmup_size,
+                prewarm_on_startup: cfg.pool.prewarm_on_startup,
                 max_idle_time_secs: cfg.pool.max_idle_time,
                 cool_timeout_secs: cfg.pool.cool_timeout,
                 max_episode_count: cfg.pool.max_episode_count,

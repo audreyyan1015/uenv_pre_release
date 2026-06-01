@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -9,7 +10,7 @@ use tonic::transport::Server;
 use crate::control_plane::client::{ControlPlane, SchedulerControlPlaneClient, SchedulerMode};
 use crate::episode::executor::EpisodeExecutor;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
-use crate::hub;
+use crate::hub::{self, EnvResolver};
 use crate::metrics::MetricsExporter;
 use crate::plugin::host::PluginHost;
 use crate::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
@@ -25,6 +26,7 @@ pub struct WorkerRuntime {
     pub supported_env_types: Vec<String>,
     pub plugin_dir: String,
     pub warmup_size: u32,
+    pub prewarm_on_startup: bool,
     pub max_idle_time_secs: u32,
     pub cool_timeout_secs: u32,
     pub max_episode_count: u32,
@@ -38,19 +40,44 @@ pub struct WorkerRuntime {
 
 impl WorkerRuntime {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
+        let hub_endpoint = if self.hub_enabled {
+            self.hub_endpoint.clone()
+        } else {
+            None
+        };
+        let env_resolver = Arc::new(EnvResolver::new(
+            plugin_host.clone(),
+            PathBuf::from(&self.plugin_dir),
+            hub_endpoint.clone(),
+        ));
+
         if self.hub_enabled {
-            if let Some(endpoint) = &self.hub_endpoint {
+            if let Some(endpoint) = &hub_endpoint {
                 for result in hub::sync_env_types_from_hub(endpoint, &self.supported_env_types).await {
                     match result {
-                        Ok(summary) => tracing::info!(
-                            trace_id = "runtime",
-                            worker_id = %self.worker_id,
-                            episode_id = "-",
-                            env_type = %summary.env_type,
-                            version = %summary.version,
-                            backends = %summary.supported_backends.join(","),
-                            msg = "hub_manifest_pulled"
-                        ),
+                        Ok(summary) => {
+                            if let Err(err) = env_resolver.apply_hub_summary(&summary).await {
+                                tracing::warn!(
+                                    trace_id = "runtime",
+                                    worker_id = %self.worker_id,
+                                    episode_id = "-",
+                                    env_type = %summary.env_type,
+                                    error = %err,
+                                    msg = "hub_manifest_apply_failed_using_local"
+                                );
+                            } else {
+                                tracing::info!(
+                                    trace_id = "runtime",
+                                    worker_id = %self.worker_id,
+                                    episode_id = "-",
+                                    env_type = %summary.env_type,
+                                    version = %summary.version,
+                                    backends = %summary.supported_backends.join(","),
+                                    msg = "hub_manifest_pulled"
+                                );
+                            }
+                        }
                         Err(err) => tracing::warn!(
                             trace_id = "runtime",
                             worker_id = %self.worker_id,
@@ -69,8 +96,6 @@ impl WorkerRuntime {
                 );
             }
         }
-
-        let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
         let loaded_envs = plugin_host.supported_envs().await;
         tracing::info!(
             trace_id = "runtime",
@@ -88,7 +113,7 @@ impl WorkerRuntime {
             server_endpoint = %self.server_endpoint,
             msg = "worker_start"
         );
-        let warmup_pool = WarmupPool::new(
+        let warmup_pool = WarmupPool::with_env_resolver(
             plugin_host.clone(),
             WarmupPoolConfig {
                 warmup_size: self.warmup_size,
@@ -96,8 +121,26 @@ impl WorkerRuntime {
                 cool_timeout_secs: self.cool_timeout_secs,
                 max_episode_count: self.max_episode_count,
             },
+            Some(env_resolver),
         );
-        warmup_pool.prewarm(&self.supported_env_types).await?;
+        if self.prewarm_on_startup {
+            warmup_pool.prewarm(&self.supported_env_types).await?;
+            tracing::info!(
+                trace_id = "runtime",
+                worker_id = %self.worker_id,
+                episode_id = "-",
+                warmup_size = self.warmup_size,
+                msg = "warmup_pool_prewarmed_on_startup"
+            );
+        } else {
+            tracing::info!(
+                trace_id = "runtime",
+                worker_id = %self.worker_id,
+                episode_id = "-",
+                warmup_size = self.warmup_size,
+                msg = "warmup_pool_on_demand"
+            );
+        }
 
         let scheduler_mode: SchedulerMode = self.scheduler_mode.parse()?;
         let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(

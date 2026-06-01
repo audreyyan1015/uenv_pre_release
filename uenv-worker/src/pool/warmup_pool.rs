@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::hub::EnvResolver;
 use crate::plugin::host::PluginHost;
 use crate::plugin::instance::PluginInstance;
 
@@ -48,17 +50,39 @@ struct PoolState {
 #[derive(Clone)]
 pub struct WarmupPool {
     plugin_host: PluginHost,
+    env_resolver: Option<Arc<EnvResolver>>,
     cfg: WarmupPoolConfig,
     state: std::sync::Arc<tokio::sync::Mutex<PoolState>>,
 }
 
 impl WarmupPool {
     pub fn new(plugin_host: PluginHost, cfg: WarmupPoolConfig) -> Self {
+        Self::with_env_resolver(plugin_host, cfg, None)
+    }
+
+    pub fn with_env_resolver(
+        plugin_host: PluginHost,
+        cfg: WarmupPoolConfig,
+        env_resolver: Option<Arc<EnvResolver>>,
+    ) -> Self {
         Self {
             plugin_host,
+            env_resolver,
             cfg,
             state: std::sync::Arc::new(tokio::sync::Mutex::new(PoolState::default())),
         }
+    }
+
+    async fn ensure_env_ready(
+        &self,
+        env_type: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(resolver) = &self.env_resolver {
+            resolver.ensure_before_spawn(env_type).await?;
+        } else if !self.plugin_host.has_env_type(env_type).await {
+            return Err(format!("manifest not found for env_type={env_type}").into());
+        }
+        Ok(())
     }
 
     pub async fn prewarm(
@@ -108,6 +132,7 @@ impl WarmupPool {
                 continue;
             }
 
+            self.ensure_env_ready(env_type).await?;
             let instance = self.plugin_host.spawn(env_type).await?;
             let instance_id = instance.instance_id.clone();
             let now = unix_now_secs();
@@ -223,6 +248,7 @@ impl WarmupPool {
             if warm_size >= target {
                 return Ok(());
             }
+            self.ensure_env_ready(env_type).await?;
             let instance = self.plugin_host.spawn(env_type).await?;
             let instance_id = instance.instance_id.clone();
             let now = unix_now_secs();
