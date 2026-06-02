@@ -1,0 +1,24 @@
+episode_id: "gsm8k-episode-001"
+attempt_id: 1
+env_type: "gsm8k"
+payload: "{\"request_id\":\"req-gsm8k-001\",\"question\":\"If 3 books cost $12, what is the cost of 5 books?\"}"
+mode: MODE_SINGLE
+max_steps: 8
+resource_spec {
+  cpu_cores: 1
+  memory_mb: 512
+  gpu_count: 0
+  gpu_type: ""
+}
+model_endpoint: "http://127.0.0.1:18080/mock-llm"
+seed: 42
+correlation_id: "corr-gsm8k-001"
+timeout_seconds: 120
+reward_config: "{\"type\":\"rule_reward\",\"target\":\"20\"}"
+dispatch_lease_id: "lease-fixture-001"
+lease_expire_at {
+  seconds: 1800000000
+  nanos: 0
+}
+scheduler_epoch: 1
+dispatch_token: "fixture-token-001"

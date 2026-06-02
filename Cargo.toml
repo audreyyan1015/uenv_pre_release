@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "uenv-worker",
+    "uenv-server",
+    "uenv-bridge/core",
+]

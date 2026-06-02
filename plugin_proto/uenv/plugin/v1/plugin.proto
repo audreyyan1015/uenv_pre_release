@@ -1,0 +1,45 @@
+syntax = "proto3";
+package uenv.plugin.v1;
+
+// L2 插件 IPC — 仅 Worker 内部使用（§2.4）
+
+service PluginService {
+    rpc Reset(ResetRequest) returns (ResetResponse);
+    rpc Step(StepRequest) returns (StepResponse);
+    rpc Close(CloseRequest) returns (CloseResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ResetRequest {
+    optional int32 seed = 1;
+}
+
+message ResetResponse {
+    bytes observation = 1;
+    map<string, string> info = 2;
+}
+
+message StepRequest {
+    bytes action = 1;
+}
+
+message StepResponse {
+    bytes observation = 1;
+    double reward = 2;
+    bool terminated = 3;
+    bool truncated = 4;
+    map<string, string> info = 5;
+}
+
+message CloseRequest {}
+
+message CloseResponse {
+    bool ok = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    bool ok = 1;
+    string message = 2;
+}

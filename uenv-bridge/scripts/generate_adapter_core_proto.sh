@@ -2,12 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE_ROOT="$(cd "$ROOT/.." && pwd)"
 PYTHON_BIN="${PYTHON:-$(command -v python3 || command -v python)}"
 
 mkdir -p "$ROOT/src/uenv/bridge/gen"
 "$PYTHON_BIN" -m grpc_tools.protoc \
-  -I="$ROOT/proto" \
-  "$ROOT/proto/adapter_core.proto" \
+  -I="$WORKSPACE_ROOT/proto" \
+  "$WORKSPACE_ROOT/proto/uenv/v1/adapter_core.proto" \
   --python_out="$ROOT/src/uenv/bridge/gen" \
   --grpc_python_out="$ROOT/src/uenv/bridge/gen"
 

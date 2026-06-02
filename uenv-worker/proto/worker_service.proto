@@ -1,0 +1,22 @@
+syntax = "proto3";
+package uenv.worker.v1;
+
+import "uenv/v1/episode.proto";
+
+// WorkerGrpcService — Scheduler 作为 Client 主动调用 Worker
+
+service WorkerGrpcService {
+    rpc DispatchEpisode(DispatchEpisodeRequest) returns (stream uenv.v1.StreamReport);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message DispatchEpisodeRequest {
+    uenv.v1.EpisodeRequest episode = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    bool ok = 1;
+    string status = 2;
+}

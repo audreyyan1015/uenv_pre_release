@@ -1,7 +1,7 @@
 pub enum WorkerState {
-    Starting,
+    Created,
     Ready,
     Busy,
     Draining,
-    Offline,
+    Terminated,
 }

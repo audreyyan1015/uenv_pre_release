@@ -1,0 +1,78 @@
+syntax = "proto3";
+package uenv.scheduler.v1;
+
+import "uenv/v1/common.proto";
+import "uenv/v1/episode.proto";
+
+// ControlPlane — Worker 作为 Client 连接 Scheduler / Mock / Server
+
+service ControlPlaneService {
+    rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+    rpc WorkerHeartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+    rpc ReportResult(ReportResultRequest) returns (ReportResultResponse);
+    rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+}
+
+message RegisterWorkerRequest {
+    string worker_id = 1;
+    repeated string supported_env_types = 2;
+    uenv.v1.ResourceSpec resource = 3;
+    string endpoint = 4;
+    uint32 max_concurrent = 5;
+}
+
+message RegisterWorkerResponse {
+    bool accepted = 1;
+    string worker_id = 2;
+    string message = 3;
+    uint64 server_epoch = 4;
+}
+
+message HeartbeatRequest {
+    string worker_id = 1;
+    int32 load = 2;
+    int32 max_load = 3;
+    int64 timestamp_ms = 4;
+    uint64 server_epoch = 5;
+}
+
+message HeartbeatResponse {
+    bool ok = 1;
+    DrainCommand drain = 2;
+    uint64 server_epoch = 3;
+    int32 next_heartbeat_interval_ms = 4;
+}
+
+message DrainCommand {
+    bool drain = 1;
+    int32 grace_period_sec = 2;
+}
+
+message ReportResultRequest {
+    string idempotency_key = 1;
+    string worker_id = 2;
+    uint64 server_epoch = 3;
+    uenv.v1.EpisodeResult result = 4;
+}
+
+message ReportResultResponse {
+    bool ack = 1;
+    bool duplicate = 2;
+}
+
+message ListWorkersRequest {
+    repeated string env_types = 1;
+}
+
+message WorkerInfo {
+    string worker_id = 1;
+    repeated string supported_env_types = 2;
+    int32 load = 3;
+    int32 max_load = 4;
+    string status = 5;
+    string endpoint = 6;
+}
+
+message ListWorkersResponse {
+    repeated WorkerInfo workers = 1;
+}
