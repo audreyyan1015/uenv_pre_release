@@ -1,8 +1,6 @@
 # uenv-bridge
 
-> **术语对照**：Worker Pool 设计文档中的 `uenv-adapter` 与本 crate **`uenv-bridge`** 指同一层（训练框架 ↔ gRPC 协议转换）。目录名暂不强制重命名。
-
-`uenv-bridge` 是 UEnv 面向训练框架的适配层，负责将各训练框架的原生协议转换为统一的 Episode 请求，让同一套环境实现可在不同框架间无缝切换。当前主要接入目标是 VeRL：把 VeRL 的 `DataProto` batch 转成 UEnv 可理解的 episode 请求，再把 UEnv/Serve 的结果转回 VeRL 训练所需的 reward。
+`uenv-bridge` 是 UEnv 面向训练框架的适配层。目前主要接入目标是 VeRL。它负责把 VeRL 的 `DataProto` batch 转成 UEnv 可以理解的 episode 请求，再把 UEnv/Serve 的结果转回 VeRL 训练所需的 reward。
 
 当前实现已经验证过真实 VeRL 训练链路：
 
@@ -160,7 +158,7 @@ pub trait EpisodeService: Send + Sync {
 
 ### 与当前 uenv-server 的关系
 
-L1 权威路径 `proto/uenv/v1/server.proto` 定义 server 对外 gRPC 协议（`UEnvService`、`AdminService`）；Worker 控制面见 `proto/uenv/v1/scheduler.proto`。Bridge 不要求 Serve 直接暴露给 Python；Bridge 对 Serve 的要求是 Rust adapter core 能通过本地函数调用拿到 episode 结果。
+当前 `main` 分支中的 `uenv-server/proto/server.proto` 是 server 对外和 worker 侧的 gRPC 协议，包含 `UEnvService`、`WorkerRegistration`、`WorkerExecution` 和 `AdminService`。Bridge 不要求 Serve 直接暴露给 Python；Bridge 对 Serve 的要求是 Rust adapter core 能通过本地函数调用拿到 episode 结果。
 
 如果 Serve 侧继续保持 gRPC-first 的实现，可以在 Rust adapter core 这一侧提供一个 wrapper：wrapper 对内实现 `EpisodeService`，对外再调用 Serve 已有的 scheduler/env/worker 逻辑。Bridge 只依赖 `EpisodeService` 这个函数边界。
 
@@ -182,7 +180,7 @@ async fn submit_episode_batch(
 
 ### Bridge EpisodeRequest 到 server proto 的建议映射
 
-如果 Serve 侧需要把 `uenv-bridge/core/src/protocol.rs` 里的 `EpisodeRequest` 映射到 `proto/uenv/v1/episode.proto` 里的 `uenv.v1.EpisodeRequest`，建议按下面规则处理：
+如果 Serve 侧需要把 `uenv-bridge/core/src/protocol.rs` 里的 `EpisodeRequest` 映射到 `uenv-server/proto/server.proto` 里的 `uenv.v1.EpisodeRequest`，建议按下面规则处理：
 
 ```text
 bridge EpisodeRequest.request_id
@@ -353,6 +351,62 @@ UENV_ADAPTER_CORE_DEFAULT_REWARD=0.0
 ```
 
 `fixed` 和 `math_proxy` 都是临时调试模式。真实 Serve 接入后，reward mode 应替换为 Serve backed implementation。
+
+## VeRL image 环境准备
+
+如果协作者也想本地跑真实 VeRL smoke test，可以直接构建包含 `uenv-bridge`、Rust、Cargo 和 `protoc` 的镜像。构建只需要容器运行时和网络；GPU 只在后续运行真实 GRPO 时需要。
+
+前置条件：
+
+- Linux host。
+- `podman` 或 `docker`。
+- 能访问 `docker.io/verlai/verl:vllm011.latest`，或通过 `BASE_IMAGE` 指向已有 VeRL base image。
+- 如果要跑真实训练，需要 NVIDIA GPU 和可用的 container GPU runtime。
+
+构建默认镜像：
+
+```bash
+cd uenv-bridge
+./scripts/build_verl_bridge_image.sh
+```
+
+默认会生成：
+
+```text
+localhost/uenv-bridge-verl:latest
+```
+
+如果使用 Docker 或自定义镜像名：
+
+```bash
+cd uenv-bridge
+CONTAINER_TOOL=docker IMAGE=uenv-bridge-verl:latest ./scripts/build_verl_bridge_image.sh
+```
+
+构建脚本会做一个轻量验证：确认镜像内可以 import `verl` 和 `uenv.bridge`，并检查 `rustc`、`cargo`、`protoc` 是否可用。如果只想构建不验证：
+
+```bash
+cd uenv-bridge
+./scripts/build_verl_bridge_image.sh --no-verify
+```
+
+跑真实 GRPO 前还需要准备模型和 GSM8K parquet 数据。现有训练脚本默认从 `MODEL_CACHE` 查找或下载模型，并要求 `VERL_WORKSPACE` 下存在 `data/gsm8k/train.parquet` 和 `data/gsm8k/test.parquet`：
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:latest \
+VERL_WORKSPACE=/path/to/verl/workspace \
+MODEL_CACHE=/path/to/models \
+TRAINING_STEPS=1 \
+SAMPLE_COUNT=2 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+ADAPTER_CORE_REWARD_MODE=fixed \
+ADAPTER_CORE_FAKE_REWARD=0.37 \
+./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+```
+
+没有 VeRL image 或 GPU 的协作者仍然可以做 Layer 1 到 Layer 3 的轻量验证；只有 Layer 4 的真实 GRPO smoke test 需要这个镜像和 GPU。
 
 ## 四层验证测试
 

@@ -24,9 +24,30 @@ impl RewardEngine {
             .get("target")
             .and_then(Value::as_str)
             .ok_or("rule_reward missing target")?;
+        let target = target.trim();
+        if target.is_empty() {
+            return Ok(fallback_reward);
+        }
         let action = std::str::from_utf8(action)?.trim();
-        Ok(if action == target.trim() { 1.0 } else { 0.0 })
+        // Exact match first
+        if action == target {
+            return Ok(1.0);
+        }
+        // Normalize: keep only alphanumeric + decimal chars, check if target appears
+        let norm_action = normalize_math_answer(action);
+        let norm_target = normalize_math_answer(target);
+        if !norm_target.is_empty() && norm_action.contains(norm_target.as_str()) {
+            return Ok(1.0);
+        }
+        Ok(0.0)
     }
+}
+
+fn normalize_math_answer(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .collect::<String>()
+        .to_lowercase()
 }
 
 #[cfg(test)]

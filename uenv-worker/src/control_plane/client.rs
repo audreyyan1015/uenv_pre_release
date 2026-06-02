@@ -23,7 +23,6 @@ pub struct RuntimeIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulerMode {
-    Mock,
     Remote,
 }
 
@@ -32,7 +31,6 @@ impl FromStr for SchedulerMode {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "mock" => Ok(Self::Mock),
             "remote" => Ok(Self::Remote),
             other => Err(format!("unsupported scheduler mode: {other}")),
         }
@@ -74,12 +72,6 @@ impl SchedulerControlPlaneClient {
         worker_id: String,
         ) -> Self {
         match mode {
-            SchedulerMode::Mock => tracing::info!(
-                trace_id = "control_plane",
-                episode_id = "-",
-                endpoint = %endpoint,
-                msg = "control_plane_mode_mock"
-            ),
             SchedulerMode::Remote => tracing::info!(
                 trace_id = "control_plane",
                 episode_id = "-",

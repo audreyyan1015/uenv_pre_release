@@ -1,0 +1,36 @@
+server:
+  endpoint: "127.0.0.1:50051"
+
+worker:
+  id: "auto"
+  listen: "0.0.0.0:50052"
+  max_concurrent: 4
+
+scheduler:
+  mode: "remote"
+
+env:
+  types: ["math"]
+  backend: "process"
+  plugin_dir: "./plugins"
+
+pool:
+  warmup_size: 1
+  max_idle_time: 300
+  cool_timeout: 60
+  max_episode_count: 1000
+
+logging:
+  level: "INFO"
+  file: "/var/log/uenv/worker.log"
+
+wal:
+  dir: "/tmp/uenv/wal"
+
+observability:
+  metrics_listen: "0.0.0.0:19090"
+  health_listen: "0.0.0.0:19090"
+
+hub:
+  enabled: false
+  endpoint: "http://127.0.0.1:8080"
