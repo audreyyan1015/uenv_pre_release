@@ -233,7 +233,7 @@ class VeRLAdapterTest(unittest.TestCase):
             binary.write_text(
                 "#!/usr/bin/env python3\n"
                 "import os, pathlib, time\n"
-                f"pathlib.Path({str(log_path)!r}).write_text(os.environ.get('UENV_ADAPTER_CORE_ADDR', ''))\n"
+                f"pathlib.Path({str(log_path)!r}).write_text(os.environ.get('UENV_ADDR', ''))\n"
                 "while True: time.sleep(0.1)\n",
                 encoding="utf-8",
             )

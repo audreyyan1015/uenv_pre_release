@@ -57,7 +57,7 @@ class GrpcEpisodeClientConfig:
 
 @dataclass(slots=True)
 class RustCoreClientConfig:
-    endpoint: str = "127.0.0.1:55101"
+    endpoint: str = "127.0.0.1:50051"
     timeout_seconds: float = 300.0
     startup_timeout_seconds: float = 30.0
     auto_start: bool = False
@@ -67,7 +67,7 @@ class RustCoreClientConfig:
     def from_mapping(cls, data: dict[str, Any]) -> "RustCoreClientConfig":
         core = data.get("core") or {}
         return cls(
-            endpoint=str(core.get("endpoint", "127.0.0.1:55101")),
+            endpoint=str(core.get("endpoint", "127.0.0.1:50051")),
             timeout_seconds=float(core.get("timeout_seconds", 300.0)),
             startup_timeout_seconds=float(core.get("startup_timeout_seconds", 30.0)),
             auto_start=bool(core.get("auto_start", False)),
@@ -148,7 +148,7 @@ class RustCoreEpisodeClient:
     def _start_local_core(self) -> subprocess.Popen[str]:
         command = [self._resolve_binary()]
         env = os.environ.copy()
-        env["UENV_ADAPTER_CORE_ADDR"] = self.config.endpoint
+        env["UENV_ADDR"] = self.config.endpoint
         return subprocess.Popen(
             command,
             env=env,

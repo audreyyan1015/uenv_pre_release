@@ -135,7 +135,7 @@ class UEnvBridgeRewardManager(RewardManagerBase):
             print(
                 "UEnvBridgeRewardManager "
                 f"client={os.getenv('UENV_BRIDGE_CLIENT', 'rust_core')} "
-                f"endpoint={os.getenv('UENV_ADAPTER_CORE_ENDPOINT', '127.0.0.1:55101')}",
+                f"endpoint={os.getenv('UENV_ADAPTER_CORE_ENDPOINT', '127.0.0.1:50051')}",
                 flush=True,
             )
 
@@ -153,7 +153,7 @@ class UEnvBridgeRewardManager(RewardManagerBase):
 
         return RustCoreEpisodeClient(
             RustCoreClientConfig(
-                endpoint=os.getenv("UENV_ADAPTER_CORE_ENDPOINT", "127.0.0.1:55101"),
+                endpoint=os.getenv("UENV_ADAPTER_CORE_ENDPOINT", "127.0.0.1:50051"),
                 timeout_seconds=float(os.getenv("UENV_ADAPTER_CORE_TIMEOUT_SECONDS", "300")),
                 startup_timeout_seconds=float(os.getenv("UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS", "30")),
                 auto_start=os.getenv("UENV_ADAPTER_CORE_AUTO_START", "1") not in {"0", "false", "False"},

@@ -5,7 +5,7 @@ adapter:
   mode: embedded
 
 core:
-  endpoint: "127.0.0.1:55101"
+  endpoint: "127.0.0.1:50051"
   auto_start: false
   binary: "./core/target/release/uenv-adapter-core"
   timeout_seconds: 300

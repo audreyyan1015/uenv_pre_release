@@ -112,7 +112,7 @@ from uenv.bridge.clients import RustCoreClientConfig, RustCoreEpisodeClient
 
 client = RustCoreEpisodeClient(
     RustCoreClientConfig(
-        endpoint="127.0.0.1:55101",
+        endpoint="127.0.0.1:50051",
         auto_start=True,
         binary="/tmp/uenv-bridge/core/target/debug/uenv-adapter-core",
         timeout_seconds=300,
@@ -125,7 +125,7 @@ client = RustCoreEpisodeClient(
 
 ```bash
 export UENV_BRIDGE_CLIENT=rust_core
-export UENV_ADAPTER_CORE_ENDPOINT=127.0.0.1:55101
+export UENV_ADAPTER_CORE_ENDPOINT=127.0.0.1:50051
 export UENV_ADAPTER_CORE_AUTO_START=1
 export UENV_ADAPTER_CORE_BINARY=/tmp/uenv-bridge/core/target/debug/uenv-adapter-core
 ```
@@ -342,7 +342,7 @@ core/target/debug/uenv-adapter-core
 环境变量：
 
 ```bash
-UENV_ADAPTER_CORE_ADDR=127.0.0.1:55101
+UENV_ADDR=127.0.0.1:50051
 UENV_ADAPTER_CORE_REWARD_MODE=fixed | math_proxy
 UENV_ADAPTER_CORE_FAKE_REWARD=0.37
 UENV_ADAPTER_CORE_FORMAT_REWARD=0.2
