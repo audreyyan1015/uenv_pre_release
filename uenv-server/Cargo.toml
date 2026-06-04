@@ -3,11 +3,15 @@ name = "uenv-server"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "uenv-server"
+path = "src/main.rs"
 
 [lib]
 name = "uenv_server"
 path = "src/lib.rs"
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tonic = "0.14"

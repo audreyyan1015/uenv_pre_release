@@ -31,3 +31,7 @@ wal:
 observability:
   metrics_listen: "0.0.0.0:19090"
   health_listen: "0.0.0.0:19090"
+
+hub:
+  enabled: true
+  endpoint: "http://10.10.20.143:8080"

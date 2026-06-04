@@ -8,7 +8,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use scheduler::RoundRobinScheduler;
 
-pub use service::{EpisodeService, EpisodeServiceError, UEnvEpisodeService};
+pub use service::{
+    AdminServiceImpl, EpisodeService, EpisodeServiceError, UEnvEpisodeService, UEnvServiceImpl,
+};
 
 pub fn create_default_state() -> Arc<state::ServerState> {
     Arc::new(state::ServerState::new(

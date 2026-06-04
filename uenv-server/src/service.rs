@@ -18,15 +18,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
 use prost_types::Timestamp;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::proto::v1::{
-    CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest,
-    DrainWorkerResponse, EpisodeRequest, EpisodeResult, GetServerStatusRequest,
-    ServerStatus,
+    BatchRequest, BatchResult, CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest,
+    DrainWorkerResponse, EpisodeRequest, EpisodeResult, GetResultRequest, GetServerStatusRequest,
+    ServerStatus, SubmitAck, WatchRequest,
 };
+use crate::proto::v1::u_env_service_server::UEnvService;
 use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
 use crate::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
 use crate::proto::worker::v1::DispatchEpisodeRequest;
@@ -178,6 +180,75 @@ async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::
         );
     }
     Ok(())
+}
+
+// =============================================================================
+// UEnvService gRPC：grpcurl / Bridge 提交 Episode（委托 UEnvEpisodeService）
+// =============================================================================
+
+pub struct UEnvServiceImpl {
+    episode: UEnvEpisodeService,
+}
+
+impl UEnvServiceImpl {
+    pub fn new(state: Arc<ServerState>) -> Self {
+        Self {
+            episode: UEnvEpisodeService::new(state),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl UEnvService for UEnvServiceImpl {
+    async fn submit_episode(
+        &self,
+        request: Request<EpisodeRequest>,
+    ) -> Result<Response<EpisodeResult>, Status> {
+        self.episode
+            .submit_episode(request.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    type SubmitEpisodeStreamStream = ReceiverStream<Result<EpisodeResult, Status>>;
+
+    async fn submit_episode_stream(
+        &self,
+        _request: Request<tonic::Streaming<EpisodeRequest>>,
+    ) -> Result<Response<Self::SubmitEpisodeStreamStream>, Status> {
+        Err(Status::unimplemented("stream mode not used"))
+    }
+
+    async fn submit_batch(
+        &self,
+        _request: Request<BatchRequest>,
+    ) -> Result<Response<BatchResult>, Status> {
+        Err(Status::unimplemented("batch mode not used"))
+    }
+
+    async fn submit_episode_async(
+        &self,
+        _request: Request<EpisodeRequest>,
+    ) -> Result<Response<SubmitAck>, Status> {
+        Err(Status::unimplemented("async mode is Phase 2+"))
+    }
+
+    async fn get_episode_result(
+        &self,
+        _request: Request<GetResultRequest>,
+    ) -> Result<Response<EpisodeResult>, Status> {
+        Err(Status::unimplemented("async mode is Phase 2+"))
+    }
+
+    type WatchEpisodesStream = ReceiverStream<Result<EpisodeResult, Status>>;
+
+    async fn watch_episodes(
+        &self,
+        _request: Request<WatchRequest>,
+    ) -> Result<Response<Self::WatchEpisodesStream>, Status> {
+        Err(Status::unimplemented("watch mode is Phase 2+"))
+    }
 }
 
 // =============================================================================
