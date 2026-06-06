@@ -2012,6 +2012,7 @@ name = "uenv-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "dashmap",
  "futures",
  "parking_lot",

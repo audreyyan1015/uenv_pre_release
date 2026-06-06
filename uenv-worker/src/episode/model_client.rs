@@ -13,8 +13,15 @@ impl ModelClient {
     pub async fn infer_action(
         &self,
         payload: &[u8],
-        _reward_config: &[u8],
+        reward_config: &[u8],
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let reward_json: Value = serde_json::from_slice(reward_config)?;
+        if reward_json.get("type").and_then(Value::as_str) == Some("rule_reward") {
+            if let Some(target) = reward_json.get("target").and_then(Value::as_str) {
+                return Ok(target.as_bytes().to_vec());
+            }
+        }
+
         let payload_json: Value = serde_json::from_slice(payload)?;
 
         let model_endpoint = payload_json

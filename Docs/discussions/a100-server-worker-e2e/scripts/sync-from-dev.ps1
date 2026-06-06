@@ -54,4 +54,4 @@ function Sync-ToMachine($Name) {
 $targets = if ($Target -eq "Both") { @("A", "B") } else { @($Target) }
 foreach ($t in $targets) { Sync-ToMachine $t }
 
-Write-Host "`n完成。请在各机器执行: cd $RemoteRoot && make proto && cargo build -p uenv-server -p uenv-worker --release"
+Write-Host "`n完成。请在各机器执行 remote-build.sh（见 scripts/remote-build.sh）"

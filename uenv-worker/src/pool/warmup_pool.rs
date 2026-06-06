@@ -134,6 +134,7 @@ impl WarmupPool {
 
             self.ensure_env_ready(env_type).await?;
             let instance = self.plugin_host.spawn(env_type).await?;
+            self.wait_plugin_ready(&instance.instance_id).await?;
             let instance_id = instance.instance_id.clone();
             let now = unix_now_secs();
             let mut state = self.state.lock().await;
@@ -250,6 +251,7 @@ impl WarmupPool {
             }
             self.ensure_env_ready(env_type).await?;
             let instance = self.plugin_host.spawn(env_type).await?;
+            self.wait_plugin_ready(&instance.instance_id).await?;
             let instance_id = instance.instance_id.clone();
             let now = unix_now_secs();
             let mut state = self.state.lock().await;
@@ -317,6 +319,24 @@ impl WarmupPool {
             state.active.remove(instance_id);
             state.tracked.remove(instance_id);
         }
+    }
+
+    async fn wait_plugin_ready(
+        &self,
+        instance_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for _ in 0..100 {
+            if self
+                .plugin_host
+                .health_check(instance_id)
+                .await
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        Err(format!("plugin {instance_id} not ready").into())
     }
 }
 
