@@ -250,6 +250,37 @@ class RustCoreEpisodeClient:
         termination_reason = str(self._field(result, "termination_reason", status))
         error_code = self._field(result, "error_code", None)
         error_message = str(self._field(result, "error_message", ""))
+        trajectory = self._decode_core_trajectory(result, reward=reward, done=done, termination_reason=termination_reason)
+        return EpisodeResult(
+            request_id=request_id,
+            status=status,
+            trajectory=trajectory,
+            summary=EpisodeSummary(
+                total_reward=reward,
+                total_steps=trajectory.total_steps,
+                terminate_reason=termination_reason,
+            ),
+            error_code=int(error_code) if str(error_code or "").isdigit() else None,
+            error_message=error_message,
+        )
+
+    def _decode_core_trajectory(
+        self,
+        result: Any,
+        *,
+        reward: float,
+        done: bool,
+        termination_reason: str,
+    ) -> Trajectory:
+        raw = self._field(result, "trajectory_json", b"")
+        if raw:
+            try:
+                data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+                trajectory = self._trajectory_from_jsonable(data, reward=reward)
+                if trajectory.steps:
+                    return trajectory
+            except Exception:
+                pass
 
         step = StepRecord(
             step_index=0,
@@ -257,14 +288,49 @@ class RustCoreEpisodeClient:
             terminated=done,
             info={"source": "rust_core", "termination_reason": termination_reason},
         )
-        return EpisodeResult(
-            request_id=request_id,
-            status=status,
-            trajectory=Trajectory(steps=[step], total_reward=reward, total_steps=1),
-            summary=EpisodeSummary(total_reward=reward, total_steps=1, terminate_reason=termination_reason),
-            error_code=int(error_code) if str(error_code or "").isdigit() else None,
-            error_message=error_message,
+        return Trajectory(steps=[step], total_reward=reward, total_steps=1)
+
+    def _trajectory_from_jsonable(self, data: Any, *, reward: float) -> Trajectory:
+        if isinstance(data, list):
+            steps_data = data
+            total_reward = reward
+            total_steps = len(steps_data)
+        elif isinstance(data, dict):
+            steps_data = data.get("steps") or []
+            total_reward = float(data.get("total_reward", reward) or 0.0)
+            total_steps = int(data.get("total_steps", len(steps_data)) or 0)
+        else:
+            return Trajectory(total_reward=reward)
+
+        steps = [self._step_from_jsonable(idx, item) for idx, item in enumerate(steps_data) if isinstance(item, dict)]
+        return Trajectory(steps=steps, total_reward=total_reward, total_steps=total_steps or len(steps))
+
+    def _step_from_jsonable(self, idx: int, data: dict[str, Any]) -> StepRecord:
+        info = data.get("info") or {}
+        if not isinstance(info, dict):
+            info = {}
+        return StepRecord(
+            step_index=int(data.get("step_index", idx) or 0),
+            observation=self._bytes_from_jsonable(data.get("observation", b"")),
+            action=self._bytes_from_jsonable(data.get("action", b"")),
+            reward=float(data.get("reward", 0.0) or 0.0),
+            terminated=bool(data.get("terminated", False)),
+            truncated=bool(data.get("truncated", False)),
+            info={str(key): self._string_from_jsonable(value) for key, value in info.items()},
+            duration_ms=int(data.get("duration_ms", 0) or 0),
         )
+
+    def _bytes_from_jsonable(self, value: Any) -> bytes:
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            return value.encode("utf-8")
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    def _string_from_jsonable(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     def _payload_json(self, request: EpisodeRequest) -> dict[str, Any]:
         try:

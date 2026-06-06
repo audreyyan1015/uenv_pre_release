@@ -1,39 +1,62 @@
 # uenv-bridge
 
-`uenv-bridge` 是 UEnv 面向训练框架的适配层。目前主要接入目标是 VeRL。它负责把 VeRL 的 `DataProto` batch 转成 UEnv 可以理解的 episode 请求，再把 UEnv/Serve 的结果转回 VeRL 训练所需的 reward。
+`uenv-bridge` 是 UEnv 面向训练框架的适配层。目前主要接入目标是 VeRL，当前主线是 rollout 前接管：VeRL 在 AgentLoop 阶段把 prompt/sample 交给 UEnv，后续模型生成、环境 step、reward 和 trajectory 由 UEnv Server/Worker 完成，Bridge 再把外部 rollout 结果包装回 VeRL 可训练的 `AgentLoopOutput`。
 
-当前实现已经验证过真实 VeRL 训练链路：
+仓库中仍保留 rollout 后 reward-manager 链路，作为对照基线和过渡方案。当前阶段新增和验证的重点是 pre-rollout Route A。
 
-- 真实 `verl.trainer.main_ppo` 1-step GRPO。
-- 真实 `verl.trainer.main_ppo` 2-step GRPO。
-- VeRL reward worker 通过本地 gRPC 调 Rust adapter core。
-- Rust adapter core 返回 reward 后，VeRL 指标中能看到 `critic/score/*` 和 `critic/rewards/*`。
+当前实现已经覆盖：
+
+- `UEnvAgentLoop` 在 VeRL rollout 前构造 `EpisodeRequest`。
+- Python 通过本地 gRPC 调 Rust adapter core。
+- Rust adapter core 保留 UEnv 返回的 `trajectory`，使 Python 能恢复 `response_ids`、`response_mask` 和 reward。
+- 真实 `verl.trainer.main_ppo` 1-step pre-rollout AgentLoop smoke test。
 
 ## 当前架构
 
+当前主线：
+
 ```text
-VeRL trainer / reward worker
+VeRL trainer
         |
-        | Python import
+        | AgentLoop before rollout generation
         v
-UEnvBridgeRewardManager
+UEnvAgentLoop
         |
-        | DataProto -> EpisodeRequest
-        v
-VeRLAdapter
-        |
-        | local gRPC, adapter_core.proto
+        | EpisodeRequest
         v
 Rust adapter core
         |
         | Rust trait / function call
         v
 UEnv Serve / UEnv Server implementation
+        |
+        | model generation + env step + reward + trajectory
+        v
+Rust adapter core
+        |
+        | trajectory_json + reward
+        v
+UEnvAgentLoop
+        |
+        | AgentLoopOutput(response_ids, response_mask, reward_score)
+        v
+VeRL GRPO trainer
 ```
 
-重要边界：
+保留的 rollout 后对照基线：
 
-- Python 侧只处理 VeRL 对象：`DataProto`、tokenizer、tensor、`non_tensor_batch`、`rm_scores`。
+```text
+VeRL trainer / reward worker
+        -> UEnvBridgeRewardManager
+        -> VeRLAdapter
+        -> Rust adapter core
+        -> reward result
+        -> VeRL rm_scores
+```
+
+当前阶段的重要边界：
+
+- Python 侧只处理 VeRL 对象：AgentLoop kwargs、tokenizer、prompt ids、`AgentLoopOutput`；后置基线中才处理 `DataProto`、`rm_scores`。
 - Python 和 Rust adapter core 之间使用本地 gRPC，proto 在 `proto/adapter_core.proto`。
 - Rust adapter core 和 Serve/UEnv Server 之间不走 gRPC。Serve 侧应该以 Rust 库/函数/trait 的形式接入 adapter core。
 
@@ -55,6 +78,27 @@ reward.reward_manager.module.path=/tmp/uenv-bridge/src/uenv/bridge/verl_reward_m
 
 `UEnvBridgeRewardManager` 接收 VeRL 传入的单条 `DataProto`，解码 rollout response token，写入 `uenv_response_text`，再调用 `VeRLAdapter`。
 
+### Python: VeRL pre-rollout AgentLoop
+
+入口文件：
+
+- `src/uenv/bridge/verl_agent_loop.py`
+- `src/uenv/bridge/agent_loop_clients.py`
+- `configs/uenv-agent-loop.yaml`
+
+这是 Route A 的 rollout 前接管入口。VeRL 在 `actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent` 时会加载 `UEnvAgentLoop`，`UEnvAgentLoop.run()` 会把 `raw_prompt`、`reward_model`、`sampling_params` 和 prompt token 组织成 `EpisodeRequest`，交给 UEnv Server/Worker 完成完整 rollout。
+
+这条链路和 reward-manager 主线的区别是：reward-manager 接入点发生在 VeRL/vLLM 已经生成 response 之后；`UEnvAgentLoop` 接入点发生在 VeRL 调用 rollout 生成之前。因此使用 `UEnvAgentLoop` 时，UEnv Server/Worker 需要负责模型生成、环境 step、reward 和 trajectory，并返回 `response_ids`、`response_mask`、`summary.total_reward`。
+
+VeRL 配置方式：
+
+```bash
+actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent
+actor_rollout_ref.rollout.agent.agent_loop_config_path=/tmp/uenv-bridge/configs/uenv-agent-loop.yaml
+```
+
+当前 bridge 会优先从 `EpisodeResult.trajectory.steps[-1].info["response_ids"]` 和 `response_mask` 读取 token 级结果。如果没有 token 字段，会退回到最后一步 `action` 文本并用 VeRL tokenizer 编码。真实 Serve/Worker 联调时应优先返回 token ids，避免 tokenizer 或 chat template 不一致。
+
 ### Python: VeRLAdapter
 
 入口文件：
@@ -67,7 +111,7 @@ reward.reward_manager.module.path=/tmp/uenv-bridge/src/uenv/bridge/verl_reward_m
 - `execute_batch(batch)`: 提交 batch 并返回普通 Python dict 结果。
 - `results_to_dataproto(batch, results)`: 构造 VeRL 可消费的 `rm_scores` 和 reward extra fields。
 
-`EpisodeRequest.payload` 是 JSON bytes，核心字段包括：
+pre-rollout Route A 中，`EpisodeRequest.payload` 是 JSON bytes，核心字段包括：
 
 ```json
 {
@@ -77,13 +121,17 @@ reward.reward_manager.module.path=/tmp/uenv-bridge/src/uenv/bridge/verl_reward_m
   "env_config": {
     "task_name": "math",
     "data_source": "openai/gsm8k",
-    "raw_prompt": "...",
-    "response_text": "model rollout text"
+    "raw_prompt": "..."
   },
   "episode_config": {
     "max_steps": 10,
     "seed": 42,
-    "initial_observation": {}
+    "initial_observation": {
+      "raw_prompt": "...",
+      "prompt_text": "...",
+      "prompt_ids": [1, 2, 3],
+      "token_source": "verl_agent_loop"
+    }
   },
   "reward_config": {
     "reward_type": "rubric",
@@ -94,10 +142,13 @@ reward.reward_manager.module.path=/tmp/uenv-bridge/src/uenv/bridge/verl_reward_m
   "metadata": {
     "batch_id": "...",
     "sample_index": 0,
-    "data_source": "openai/gsm8k"
+    "data_source": "openai/gsm8k",
+    "required_result_fields": ["response_ids", "response_mask", "reward", "trajectory"]
   }
 }
 ```
+
+rollout 后 reward-manager 对照基线中才会把已生成的模型 response 放入请求；当前主线的请求只携带 prompt/sample 信息，response 由 UEnv Server/Worker 生成并随 `EpisodeResult` 返回。
 
 ### Python: RustCoreEpisodeClient
 
@@ -139,12 +190,11 @@ Python reward manager 与 Rust adapter core 的本地通信由 `proto/adapter_co
 Serve 侧需要向 `core` 提供 Rust 可调用的 batch episode 实现，满足这个 trait：
 
 ```rust
-#[async_trait]
 pub trait EpisodeService: Send + Sync {
-    async fn submit_episode_batch(
+    fn submit_episode_batch(
         &self,
         requests: Vec<EpisodeRequest>,
-    ) -> Result<Vec<EpisodeResult>, CoreError>;
+    ) -> impl Future<Output = Result<Vec<EpisodeResult>, EpisodeServiceError>> + Send;
 }
 ```
 
@@ -176,7 +226,7 @@ async fn submit_episode_batch(
 - 每个 `EpisodeResult.request_id` 必须原样等于对应的 `EpisodeRequest.request_id`。
 - batch 内单个 episode 失败时，推荐返回该 request 的 failed `EpisodeResult`，不要让整个 batch panic。
 - `EpisodeResult.summary.total_reward` 是 VeRL 训练最终读取的 reward。
-- `trajectory.steps` 在 math 类 MVP 中可以为空，但 `summary` 必须完整。
+- pre-rollout Route A 中，`trajectory.steps` 至少要能表达最终模型输出。推荐在最后一个 step 的 `info` 中返回 `response_ids` 和 `response_mask`；如果暂时做不到，Bridge 会退回到 `StepRecord.action` 或 `info["response_text"]` 并用 VeRL tokenizer 编码。
 
 ### Bridge EpisodeRequest 到 server proto 的建议映射
 
@@ -236,11 +286,27 @@ server EpisodeResult.summary.termination_reason
   -> bridge EpisodeResult.summary.terminate_reason
 
 server EpisodeResult.trajectory
-  -> bridge EpisodeResult.trajectory, MVP 可以先为空 steps
+  -> bridge EpisodeResult.trajectory
 
 server EpisodeResult.error
   -> bridge EpisodeResult.error_code / error_message
 ```
+
+pre-rollout Route A 还要求 `trajectory.steps[-1]` 包含下列信息之一：
+
+```text
+trajectory.steps[-1].info["response_ids"] = "[101,102,...]"
+trajectory.steps[-1].info["response_mask"] = "[1,1,...]"
+```
+
+或者：
+
+```text
+trajectory.steps[-1].action = response text bytes
+trajectory.steps[-1].info["response_text"] = "..."
+```
+
+推荐优先返回 token ids，因为这样可以避免 tokenizer、chat template 或特殊 token 处理不一致。
 
 Serve 侧要做的事情：
 
@@ -299,14 +365,15 @@ EpisodeResult {
 
 ### Trajectory 在当前 MVP 中的要求
 
-当前 VeRL GRPO reward 链路只依赖 `EpisodeResult.summary.total_reward`，Bridge 会把它写入 VeRL 的 `rm_scores`，advantage 仍由 VeRL 原生逻辑计算。因此 Serve 侧 MVP 可以先返回空 `trajectory.steps`，但必须保证：
+当前主线是 rollout 前接管，所以 Serve/Worker 需要返回可恢复 VeRL response 的 trajectory。最小要求：
 
 - `EpisodeResult.request_id` 与输入 `EpisodeRequest.request_id` 一致。
 - `EpisodeResult.summary.total_reward` 是本 episode 的最终 reward。
 - `EpisodeResult.summary.terminate_reason` 能解释 reward 来源或终止原因。
 - `EpisodeResult.trajectory.total_reward` / `total_steps` 与 summary 保持合理一致。
+- 最后一个 `StepRecord` 能提供 `response_ids` / `response_mask`，或者能通过 `action` / `response_text` 恢复 response 文本。
 
-完整 `StepRecord` trajectory 仍然重要，但它属于后续 CodeEnv/AgentEnv 调试、回放、过程奖励和审计能力。真实 Serve 接入后可以逐步填充 `trajectory.steps`；当前 math 类 GRPO smoke test 不依赖完整 trajectory。
+完整多步 `StepRecord` 仍可逐步完善；但对 rollout 前接管来说，最终 response token 和最终 reward 是训练能继续运行的硬要求。
 
 Serve 完成后，应新增真实实现，例如：
 
@@ -315,12 +382,11 @@ pub struct UEnvServeEpisodeService {
     // registry, scheduler, env manager, etc.
 }
 
-#[async_trait]
 impl EpisodeService for UEnvServeEpisodeService {
     async fn submit_episode_batch(
         &self,
         requests: Vec<EpisodeRequest>,
-    ) -> Result<Vec<EpisodeResult>, CoreError> {
+    ) -> Result<Vec<EpisodeResult>, EpisodeServiceError> {
         // 1. parse EpisodeRequest.payload
         // 2. call Serve/UEnv environment functions
         // 3. map Serve/UEnv output to EpisodeResult
@@ -343,14 +409,13 @@ core/target/debug/uenv-adapter-core
 
 ```bash
 UENV_ADDR=127.0.0.1:50051
-UENV_ADAPTER_CORE_REWARD_MODE=fixed | math_proxy
-UENV_ADAPTER_CORE_FAKE_REWARD=0.37
-UENV_ADAPTER_CORE_FORMAT_REWARD=0.2
-UENV_ADAPTER_CORE_NONEMPTY_REWARD=0.05
-UENV_ADAPTER_CORE_DEFAULT_REWARD=0.0
+UENV_ADAPTER_CORE_BACKEND=static_rollout | server
+UENV_ADAPTER_CORE_STATIC_REWARD=0.73
+UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS=201,202,203
+UENV_ADAPTER_CORE_STATIC_RESPONSE_TEXT="static external rollout"
 ```
 
-`fixed` 和 `math_proxy` 都是临时调试模式。真实 Serve 接入后，reward mode 应替换为 Serve backed implementation。
+`static_rollout` 是 rollout 前接管的 bridge-only 调试后端，会返回固定 token、mask 和 reward。真实 Serve/Worker 接入时应使用 `server` 后端，由 `UEnvEpisodeService` 调度真实 worker。
 
 ## VeRL image 环境准备
 
@@ -401,16 +466,18 @@ TRAINING_STEPS=1 \
 SAMPLE_COUNT=2 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
-ADAPTER_CORE_REWARD_MODE=fixed \
-ADAPTER_CORE_FAKE_REWARD=0.37 \
-./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_ADAPTER_CORE_BACKEND=static_rollout \
+UENV_ADAPTER_CORE_STATIC_REWARD=0.73 \
+UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS=201,202,203 \
+./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
 没有 VeRL image 或 GPU 的协作者仍然可以做 Layer 1 到 Layer 3 的轻量验证；只有 Layer 4 的真实 GRPO smoke test 需要这个镜像和 GPU。
 
 ## 四层验证测试
 
-Bridge 当前按四层验证。越靠前越轻量，越靠后越接近真实 VeRL + Serve 联动。Serve 侧协作者主要关注 Layer 4；Layer 1 到 Layer 3 是 bridge 侧在联调前确认自身链路可用的基线测试。
+Bridge 当前按四层验证。越靠前越轻量，越靠后越接近真实 VeRL + Serve/Worker 联动。当前主线是 rollout 前接管，Serve 侧协作者主要关注 Layer 4；Layer 1 到 Layer 3 是 bridge 侧在联调前确认自身链路可用的基线测试。
 
 ### Layer 1: Python adapter 转换与单测
 
@@ -423,11 +490,11 @@ Bridge 当前按四层验证。越靠前越轻量，越靠后越接近真实 VeR
 流程：
 
 ```text
-dict fixture / fake DataProto-like batch
+pre-rollout dict fixture / AgentLoop fake input
   -> VeRLAdapter.to_episode_requests()
+  -> UEnvAgentLoop.build_episode_request()
   -> FakeEpisodeClient / DryRunEpisodeClient
-  -> VeRLAdapter.results_to_dataproto()
-  -> Python dict result / rm_scores-like fields
+  -> Python dict result / AgentLoopOutput
 ```
 
 运行方式：
@@ -439,9 +506,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 预期结果：
 
-- 当前应看到 `13` 个 Python tests 通过。
-- request 中的 `request_id`、`batch_id`、`sample_index` 和 metadata 能被保留。
-- fake/dry-run client 返回的结果能按原 sample 顺序写回 reward 字段。
+- 当前应看到 `17` 个 Python tests 通过。
+- request 中的 `request_id`、`batch_id`、`sample_index`、prompt token 和 metadata 能被保留。
+- fake/dry-run client 返回的结果能恢复 `response_ids`、`response_mask` 和 reward。
 
 ### Layer 2: Rust adapter core 单测
 
@@ -457,9 +524,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 normalized sample
   -> Rust adapter core
   -> EpisodeRequest
-  -> EpisodeService(fake/math_proxy)
+  -> EpisodeService(static_rollout/test service)
   -> EpisodeResult
-  -> normalized reward result
+  -> SampleResult(reward + trajectory_json)
 ```
 
 运行方式：
@@ -471,11 +538,11 @@ cargo test
 
 预期结果：
 
-- 当前应看到 `5` 个 Rust tests 通过。
+- 当前应看到 `6` 个 Rust tests 通过。
 - Rust core 能校验 batch result 数量和 `request_id` 对齐。
-- `FakeEpisodeService` 和 `MathProxyEpisodeService` 能产出可回传的 `EpisodeResult.summary.total_reward`。
+- Rust core 能把 server/worker 返回的 `trajectory` 保留为 `SampleResult.trajectory_json`，供 Python AgentLoop 恢复 token 级 rollout 结果。
 
-### Layer 3: Python 到 Rust core 的本地 gRPC 闭环
+### Layer 3: rollout 前 AgentLoop 到 Rust core 的本地 gRPC 闭环
 
 前置条件：
 
@@ -487,12 +554,13 @@ cargo test
 流程：
 
 ```text
-fixture batch
-  -> Python VeRLAdapter
+AgentLoop sample
+  -> UEnvAgentLoop.run()
   -> RustCoreEpisodeClient(auto_start=True)
   -> Rust adapter core
-  -> EpisodeService(fake)
-  -> Python EpisodeResult
+  -> EpisodeService(static_rollout)
+  -> EpisodeResult(trajectory + reward)
+  -> AgentLoopOutput(response_ids, response_mask, reward_score)
 ```
 
 运行方式：
@@ -500,39 +568,40 @@ fixture batch
 ```bash
 cd uenv-bridge
 ./scripts/generate_adapter_core_proto.sh
-PYTHONPATH=src ./scripts/verify_rust_core_grpc_loop.py --reward 0.37
+PYTHONPATH=src ./scripts/verify_pre_rollout_rust_core_loop.py --reward 0.73 --response-ids 201,202,203
 ```
 
 预期结果：
 
 - Python client 能自动启动本地 Rust core。
 - gRPC `HealthCheck` 通过。
-- fixture batch 能得到类似下面的 reward 输出：
+- Rust core 的 `static_rollout` 后端会返回含 `response_ids`、`response_mask` 和 reward 的 trajectory。
+- `UEnvAgentLoop` 能得到类似下面的输出：
 
 ```json
-{"rewards": [0.37, 0.37]}
+{"response_ids": [201, 202, 203], "response_mask": [1, 1, 1], "reward_score": 0.73}
 ```
 
-### Layer 4: 真实 VeRL + Serve 联动 smoke test
+### Layer 4: 真实 VeRL + Serve/Worker pre-rollout 联动 smoke test
 
 前置条件：
 
 - 可运行的 VeRL image，例如 `localhost/uenv-bridge-verl:latest`。
 - GPU、模型缓存/模型路径、GSM8K sample 数据。
 - Layer 3 的 Rust core 本地 gRPC 链路可用。
-- Serve 侧已经实现 [core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`，并在 Rust adapter core binary 中替换 `FakeEpisodeService` / `MathProxyEpisodeService`。
-- Serve 返回的 `EpisodeResult.request_id` 必须和输入 `EpisodeRequest.request_id` 一致，`summary.total_reward` 必须是该 sample 的最终 reward。
+- Serve/Worker 侧已经实现 [core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`，并能调模型生成 action、执行环境 step、计算 reward。
+- Serve 返回的 `EpisodeResult.request_id` 必须和输入 `EpisodeRequest.request_id` 一致，`summary.total_reward` 必须是该 sample 的最终 reward，trajectory 中必须能恢复 `response_ids` / `response_mask`。
 
 流程：
 
 ```text
 verl.trainer.main_ppo
-  -> UEnvBridgeRewardManager
-  -> VeRLAdapter
+  -> UEnvAgentLoop
   -> Rust adapter core
   -> Serve EpisodeService implementation
-  -> EpisodeResult
-  -> rm_scores
+  -> Worker model generation + env step + reward
+  -> EpisodeResult(trajectory + reward)
+  -> AgentLoopOutput
   -> VeRL GRPO advantage/update
 ```
 
@@ -545,8 +614,9 @@ TRAINING_STEPS=1 \
 SAMPLE_COUNT=2 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
-ADAPTER_CORE_REWARD_MODE=serve \
-./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_ADAPTER_CORE_BACKEND=server \
+./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
 多步联动可以把 `TRAINING_STEPS` 调大，例如：
@@ -558,21 +628,22 @@ TRAINING_STEPS=2 \
 SAMPLE_COUNT=4 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
-ADAPTER_CORE_REWARD_MODE=serve \
-./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_ADAPTER_CORE_BACKEND=server \
+./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
-这里假设 Serve 接入 PR 暴露 `serve` 作为真实启动开关；如果实际使用其他 mode，需要替换 `ADAPTER_CORE_REWARD_MODE`。当前仓库尚未实现 `serve` mode，因此在 Serve 接入前直接运行会失败；`fixed` 和 `math_proxy` 只是 bridge-only 基线，不代表真实 Serve 联动通过。
+这里假设 bridge core binary 通过 `UENV_ADAPTER_CORE_BACKEND=server` 使用真实 Server/Worker 后端。当前仓库中的 `static_rollout` 只是 bridge-only 基线，不代表真实 Serve 联动通过。
 
 预期结果：
 
-- Serve 日志能看到 Rust adapter core 调用了真实 `EpisodeService`。
-- `episode_requests.jsonl` 中的每个 `request_id` 都能在 Serve 侧和 `episode_results.jsonl` 中对应起来。
-- VeRL 日志中的 `critic/score/mean` / `critic/rewards/mean` 等于 Serve 返回 reward 的 batch 平均值，而不是固定 fake reward。
+- Serve/Worker 日志能看到 Rust adapter core 调用了真实 `EpisodeService`。
+- 每个输入 `request_id` 都能在 Serve/Worker 返回的 `EpisodeResult` 中对应起来。
+- VeRL 日志中的 `critic/score/mean` / `critic/rewards/mean` 等于 Serve/Worker 返回 reward 的 batch 平均值，而不是固定 fake reward。
+- VeRL rollout 结果来自 UEnv 返回的 `response_ids` / `response_mask`，不是 VeRL 本地 vLLM 生成。
 - 1-step 和 2-step GRPO 都能正常结束，`Training Progress` 达到 `100%`。
-- `tmp/verl_bridge_reward_records/<RUN_ID>/episode_requests.jsonl` 和 `episode_results.jsonl` 行数应匹配 `TRAINING_STEPS * TRAIN_BATCH_SIZE * ROLLOUT_N`。
 
-在真实 Serve implementation 合入前，可以先用下面两个命令作为 bridge-only 基线，确认 VeRL -> Python bridge -> Rust core -> reward 回写链路没有问题：
+在真实 Serve implementation 合入前，可以先用下面命令作为 bridge-only 基线，确认真实 VeRL 能通过 AgentLoop 走到 Rust core，并从 Rust core 的 `static_rollout` 后端拿回 token 和 reward：
 
 ```bash
 cd uenv-bridge
@@ -581,9 +652,11 @@ TRAINING_STEPS=1 \
 SAMPLE_COUNT=2 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
-ADAPTER_CORE_REWARD_MODE=fixed \
-ADAPTER_CORE_FAKE_REWARD=0.37 \
-./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_ADAPTER_CORE_BACKEND=static_rollout \
+UENV_ADAPTER_CORE_STATIC_REWARD=0.73 \
+UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS=201,202,203 \
+./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
 ```bash
@@ -593,8 +666,11 @@ TRAINING_STEPS=2 \
 SAMPLE_COUNT=4 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
-ADAPTER_CORE_REWARD_MODE=math_proxy \
-./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_ADAPTER_CORE_BACKEND=static_rollout \
+UENV_ADAPTER_CORE_STATIC_REWARD=0.73 \
+UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS=201,202,203 \
+./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
 ## 常用开发命令
@@ -620,14 +696,14 @@ cd uenv-bridge/core
 cargo test
 ```
 
-验证 Python 自动启动 Rust core 的本地 gRPC 闭环：
+验证 rollout 前 AgentLoop 自动启动 Rust core 的本地 gRPC 闭环：
 
 ```bash
 cd uenv-bridge
-./scripts/verify_rust_core_grpc_loop.py --reward 0.37
+PYTHONPATH=src ./scripts/verify_pre_rollout_rust_core_loop.py --reward 0.73 --response-ids 201,202,203
 ```
 
-跑真实 VeRL 1-step bridge-only 基线：
+跑真实 VeRL 1-step pre-rollout AgentLoop + Rust core 基线：
 
 ```bash
 IMAGE=localhost/uenv-bridge-verl:latest \
@@ -635,12 +711,14 @@ TRAINING_STEPS=1 \
 SAMPLE_COUNT=2 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
-ADAPTER_CORE_REWARD_MODE=fixed \
-ADAPTER_CORE_FAKE_REWARD=0.37 \
-./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_ADAPTER_CORE_BACKEND=static_rollout \
+UENV_ADAPTER_CORE_STATIC_REWARD=0.73 \
+UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS=201,202,203 \
+./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
-跑真实 VeRL 2-step bridge-only 基线，使用 Rust math proxy reward：
+跑真实 VeRL 2-step pre-rollout AgentLoop + Rust core 基线：
 
 ```bash
 IMAGE=localhost/uenv-bridge-verl:latest \
@@ -648,17 +726,24 @@ TRAINING_STEPS=2 \
 SAMPLE_COUNT=4 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
-ADAPTER_CORE_REWARD_MODE=math_proxy \
-./scripts/run_verl_grpo_1step_with_bridge_reward.sh
+UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_ADAPTER_CORE_BACKEND=static_rollout \
+UENV_ADAPTER_CORE_STATIC_REWARD=0.73 \
+UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS=201,202,203 \
+./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
 ## 已验证结果
 
 已在 `localhost/uenv-bridge-verl:latest` 中验证以下 bridge-only 基线：
 
-- Python unit tests: 13 passed。
-- Rust unit tests: 5 passed。
-- fixture -> Python -> Rust core gRPC 闭环。
+- Python unit tests: 17 passed。
+- Rust unit tests: 6 passed。
+- `UEnvAgentLoop -> RustCoreEpisodeClient -> Rust core static_rollout -> AgentLoopOutput` 本地 gRPC 闭环。
+- 真实 VeRL 1-step GRPO，`UEnvAgentLoop` pre-rollout fake client 返回 `reward_score=1.0`，VeRL 日志中 `critic/score/mean=1.0`、`training/global_step=1`。
+
+下列 rollout 后 reward-manager 基线也保留为历史验证结果，但不是当前主线：
+
 - 真实 VeRL 1-step GRPO，Rust core fixed reward 返回到 `critic/score/mean`。
 - 真实 VeRL 2-step GRPO，Rust core math proxy reward 每步返回到 `critic/score/mean`。
 
@@ -671,7 +756,7 @@ step 1: critic/score/mean = 0.20000000298023224
 step 2: critic/score/mean = 0.20000000298023224
 ```
 
-对应记录目录：
+rollout 后 reward-manager 基线的记录目录：
 
 ```text
 tmp/verl_bridge_reward_records/<RUN_ID>/
@@ -684,6 +769,6 @@ tmp/verl_bridge_reward_records/<RUN_ID>/
 
 ## 当前限制
 
-- Serve 真实实现还未接入，当前 Rust core 使用 fake/math proxy service。
-- trajectory 目前可以为空 steps，后续应由 Serve 返回真实轨迹。
-- 当前 reward 写入 VeRL 的 `rm_scores`，advantage 仍由 VeRL 自己计算。
+- Serve 真实实现还未接入，当前 pre-rollout Rust core 基线使用 `static_rollout` service。
+- 当前 pre-rollout smoke test 还没有真实 Worker 生成 action；真实 Serve/Worker 接入后必须返回 token 级 response 和 reward。
+- 旧 reward-manager 基线仍写入 VeRL 的 `rm_scores`；pre-rollout 主线通过 `AgentLoopOutput.reward_score` 进入 VeRL。

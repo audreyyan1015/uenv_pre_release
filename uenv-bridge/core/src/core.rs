@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use uenv_server::proto::v1::{
     EpisodeRequest as ProtoEpisodeRequest,
@@ -153,25 +153,69 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
     let payload = serde_json::from_slice::<Value>(&sample.payload_json).unwrap_or(Value::Null);
     let episode_cfg = payload.get("episode_config").unwrap_or(&Value::Null);
     let model_ep = payload.get("model_endpoint").unwrap_or(&Value::Null);
+    let model_endpoint = json_string(model_ep, "url").unwrap_or_default();
+    let worker_payload = sample_to_worker_payload(&sample, &payload, model_ep, &model_endpoint);
+    let worker_reward_config = sample_to_worker_reward_config(&payload);
 
     Ok(ProtoEpisodeRequest {
         episode_id: sample.request_id,
         env_type: sample.env_type,
-        payload: payload
-            .get("env_config")
-            .map(|v| serde_json::to_vec(v).unwrap_or_default())
-            .unwrap_or_default(),
+        payload: serde_json::to_vec(&worker_payload).unwrap_or_default(),
         correlation_id: json_string(&payload, "correlation_id").unwrap_or_default(),
-        model_endpoint: json_string(model_ep, "url").unwrap_or_default(),
+        model_endpoint,
         max_steps: json_i32(episode_cfg, "max_steps").unwrap_or(0),
         seed: json_i32(episode_cfg, "seed"),
         timeout_seconds: json_i32(&payload, "timeout_seconds").unwrap_or(300),
-        reward_config: payload
-            .get("reward_config")
-            .map(|v| serde_json::to_vec(v).unwrap_or_default())
-            .unwrap_or_default(),
+        reward_config: serde_json::to_vec(&worker_reward_config).unwrap_or_default(),
         ..Default::default()
     })
+}
+
+fn sample_to_worker_payload(
+    sample: &SampleEnvelope,
+    payload: &Value,
+    model_ep: &Value,
+    model_endpoint: &str,
+) -> Value {
+    let env_cfg = payload.get("env_config").unwrap_or(&Value::Null);
+    let metadata = payload.get("metadata").unwrap_or(&Value::Null);
+    let extra_info = metadata.get("extra_info").unwrap_or(&Value::Null);
+
+    let question = json_string(extra_info, "question")
+        .or_else(|| json_string(env_cfg, "question"))
+        .or_else(|| json_string(env_cfg, "raw_prompt"))
+        .unwrap_or_default();
+    let dataset = json_string(env_cfg, "dataset")
+        .or_else(|| json_string(env_cfg, "data_source"))
+        .or_else(|| json_string(metadata, "data_source"))
+        .unwrap_or_default();
+
+    json!({
+        "request_id": sample.request_id,
+        "question": question,
+        "dataset": dataset,
+        "model_endpoint": model_endpoint,
+        "model_name": json_string(model_ep, "model_name").unwrap_or_else(|| "policy-model".to_string()),
+        "generation_config": model_ep.get("generation_config").cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
+fn sample_to_worker_reward_config(payload: &Value) -> Value {
+    let reward_cfg = payload.get("reward_config").unwrap_or(&Value::Null);
+    if reward_cfg.get("type").and_then(Value::as_str) == Some("rule_reward") {
+        return reward_cfg.clone();
+    }
+
+    let rubric = reward_cfg.get("rubric_config").unwrap_or(&Value::Null);
+    let target = json_string(rubric, "ground_truth").unwrap_or_default();
+    if !target.is_empty() {
+        return json!({
+            "type": "rule_reward",
+            "target": target,
+        });
+    }
+
+    reward_cfg.clone()
 }
 
 fn episode_result_to_sample_result(
@@ -187,6 +231,12 @@ fn episode_result_to_sample_result(
 
     let status_str = result.status.as_str();
     let done = matches!(status_str, "completed" | "failed" | "timeout");
+    let trajectory_json = result
+        .trajectory
+        .as_ref()
+        .map(proto_trajectory_to_json_bytes)
+        .transpose()?
+        .unwrap_or_default();
     let summary = result.summary.unwrap_or_default();
 
     Ok(SampleResult {
@@ -197,10 +247,41 @@ fn episode_result_to_sample_result(
         reward: summary.total_reward,
         done,
         termination_reason: summary.terminate_reason,
-        trajectory_json: vec![],
+        trajectory_json,
         error_code: result.error_code.map(|c| c.to_string()).unwrap_or_default(),
         error_message: result.error_message,
     })
+}
+
+fn proto_trajectory_to_json_bytes(
+    trajectory: &uenv_server::proto::v1::Trajectory,
+) -> Result<Vec<u8>, CoreError> {
+    let steps = trajectory
+        .steps
+        .iter()
+        .map(|step| {
+            json!({
+                "step_index": step.step_index,
+                "observation": bytes_to_lossy_string(&step.observation),
+                "action": bytes_to_lossy_string(&step.action),
+                "reward": step.reward,
+                "terminated": step.terminated,
+                "truncated": step.truncated,
+                "info": step.info,
+                "duration_ms": step.duration_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_vec(&json!({
+        "steps": steps,
+        "total_reward": trajectory.total_reward,
+        "total_steps": trajectory.total_steps,
+    }))
+    .map_err(|err| CoreError::InvalidEpisodeResult(format!("failed to encode trajectory_json: {err}")))
+}
+
+fn bytes_to_lossy_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
 }
 
 fn json_i32(value: &Value, key: &str) -> Option<i32> {
@@ -215,7 +296,9 @@ fn json_string(value: &Value, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::collections::HashMap;
     use uenv_server::proto::v1::episode_result::Summary;
+    use uenv_server::proto::v1::{StepRecord, Trajectory};
     use uenv_server::{EpisodeService, EpisodeServiceError};
 
     #[derive(Clone)]
@@ -298,6 +381,46 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct RolloutTrajectoryService;
+
+    impl EpisodeService for RolloutTrajectoryService {
+        async fn submit_episode_batch(
+            &self,
+            requests: Vec<ProtoEpisodeRequest>,
+        ) -> Result<Vec<ProtoEpisodeResult>, EpisodeServiceError> {
+            Ok(requests
+                .into_iter()
+                .map(|r| ProtoEpisodeResult {
+                    episode_id: r.episode_id,
+                    status: "completed".to_string(),
+                    trajectory: Some(Trajectory {
+                        steps: vec![StepRecord {
+                            step_index: 1,
+                            action: b"42".to_vec(),
+                            reward: 0.75,
+                            terminated: true,
+                            info: HashMap::from([
+                                ("response_ids".to_string(), "[101,102]".to_string()),
+                                ("response_mask".to_string(), "[1,1]".to_string()),
+                            ]),
+                            ..Default::default()
+                        }],
+                        total_reward: 0.75,
+                        total_steps: 1,
+                    }),
+                    summary: Some(Summary {
+                        total_reward: 0.75,
+                        total_steps: 1,
+                        terminate_reason: "static_rollout".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .collect())
+        }
+    }
+
     fn make_sample(request_id: &str, sample_index: u32, payload: &[u8]) -> SampleEnvelope {
         SampleEnvelope {
             request_id: request_id.to_string(),
@@ -348,6 +471,66 @@ mod tests {
         assert_eq!(episode_requests[0].seed, Some(99));
         assert_eq!(episode_requests[0].model_endpoint, "http://vllm:8000/v1");
         assert_eq!(response.results[0].sample_index, 7);
+    }
+
+    #[tokio::test]
+    async fn execute_batch_maps_verl_math_payload_to_worker_contract() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core = AdapterCore::new(RecordingEpisodeService { requests: Arc::clone(&recorded) });
+        let payload = br#"{
+            "env_config":{"data_source":"openai/gsm8k","raw_prompt":"user: ignored"},
+            "metadata":{"extra_info":{"question":"How many clips?"}},
+            "model_endpoint":{
+                "url":"http://127.0.0.1:18080/v1",
+                "model_name":"mock-policy",
+                "generation_config":{"max_new_tokens":8}
+            },
+            "reward_config":{
+                "reward_type":"rubric",
+                "rubric_config":{"ground_truth":"72","style":"rule"}
+            }
+        }"#;
+
+        core.execute_batch(ExecuteBatchRequest {
+            request_id: "request-1".to_string(),
+            batch_id: "batch-1".to_string(),
+            samples: vec![make_sample("episode-1", 0, payload)],
+        })
+        .await
+        .unwrap();
+
+        let episode_requests = recorded.lock().unwrap().pop().unwrap();
+        let worker_payload: Value =
+            serde_json::from_slice(&episode_requests[0].payload).expect("worker payload json");
+        let worker_reward: Value = serde_json::from_slice(&episode_requests[0].reward_config)
+            .expect("worker reward json");
+
+        assert_eq!(worker_payload["question"], "How many clips?");
+        assert_eq!(worker_payload["dataset"], "openai/gsm8k");
+        assert_eq!(worker_payload["model_endpoint"], "http://127.0.0.1:18080/v1");
+        assert_eq!(worker_payload["model_name"], "mock-policy");
+        assert_eq!(worker_reward["type"], "rule_reward");
+        assert_eq!(worker_reward["target"], "72");
+    }
+
+    #[tokio::test]
+    async fn execute_batch_preserves_rollout_trajectory_for_agent_loop() {
+        let core = AdapterCore::new(RolloutTrajectoryService);
+        let response = core
+            .execute_batch(ExecuteBatchRequest {
+                request_id: "request-1".to_string(),
+                batch_id: "batch-1".to_string(),
+                samples: vec![make_sample("episode-1", 0, b"{\"framework\":\"verl\"}")],
+            })
+            .await
+            .unwrap();
+
+        let trajectory: Value = serde_json::from_slice(&response.results[0].trajectory_json)
+            .expect("trajectory json should decode");
+        assert_eq!(response.results[0].reward, 0.75);
+        assert_eq!(trajectory["steps"][0]["action"], "42");
+        assert_eq!(trajectory["steps"][0]["info"]["response_ids"], "[101,102]");
+        assert_eq!(trajectory["steps"][0]["info"]["response_mask"], "[1,1]");
     }
 
     #[tokio::test]

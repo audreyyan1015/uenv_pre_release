@@ -22,13 +22,17 @@ from uenv.bridge.verl import VeRLAdapter, VeRLAdapterConfig
 def make_batch() -> dict:
     return {
         "meta_info": {
-            "batch_id": "batch-0001",
+            "batch_id": "pre-rollout-batch-0001",
             "global_steps": 7,
             "temperature": 0.7,
+            "top_p": 0.9,
             "max_response_length": 128,
+            "rollout_n": 2,
+            "model_endpoint": "http://policy.example/v1",
+            "model_name": "policy-model",
         },
         "batch": {
-            "input_ids": [[1, 2, 3], [4, 5, 0]],
+            "prompts": [[1, 2, 3], [4, 5, 0]],
             "attention_mask": [[1, 1, 1], [1, 1, 0]],
             "position_ids": [[0, 1, 2], [0, 1, 2]],
         },
@@ -36,13 +40,28 @@ def make_batch() -> dict:
             "uid": ["uid-1", "uid-2"],
             "prompt_id": ["prompt-1", "prompt-2"],
             "task_name": ["math", "code"],
-            "raw_prompt": ["What is 2 + 2?", "Write add(a, b)."],
+            "raw_prompt": [
+                [{"role": "user", "content": "What is 2 + 2?"}],
+                [{"role": "user", "content": "Write add(a, b)."}],
+            ],
             "data_source": ["gsm8k", "humaneval"],
             "reward_model": [
                 {"style": "rule", "ground_truth": "4"},
                 {"style": "unit_test", "tests": ["assert add(2, 3) == 5"]},
             ],
-            "extra_info": [{"index": 1}, {"index": 2}],
+            "agent_name": ["uenv_agent", "uenv_agent"],
+            "extra_info": [
+                {
+                    "index": 1,
+                    "rollout_n": 0,
+                    "required_result_fields": ["response_ids", "response_mask", "reward", "trajectory"],
+                },
+                {
+                    "index": 2,
+                    "rollout_n": 1,
+                    "required_result_fields": ["response_ids", "response_mask", "reward", "trajectory"],
+                },
+            ],
         },
     }
 
@@ -101,20 +120,22 @@ class VeRLAdapterTest(unittest.TestCase):
 
         payload0 = json.loads(requests[0].payload.decode("utf-8"))
         self.assertEqual(payload0["framework"], "verl")
-        self.assertEqual(payload0["correlation_id"], "batch-0001-0")
-        self.assertEqual(payload0["metadata"]["batch_id"], "batch-0001")
+        self.assertEqual(payload0["correlation_id"], "pre-rollout-batch-0001-0")
+        self.assertEqual(payload0["metadata"]["batch_id"], "pre-rollout-batch-0001")
         self.assertEqual(payload0["metadata"]["sample_index"], 0)
         self.assertEqual(payload0["metadata"]["uid"], "uid-1")
         self.assertEqual(payload0["metadata"]["prompt_id"], "prompt-1")
         self.assertEqual(payload0["metadata"]["global_steps"], 7)
         self.assertEqual(payload0["reward_config"]["reward_type"], "rubric")
-        self.assertEqual(payload0["episode_config"]["initial_observation"]["input_ids"], [1, 2, 3])
+        self.assertEqual(payload0["model_endpoint"]["generation_config"]["top_p"], 0.9)
+        self.assertEqual(payload0["episode_config"]["initial_observation"]["prompts"], [1, 2, 3])
+        self.assertNotIn("response_text", payload0["env_config"])
 
     def test_execute_batch_with_fake_client_returns_ordered_results(self) -> None:
         adapter = VeRLAdapter(client=FakeEpisodeClient(reward=2.5))
         output = adapter.execute_batch(make_batch())
 
-        self.assertEqual(output["batch_id"], "batch-0001")
+        self.assertEqual(output["batch_id"], "pre-rollout-batch-0001")
         self.assertEqual(len(output["results"]), 2)
         self.assertEqual(output["results"][0]["reward"], 2.5)
         self.assertEqual(output["results"][1]["reward"], 2.5)
@@ -145,13 +166,15 @@ class VeRLAdapterTest(unittest.TestCase):
             self.assertTrue(output.exists())
             written = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(len(written), 2)
-            self.assertEqual(json.loads(written[0]["payload"])["metadata"]["sample_index"], 0)
+            payload = json.loads(written[0]["payload"])
+            self.assertEqual(payload["metadata"]["sample_index"], 0)
+            self.assertNotIn("response_text", payload["env_config"])
 
     def test_request_to_jsonable_decodes_payload(self) -> None:
         request = VeRLAdapter().to_episode_requests(make_batch())[0]
         payload = request_to_jsonable(request)
         self.assertIsInstance(payload["payload"], str)
-        self.assertIn("batch-0001-0", payload["payload"])
+        self.assertIn("pre-rollout-batch-0001-0", payload["payload"])
 
     def test_verl_config_loads_from_mapping(self) -> None:
         config = VeRLAdapterConfig.from_mapping(
@@ -211,11 +234,11 @@ class VeRLAdapterTest(unittest.TestCase):
         adapter = VeRLAdapter(client=client)
         output = adapter.execute_batch(make_batch())
 
-        self.assertEqual(output["batch_id"], "batch-0001")
+        self.assertEqual(output["batch_id"], "pre-rollout-batch-0001")
         self.assertEqual(len(output["results"]), 2)
         self.assertEqual(output["results"][0]["reward"], 4.0)
         self.assertEqual(output["results"][1]["reward"], 4.0)
-        self.assertEqual(stub.last_request["batch_id"], "batch-0001")
+        self.assertEqual(stub.last_request["batch_id"], "pre-rollout-batch-0001")
         self.assertEqual(stub.last_request["samples"][0]["framework"], "verl")
         self.assertEqual(stub.last_request["samples"][0]["sample_index"], 0)
         self.assertEqual(json.loads(stub.last_request["samples"][0]["payload_json"])["metadata"]["uid"], "uid-1")

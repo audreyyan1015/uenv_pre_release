@@ -20,6 +20,9 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-text = text.replace("import adapter_core_pb2 as adapter__core__pb2", "from . import adapter_core_pb2 as adapter__core__pb2")
+text = text.replace(
+    "\nimport adapter_core_pb2 as adapter__core__pb2\n",
+    "\nfrom . import adapter_core_pb2 as adapter__core__pb2\n",
+)
 path.write_text(text, encoding="utf-8")
 PY
