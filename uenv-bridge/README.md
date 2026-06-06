@@ -9,7 +9,7 @@
 - `UEnvAgentLoop` 在 VeRL rollout 前构造 `EpisodeRequest`。
 - Python 通过本地 gRPC 调 Rust adapter core。
 - Rust adapter core 保留 UEnv 返回的 `trajectory`，使 Python 能恢复 `response_ids`、`response_mask` 和 reward。
-- 真实 `verl.trainer.main_ppo` 1-step pre-rollout AgentLoop smoke test。
+- 真实 `verl.trainer.main_ppo` 1-step pre-rollout AgentLoop smoke test。当前 Layer 4 主线脚本是 `scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh`。
 
 ## 当前架构
 
@@ -88,7 +88,7 @@ reward.reward_manager.module.path=/tmp/uenv-bridge/src/uenv/bridge/verl_reward_m
 
 这是 Route A 的 rollout 前接管入口。VeRL 在 `actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent` 时会加载 `UEnvAgentLoop`，`UEnvAgentLoop.run()` 会把 `raw_prompt`、`reward_model`、`sampling_params` 和 prompt token 组织成 `EpisodeRequest`，交给 UEnv Server/Worker 完成完整 rollout。
 
-这条链路和 reward-manager 主线的区别是：reward-manager 接入点发生在 VeRL/vLLM 已经生成 response 之后；`UEnvAgentLoop` 接入点发生在 VeRL 调用 rollout 生成之前。因此使用 `UEnvAgentLoop` 时，UEnv Server/Worker 需要负责模型生成、环境 step、reward 和 trajectory，并返回 `response_ids`、`response_mask`、`summary.total_reward`。
+这条链路和旧 reward-manager 对照基线的区别是：reward-manager 接入点发生在 VeRL/vLLM 已经生成 response 之后；`UEnvAgentLoop` 接入点发生在 VeRL 调用 rollout 生成之前。因此使用 `UEnvAgentLoop` 时，UEnv Server/Worker 需要负责模型生成、环境 step、reward 和 trajectory，并返回 `response_ids`、`response_mask`、`summary.total_reward`。
 
 VeRL 配置方式：
 
@@ -183,7 +183,7 @@ export UENV_ADAPTER_CORE_BINARY=/tmp/uenv-bridge/core/target/debug/uenv-adapter-
 
 ## Bridge 内部通道
 
-Python reward manager 与 Rust adapter core 的本地通信由 `proto/adapter_core.proto` 定义。这个协议只用于 bridge 内部调试和验证；Serve 接入时只需要关注下一节的 `EpisodeService` 边界。
+Python 与 Rust adapter core 的本地通信由 `../proto/uenv/v1/adapter_core.proto` 定义。这个协议只用于 bridge 内部调试和验证；Serve 接入时只需要关注下一节的 `EpisodeService` 边界。
 
 ## Serve 侧应该如何接入
 
@@ -589,7 +589,8 @@ PYTHONPATH=src ./scripts/verify_pre_rollout_rust_core_loop.py --reward 0.73 --re
 - 可运行的 VeRL image，例如 `localhost/uenv-bridge-verl:latest`。
 - GPU、模型缓存/模型路径、GSM8K sample 数据。
 - Layer 3 的 Rust core 本地 gRPC 链路可用。
-- Serve/Worker 侧已经实现 [core/src/server_api.rs](core/src/server_api.rs) 中的 `EpisodeService`，并能调模型生成 action、执行环境 step、计算 reward。
+- Rust adapter core 已用 `UENV_ADAPTER_CORE_BACKEND=server` 启动，并监听一个宿主机端口，例如 `127.0.0.1:50053`。
+- Worker 已注册到该 adapter core/server 后端，并能调模型生成 action、执行环境 step、计算 reward。
 - Serve 返回的 `EpisodeResult.request_id` 必须和输入 `EpisodeRequest.request_id` 一致，`summary.total_reward` 必须是该 sample 的最终 reward，trajectory 中必须能恢复 `response_ids` / `response_mask`。
 
 流程：
@@ -605,7 +606,29 @@ verl.trainer.main_ppo
   -> VeRL GRPO advantage/update
 ```
 
-运行方式：
+当前主线脚本：
+
+```text
+scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
+```
+
+推荐用下面的一键脚本运行当前 smoke test。它会自动启动本地 mock OpenAI endpoint、`UENV_ADAPTER_CORE_BACKEND=server` 的 adapter core、注册到 core 的 `uenv-worker`，再调用当前主线脚本运行 VeRL，结束后自动清理临时服务：
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:latest ./scripts/run_layer4_smoke_with_services.sh
+```
+
+如果需要复用已有临时镜像或保留服务用于调试：
+
+```bash
+cd uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+KEEP_SERVICES=1 \
+./scripts/run_layer4_smoke_with_services.sh
+```
+
+手动启动外部服务后的真实 Serve/Worker 联动运行方式：
 
 ```bash
 cd uenv-bridge
@@ -614,10 +637,18 @@ TRAINING_STEPS=1 \
 SAMPLE_COUNT=2 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
+AGENT_NUM_WORKERS=1 \
+RAY_NUM_CPUS=4 \
 UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_AGENT_LOOP_ENDPOINT=127.0.0.1:50053 \
+UENV_ADAPTER_CORE_AUTO_START=0 \
+UENV_AGENT_LOOP_BUILD_CORE=0 \
 UENV_ADAPTER_CORE_BACKEND=server \
+PODMAN_NETWORK_ARGS='--network host' \
 ./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
+
+这里 `UENV_ADAPTER_CORE_AUTO_START=0` 表示 VeRL 容器不再启动自己的 core，而是连接宿主机上已经启动并带有真实 Worker 注册的 adapter core。`PODMAN_NETWORK_ARGS='--network host'` 用于让容器内的 Python client 能访问宿主机的 `127.0.0.1:50053`。
 
 多步联动可以把 `TRAINING_STEPS` 调大，例如：
 
@@ -629,11 +660,15 @@ SAMPLE_COUNT=4 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
 UENV_AGENT_LOOP_CLIENT=rust_core \
+UENV_AGENT_LOOP_ENDPOINT=127.0.0.1:50053 \
+UENV_ADAPTER_CORE_AUTO_START=0 \
+UENV_AGENT_LOOP_BUILD_CORE=0 \
 UENV_ADAPTER_CORE_BACKEND=server \
+PODMAN_NETWORK_ARGS='--network host' \
 ./scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
 ```
 
-这里假设 bridge core binary 通过 `UENV_ADAPTER_CORE_BACKEND=server` 使用真实 Server/Worker 后端。当前仓库中的 `static_rollout` 只是 bridge-only 基线，不代表真实 Serve 联动通过。
+这里假设外部 adapter core binary 通过 `UENV_ADAPTER_CORE_BACKEND=server` 使用真实 Server/Worker 后端。当前仓库中的 `static_rollout` 只是 bridge-only 基线，不代表真实 Serve 联动通过。
 
 预期结果：
 
@@ -740,14 +775,15 @@ UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS=201,202,203 \
 - Python unit tests: 17 passed。
 - Rust unit tests: 6 passed。
 - `UEnvAgentLoop -> RustCoreEpisodeClient -> Rust core static_rollout -> AgentLoopOutput` 本地 gRPC 闭环。
-- 真实 VeRL 1-step GRPO，`UEnvAgentLoop` pre-rollout fake client 返回 `reward_score=1.0`，VeRL 日志中 `critic/score/mean=1.0`、`training/global_step=1`。
+- 真实 VeRL 1-step GRPO，`UEnvAgentLoop` pre-rollout fake/static client 返回 `reward_score=1.0`，VeRL 日志中 `critic/score/mean=1.0`、`training/global_step=1`。
+- 真实 VeRL 1-step GRPO + `UENV_ADAPTER_CORE_BACKEND=server` + 已注册 `uenv-worker` smoke test：Worker 日志出现 `trace_id=verl-agent-loop-*`、`dispatch_completed`、`reward=1.0`，VeRL 日志中 `critic/score/mean=1.0`、`critic/rewards/mean=1.0`。这次模型生成端使用本地 mock OpenAI endpoint 返回 `"20"`，验证的是 VeRL -> AgentLoop -> Rust core -> Server/Worker -> reward 回流的完整联动，不代表最终真实模型服务已接入。
 
 下列 rollout 后 reward-manager 基线也保留为历史验证结果，但不是当前主线：
 
 - 真实 VeRL 1-step GRPO，Rust core fixed reward 返回到 `critic/score/mean`。
 - 真实 VeRL 2-step GRPO，Rust core math proxy reward 每步返回到 `critic/score/mean`。
 
-真实 Serve 联动需要 Serve 侧 `EpisodeService` 接入 Rust core 后再验收。
+真实 Serve/Worker 联动的主线入口是 `scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh`。`scripts/run_verl_grpo_1step_with_bridge_reward.sh` 属于 rollout 后 reward-manager 历史基线，不用于当前 pre-rollout Layer 4 主线验收。
 
 多步验证记录示例：
 
@@ -770,5 +806,5 @@ tmp/verl_bridge_reward_records/<RUN_ID>/
 ## 当前限制
 
 - Serve 真实实现还未接入，当前 pre-rollout Rust core 基线使用 `static_rollout` service。
-- 当前 pre-rollout smoke test 还没有真实 Worker 生成 action；真实 Serve/Worker 接入后必须返回 token 级 response 和 reward。
+- 当前 pre-rollout Serve/Worker smoke test 已能经过真实 worker 调度并返回 reward，但模型生成端仍使用本地 mock endpoint；真实模型服务接入后仍需复验 token 级 response 和 reward。
 - 旧 reward-manager 基线仍写入 VeRL 的 `rm_scores`；pre-rollout 主线通过 `AgentLoopOutput.reward_score` 进入 VeRL。

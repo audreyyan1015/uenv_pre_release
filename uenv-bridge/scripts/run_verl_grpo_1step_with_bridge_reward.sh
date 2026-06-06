@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
+WORKSPACE_ROOT=${WORKSPACE_ROOT:-"$(cd "${REPO_DIR}/.." && pwd)"}
 IMAGE=${IMAGE:-docker.io/verlai/verl:vllm011.latest}
 VERL_WORKSPACE=${VERL_WORKSPACE:-/data/podman/verl/workspace}
 MODEL_CACHE=${MODEL_CACHE:-/data/ronghao/models}
@@ -51,6 +52,7 @@ if [ ! -f "${DATA_DIR}/train.parquet" ] || [ ! -f "${DATA_DIR}/test.parquet" ]; 
     -e CONTAINER_DATA_DIR="${CONTAINER_DATA_DIR}" \
     -v "${VERL_WORKSPACE}:/workspace" \
     -v "${REPO_DIR}:/tmp/uenv-bridge" \
+    -v "${WORKSPACE_ROOT}/proto:/tmp/proto:ro" \
     "${IMAGE}" \
     -lc 'python scripts/prepare_verl_gsm8k_sample.py \
         --input /workspace/data/gsm8k/train.parquet \
@@ -71,6 +73,7 @@ podman run --rm \
   --workdir /workspace/verl \
   -v "${VERL_WORKSPACE}:/workspace" \
   -v "${REPO_DIR}:/tmp/uenv-bridge" \
+  -v "${WORKSPACE_ROOT}/proto:/tmp/proto:ro" \
   -v "${MODEL_CACHE}:/models" \
   "${IMAGE}" \
   -lc "set -euo pipefail
