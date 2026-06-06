@@ -1,22 +1,27 @@
 # uenv-adapter-core
 
-Rust adapter core for local Python shim integration.
+Rust adapter core for the VeRL pre-rollout Python shim.
 
 Boundary:
 
 ```text
-VeRL Python shim
-  DataProto / tensors / tokenizer / rm_scores
+VeRL UEnvAgentLoop
+  prompt ids / sampling params / reward config
         |
-        | gRPC: adapter_core.proto
+        | local gRPC: adapter_core.proto
         v
 Rust adapter core
-  envelope validation / conversion / logs / retry
+  SampleEnvelope validation / conversion / dispatch
         |
         | Rust function call
         v
-UEnv Server library API
+EpisodeService
+        |
+        v
+UEnv Server / Worker
 ```
 
-The core should not depend on VeRL Python objects. Python sends normalized
-`SampleEnvelope` messages and receives `SampleResult` messages.
+The core does not depend on VeRL Python objects. Python sends normalized
+`SampleEnvelope` messages and receives `SampleResult` messages. Server-side
+code only needs to implement `EpisodeService` and return `EpisodeResult`
+values that include response token ids, response mask, trajectory and reward.

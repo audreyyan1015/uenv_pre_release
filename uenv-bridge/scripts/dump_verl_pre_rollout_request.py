@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Dump VeRL data before vLLM rollout and shape an external rollout request.
+"""Dump VeRL data before vLLM rollout and shape pre-rollout EpisodeRequest JSON.
 
 This is a spike script. It does not patch VeRL or start Ray/vLLM. It follows the
 trainer-side data path up to the prompt batch that would be sent to
 actor_rollout_wg.generate_sequences(gen_batch), then emits a JSON request shape
-that a future UEnv external rollout path could send to Serve/Worker.
+that UEnvAgentLoop can send to Serve/Worker before VeRL local rollout.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ def local_prompt_tokens(raw_prompt: Any, tokenizer: Any, max_prompt_length: int)
     }
 
 
-def build_external_rollout_request(
+def build_episode_request_batch(
     gen_batch: DataProto,
     *,
     rollout_n: int,
@@ -194,7 +194,7 @@ def build_external_rollout_request(
     batch_id = str(gen_batch.meta_info.get("batch_id") or f"verl-pre-rollout-{uuid.uuid4().hex[:8]}")
     request = {
         "protocol_version": "0.1-spike",
-        "request_type": "external_rollout_batch",
+        "request_type": "episode_request_batch",
         "request_id": str(uuid.uuid4()),
         "batch_id": batch_id,
         "framework": "verl",
@@ -292,7 +292,7 @@ def build_mock_rollout_result(request: dict[str, Any]) -> dict[str, Any]:
                 "sample_id": sample.get("sample_id"),
                 "status": "completed",
                 "response_text": response_text,
-                "finish_reason": "mock_external_rollout",
+                "finish_reason": "mock_uenv_rollout",
                 "reward": None,
                 "trajectory": [
                     {
@@ -311,46 +311,6 @@ def build_mock_rollout_result(request: dict[str, Any]) -> dict[str, Any]:
         "status": "completed",
         "results": results,
     }
-
-
-def build_post_rollout_dataproto(
-    gen_batch: DataProto,
-    mock_result: dict[str, Any],
-    *,
-    tokenizer_path: str,
-    max_response_length: int,
-) -> DataProto:
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None:
-        pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
-
-    responses = torch.full((len(gen_batch), max_response_length), int(pad_token_id), dtype=torch.long)
-    response_mask = torch.zeros((len(gen_batch), max_response_length), dtype=torch.long)
-    for result in mock_result["results"]:
-        idx = int(result["sample_index"])
-        token_ids = tokenizer.encode(str(result["response_text"]), add_special_tokens=False)
-        token_ids = token_ids[:max_response_length]
-        if token_ids:
-            responses[idx, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long)
-            response_mask[idx, : len(token_ids)] = 1
-
-    non_tensors = dict(gen_batch.non_tensor_batch)
-    non_tensors["uenv_external_rollout_text"] = np.array(
-        [str(item["response_text"]) for item in mock_result["results"]],
-        dtype=object,
-    )
-    non_tensors["uenv_external_rollout_status"] = np.array(
-        [str(item["status"]) for item in mock_result["results"]],
-        dtype=object,
-    )
-    return DataProto.from_dict(
-        tensors={"responses": responses, "response_mask": response_mask},
-        non_tensors=non_tensors,
-        meta_info=dict(gen_batch.meta_info),
-    )
 
 
 def main() -> None:
@@ -407,7 +367,7 @@ def main() -> None:
     combined_gen_batch = gen_batch.repeat(repeat_times=args.rollout_n, interleave=True)
     combined_gen_batch.meta_info["batch_id"] = train_batch.meta_info["batch_id"]
 
-    rollout_request = build_external_rollout_request(
+    rollout_request = build_episode_request_batch(
         combined_gen_batch,
         rollout_n=args.rollout_n,
         model_endpoint=args.model_endpoint,
@@ -433,49 +393,24 @@ def main() -> None:
         json.dumps(dataproto_summary(combined_gen_batch), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (out_dir / "external_rollout_request.json").write_text(
+    (out_dir / "episode_request_batch.json").write_text(
         json.dumps(rollout_request, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (out_dir / "external_rollout_request_0.json").write_text(
+    (out_dir / "episode_request_0.json").write_text(
         json.dumps(rollout_request["samples"][0], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (out_dir / "mock_external_rollout_result.json").write_text(
+    (out_dir / "mock_episode_result_batch.json").write_text(
         json.dumps(mock_result, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    post_rollout_status: dict[str, Any]
-    if args.tokenizer_path:
-        post_rollout = build_post_rollout_dataproto(
-            combined_gen_batch,
-            mock_result,
-            tokenizer_path=args.tokenizer_path,
-            max_response_length=args.max_response_length,
-        )
-        torch.save(post_rollout, out_dir / "mock_post_rollout_dataproto.pt")
-        post_rollout_status = {
-            "built": True,
-            "path": str(out_dir / "mock_post_rollout_dataproto.pt"),
-            "summary": dataproto_summary(post_rollout),
-        }
-    else:
-        post_rollout_status = {
-            "built": False,
-            "reason": "pass --tokenizer-path to tokenize response_text into VeRL responses/response_mask tensors",
-        }
-    (out_dir / "mock_post_rollout_status.json").write_text(
-        json.dumps(post_rollout_status, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
     print(f"wrote {out_dir / 'verl_pre_rollout_batches.pt'}")
     print(f"wrote {out_dir / 'combined_gen_batch_summary.json'}")
-    print(f"wrote {out_dir / 'external_rollout_request.json'}")
-    print(f"wrote {out_dir / 'mock_external_rollout_result.json'}")
+    print(f"wrote {out_dir / 'episode_request_batch.json'}")
+    print(f"wrote {out_dir / 'mock_episode_result_batch.json'}")
     print(f"samples={len(rollout_request['samples'])} rollout_n={args.rollout_n}")
-    print(f"post_rollout_dataproto_built={post_rollout_status['built']}")
 
 
 if __name__ == "__main__":

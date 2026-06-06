@@ -57,7 +57,9 @@ def main() -> int:
     endpoint = args.endpoint or f"127.0.0.1:{free_port()}"
     response_ids = parse_ids(args.response_ids)
 
-    subprocess.run([str(ROOT / "scripts" / "generate_adapter_core_proto.sh")], check=True)
+    generated_stub = SRC / "uenv" / "bridge" / "gen" / "adapter_core_pb2_grpc.py"
+    if not args.skip_build or not generated_stub.exists():
+        subprocess.run([str(ROOT / "scripts" / "generate_adapter_core_proto.sh")], check=True)
     if not args.skip_build:
         subprocess.run(["cargo", "build"], cwd=ROOT / "core", check=True)
 

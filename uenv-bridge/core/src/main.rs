@@ -32,7 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("uenv listening on {addr}");
 
     let backend = std::env::var("UENV_ADAPTER_CORE_BACKEND")
-        .or_else(|_| std::env::var("UENV_ADAPTER_CORE_REWARD_MODE"))
         .unwrap_or_else(|_| "server".to_string());
     if backend == "static_rollout" {
         let core = AdapterCore::new(StaticRolloutEpisodeService::from_env());

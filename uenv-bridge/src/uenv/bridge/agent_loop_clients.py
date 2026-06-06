@@ -66,7 +66,7 @@ class StaticRolloutEpisodeClient:
     def submit_episode(self, request: EpisodeRequest) -> EpisodeResult:
         self.last_request = request
         payload = self._payload(request)
-        response_text = self.response_text or self._ground_truth(payload) or "mock external rollout response"
+        response_text = self.response_text or self._ground_truth(payload) or "mock uenv rollout response"
         step = StepRecord(
             step_index=1,
             action=response_text.encode("utf-8"),

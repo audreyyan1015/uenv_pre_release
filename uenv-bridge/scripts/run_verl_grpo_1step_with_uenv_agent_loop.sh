@@ -11,10 +11,13 @@ MODEL_PATH=${MODEL_PATH:-/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct}
 TRAINING_STEPS=${TRAINING_STEPS:-1}
 DATA_DIR=${DATA_DIR:-${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_data}
 CONTAINER_DATA_DIR=/tmp/uenv-bridge/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_data
+DATA_MARKER=${DATA_MARKER:-${DATA_DIR}/.sample_count}
 LOG_DIR=${LOG_DIR:-${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_logs}
 SAMPLE_COUNT=${SAMPLE_COUNT:-2}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ROLLOUT_N=${ROLLOUT_N:-2}
+ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
+ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-4}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0}
@@ -36,6 +39,13 @@ UENV_ROLLOUT_MODEL_ENDPOINT=${UENV_ROLLOUT_MODEL_ENDPOINT:-}
 UENV_ROLLOUT_MODEL_NAME=${UENV_ROLLOUT_MODEL_NAME:-}
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:-}
 
+REQUIRED_SAMPLE_COUNT=$((TRAINING_STEPS * TRAIN_BATCH_SIZE))
+if [ "${SAMPLE_COUNT}" -lt "${REQUIRED_SAMPLE_COUNT}" ]; then
+  echo "SAMPLE_COUNT=${SAMPLE_COUNT} is too small for TRAINING_STEPS=${TRAINING_STEPS} and TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}." >&2
+  echo "Use SAMPLE_COUNT>=${REQUIRED_SAMPLE_COUNT}, or reduce TRAINING_STEPS/TRAIN_BATCH_SIZE." >&2
+  exit 2
+fi
+
 mkdir -p "${MODEL_CACHE}" "${DATA_DIR}" "${LOG_DIR}"
 
 if [ ! -f "${HOST_MODEL_PATH}/config.json" ] || [ ! -f "${HOST_MODEL_PATH}/model.safetensors" ]; then
@@ -50,7 +60,10 @@ print(path)
 PY"
 fi
 
-if [ ! -f "${DATA_DIR}/train.parquet" ] || [ ! -f "${DATA_DIR}/test.parquet" ]; then
+if [ ! -f "${DATA_DIR}/train.parquet" ] ||
+   [ ! -f "${DATA_DIR}/test.parquet" ] ||
+   [ ! -f "${DATA_MARKER}" ] ||
+   [ "$(cat "${DATA_MARKER}" 2>/dev/null || true)" != "${SAMPLE_COUNT}" ]; then
   echo "Preparing VeRL-format GSM8K samples under ${DATA_DIR}..."
   podman run --rm --entrypoint bash \
     --workdir /tmp/uenv-bridge \
@@ -67,6 +80,7 @@ if [ ! -f "${DATA_DIR}/train.parquet" ] || [ ! -f "${DATA_DIR}/test.parquet" ]; 
         --input /workspace/data/gsm8k/test.parquet \
         --output "${CONTAINER_DATA_DIR}/test.parquet" \
         --n "${SAMPLE_COUNT}"'
+  printf '%s\n' "${SAMPLE_COUNT}" >"${DATA_MARKER}"
 fi
 
 echo "Running ${TRAINING_STEPS}-step GRPO with UEnv pre-rollout AgentLoop; log: ${LOG_FILE}"
@@ -151,7 +165,8 @@ python3 -m verl.trainer.main_ppo \\
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \\
   actor_rollout_ref.rollout.enforce_eager=True \\
   actor_rollout_ref.rollout.enable_chunked_prefill=False \\
-  actor_rollout_ref.rollout.free_cache_engine=True \\
+  actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
+  +actor_rollout_ref.rollout.enable_sleep_mode=${ROLLOUT_ENABLE_SLEEP_MODE} \\
   actor_rollout_ref.rollout.max_num_seqs=4 \\
   actor_rollout_ref.rollout.max_num_batched_tokens=512 \\
   actor_rollout_ref.rollout.calculate_log_probs=True \\

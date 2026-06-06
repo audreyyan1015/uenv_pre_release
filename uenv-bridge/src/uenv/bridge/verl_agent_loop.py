@@ -10,7 +10,7 @@ from typing import Any
 from .agent_loop_clients import build_agent_loop_episode_client
 from .clients import EpisodeClient
 from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec
-from .verl import prompt_text, to_jsonable
+from .utils import prompt_text, to_jsonable
 
 try:
     from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopMetrics, AgentLoopOutput, register
