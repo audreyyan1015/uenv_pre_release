@@ -37,6 +37,7 @@ async fn main() {
             let runtime = WorkerRuntime {
                 scheduler_mode: cfg.scheduler.mode.clone(),
                 listen: cfg.worker.listen.clone(),
+                advertise_endpoint: cfg.worker.advertise_endpoint.clone(),
                 server_endpoint: cfg.server.endpoint.clone(),
                 worker_id: cfg.worker.id.clone(),
                 max_concurrent: cfg.worker.max_concurrent,
@@ -60,6 +61,7 @@ async fn main() {
                 },
                 hub_enabled: cfg.hub.enabled,
                 hub_endpoint: cfg.hub.endpoint.clone(),
+                hub_token: cfg.hub.token.clone(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

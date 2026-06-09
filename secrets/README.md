@@ -1,314 +1,389 @@
 # A100 测试机联调指南
 
-本目录存放两台 A100 测试机的 SSH 私钥。**请勿将私钥提交到公开仓库或分享给无关人员。**
+本目录存放两台 A100 测试机的 SSH 私钥，以及四端联调的主机/端口/账号说明。**请勿将私钥或账号密码提交到公开仓库或分享给无关人员。**
 
 ---
 
-## 1. 机器与密钥对照
+## 1. 四端联调部署分配
 
-| 角色建议 | 主机 | SSH 端口 | 用户 | 私钥文件 |
-|----------|------|----------|------|----------|
-| 机器 A（控制面 / Hub） | `219.147.100.43` | **7143** | `root` | `9aa460dab6678381f86a1022b8a54c9f_32e42d1c7902ce68ba6719d551645e02_8.143` |
-| 机器 B（Worker 执行层） | `219.147.100.43` | **7142** | `root` | `2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142` |
+| 组件 | 部署位置 | 登录 / 可达地址 | 说明 |
+|------|----------|-----------------|------|
+| **uenv-adapter** | A100 **7142** | `ssh -p 7142 root@219.147.100.43`（私钥见 §2） | 内网 `10.10.20.142` |
+| **uenv-worker** | A100 **7143** | `ssh -p 7143 root@219.147.100.43`（私钥见 §2） | 内网 `10.10.20.143`；配置见 `config/uenv-worker.deploy-7143.yaml` |
+| **uenv-adapter + uenv-server** | 阿里云 **`8.130.86.71`** | `ssh root@8.130.86.71` | 密码：`dev@BDW2026`；**同一进程** `uenv-adapter-core`，公网入口 **`8.130.86.71:8088`** |
+| **uenv-hub** | 阿里云 **`8.130.95.176`** | `ssh root@8.130.95.176`（密码 `pku@345`）；普通用户 `pku` / `pku@123` | 公网 **`http://8.130.95.176:8088`**；Token 见 §1.5 |
 
-两台机器共用同一公网 IP，通过 **不同 SSH 端口** 区分实例。
+```
+                    ┌──────────────────────────────────────────┐
+  VeRL / 训练侧      │  A100 7142 — uenv-adapter                │
+                    └──────────────────┬───────────────────────┘
+                                       │
+                    ┌──────────────────▼───────────────────────┐
+                    │  阿里云 8.130.86.71                       │
+                    │  uenv-adapter-core :8088（Adapter+Server）│
+                    │  阿里云 8.130.95.176 — uenv-hub :8088        │
+                    └──────────────────┬───────────────────────┘
+                                       │ DispatchEpisode（回连）
+                    ┌──────────────────▼───────────────────────┐
+                    │  A100 7143 — uenv-worker                  │
+                    │  公网 219.147.100.43:28888（gRPC 业务）    │
+                    │  公网 219.147.100.43:28777（health）       │
+                    └──────────────────────────────────────────┘
+```
+
+### 1.1 Worker 业务地址（当前，告知 Server 侧）
+
+> **Server 同学需配置回连地址；Worker 启动前须先能连上 Server 完成 Register。**
+
+| 项 | 地址 | 说明 |
+|----|------|------|
+| **Worker gRPC 业务 endpoint** | **`219.147.100.43:28888`** | Register 上报地址；Server `DispatchEpisode` **必须**能公网 TCP 连通 |
+| Worker 本机 bind | `0.0.0.0:28888` | 7143 VM 内监听 |
+| Worker health / metrics | **`http://219.147.100.43:28777/health`** | 探活期望返回 `ok`；本机 bind `0.0.0.0:28777` |
+| Worker → Server（出站） | **`8.130.86.71:8088`** | Register / Heartbeat / ReportResult |
+| 支持 env | `math` | `supported_env_types: ["math"]` |
+
+**启动顺序**：① Server 在 `8.130.86.71:8088` 就绪 → ② Worker 在 7143 启动并完成 Register → ③ Server 回连 `219.147.100.43:28888` 派发。
+
+临时保活（Server 未就绪、仅本机联调）：`config/uenv-worker.deploy-7143.standby.yaml`（连 `127.0.0.1:50051`）。
+
+### 1.2 A100 公网端口映射（`219.147.100.43`）
+
+两台 VM 共用公网 IP，**SSH 与业务口按实例前缀区分**。
+
+| SSH 端口 | 内网 IP | 角色 | 已开通公网 TCP 口 |
+|----------|---------|------|-------------------|
+| **7142** | `10.10.20.142` | Adapter | **18000**，**18077**，**18088**，**18099**，**18777**，**18888** |
+| **7143** | `10.10.20.143` | Worker | **28000**，**28077**，**28088**，**28099**，**28777**，**28888** |
+
+**Worker（7143）端口约定**（与 `config/uenv-worker.deploy-7143.yaml` 一致）：
+
+| 用途 | 本机 bind | 注册给 Server 的 endpoint | 公网探活 |
+|------|-----------|---------------------------|----------|
+| gRPC 业务（原 50052） | `0.0.0.0:28888` | **`219.147.100.43:28888`** | Server 回连 |
+| health / metrics（原 19090） | `0.0.0.0:28777` | — | `curl http://219.147.100.43:28777/health` |
+
+**Adapter（7142）**：业务口按实际 bind 与上表 **18xxx** 映射对齐（部署 Adapter 时再定具体口）。
+
+### 1.3 阿里云公网端口（Server / Hub）
+
+两台阿里云主机均开放：**8000**，**8077**，**8088**，**8099**。
+
+| 组件 | 主机 | 配置中应使用的 endpoint |
+|------|------|-------------------------|
+| **uenv-adapter-core**（Adapter+Server） | **`8.130.86.71`** | Worker `server.endpoint`、7142 Adapter 均指向 **`8.130.86.71:8088`** |
+| **uenv-hub** REST | **`8.130.95.176`** | Worker `hub.endpoint`：**`http://8.130.95.176:8088`**（Hub 实际用 **8088**，非 8080） |
+
+> Worker **出站**连 Server/Hub 时使用上表公网地址；Server **入站回连** Worker 时使用 **`219.147.100.43:28888`**，不要填内网 `10.10.20.143` 或 `0.0.0.0`。
+
+### 1.4 ⚠️ Adapter 与 Server 共用同一进程（重要）
+
+在阿里云 **`8.130.86.71`** 上，**`uenv-adapter`（VeRL Bridge Core）与 `uenv-server`（ControlPlane）不是两个独立服务**，而是合并在 **`uenv-adapter-core`** 一个进程中，**共用同一个 gRPC 入口**（当前公网 **`8.130.86.71:8088`**）。
+
+该进程同时注册三类 gRPC Service（同端口、同进程）：
+
+| Service | 用途 | 谁连接 |
+|---------|------|--------|
+| `AdapterCoreService` | VeRL 训练侧提交 batch | A100 **7142** Python Adapter |
+| `ControlPlaneService` | Register / Heartbeat / ReportResult | A100 **7143** Worker |
+| `AdminService` | 运维查询 | 运维 / 调试 |
+
+**正确做法**
+
+```bash
+# 仅启动 uenv-adapter-core，监听与公网映射一致的地址
+export UENV_ADDR=0.0.0.0:8088
+/home/uenv/target/release/uenv-adapter-core
+# 或：nohup .../uenv-adapter-core >> /var/log/uenv/adapter-core.log 2>&1 &
+```
+
+**错误做法（勿重复）**
+
+- ❌ 认为 8088 上是「纯 Adapter」，再单独起 `uenv-server` 抢端口
+- ❌ `pkill uenv-adapter-core` 后改起 `uenv-server -b 0.0.0.0:8088`（二者 ControlPlane 能力重复，会破坏 Adapter 入口）
+- ❌ 在同一主机上对 **8088** 启动两个进程
+
+A100 **7142** 部署的是 **Python VeRL Adapter 客户端**，通过配置中的 `server.endpoint` / `core.endpoint` 指向 **`8.130.86.71:8088`**（即上述统一入口），**不是**在 7142 上再跑一份 `uenv-adapter-core`（除非架构另有约定）。
+
+### 1.5 Worker ↔ Hub 对接（`8.130.95.176:8088`）
+
+Hub 为 **HTTP REST** 元数据服务，Worker 启动时拉取 `env` manifest（失败降级本地 `plugins/`）。详见 **`Docs/hub/uenv-hub服务指南.md`**。
+
+| 项 | 值 |
+|----|-----|
+| **Hub Base URL** | **`http://8.130.95.176:8088`** |
+| 探活（无需 token） | `GET /healthz` → `{"status":"ok","db":"up"}` |
+| Worker 主路径 | `GET /api/v1/envs/math/versions/latest`（**需 Bearer Token**） |
+| Worker 配置 | `hub.enabled: true`，`hub.endpoint: "http://8.130.95.176:8088"` |
+| Token | **`UENV_HUB_TOKEN`**（与 Hub 主机 `data/.admin_token` 一致，**勿提交仓库**） |
+| Token 读取（Hub SSH） | `ssh root@8.130.95.176` → `cat /root/uenv/uenv-hub/data/.admin_token` |
+
+**7143 启动 Worker 时：**
+
+```bash
+export UENV_HUB_TOKEN=uenvh_xxxxxxxx   # 勿提交仓库；Hub 上 cat /root/uenv/uenv-hub/data/.admin_token
+export UENV_MATH_PLUGIN_BIN=/root/UEnv/target/release/uenv-math-plugin
+./target/release/uenv-worker --config config/uenv-worker.deploy-7143.yaml serve
+# 或持久化：7143 上 source /root/.uenv-worker.env && bash /root/UEnv/scripts/start-worker-7143-hub.sh
+```
+
+**连通性自检（7143 上）：**
+
+```bash
+curl -s http://8.130.95.176:8088/healthz
+curl -s -H "Authorization: Bearer $UENV_HUB_TOKEN" \
+  http://8.130.95.176:8088/api/v1/envs/math/versions/latest
+```
+
+成功时 Worker 日志出现 `hub_manifest_pulled`；无 token 或网络不通则 `hub_pull_failed_using_local_manifest`（不阻塞 Register/Episode，但版本元数据来自本地）。
+
+> **Token 不会自动获取**：`UENV_HUB_TOKEN` 为部署期注入的共享 API 密钥（与 Hub `data/.admin_token` 一致），Worker 不会 SSH 登录 Hub 拉取。7143 上可写入 **`/root/.uenv-worker.env`**（权限 600，**勿提交仓库**），启动前 `source` 即可。
+
+### 1.6 全链路（VeRL → Worker）注意事项
+
+**发起位置**：VeRL 训练在 **7142**（Python `uenv-bridge` / `UEnvBridgeRewardManager`），**不要**在 7142 再起 `uenv-adapter-core`（Core+Server 已在 **`8.130.86.71:8088`**）。
+
+**7142 Python Adapter 连远端 Core（必配）**：
+
+```bash
+export UENV_BRIDGE_CLIENT=rust_core
+export UENV_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088
+export UENV_ADAPTER_CORE_AUTO_START=0    # Core 已在阿里云，勿本机 auto_start
+# VeRL 容器内需：grpcio、uenv-bridge 代码与 adapter_core proto stub
+```
+
+**7143 Worker 跑 Episode 必配环境变量**（缺任一则易出现 `plugin math-1 not ready`）：
+
+| 变量 | 值（7143 示例） | 说明 |
+|------|-----------------|------|
+| `UENV_MATH_PLUGIN_BIN` | `/root/UEnv/target/release/uenv-math-plugin` | `plugins/math/run.sh` 依赖 |
+| `UENV_PLUGIN_DIR` | `/root/UEnv/plugins` | 与 yaml `plugin_dir` 一致 |
+| `UENV_HUB_TOKEN` | Hub `.admin_token` | Hub manifest 拉取（可选降级本地） |
+| `UENV_PREWARM_ON_STARTUP` | 建议 `true`（VeRL 联调） | 启动即预热 math 插件，避免首条 Dispatch 超时 |
+
+**推荐启动（7143，已验证 E2E）**：
+
+```bash
+source /root/.uenv-worker.env
+bash /root/UEnv/scripts/start-worker-7143-hub.sh
+# 日志期望：hub_manifest_pulled、warmup_pool_prewarmed_on_startup、register、heartbeat
+```
+
+**链路自检（不跑完整 VeRL 时）**：本机或 7142 用 `uenv-bridge` 的 `VeRLAdapter` + `RustCoreEpisodeClient(endpoint=8.130.86.71:8088, auto_start=False)` 提交 math batch；Worker 日志应出现 `dispatch_received` → `warmup_hit=true instance_id=math-1` → `report_result`。
 
 ---
 
-## 2. SSH 登录
+## 2. 机器与密钥对照（A100）
+
+| 角色 | 主机 | SSH 端口 | 用户 | 私钥文件 |
+|------|------|----------|------|----------|
+| **Adapter（7142）** | `219.147.100.43` | **7142** | `root` | `2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142` |
+| **Worker（7143）** | `219.147.100.43` | **7143** | `root` | `9aa460dab6678381f86a1022b8a54c9f_32e42d1c7902ce68ba6719d551645e02_8.143` |
+
+---
+
+## 3. SSH 登录
 
 ### Linux / macOS / WSL / Git Bash
 
 ```bash
-# 进入仓库根目录
 cd /path/to/UEnv
 
-# 设置私钥权限（仅首次）
 chmod 600 secrets/9aa460dab6678381f86a1022b8a54c9f_32e42d1c7902ce68ba6719d551645e02_8.143
 chmod 600 secrets/2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142
 
-# 登录机器 A（7143）
+# Adapter — 7142
+ssh -i secrets/2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142 \
+    -p 7142 root@219.147.100.43
+
+# Worker — 7143
 ssh -i secrets/9aa460dab6678381f86a1022b8a54c9f_32e42d1c7902ce68ba6719d551645e02_8.143 \
     -p 7143 root@219.147.100.43
 
-# 登录机器 B（7142）
-ssh -i secrets/2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142 \
-    -p 7142 root@219.147.100.43
+# Server（密码登录）
+ssh root@8.130.86.71
+# 密码：dev@BDW2026
+
+# Hub（密码登录）
+ssh root@8.130.95.176
+# root 密码：pku@345
+# 普通用户：pku / pku@123
+# 读取 Token：cat /root/uenv/uenv-hub/data/.admin_token
 ```
 
 ### Windows PowerShell
 
 ```powershell
+ssh -i secrets\2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142 `
+    -p 7142 root@219.147.100.43
+
 ssh -i secrets\9aa460dab6678381f86a1022b8a54c9f_32e42d1c7902ce68ba6719d551645e02_8.143 `
     -p 7143 root@219.147.100.43
 
-ssh -i secrets\2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142 `
-    -p 7142 root@219.147.100.43
+ssh root@8.130.86.71
+
+ssh root@8.130.95.176
 ```
 
 ### 可选：写入 `~/.ssh/config` 简化登录
 
 ```
+Host uenv-a100-7142
+    HostName 219.147.100.43
+    Port 7142
+    User root
+    IdentityFile /path/to/UEnv/secrets/2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142
+
 Host uenv-a100-7143
     HostName 219.147.100.43
     Port 7143
     User root
     IdentityFile /path/to/UEnv/secrets/9aa460dab6678381f86a1022b8a54c9f_32e42d1c7902ce68ba6719d551645e02_8.143
 
-Host uenv-a100-7142
-    HostName 219.147.100.43
-    Port 7142
+Host uenv-server
+    HostName 8.130.86.71
     User root
-    IdentityFile /path/to/UEnv/secrets/2a9f778a35e7d08c738c79493ba643ef_65c3b455afbe3c81a8a757c01b0faae8_8.142
-```
 
-之后可直接 `ssh uenv-a100-7143` / `ssh uenv-a100-7142`。
+Host uenv-hub
+    HostName 8.130.95.176
+    User root
+    # 密码：pku@345（普通用户 pku / pku@123）
+```
 
 ---
 
-## 3. 推荐联调拓扑（MathEnv / gsm8k benchmark）
+## 3.1 阿里云 Hub / Server 账号速查
 
-Math 插件依赖 **Linux + Unix Domain Socket**（`proto-uds`），必须在 Linux 环境（本 A100 机或 WSL2）上跑 Worker。L1 调度键为 **`env_type=math`**；GSM8K 通过 **`payload.dataset=gsm8k`** 表达。
-
-```
-┌─────────────────────────────────────┐     gRPC ControlPlane      ┌─────────────────────────────────────┐
-│  机器 A (7143)                       │ ◄────────────────────────── │  机器 B (7142)                       │
-│  uenv-server / mock-scheduler :50051 │   Register / Heartbeat /    │  uenv-worker          :50052         │
-│  （可选）uenv-hub       :8080         │   ReportResult              │  plugins/math 子进程                  │
-└─────────────────────────────────────┘                             └─────────────────────────────────────┘
-         │ 主动 DispatchEpisode ──────────────────────────────────────────────► Worker gRPC :50052
-```
-
-| 组件 | 建议部署位置 | 默认端口 | 说明 |
-|------|-------------|----------|------|
-| `uenv-server` 或 `uenv-mock-scheduler` | 机器 A | `50051` | M7 已验收 `uenv-server` + Worker；mock 用于本机混沌测试 |
-| `uenv-worker` | 机器 B | `50052`（gRPC）、`19090`（metrics/health） | 执行 `plugins/math`；`UENV_MATH_PLUGIN_BIN` |
-| `uenv-hub`（可选） | 机器 A | `8080` | seed 含 `math`；Worker M-5 可选启动 pull（见 §6） |
-
-> **单机快速验证**：若两台机器网络互通不便，也可在同一台 Linux 机器上同时启动 mock-scheduler 与 worker，仅将 `server.endpoint` 改为 `127.0.0.1:50051`。
+| 主机 | 用户 | 密码 | 用途 |
+|------|------|------|------|
+| **`8.130.86.71`**（Server） | `root` | `dev@BDW2026` | `uenv-adapter-core` |
+| **`8.130.95.176`**（Hub） | `root` | `pku@345` | 运维、`data/.admin_token` |
+| **`8.130.95.176`**（Hub） | `pku` | `pku@123` | 普通登录 |
 
 ---
 
-## 4. 环境准备（两台机器均需）
+## 4. 推荐联调拓扑（四端 / MathEnv）
+
+| 组件 | 部署位置 | 端口 / endpoint | 说明 |
+|------|----------|-----------------|------|
+| `uenv-adapter`（Python） | A100 **7142** | 出站 → **`8.130.86.71:8088`** | VeRL 训练侧；连统一 Core 入口 |
+| `uenv-adapter-core`（Adapter+Server） | **`8.130.86.71`** | 公网 **`:8088`** | **唯一** gRPC 入口；含 ControlPlane |
+| `uenv-hub` | **`8.130.95.176`** | **`http://8.130.95.176:8088`** | Worker 启动拉 manifest；需 `UENV_HUB_TOKEN` |
+| `uenv-worker` | A100 **7143** | 公网 **`:28888`**（gRPC）、**`:28777`**（health） | `config/uenv-worker.deploy-7143.yaml` |
+
+---
+
+## 5. 环境准备（A100 7142 / 7143）
 
 ```bash
-# 依赖（Ubuntu/Debian 示例）
 apt-get update && apt-get install -y build-essential pkg-config libssl-dev protobuf-compiler git curl
-
-# Rust（若未安装）
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 
-# 同步代码（任选其一）
 git clone <repo-url> UEnv && cd UEnv
-# 或 scp/rsync 从本机推送
-
-# 生成 proto 并编译
 make proto
-cargo build -p uenv-mock-scheduler -p uenv-worker --release
-```
+cargo build -p uenv-worker -p uenv-adapter-core --release
 
-创建日志目录：
-
-```bash
 sudo mkdir -p /var/log/uenv /tmp/uenv/wal
 sudo chown -R "$USER" /var/log/uenv /tmp/uenv
 ```
 
 ---
 
-## 5. 分步启动与验证
+## 6. 分步启动与验证
 
-### 5.1 机器 A：启动 Mock Scheduler
+### 6.1 阿里云：启动 uenv-adapter-core（Adapter + Server 合一）
+
+在 **`8.130.86.71`** 上**只启动 `uenv-adapter-core`**，不要单独再起 `uenv-server`：
 
 ```bash
-cd UEnv
+export UENV_ADDR=0.0.0.0:8088
+nohup /home/uenv/target/release/uenv-adapter-core >> /var/log/uenv/adapter-core.log 2>&1 &
 
-# 编辑 config/uenv-mock-scheduler.yaml，确认 fixture_dir 指向 ./fixtures/math
-UENV_MOCK_LISTEN=0.0.0.0:50051 \
-UENV_LOG_FILE=/var/log/uenv/mock-scheduler.log \
-  ./target/release/uenv-mock-scheduler serve --config config/uenv-mock-scheduler.yaml
+# 确认：进程名应为 uenv-adapter-core，8088 仅一份监听
+pgrep -af uenv-adapter-core
+ss -tlnp | grep 8088
 ```
 
-另开终端确认监听：
+Worker 的 `server.endpoint` 与 7142 Python Adapter 的 Core/Server 地址均指向 **`8.130.86.71:8088`**。
+
+### 6.2 A100 7143：启动 uenv-worker
 
 ```bash
-ss -tlnp | grep 50051
-tail -f /var/log/uenv/mock-scheduler.log
+cd /root/UEnv
+source /root/.uenv-worker.env   # 含 UENV_MATH_PLUGIN_BIN、UENV_HUB_TOKEN 等（勿提交仓库）
+bash scripts/start-worker-7143-hub.sh
+# 或手动：
+export UENV_MATH_PLUGIN_BIN=/root/UEnv/target/release/uenv-math-plugin
+export UENV_PLUGIN_DIR=/root/UEnv/plugins
+export UENV_HUB_TOKEN=...        # 见 §1.5
+export UENV_PREWARM_ON_STARTUP=true   # VeRL 联调建议开启
+
+./target/release/uenv-worker --config config/uenv-worker.deploy-7143.yaml serve
 ```
 
-### 5.2 机器 B：启动 Worker
-
-将 `config/uenv-worker.yaml` 中 `server.endpoint` 改为 **机器 A 的内网/可达 IP:50051**（不要用 `127.0.0.1`，除非同机部署）。
+确认监听与注册：
 
 ```bash
-cd UEnv
-
-export UENV_SCHEDULER_MODE=remote
-export UENV_SERVER_ENDPOINT=<机器A_IP>:50051
-export UENV_WORKER_LISTEN=0.0.0.0:50052
-export UENV_ENV_TYPES=math
-export UENV_PLUGIN_DIR=./plugins
-export UENV_MATH_PLUGIN_BIN=./target/release/uenv-math-plugin
-export UENV_WARMUP_POOL_SIZE=2
-export UENV_MAX_CONCURRENT=4
-export UENV_METRICS_LISTEN=0.0.0.0:19090
-export UENV_LOG_FILE=/var/log/uenv/worker.log
-
-./target/release/uenv-worker serve --config config/uenv-worker.yaml
+ss -tlnp | grep -E '28888|28777'
+curl -s http://127.0.0.1:28777/health
+# 日志中应出现 register_endpoint=219.147.100.43:28888、server_endpoint=8.130.86.71:8088
+# VeRL 联调另查：warmup_pool_prewarmed_on_startup、hub_manifest_pulled
+tail -f /var/log/uenv/worker.log
 ```
 
-### 5.3 连通性检查
-
-**在机器 B 上**（Worker 侧）：
+### 6.3 连通性检查
 
 ```bash
-# Worker 健康与指标
-curl -s http://127.0.0.1:19090/health
-curl -s http://127.0.0.1:19090/metrics | grep uenv_
+# 外网探活 Worker
+curl -s http://219.147.100.43:28777/health
+nc -zv 219.147.100.43 28888
 
-# 确认能连到机器 A 的控制面（需 grpcurl）
-grpcurl -plaintext <机器A_IP>:50051 list
-```
-
-**在机器 A 上**（Scheduler 侧）：
-
-```bash
-# 查看已注册 Worker
-grpcurl -plaintext -d '{"env_types":["math"]}' \
-  127.0.0.1:50051 uenv.scheduler.v1.ControlPlaneService/ListWorkers
-```
-
-### 5.4 期望的 MathEnv 全链路日志
-
-Mock Scheduler 启动后会从 `fixtures/math/episode_001.pb` 自动派发任务（`env_type=math`，payload 含 `dataset=gsm8k`）。成功时两侧日志应出现：
-
-| 阶段 | 机器 A（mock-scheduler） | 机器 B（worker） |
-|------|--------------------------|------------------|
-| 注册 | `RegisterWorker accepted` | `control_plane_mode_remote` / register ok |
-| 心跳 | heartbeat ack | heartbeat loop |
-| 派发 | dispatch to `<worker_endpoint>` | `phase=dispatch_received` |
-| 执行 | — | `acquire` → `reset` → `model_callback` → `step` → `release` |
-| 回报 | `ReportResult ack` | `phase=dispatch_completed`, `warmup_hit=true/false` |
-
-Metrics 验收：
-
-```bash
-curl -s http://<机器B_IP>:19090/metrics | grep -E 'uenv_episode_total|uenv_warmup_pool'
-```
-
-### 5.5 自动化回归（推荐在机器 B 上执行）
-
-```bash
-cd UEnv
-cargo test -p uenv-mock-scheduler --test m1_contract_chaos_tests -- --nocapture
-cargo test -p uenv-worker --test m5_episode_executor -- --nocapture
-cargo test -p uenv-worker --test m6_warmup_pool -- --nocapture
+# Worker 侧：能否连上 Server
+nc -zv 8.130.86.71 8088
 ```
 
 ---
 
-## 6. 当前接口对接状态（2026-05-31）
+## 7. 防火墙与端口放行
 
-merge 后代码已合入同一仓库。**Worker ↔ Server L1 proto 已统一**；M7（2026-05-30）实机验收 Server–Worker 全链路；MathEnv（M-1～M-6）已将 Phase 0 收敛为 `env_type=math` + `payload.dataset=gsm8k`。
-
-### ✅ 已对齐、可联调
-
-| 链路 | Proto / 接口 | 状态 |
-|------|-------------|------|
-| **uenv-server ↔ Worker** | 共享 `proto/uenv/v1/` + `worker_service.proto` | ✅ 已实现；M7 实机已验收 |
-| Mock Scheduler ↔ Worker 控制面 | `scheduler.proto` → `ControlPlaneService` | ✅ 已实现 |
-| Server/Mock → Worker 派发 | `WorkerGrpcService.DispatchEpisode` | ✅ 已实现 |
-| Worker ↔ math 插件 | `plugins/math/` + `plugin_proto/` UDS | ✅ 已实现（**仅 Linux**） |
-| Episode 消息 | `episode.proto`（含租约字段） | ✅ Server/Mock/Worker 同构 |
-| Hub HTTP API | `uenv-hub` REST `/api/v1/*`；seed 含 `math` | ✅ Hub 可独立启动 |
-| Worker Hub pull（M-5） | `GET .../envs/{env_type}/versions/latest` | ✅ 启动探测 + 日志；失败降级本地 |
-
-### ⚠️ 部分对齐 / 待验收
-
-| 项 | 说明 | 联调影响 |
-|----|------|----------|
-| **MathEnv A100 复验** | M7 历史记录为 `env_type=gsm8k`；e2e 脚本已改为 `math` | 需重跑 Server–Worker 确认 math 语义 |
-| **Bridge serve 三联调** | `serve_client.rs` + `l1_mapping` 就绪 | VeRL → Bridge → Server → Worker 无实机记录（P0-8） |
-| **Hub 深度集成** | M-5 不下载 manifest 制品、不替换 `plugins/` | Episode 热路径仍用本地插件（P2-2） |
-| **心跳语义简化** | Worker `load` 恒 0、`DrainCommand` 未处理、`ResourceSpec` 未填 | 不影响单轮 Episode，影响调度感知 |
-
-### 结论：现在能跑通什么？
-
-- **可以跑通**：`uenv-server` 或 `uenv-mock-scheduler` + `uenv-worker` + `plugins/math` 的 **Register → Heartbeat → Dispatch → Execute → Report** 全链路（Linux）；M7 已用 `uenv-server` 实机验收。
-- **待验收**：`env_type=math` 下 A100 复验；`uenv-bridge` serve mode 端到端；Hub 驱动的插件发现/制品同步。
+| 方向 | 地址:端口 | 用途 |
+|------|-----------|------|
+| Worker → Server | **`8.130.86.71:8088`** | Register / Heartbeat / ReportResult |
+| Server → Worker | **`219.147.100.43:28888`** | DispatchEpisode |
+| 运维 | **`219.147.100.43:28777`** | Worker `/health`、`/metrics` |
+| Worker → Hub | **`http://8.130.95.176:8088`** | 可选 manifest pull（`/api/v1/**` 需 token） |
+| Adapter（7142） | `219.147.100.43:18xxx` | 按 Adapter 实际 bind 配置 |
 
 ---
 
-## 7. （可选）启动 Hub 做独立验证
-
-Hub 与 Worker 执行链路 **当前无硬依赖**，可先在机器 A 验证 Hub 自身：
-
-```bash
-cd UEnv/uenv-hub
-UENV_HUB_AUTH__REQUIRE_TOKEN=false cargo run -p uenv-hub-server
-
-# 另开终端
-curl -s http://127.0.0.1:8080/healthz
-curl -s http://127.0.0.1:8080/api/v1/envs
-```
-
-CLI（需先 `cargo build -p uenv-hub-client`）：
-
-```bash
-export UENV_HUB_ENDPOINT=http://127.0.0.1:8080
-./target/debug/uenv hub status
-./target/debug/uenv env list
-```
-
----
-
-## 8. 防火墙与端口放行
-
-跨机联调时，需确保以下端口在 **机器 A ↔ 机器 B** 之间可达：
-
-| 方向 | 端口 | 用途 |
-|------|------|------|
-| B → A | `50051` | Worker 注册/心跳/上报 → ControlPlane |
-| A → B | `50052` | Scheduler 主动 DispatchEpisode |
-| 运维 | `19090` | Worker metrics / health（可选外网暴露） |
-| 可选 | `8080` | Hub HTTP |
-
-```bash
-# 示例：ufw 放行（按实际安全策略调整）
-ufw allow from <对端IP> to any port 50051
-ufw allow from <对端IP> to any port 50052
-```
-
----
-
-## 9. 常见问题
+## 8. 常见问题
 
 | 现象 | 排查 |
 |------|------|
-| Worker 注册失败 `UNAVAILABLE` | 检查 `UENV_SERVER_ENDPOINT` 是否可达；机器 A mock-scheduler 是否监听 `0.0.0.0:50051` |
-| Dispatch 超时 | 检查 A→B 的 `50052` 是否放行；`UENV_WORKER_LISTEN` 是否为 Worker 对外 IP |
-| 插件启动失败 | 确认在 Linux 运行；`UENV_PLUGIN_DIR` 指向含 `plugins/math/run.sh` 的目录；`chmod +x plugins/math/run.sh`；`UENV_MATH_PLUGIN_BIN` 指向 `uenv-math-plugin` |
-| `warmup_hit=false` 持续 | 首次 Episode 冷创建属正常；第二次应为 `true` |
-| 使用 uenv-server 报错 | 确认已用 2026-05-30 后统一 proto 的代码；M7 已验收 `uenv-server` + Worker；若仍失败查 grpc 端口与 Worker `supported_env_types` 含 `math` |
+| Worker 注册失败 | `server.endpoint` 是否为 **`8.130.86.71:8088`**；**`uenv-adapter-core`** 是否在监听（勿误起独立 `uenv-server`） |
+| Dispatch 超时 | Server 能否访问 **`219.147.100.43:28888`** |
+| **`plugin math-1 not ready`** | Worker 进程是否带 **`UENV_MATH_PLUGIN_BIN`**；`plugins/math/run.sh` 是否可执行；手工 `bash run.sh --uds-path /tmp/t.sock` 能否创建 sock |
+| Hub 401 / 无 manifest | 是否 `export UENV_HUB_TOKEN=...`（见 §1.5） |
+| 7142 Adapter 报 stub 错误 | 容器内是否安装 **`grpcio`**；`core.endpoint` 是否 **`8.130.86.71:8088`** 且 **`AUTO_START=0`** |
+| 8088 端口冲突 | 确认只有 **`uenv-adapter-core`** 占用 8088，不要 Adapter/Server 各起一个进程 |
+| 7142 上误跑 Worker | Worker 应只在 **7143**；7142 为 Python Adapter 客户端 |
+| 插件启动失败 | Linux + `UENV_MATH_PLUGIN_BIN` + `plugins/math/run.sh` 可执行 |
 
 ---
 
-## 10. 联调记录模板
-
-每次跨机验收建议留存：
+## 9. 联调记录模板
 
 ```
 日期：
 分支/提交：
-机器 A IP:端口：
-机器 B IP:端口：
-控制面：mock-scheduler / uenv-server（注明）
+Adapter：7142 / 10.10.20.142
+Worker 业务地址：219.147.100.43:28888
+Worker health：219.147.100.43:28777
+Server（uenv-adapter-core @ 8.130.86.71:8088）：
+Hub：http://8.130.95.176:8088
 Episode ID：
-Worker endpoint：
 结果：success / fail
-warmup_hit：
-reward / status：
 异常与处置：
 ```
 
@@ -316,8 +391,6 @@ reward / status：
 
 ## 参考文档
 
-- [worker-pool-mvp-checklist.md](../Docs/worker-pool-mvp-checklist.md) — M7 联调退出标准
-- [260528-1722-worker-next-phase-plan.md](../Docs/260528-1722-worker-next-phase-plan.md) — proto 对齐与 Hub 接入规划
-- [uenv-worker/README.md](../uenv-worker/README.md) — Worker 配置说明
-- [uenv-mock-scheduler/README.md](../uenv-mock-scheduler/README.md) — Mock 控制面说明
-- [uenv-hub/README.md](../uenv-hub/README.md) — Hub 独立部署
+- [全链路联调-各层接口与参数字段.md](../Docs/全链路联调-各层接口与参数字段.md)
+- [uenv-worker/README.md](../uenv-worker/README.md)
+- [Docs/hub/uenv-hub服务指南.md](../Docs/hub/uenv-hub服务指南.md)

@@ -16,6 +16,7 @@ pub struct EnvResolver {
     plugin_host: PluginHost,
     plugin_dir: PathBuf,
     hub_endpoint: Option<String>,
+    hub_token: Option<String>,
     hub_synced: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -24,11 +25,13 @@ impl EnvResolver {
         plugin_host: PluginHost,
         plugin_dir: PathBuf,
         hub_endpoint: Option<String>,
+        hub_token: Option<String>,
     ) -> Self {
         Self {
             plugin_host,
             plugin_dir,
             hub_endpoint,
+            hub_token,
             hub_synced: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -83,7 +86,12 @@ impl EnvResolver {
                 return Ok(());
             }
         }
-        let summary = super::pull_env_manifest(endpoint, env_type).await?;
+        let summary = super::pull_env_manifest(
+            endpoint,
+            env_type,
+            self.hub_token.as_deref(),
+        )
+        .await?;
         self.apply_hub_summary(&summary).await?;
         tracing::info!(
             trace_id = "env_resolver",
@@ -103,7 +111,7 @@ impl EnvResolver {
         let endpoint = self.hub_endpoint.as_ref().ok_or_else(|| {
             format!("env_type={env_type} has no local manifest and hub is not configured")
         })?;
-        let hub = pull_full_manifest(endpoint, env_type).await?;
+        let hub = pull_full_manifest(endpoint, env_type, self.hub_token.as_deref()).await?;
         let manifest = hub_to_plugin_manifest(&hub, &self.plugin_dir)?;
         self.plugin_host.register_manifest(manifest).await?;
         self.hub_synced.lock().await.insert(env_type.to_string());

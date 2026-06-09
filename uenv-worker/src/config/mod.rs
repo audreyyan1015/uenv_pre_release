@@ -25,6 +25,8 @@ pub struct ServerConfig {
 pub struct WorkerSection {
     pub id: String,
     pub listen: String,
+    #[serde(default)]
+    pub advertise_endpoint: Option<String>,
     pub max_concurrent: u32,
 }
 
@@ -66,6 +68,8 @@ pub struct HubConfig {
     #[serde(default)]
     pub enabled: bool,
     pub endpoint: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 impl Default for HubConfig {
@@ -73,6 +77,7 @@ impl Default for HubConfig {
         Self {
             enabled: false,
             endpoint: None,
+            token: None,
         }
     }
 }
@@ -101,6 +106,7 @@ impl Default for WorkerConfig {
             worker: WorkerSection {
                 id: "auto".to_string(),
                 listen: "0.0.0.0:50052".to_string(),
+                advertise_endpoint: None,
                 max_concurrent: 4,
             },
             scheduler: SchedulerConfig {
@@ -165,6 +171,9 @@ impl WorkerConfig {
         }
         if let Ok(v) = std::env::var("UENV_WORKER_LISTEN") {
             self.worker.listen = v;
+        }
+        if let Ok(v) = std::env::var("UENV_WORKER_ADVERTISE_ENDPOINT") {
+            self.worker.advertise_endpoint = Some(v);
         }
         if let Ok(v) = std::env::var("UENV_WORKER_ID") {
             self.worker.id = v;
@@ -232,6 +241,9 @@ impl WorkerConfig {
         if let Ok(v) = std::env::var("UENV_HUB_ENDPOINT") {
             self.hub.endpoint = Some(v);
             self.hub.enabled = true;
+        }
+        if let Ok(v) = std::env::var("UENV_HUB_TOKEN") {
+            self.hub.token = Some(v);
         }
         if let Ok(v) = std::env::var("UENV_HUB_ENABLED") {
             self.hub.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");

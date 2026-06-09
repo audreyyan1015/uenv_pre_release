@@ -55,7 +55,7 @@ pub trait ControlPlane: Send + Sync {
 #[derive(Clone)]
 pub struct SchedulerControlPlaneClient {
     endpoint: String,
-    listen: String,
+    register_endpoint: String,
     supported_env_types: Vec<String>,
     max_concurrent: u32,
     identity: Arc<RwLock<RuntimeIdentity>>,
@@ -66,7 +66,7 @@ impl SchedulerControlPlaneClient {
     pub fn new(
         mode: SchedulerMode,
         endpoint: String,
-        listen: String,
+        register_endpoint: String,
         supported_env_types: Vec<String>,
         max_concurrent: u32,
         worker_id: String,
@@ -81,7 +81,7 @@ impl SchedulerControlPlaneClient {
         }
         Self {
             endpoint,
-            listen,
+            register_endpoint,
             supported_env_types,
             max_concurrent,
             identity: Arc::new(RwLock::new(RuntimeIdentity {
@@ -100,7 +100,7 @@ impl SchedulerControlPlaneClient {
                 worker_id: identity.worker_id.clone(),
                 supported_env_types: self.supported_env_types.clone(),
                 resource: None,
-                endpoint: self.listen.clone(),
+                endpoint: self.register_endpoint.clone(),
                 max_concurrent: self.max_concurrent,
             })
             .await?

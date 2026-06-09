@@ -20,6 +20,7 @@ use crate::wal::WalWriter;
 pub struct WorkerRuntime {
     pub scheduler_mode: String,
     pub listen: String,
+    pub advertise_endpoint: Option<String>,
     pub server_endpoint: String,
     pub worker_id: String,
     pub max_concurrent: u32,
@@ -36,6 +37,7 @@ pub struct WorkerRuntime {
     pub disconnect_dispatch_policy: DisconnectDispatchPolicy,
     pub hub_enabled: bool,
     pub hub_endpoint: Option<String>,
+    pub hub_token: Option<String>,
 }
 
 impl WorkerRuntime {
@@ -46,15 +48,27 @@ impl WorkerRuntime {
         } else {
             None
         };
+        let hub_token = if self.hub_enabled {
+            self.hub_token.clone()
+        } else {
+            None
+        };
         let env_resolver = Arc::new(EnvResolver::new(
             plugin_host.clone(),
             PathBuf::from(&self.plugin_dir),
             hub_endpoint.clone(),
+            hub_token.clone(),
         ));
 
         if self.hub_enabled {
             if let Some(endpoint) = &hub_endpoint {
-                for result in hub::sync_env_types_from_hub(endpoint, &self.supported_env_types).await {
+                for result in hub::sync_env_types_from_hub(
+                    endpoint,
+                    &self.supported_env_types,
+                    hub_token.as_deref(),
+                )
+                .await
+                {
                     match result {
                         Ok(summary) => {
                             if let Err(err) = env_resolver.apply_hub_summary(&summary).await {
@@ -105,11 +119,16 @@ impl WorkerRuntime {
             loaded_envs = %loaded_envs.join(","),
             msg = "plugin_host_loaded"
         );
+        let register_endpoint = self
+            .advertise_endpoint
+            .clone()
+            .unwrap_or_else(|| self.listen.clone());
         tracing::info!(
             trace_id = "runtime",
             worker_id = %self.worker_id,
             episode_id = "-",
             listen = %self.listen,
+            register_endpoint = %register_endpoint,
             server_endpoint = %self.server_endpoint,
             msg = "worker_start"
         );
@@ -146,7 +165,7 @@ impl WorkerRuntime {
         let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
             scheduler_mode,
             self.server_endpoint.clone(),
-            self.listen.clone(),
+            register_endpoint,
             self.supported_env_types.clone(),
             self.max_concurrent,
             self.worker_id,

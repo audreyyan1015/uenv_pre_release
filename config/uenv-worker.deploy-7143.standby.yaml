@@ -1,0 +1,42 @@
+# UEnv Worker — A100 7143 保活（临时）
+# 阿里云 Server (8.130.86.71:8088) 未就绪时，先连本机 uenv-server 完成 Register，
+# 对外仍监听 28888/28777，advertise 仍为公网地址。
+# Server 就绪后改回 config/uenv-worker.deploy-7143.yaml 并重启。
+
+server:
+  endpoint: "127.0.0.1:50051"
+
+worker:
+  id: "auto"
+  listen: "0.0.0.0:28888"
+  advertise_endpoint: "219.147.100.43:28888"
+  max_concurrent: 4
+
+scheduler:
+  mode: "remote"
+
+env:
+  types: ["math"]
+  backend: "process"
+  plugin_dir: "/root/UEnv/plugins"
+
+pool:
+  warmup_size: 2
+  prewarm_on_startup: false
+  max_idle_time: 300
+  cool_timeout: 60
+  max_episode_count: 1000
+
+logging:
+  level: "INFO"
+  file: "/var/log/uenv/worker.log"
+
+wal:
+  dir: "/tmp/uenv/wal"
+
+observability:
+  metrics_listen: "0.0.0.0:28777"
+  health_listen: "0.0.0.0:28777"
+
+hub:
+  enabled: false
