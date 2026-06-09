@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 打印脚本用途、依赖服务布局以及常用运行参数。
 usage() {
   cat <<'EOF'
 Run the real pre-rollout Layer 4 smoke test end to end.
@@ -41,9 +42,12 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
+# 解析仓库路径。REPO_DIR 指向 uenv-bridge，WORKSPACE_ROOT 指向上一级
+# uenv 工作区，其中包含共享 proto、worker、server 和 plugins。
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 WORKSPACE_ROOT=${WORKSPACE_ROOT:-"$(cd "${REPO_DIR}/.." && pwd)"}
 
+# 配置将在容器内运行的 VeRL 训练任务参数。
 IMAGE=${IMAGE:-localhost/uenv-bridge-verl:latest}
 TRAINING_STEPS=${TRAINING_STEPS:-1}
 SAMPLE_COUNT=${SAMPLE_COUNT:-1}
@@ -55,6 +59,8 @@ AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-4}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0}
 
+# 配置本地服务地址。这些服务运行在宿主机上，默认通过 host network
+# 被 VeRL 容器访问。
 RUN_ID=${RUN_ID:-layer4_smoke_$(date +%Y%m%d_%H%M%S)}
 CORE_ADDR=${CORE_ADDR:-127.0.0.1:50053}
 WORKER_LISTEN=${WORKER_LISTEN:-127.0.0.1:50054}
@@ -64,16 +70,20 @@ MODEL_NAME=${MODEL_NAME:-mock-policy}
 METRICS_LISTEN=${METRICS_LISTEN:-127.0.0.1:19091}
 HEALTH_LISTEN=${HEALTH_LISTEN:-${METRICS_LISTEN}}
 
+# 配置可选的构建行为和服务生命周期行为。
 BUILD_RUST=${BUILD_RUST:-0}
 START_MOCK_MODEL=${START_MOCK_MODEL:-1}
 KEEP_SERVICES=${KEEP_SERVICES:-0}
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 
+# 定位 smoke test 所需的宿主机侧二进制文件和插件资源。
 ADAPTER_CORE_BIN=${ADAPTER_CORE_BIN:-${WORKSPACE_ROOT}/target/debug/uenv-adapter-core}
 WORKER_BIN=${WORKER_BIN:-${WORKSPACE_ROOT}/target/debug/uenv-worker}
 MATH_PLUGIN_BIN=${MATH_PLUGIN_BIN:-${WORKSPACE_ROOT}/target/debug/uenv-math-plugin}
 PLUGIN_DIR=${PLUGIN_DIR:-${WORKSPACE_ROOT}/plugins}
 
+# 为本次运行创建独立目录，用于保存服务日志、worker WAL 文件以及
+# 可选的 worker 注册快照。
 SERVICE_DIR=${SERVICE_DIR:-${REPO_DIR}/tmp/layer4_smoke/${RUN_ID}}
 WAL_DIR=${WAL_DIR:-${SERVICE_DIR}/wal}
 MOCK_MODEL_LOG=${MOCK_MODEL_LOG:-${SERVICE_DIR}/mock-model.log}
@@ -83,18 +93,22 @@ WORKER_LOG=${WORKER_LOG:-${SERVICE_DIR}/worker.log}
 WORKERS_JSON=${WORKERS_JSON:-${SERVICE_DIR}/workers.json}
 mkdir -p "${SERVICE_DIR}" "${WAL_DIR}"
 
+# 记录本脚本启动的服务进程 id，退出时由 cleanup trap 统一清理。
 PIDS=()
 
+# 从 host:port 地址中取出 host 部分。
 split_host() {
   local addr="$1"
   printf '%s\n' "${addr%:*}"
 }
 
+# 从 host:port 地址中取出 port 部分。
 split_port() {
   local addr="$1"
   printf '%s\n' "${addr##*:}"
 }
 
+# 检查 TCP 地址是否已经可以建立连接；可以连接则返回成功。
 port_open() {
   local host="$1"
   local port="$2"
@@ -117,6 +131,7 @@ finally:
 PY
 }
 
+# 如果服务地址已经被占用，则提前失败，避免后续启动服务时才报错。
 require_free_addr() {
   local name="$1"
   local addr="$2"
@@ -131,6 +146,7 @@ require_free_addr() {
   fi
 }
 
+# 等待刚启动的服务开始监听端口。
 wait_for_addr() {
   local name="$1"
   local addr="$2"
@@ -150,6 +166,8 @@ wait_for_addr() {
   return 1
 }
 
+# 除非设置 KEEP_SERVICES=1 用于调试，否则退出时停止本 wrapper 启动的
+# 所有服务进程，并保留原始命令退出状态。
 cleanup() {
   local status=$?
   if [ "${KEEP_SERVICES}" = "1" ]; then
@@ -167,6 +185,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# 当显式要求构建或预期二进制不存在时，构建宿主机侧 Rust binaries。
+# VeRL trainer 仍然运行在容器内；这些二进制负责提供容器要连接的
+# 本地 adapter core 和 worker 服务。
 if [ "${BUILD_RUST}" = "1" ] ||
    [ ! -x "${ADAPTER_CORE_BIN}" ] ||
    [ ! -x "${WORKER_BIN}" ] ||
@@ -181,6 +202,7 @@ if [ "${BUILD_RUST}" = "1" ] ||
     --bin uenv-math-plugin
 fi
 
+# 在占用端口之前，检查所有运行时二进制文件和插件路径是否存在。
 for path in "${ADAPTER_CORE_BIN}" "${WORKER_BIN}" "${MATH_PLUGIN_BIN}" "${PLUGIN_DIR}"; do
   if [ ! -e "${path}" ]; then
     echo "Required path does not exist: ${path}" >&2
@@ -188,6 +210,8 @@ for path in "${ADAPTER_CORE_BIN}" "${WORKER_BIN}" "${MATH_PLUGIN_BIN}" "${PLUGIN
   fi
 done
 
+# 检查需要监听的地址是否空闲，并确定 worker 在 rollout 时要调用的
+# 模型 endpoint。
 require_free_addr "adapter core" "${CORE_ADDR}"
 require_free_addr "worker" "${WORKER_LISTEN}"
 if [ "${START_MOCK_MODEL}" = "1" ]; then
@@ -201,6 +225,8 @@ else
   fi
 fi
 
+# 按需启动一个最小 OpenAI-compatible model endpoint。对于只需要
+# chat/completions API、不需要真实模型服务的 smoke test，这已经足够。
 if [ "${START_MOCK_MODEL}" = "1" ]; then
   echo "Starting mock OpenAI-compatible model endpoint on ${MOCK_MODEL_ADDR}"
   LAYER4_MODEL_ADDR="${MOCK_MODEL_ADDR}" LAYER4_MODEL_NAME="${MODEL_NAME}" \
@@ -254,6 +280,8 @@ PY
   wait_for_addr "mock model" "${MOCK_MODEL_ADDR}" 20
 fi
 
+# 以 server backend 模式启动 Rust adapter core。Python 侧通过
+# adapter_core.proto 定义的 gRPC 连接该进程。
 echo "Starting adapter core on ${CORE_ADDR}"
 UENV_ADDR="${CORE_ADDR}" \
 UENV_ADAPTER_CORE_BACKEND=server \
@@ -261,6 +289,8 @@ UENV_ADAPTER_CORE_BACKEND=server \
 PIDS+=("$!")
 wait_for_addr "adapter core" "${CORE_ADDR}" 20
 
+# 启动一个 uenv-worker，并将其注册到 adapter core。worker 负责 math
+# episode 执行、模型调用、reward 计算以及 trajectory 返回。
 echo "Starting worker on ${WORKER_LISTEN}"
 UENV_SERVER_ENDPOINT="${CORE_ADDR}" \
 UENV_WORKER_LISTEN="${WORKER_LISTEN}" \
@@ -278,6 +308,8 @@ UENV_HEALTH_LISTEN="${HEALTH_LISTEN}" \
 PIDS+=("$!")
 wait_for_addr "worker" "${WORKER_LISTEN}" 20
 
+# 如果本机有 grpcurl，则在启动成本较高的 VeRL 训练前，确认 worker
+# 已经成功注册。
 if command -v grpcurl >/dev/null 2>&1; then
   echo "Waiting for worker registration..."
   for _ in $(seq 1 30); do
@@ -304,6 +336,8 @@ else
   sleep 3
 fi
 
+# 运行真实 VeRL GRPO smoke test。内部脚本会启动 VeRL 容器，启用
+# UEnvAgentLoop，并将其指向上面启动的 adapter core。
 echo "Running VeRL Layer 4 smoke test; service logs: ${SERVICE_DIR}"
 set +e
 IMAGE="${IMAGE}" \
@@ -329,6 +363,7 @@ RUN_ID="${RUN_ID}" \
 run_status=$?
 set -e
 
+# 如果 VeRL 运行失败，先打印训练日志末尾的关键信息，再返回原始失败码。
 VERL_LOG="${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_logs/${RUN_ID}.log"
 if [ "${run_status}" -ne 0 ]; then
   echo "Layer 4 smoke test failed. VeRL log: ${VERL_LOG}" >&2
@@ -336,6 +371,7 @@ if [ "${run_status}" -ne 0 ]; then
   exit "${run_status}"
 fi
 
+# 从 VeRL 和 worker 日志中打印简短的成功摘要。
 echo "Layer 4 smoke test completed."
 echo "VeRL log: ${VERL_LOG}"
 grep -E "Training Progress: 100%|critic/score/mean|critic/rewards/mean" "${VERL_LOG}" | tail -5 || true
