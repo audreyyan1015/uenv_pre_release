@@ -12,7 +12,7 @@ TRAINING_STEPS=${TRAINING_STEPS:-1}
 DATA_DIR=${DATA_DIR:-${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_data}
 CONTAINER_DATA_DIR=/tmp/uenv-bridge/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_data
 DATA_MARKER=${DATA_MARKER:-${DATA_DIR}/.sample_count}
-LOG_DIR=${LOG_DIR:-${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_logs}
+LOG_DIR=${LOG_DIR:-${REPO_DIR}/logs/verl_grpo_${TRAINING_STEPS}step_agent_loop}
 SAMPLE_COUNT=${SAMPLE_COUNT:-2}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ROLLOUT_N=${ROLLOUT_N:-2}
@@ -128,7 +128,7 @@ if [ \"${UENV_AGENT_LOOP_CLIENT}\" = \"rust_core\" ] && [ \"${UENV_AGENT_LOOP_BU
   cd /workspace/verl
 fi
 python3 -m verl.trainer.main_ppo \\
-  hydra.run.dir=/tmp/uenv-bridge/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_logs/hydra_${RUN_ID} \\
+  hydra.run.dir=/tmp/uenv-bridge/logs/verl_grpo_${TRAINING_STEPS}step_agent_loop/hydra_${RUN_ID} \\
   algorithm.adv_estimator=grpo \\
   algorithm.use_kl_in_reward=False \\
   algorithm.kl_ctrl.kl_coef=0.0 \\

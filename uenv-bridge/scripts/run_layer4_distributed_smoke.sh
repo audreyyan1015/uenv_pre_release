@@ -36,6 +36,7 @@ Common environment overrides:
   MODEL_NAME                    Default: mock-policy
   START_MOCK_MODEL              Start adapter-host mock model endpoint. Default: 1
   UENV_ROLLOUT_MODEL_ENDPOINT   Required only when START_MOCK_MODEL=0
+  LOG_ROOT                      Directory for run logs. Default: <repo>/logs
   KEEP_SERVICES                 Do not stop local mock model after run. Default: 0
 
 Example:
@@ -64,7 +65,7 @@ HUB_SSH=${HUB_SSH:-nemo@8.130.179.41}
 
 # 配置 server 侧已经启动的 Rust adapter core 地址。Python/VeRL 只连接
 # 这个 endpoint，不在 adapter 侧启动 core。
-SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-${UENV_AGENT_LOOP_ENDPOINT:-8.130.89.198:50053}}
+SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-${UENV_AGENT_LOOP_ENDPOINT:-8.130.86.71:8088}}
 if [ -z "${SERVER_ADAPTER_CORE_ENDPOINT}" ]; then
   echo "SERVER_ADAPTER_CORE_ENDPOINT is required." >&2
   exit 1
@@ -110,7 +111,8 @@ PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 
 # 为本次运行创建独立目录，用于保存 mock model 和 VeRL 日志。
 RUN_ID=${RUN_ID:-layer4_distributed_$(date +%Y%m%d_%H%M%S)}
-SERVICE_DIR=${SERVICE_DIR:-${REPO_DIR}/tmp/layer4_distributed/${RUN_ID}}
+LOG_ROOT=${LOG_ROOT:-${REPO_DIR}/logs}
+SERVICE_DIR=${SERVICE_DIR:-${LOG_ROOT}/layer4_distributed/${RUN_ID}}
 MOCK_MODEL_LOG=${MOCK_MODEL_LOG:-${SERVICE_DIR}/mock-model.log}
 mkdir -p "${SERVICE_DIR}"
 
@@ -295,12 +297,13 @@ UENV_ROLLOUT_MODEL_ENDPOINT="${ROLLOUT_ENDPOINT}" \
 UENV_ROLLOUT_MODEL_NAME="${MODEL_NAME}" \
 PODMAN_NETWORK_ARGS="${PODMAN_NETWORK_ARGS}" \
 RUN_ID="${RUN_ID}" \
+LOG_DIR="${LOG_ROOT}/verl_grpo_${TRAINING_STEPS}step_agent_loop" \
   "${REPO_DIR}/scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh"
 run_status=$?
 set -e
 
 # 如果 VeRL 运行失败，打印训练日志末尾。
-VERL_LOG="${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_logs/${RUN_ID}.log"
+VERL_LOG="${LOG_ROOT}/verl_grpo_${TRAINING_STEPS}step_agent_loop/${RUN_ID}.log"
 if [ "${run_status}" -ne 0 ]; then
   echo "Distributed Layer 4 smoke test failed. VeRL log: ${VERL_LOG}" >&2
   tail -120 "${VERL_LOG}" >&2 2>/dev/null || true
