@@ -1,17 +1,3 @@
-// service.rs：服务实现
-//
-// 本文件实现两个部分：
-//
-// 1. UEnvEpisodeService
-//    供 Rust adapter core 直接调用（非 gRPC）的 episode 执行服务。
-//    复用原 submit_episode 的调度和分发逻辑，但不暴露 gRPC 端点。
-//
-// 2. AdminService（AdminServiceImpl）
-//    管理接口，供运维人员或工具使用（保留 gRPC）。
-//
-// 3. EpisodeService trait + EpisodeServiceError
-//    adapter core 调用 server 的函数调用边界。
-
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -37,11 +23,9 @@ use crate::scheduler::traits::Scheduler;
 use crate::state::{ActiveEpisode, ServerState};
 
 // =============================================================================
-// UEnvEpisodeService：供 Rust adapter core 直接调用的 episode 执行服务
+// UEnvEpisodeService
 // =============================================================================
 
-/// 持有 ServerState 的直接 episode 执行服务。
-/// 复用调度器和 dispatch_to_worker 逻辑，不经过 gRPC 层。
 pub struct UEnvEpisodeService {
     state: Arc<ServerState>,
 }
@@ -51,12 +35,10 @@ impl UEnvEpisodeService {
         Self { state }
     }
 
-    /// 暴露 ServerState，供外部注册 worker 等操作。
     pub fn state(&self) -> Arc<ServerState> {
         Arc::clone(&self.state)
     }
 
-    /// 提交单个 episode，等待结果返回。
     pub async fn submit_episode(
         &self,
         mut req: EpisodeRequest,
@@ -78,7 +60,6 @@ impl UEnvEpisodeService {
         };
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
-        // 轮询调度器，直到找到可用 worker 或超时
         let assignment = loop {
             let result = self.state.scheduler.read().schedule(&req);
             match result {
@@ -92,7 +73,6 @@ impl UEnvEpisodeService {
             }
         };
 
-        // 建立 oneshot channel，用于接收 worker 上报的结果
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.state.pending_results.insert(
             (episode_id.clone(), attempt_id),
@@ -112,7 +92,6 @@ impl UEnvEpisodeService {
         );
         self.state.scheduler.write().increment_load(&assignment.worker_id);
 
-        // 填入调度元数据
         req.dispatch_lease_id = self.state.next_lease_id();
         req.scheduler_epoch = self.state.epoch();
         let expire_at = SystemTime::now() + Duration::from_secs(timeout_secs);
@@ -124,7 +103,6 @@ impl UEnvEpisodeService {
             nanos: 0,
         });
 
-        // 下发给 worker，完成后归还负载计数
         let dispatch_result = dispatch_to_worker(&assignment.endpoint, req).await;
         self.state.scheduler.write().decrement_load(&assignment.worker_id);
         self.state.active_episodes.remove(&episode_id);
@@ -134,9 +112,12 @@ impl UEnvEpisodeService {
             anyhow::bail!("dispatch failed: {e}");
         }
 
-        // 等待 worker 通过 ReportResult 上报结果
         match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), rx).await {
-            Ok(Ok(result)) => Ok(result),
+            Ok(Ok(result)) => {
+                // Notify all watch_episodes subscribers.
+                let _ = self.state.episode_broadcast.send(result.clone());
+                Ok(result)
+            }
             Ok(Err(_)) => {
                 self.state.pending_results.remove(&(episode_id, attempt_id));
                 anyhow::bail!("report_result channel closed")
@@ -148,7 +129,6 @@ impl UEnvEpisodeService {
         }
     }
 
-    /// 并发提交多个 episode，返回结果列表（顺序与输入一致）。
     pub async fn submit_episode_batch(
         &self,
         requests: Vec<EpisodeRequest>,
@@ -162,7 +142,6 @@ impl UEnvEpisodeService {
     }
 }
 
-/// 把 episode 请求通过 gRPC 下发给指定的 worker。
 async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::Result<()> {
     let mut client =
         WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
@@ -183,7 +162,7 @@ async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::
 }
 
 // =============================================================================
-// UEnvService gRPC：grpcurl / Bridge 提交 Episode（委托 UEnvEpisodeService）
+// UEnvService gRPC
 // =============================================================================
 
 pub struct UEnvServiceImpl {
@@ -200,6 +179,7 @@ impl UEnvServiceImpl {
 
 #[tonic::async_trait]
 impl UEnvService for UEnvServiceImpl {
+    // ── Phase 0: SubmitEpisode (unary) ────────────────────────────────────
     async fn submit_episode(
         &self,
         request: Request<EpisodeRequest>,
@@ -211,51 +191,164 @@ impl UEnvService for UEnvServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))
     }
 
-    type SubmitEpisodeStreamStream = ReceiverStream<Result<EpisodeResult, Status>>;
-
-    async fn submit_episode_stream(
-        &self,
-        _request: Request<tonic::Streaming<EpisodeRequest>>,
-    ) -> Result<Response<Self::SubmitEpisodeStreamStream>, Status> {
-        Err(Status::unimplemented("stream mode not used"))
-    }
-
+    // ── Phase 2+: SubmitBatch (unary) ─────────────────────────────────────
     async fn submit_batch(
         &self,
-        _request: Request<BatchRequest>,
+        request: Request<BatchRequest>,
     ) -> Result<Response<BatchResult>, Status> {
-        Err(Status::unimplemented("batch mode not used"))
+        let req = request.into_inner();
+        let batch_id = req.batch_id.clone();
+        let allow_partial = req.partial_results;
+
+        let results = self.episode.submit_episode_batch(req.episodes).await;
+
+        let mut completed: Vec<EpisodeResult> = Vec::new();
+        let mut failed_count = 0i32;
+        for r in results {
+            match r {
+                Ok(result) => completed.push(result),
+                Err(e) => {
+                    failed_count += 1;
+                    if !allow_partial {
+                        return Err(Status::internal(e.to_string()));
+                    }
+                }
+            }
+        }
+
+        let total = completed.len() as i32 + failed_count;
+        Ok(Response::new(BatchResult {
+            batch_id,
+            completed_count: completed.len() as i32,
+            failed_count,
+            total_count: total,
+            batch_complete: true,
+            results: completed,
+        }))
     }
 
+    // ── Phase 2+: SubmitEpisodeAsync (fire-and-forget) ────────────────────
     async fn submit_episode_async(
         &self,
-        _request: Request<EpisodeRequest>,
+        request: Request<EpisodeRequest>,
     ) -> Result<Response<SubmitAck>, Status> {
-        Err(Status::unimplemented("async mode is Phase 2+"))
+        let mut req = request.into_inner();
+        if req.episode_id.is_empty() {
+            req.episode_id = Uuid::new_v4().to_string();
+        }
+        let episode_id = req.episode_id.clone();
+        let state = self.episode.state();
+        let ack_episode_id = episode_id.clone();
+
+        tokio::spawn(async move {
+            let svc = UEnvEpisodeService::new(Arc::clone(&state));
+            match svc.submit_episode(req).await {
+                Ok(result) => {
+                    state.completed_async.insert(result.episode_id.clone(), result);
+                }
+                Err(e) => {
+                    let failed = EpisodeResult {
+                        episode_id: episode_id.clone(),
+                        status: "failed".to_string(),
+                        error_message: e.to_string(),
+                        ..Default::default()
+                    };
+                    // Also notify watchers of the failure.
+                    let _ = state.episode_broadcast.send(failed.clone());
+                    state.completed_async.insert(episode_id, failed);
+                }
+            }
+        });
+
+        Ok(Response::new(SubmitAck {
+            episode_id: ack_episode_id,
+            accepted: true,
+            queue_position: 0,
+            estimated_wait_seconds: 0,
+        }))
     }
 
+    // ── Phase 2+: GetEpisodeResult (poll async result) ────────────────────
     async fn get_episode_result(
         &self,
-        _request: Request<GetResultRequest>,
+        request: Request<GetResultRequest>,
     ) -> Result<Response<EpisodeResult>, Status> {
-        Err(Status::unimplemented("async mode is Phase 2+"))
+        let req = request.into_inner();
+        match self.episode.state().completed_async.get(&req.episode_id) {
+            Some(result) => Ok(Response::new(result.clone())),
+            None => Err(Status::not_found(format!(
+                "episode '{}' not found or still executing",
+                req.episode_id
+            ))),
+        }
     }
 
+    // ── Phase 2+: WatchEpisodes (server stream) ───────────────────────────
     type WatchEpisodesStream = ReceiverStream<Result<EpisodeResult, Status>>;
 
     async fn watch_episodes(
         &self,
-        _request: Request<WatchRequest>,
+        request: Request<WatchRequest>,
     ) -> Result<Response<Self::WatchEpisodesStream>, Status> {
-        Err(Status::unimplemented("watch mode is Phase 2+"))
+        let correlation_id = request.into_inner().correlation_id;
+        let mut rx = self.episode.state().episode_broadcast.subscribe();
+        let (tx, rx_stream) = tokio::sync::mpsc::channel(64);
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(result) => {
+                        let matches = correlation_id.is_empty()
+                            || result.episode_id.contains(&correlation_id);
+                        if matches && tx.send(Ok(result)).await.is_err() {
+                            break; // client disconnected
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        info!("watch_episodes lagged by {n} messages");
+                    }
+                    Err(_) => break, // channel closed
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx_stream)))
+    }
+
+    // ── Phase 2+: SubmitEpisodeStream (bidi stream) ───────────────────────
+    type SubmitEpisodeStreamStream = ReceiverStream<Result<EpisodeResult, Status>>;
+
+    async fn submit_episode_stream(
+        &self,
+        request: Request<tonic::Streaming<EpisodeRequest>>,
+    ) -> Result<Response<Self::SubmitEpisodeStreamStream>, Status> {
+        let mut in_stream = request.into_inner();
+        let state = self.episode.state();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+        tokio::spawn(async move {
+            while let Ok(Some(req)) = in_stream.message().await {
+                let state = Arc::clone(&state);
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let svc = UEnvEpisodeService::new(state);
+                    let item = svc
+                        .submit_episode(req)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()));
+                    let _ = tx.send(item).await;
+                });
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 
 // =============================================================================
-// AdminService：管理接口
+// AdminService
 // =============================================================================
 
-/// AdminService 的实现结构体。
 pub struct AdminServiceImpl {
     pub state: Arc<ServerState>,
 }
@@ -323,22 +416,15 @@ impl AdminService for AdminServiceImpl {
 }
 
 // =============================================================================
-// EpisodeService trait — adapter core 调用 server 的函数调用边界
+// EpisodeService trait (adapter-core ↔ server boundary)
 // =============================================================================
 
-/// adapter core 调用 episode 执行后端时使用的错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum EpisodeServiceError {
     #[error("{0}")]
     Failed(String),
 }
 
-/// adapter core 和 episode 执行后端之间的函数调用接口。
-///
-/// 生产环境中由 UEnvEpisodeService 实现，测试中可以用任何替身实现。
-/// 定义在 uenv-server 中（而非 adapter core 中）是为了避免循环依赖：
-///   - adapter core 依赖 uenv-server（使用其 proto 类型）
-///   - 如果 uenv-server 也依赖 adapter core 就形成循环
 pub trait EpisodeService: Send + Sync {
     fn submit_episode_batch(
         &self,

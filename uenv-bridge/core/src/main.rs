@@ -1,9 +1,10 @@
-// uenv-adapter-core 启动入口
+// uenv-adapter-core 入口
 //
-// 对外暴露三类 gRPC service：
-//   1. AdapterCoreService  —— Python VeRL 提交 episode batch，获取 reward
-//   2. ControlPlaneService —— Worker 注册、心跳、上报结果
-//   3. AdminService        —— 运维管理（查询 Worker 状态等）
+// 暴露以下 gRPC service：
+//   1. UEnvService         供 Adapter 直连提交 episode（SubmitEpisode 等）
+//   2. AdapterCoreService  供 Python VeRL 提交 episode batch、获取 reward
+//   3. ControlPlaneService 供 Worker 注册、心跳、上报结果
+//   4. AdminService        供 运维工具查询 Worker 状态等
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,13 +15,14 @@ use uenv_adapter_core::pb::adapter_core_service_server::AdapterCoreServiceServer
 use uenv_adapter_core::{AdapterCore, AdapterCoreServiceImpl};
 
 use uenv_server::proto::v1::admin_service_server::AdminServiceServer;
+use uenv_server::proto::v1::u_env_service_server::UEnvServiceServer;
 use uenv_server::proto::v1::episode_result::Summary;
 use uenv_server::proto::v1::{
     EpisodeRequest, EpisodeResult, StepRecord, Trajectory,
 };
 use uenv_server::proto::scheduler::v1::control_plane_service_server::ControlPlaneServiceServer;
 use uenv_server::control_plane::ControlPlaneServiceImpl;
-use uenv_server::service::AdminServiceImpl;
+use uenv_server::service::{AdminServiceImpl, UEnvServiceImpl};
 use uenv_server::{create_default_state, EpisodeService, EpisodeServiceError, UEnvEpisodeService};
 
 #[tokio::main]
@@ -49,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adapter_service = AdapterCoreServiceImpl::new(core);
 
     Server::builder()
+        .add_service(UEnvServiceServer::new(UEnvServiceImpl::new(Arc::clone(&state))))
         .add_service(AdapterCoreServiceServer::new(adapter_service))
         .add_service(ControlPlaneServiceServer::new(ControlPlaneServiceImpl {
             state: Arc::clone(&state),
