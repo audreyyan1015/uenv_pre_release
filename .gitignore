@@ -17,3 +17,4 @@ Thumbs.db
 secrets/*
 !secrets/README.md
 /scripts
+/logs
