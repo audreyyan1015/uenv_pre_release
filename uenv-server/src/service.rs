@@ -4,17 +4,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
 use prost_types::Timestamp;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::proto::v1::{
-    BatchRequest, BatchResult, CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest,
-    DrainWorkerResponse, EpisodeRequest, EpisodeResult, GetResultRequest, GetServerStatusRequest,
-    ServerStatus, SubmitAck, WatchRequest,
+    CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest, DrainWorkerResponse,
+    EpisodeRequest, EpisodeResult, GetServerStatusRequest, ServerStatus,
 };
-use crate::proto::v1::u_env_service_server::UEnvService;
 use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
 use crate::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
 use crate::proto::worker::v1::DispatchEpisodeRequest;
@@ -114,7 +111,7 @@ impl UEnvEpisodeService {
 
         match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), rx).await {
             Ok(Ok(result)) => {
-                // Notify all watch_episodes subscribers.
+                // Notify all subscribe() watchers.
                 let _ = self.state.episode_broadcast.send(result.clone());
                 Ok(result)
             }
@@ -140,6 +137,50 @@ impl UEnvEpisodeService {
         });
         join_all(futures).await
     }
+
+    /// Fire-and-forget 提交：后台 spawn 执行，结果存入 `completed_async` 供
+    /// `get_result` 轮询；失败结果额外广播给 watcher（成功结果已由
+    /// `submit_episode` 内部广播）。返回 episode_id（缺省时生成 UUID）。
+    pub fn submit_episode_async(&self, mut req: EpisodeRequest) -> String {
+        if req.episode_id.is_empty() {
+            req.episode_id = Uuid::new_v4().to_string();
+        }
+        let episode_id = req.episode_id.clone();
+        let state = Arc::clone(&self.state);
+        let spawn_episode_id = episode_id.clone();
+
+        tokio::spawn(async move {
+            let svc = UEnvEpisodeService::new(Arc::clone(&state));
+            match svc.submit_episode(req).await {
+                Ok(result) => {
+                    state.completed_async.insert(result.episode_id.clone(), result);
+                }
+                Err(e) => {
+                    let failed = EpisodeResult {
+                        episode_id: spawn_episode_id.clone(),
+                        status: "failed".to_string(),
+                        error_message: e.to_string(),
+                        ..Default::default()
+                    };
+                    // 失败不会经 submit_episode 广播，这里补发给 watcher。
+                    let _ = state.episode_broadcast.send(failed.clone());
+                    state.completed_async.insert(spawn_episode_id, failed);
+                }
+            }
+        });
+
+        episode_id
+    }
+
+    /// 轮询一个异步提交 episode 的结果（按 episode_id）。
+    pub fn get_result(&self, episode_id: &str) -> Option<EpisodeResult> {
+        self.state.completed_async.get(episode_id).map(|r| r.clone())
+    }
+
+    /// 订阅所有完成 episode 的广播流（驱动 WatchEpisodes）。
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EpisodeResult> {
+        self.state.episode_broadcast.subscribe()
+    }
 }
 
 async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::Result<()> {
@@ -159,190 +200,6 @@ async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::
         );
     }
     Ok(())
-}
-
-// =============================================================================
-// UEnvService gRPC
-// =============================================================================
-
-pub struct UEnvServiceImpl {
-    episode: UEnvEpisodeService,
-}
-
-impl UEnvServiceImpl {
-    pub fn new(state: Arc<ServerState>) -> Self {
-        Self {
-            episode: UEnvEpisodeService::new(state),
-        }
-    }
-}
-
-#[tonic::async_trait]
-impl UEnvService for UEnvServiceImpl {
-    // ── Phase 0: SubmitEpisode (unary) ────────────────────────────────────
-    async fn submit_episode(
-        &self,
-        request: Request<EpisodeRequest>,
-    ) -> Result<Response<EpisodeResult>, Status> {
-        self.episode
-            .submit_episode(request.into_inner())
-            .await
-            .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
-    }
-
-    // ── Phase 2+: SubmitBatch (unary) ─────────────────────────────────────
-    async fn submit_batch(
-        &self,
-        request: Request<BatchRequest>,
-    ) -> Result<Response<BatchResult>, Status> {
-        let req = request.into_inner();
-        let batch_id = req.batch_id.clone();
-        let allow_partial = req.partial_results;
-
-        let results = self.episode.submit_episode_batch(req.episodes).await;
-
-        let mut completed: Vec<EpisodeResult> = Vec::new();
-        let mut failed_count = 0i32;
-        for r in results {
-            match r {
-                Ok(result) => completed.push(result),
-                Err(e) => {
-                    failed_count += 1;
-                    if !allow_partial {
-                        return Err(Status::internal(e.to_string()));
-                    }
-                }
-            }
-        }
-
-        let total = completed.len() as i32 + failed_count;
-        Ok(Response::new(BatchResult {
-            batch_id,
-            completed_count: completed.len() as i32,
-            failed_count,
-            total_count: total,
-            batch_complete: true,
-            results: completed,
-        }))
-    }
-
-    // ── Phase 2+: SubmitEpisodeAsync (fire-and-forget) ────────────────────
-    async fn submit_episode_async(
-        &self,
-        request: Request<EpisodeRequest>,
-    ) -> Result<Response<SubmitAck>, Status> {
-        let mut req = request.into_inner();
-        if req.episode_id.is_empty() {
-            req.episode_id = Uuid::new_v4().to_string();
-        }
-        let episode_id = req.episode_id.clone();
-        let state = self.episode.state();
-        let ack_episode_id = episode_id.clone();
-
-        tokio::spawn(async move {
-            let svc = UEnvEpisodeService::new(Arc::clone(&state));
-            match svc.submit_episode(req).await {
-                Ok(result) => {
-                    state.completed_async.insert(result.episode_id.clone(), result);
-                }
-                Err(e) => {
-                    let failed = EpisodeResult {
-                        episode_id: episode_id.clone(),
-                        status: "failed".to_string(),
-                        error_message: e.to_string(),
-                        ..Default::default()
-                    };
-                    // Also notify watchers of the failure.
-                    let _ = state.episode_broadcast.send(failed.clone());
-                    state.completed_async.insert(episode_id, failed);
-                }
-            }
-        });
-
-        Ok(Response::new(SubmitAck {
-            episode_id: ack_episode_id,
-            accepted: true,
-            queue_position: 0,
-            estimated_wait_seconds: 0,
-        }))
-    }
-
-    // ── Phase 2+: GetEpisodeResult (poll async result) ────────────────────
-    async fn get_episode_result(
-        &self,
-        request: Request<GetResultRequest>,
-    ) -> Result<Response<EpisodeResult>, Status> {
-        let req = request.into_inner();
-        match self.episode.state().completed_async.get(&req.episode_id) {
-            Some(result) => Ok(Response::new(result.clone())),
-            None => Err(Status::not_found(format!(
-                "episode '{}' not found or still executing",
-                req.episode_id
-            ))),
-        }
-    }
-
-    // ── Phase 2+: WatchEpisodes (server stream) ───────────────────────────
-    type WatchEpisodesStream = ReceiverStream<Result<EpisodeResult, Status>>;
-
-    async fn watch_episodes(
-        &self,
-        request: Request<WatchRequest>,
-    ) -> Result<Response<Self::WatchEpisodesStream>, Status> {
-        let correlation_id = request.into_inner().correlation_id;
-        let mut rx = self.episode.state().episode_broadcast.subscribe();
-        let (tx, rx_stream) = tokio::sync::mpsc::channel(64);
-
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(result) => {
-                        let matches = correlation_id.is_empty()
-                            || result.episode_id.contains(&correlation_id);
-                        if matches && tx.send(Ok(result)).await.is_err() {
-                            break; // client disconnected
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        info!("watch_episodes lagged by {n} messages");
-                    }
-                    Err(_) => break, // channel closed
-                }
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx_stream)))
-    }
-
-    // ── Phase 2+: SubmitEpisodeStream (bidi stream) ───────────────────────
-    type SubmitEpisodeStreamStream = ReceiverStream<Result<EpisodeResult, Status>>;
-
-    async fn submit_episode_stream(
-        &self,
-        request: Request<tonic::Streaming<EpisodeRequest>>,
-    ) -> Result<Response<Self::SubmitEpisodeStreamStream>, Status> {
-        let mut in_stream = request.into_inner();
-        let state = self.episode.state();
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-
-        tokio::spawn(async move {
-            while let Ok(Some(req)) = in_stream.message().await {
-                let state = Arc::clone(&state);
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let svc = UEnvEpisodeService::new(state);
-                    let item = svc
-                        .submit_episode(req)
-                        .await
-                        .map_err(|e| Status::internal(e.to_string()));
-                    let _ = tx.send(item).await;
-                });
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
 }
 
 // =============================================================================

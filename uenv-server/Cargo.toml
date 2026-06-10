@@ -3,15 +3,10 @@ name = "uenv-server"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "uenv-server"
-path = "src/main.rs"
-
 [lib]
 name = "uenv_server"
 path = "src/lib.rs"
 [dependencies]
-clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tonic = "0.14"
@@ -22,7 +17,6 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-tracing-subscriber = "0.3"
 dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"

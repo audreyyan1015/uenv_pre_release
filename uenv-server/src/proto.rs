@@ -6,9 +6,9 @@
 //   include!(concat!(env!("OUT_DIR"), "/包名.rs"));
 // 即把生成的 Rust 源代码直接嵌入到当前模块中。
 
-/// uenv.v1 包：客户端接口和管理接口的数据类型与 trait。
+/// uenv.v1 包：Episode 数据类型与管理接口的 trait。
 /// 对应 proto/uenv/v1/server.proto 中 package uenv.v1 的内容。
-/// 包含 EpisodeRequest、EpisodeResult、UEnvService、AdminService 等。
+/// 包含 EpisodeRequest、EpisodeResult、AdminService 等。
 pub mod v1 {
     tonic::include_proto!("uenv.v1");
 }

@@ -16,7 +16,7 @@ pub struct ServerState {
     pub seen_idempotency: parking_lot::Mutex<std::collections::HashSet<String>>,
     /// Results of async-submitted episodes (submit_episode_async).
     pub completed_async: DashMap<String, EpisodeResult>,
-    /// Broadcast channel: every completed episode is sent here for watch_episodes.
+    /// Broadcast channel: every completed episode is sent here for subscribe() watchers.
     pub episode_broadcast: broadcast::Sender<EpisodeResult>,
 }
 
