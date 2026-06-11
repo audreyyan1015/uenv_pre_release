@@ -12,7 +12,7 @@ use tonic::Request;
 use crate::metrics::MetricsExporter;
 use crate::proto::scheduler::v1::control_plane_service_client::ControlPlaneServiceClient;
 use crate::proto::scheduler::v1::{HeartbeatRequest, RegisterWorkerRequest, ReportResultRequest};
-use crate::proto::v1::EpisodeResult;
+use crate::proto::v1::{EpisodeResult, ResourceSpec};
 use crate::wal::WalWriter;
 
 #[derive(Clone, Debug)]
@@ -58,8 +58,31 @@ pub struct SchedulerControlPlaneClient {
     register_endpoint: String,
     supported_env_types: Vec<String>,
     max_concurrent: u32,
+    resource: ResourceSpec,
+    metrics: MetricsExporter,
     identity: Arc<RwLock<RuntimeIdentity>>,
     connected: Arc<AtomicBool>,
+}
+
+pub fn detect_resource_spec() -> ResourceSpec {
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(1);
+    let memory_mb = std::env::var("UENV_WORKER_MEMORY_MB")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(8192);
+    let gpu_count = std::env::var("UENV_WORKER_GPU_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(0);
+    let gpu_type = std::env::var("UENV_WORKER_GPU_TYPE").unwrap_or_default();
+    ResourceSpec {
+        cpu_cores,
+        memory_mb,
+        gpu_count,
+        gpu_type,
+    }
 }
 
 impl SchedulerControlPlaneClient {
@@ -70,7 +93,9 @@ impl SchedulerControlPlaneClient {
         supported_env_types: Vec<String>,
         max_concurrent: u32,
         worker_id: String,
-        ) -> Self {
+        resource: ResourceSpec,
+        metrics: MetricsExporter,
+    ) -> Self {
         match mode {
             SchedulerMode::Remote => tracing::info!(
                 trace_id = "control_plane",
@@ -84,6 +109,8 @@ impl SchedulerControlPlaneClient {
             register_endpoint,
             supported_env_types,
             max_concurrent,
+            resource,
+            metrics,
             identity: Arc::new(RwLock::new(RuntimeIdentity {
                 worker_id,
                 server_epoch: 0,
@@ -99,7 +126,7 @@ impl SchedulerControlPlaneClient {
             .register_worker(RegisterWorkerRequest {
                 worker_id: identity.worker_id.clone(),
                 supported_env_types: self.supported_env_types.clone(),
-                resource: None,
+                resource: Some(self.resource.clone()),
                 endpoint: self.register_endpoint.clone(),
                 max_concurrent: self.max_concurrent,
             })
@@ -151,7 +178,7 @@ impl SchedulerControlPlaneClient {
         let identity = self.identity.read().await.clone();
         tx.send(HeartbeatRequest {
             worker_id: identity.worker_id,
-            load: 0,
+            load: self.metrics.active_episode_count() as i32,
             max_load: self.max_concurrent as i32,
             timestamp_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -1,0 +1,8 @@
+[package]
+name = "uenv-math-env"
+version = "0.1.0"
+edition = "2024"
+description = "MathEnv (L2) — dataset backends and scoring logic for uenv-math-plugin"
+
+[lib]
+path = "src/lib.rs"

@@ -7,7 +7,9 @@ use axum::routing::get;
 use axum::Router;
 use tonic::transport::Server;
 
-use crate::control_plane::client::{ControlPlane, SchedulerControlPlaneClient, SchedulerMode};
+use crate::control_plane::client::{
+    detect_resource_spec, ControlPlane, SchedulerControlPlaneClient, SchedulerMode,
+};
 use crate::episode::executor::EpisodeExecutor;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
 use crate::hub::{self, EnvResolver};
@@ -162,6 +164,7 @@ impl WorkerRuntime {
         }
 
         let scheduler_mode: SchedulerMode = self.scheduler_mode.parse()?;
+        let metrics = MetricsExporter::new();
         let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
             scheduler_mode,
             self.server_endpoint.clone(),
@@ -169,11 +172,11 @@ impl WorkerRuntime {
             self.supported_env_types.clone(),
             self.max_concurrent,
             self.worker_id,
+            detect_resource_spec(),
+            metrics.clone(),
         ));
         control_plane.register().await?;
         control_plane.spawn_heartbeat_loop();
-
-        let metrics = MetricsExporter::new();
         let wal = WalWriter::new(&self.wal_dir)?;
         metrics.set_wal_pending_records(wal.pending_count());
         control_plane.spawn_replay_loop(wal.clone(), metrics.clone());

@@ -16,7 +16,7 @@ async fn m4_plugin_host_reset_step_close() {
     let host = PluginHost::load_from_dir("../plugins").expect("load host");
     let instance = host.spawn("math").await.expect("spawn plugin");
     let obs = host
-        .reset(&instance.instance_id, None)
+        .reset(&instance.instance_id, None, None)
         .await
         .expect("reset");
     let obs_text = String::from_utf8(obs).expect("observation utf8");
@@ -42,7 +42,9 @@ async fn m4_plugin_killed_marks_instance_broken() {
 
     let host = PluginHost::load_from_dir("../plugins").expect("load host");
     let instance = host.spawn("math").await.expect("spawn plugin");
-    host.reset(&instance.instance_id, None).await.expect("reset");
+    host.reset(&instance.instance_id, None, None)
+        .await
+        .expect("reset");
     host.terminate_for_test(&instance.instance_id)
         .await
         .expect("kill");

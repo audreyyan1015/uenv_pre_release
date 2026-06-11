@@ -14,15 +14,34 @@ impl ModelClient {
         &self,
         payload: &[u8],
         reward_config: &[u8],
+        step_index: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        let reward_json: Value = serde_json::from_slice(reward_config)?;
+        let payload_json: Value = if payload.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(payload)?
+        };
+
+        // W-1: VeRL rollout answer takes priority on the first step.
+        if step_index <= 1 {
+            if let Some(response) = payload_json.get("response_text").and_then(Value::as_str) {
+                if !response.is_empty() {
+                    return Ok(response.as_bytes().to_vec());
+                }
+            }
+        }
+
+        // W-2: rule_reward short-circuit for direct Worker/grpcurl tests only.
+        let reward_json: Value = if reward_config.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(reward_config)?
+        };
         if reward_json.get("type").and_then(Value::as_str) == Some("rule_reward") {
             if let Some(target) = reward_json.get("target").and_then(Value::as_str) {
                 return Ok(target.as_bytes().to_vec());
             }
         }
-
-        let payload_json: Value = serde_json::from_slice(payload)?;
 
         let model_endpoint = payload_json
             .get("model_endpoint")
@@ -64,7 +83,6 @@ impl ModelClient {
         let url = format!("{}/chat/completions", model_endpoint.trim_end_matches('/'));
         let client = Client::new();
 
-        // Retry on any HTTP error or connection error (sglang may still be loading during startup)
         let max_retries: usize = 30;
         let mut last_err = String::new();
         for attempt in 0..max_retries {
@@ -94,5 +112,39 @@ impl ModelClient {
             sleep(Duration::from_secs(2)).await;
         }
         Err(last_err.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelClient;
+
+    #[tokio::test]
+    async fn prefers_response_text_over_rule_reward() {
+        let client = ModelClient::new();
+        let payload = format!(r#"{{"response_text":"{} 42","question":"q"}}"#, "####");
+        let action = client
+            .infer_action(
+                payload.as_bytes(),
+                br#"{"type":"rule_reward","target":"20"}"#,
+                1,
+            )
+            .await
+            .expect("infer");
+        assert_eq!(action, b"#### 42");
+    }
+
+    #[tokio::test]
+    async fn rule_reward_short_circuit_without_response_text() {
+        let client = ModelClient::new();
+        let action = client
+            .infer_action(
+                br#"{"question":"q"}"#,
+                br#"{"type":"rule_reward","target":"20"}"#,
+                1,
+            )
+            .await
+            .expect("infer");
+        assert_eq!(action, b"20");
     }
 }

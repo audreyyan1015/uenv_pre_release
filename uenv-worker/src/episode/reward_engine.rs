@@ -1,5 +1,11 @@
 use serde_json::Value;
 
+use crate::episode::payload::reward_target;
+
+/// Worker 侧 reward 解析：默认采信环境插件 `step.reward`。
+///
+/// 仅当 `reward_config.scorer == "worker"` 时，由平台做**通用** rule 比对（精确/trim），
+/// 不含任何 dataset 专用逻辑（GSM8K `####` 等归属 math 环境制品）。
 #[derive(Clone, Default)]
 pub struct RewardEngine;
 
@@ -8,46 +14,36 @@ impl RewardEngine {
         Self
     }
 
-    pub fn evaluate_rule_reward(
+    pub fn resolve_reward(
         &self,
         action: &[u8],
         reward_config: &[u8],
-        fallback_reward: f64,
+        plugin_reward: f64,
     ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-        let reward_json: Value = serde_json::from_slice(reward_config)?;
-        let reward_type = reward_json.get("type").and_then(Value::as_str);
-        if reward_type != Some("rule_reward") {
-            return Ok(fallback_reward);
+        let reward_json: Value = if reward_config.is_empty() {
+            return Ok(plugin_reward);
+        } else {
+            serde_json::from_slice(reward_config)?
+        };
+
+        if reward_json.get("scorer").and_then(Value::as_str) != Some("worker") {
+            return Ok(plugin_reward);
         }
 
-        let target = reward_json
-            .get("target")
-            .and_then(Value::as_str)
-            .ok_or("rule_reward missing target")?;
-        let target = target.trim();
-        if target.is_empty() {
-            return Ok(fallback_reward);
+        let Some(target) = reward_target(&reward_json) else {
+            return Ok(plugin_reward);
+        };
+        if target.trim().is_empty() {
+            return Ok(plugin_reward);
         }
+
         let action = std::str::from_utf8(action)?.trim();
-        // Exact match first
-        if action == target {
-            return Ok(1.0);
-        }
-        // Normalize: keep only alphanumeric + decimal chars, check if target appears
-        let norm_action = normalize_math_answer(action);
-        let norm_target = normalize_math_answer(target);
-        if !norm_target.is_empty() && norm_action.contains(norm_target.as_str()) {
-            return Ok(1.0);
-        }
-        Ok(0.0)
+        Ok(if action == target.trim() {
+            1.0
+        } else {
+            0.0
+        })
     }
-}
-
-fn normalize_math_answer(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
-        .collect::<String>()
-        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -55,28 +51,42 @@ mod tests {
     use super::RewardEngine;
 
     #[test]
-    fn rule_reward_matches_target() {
+    fn plugin_reward_is_authoritative_by_default() {
         let engine = RewardEngine::new();
         let reward = engine
-            .evaluate_rule_reward(
-                b"20",
+            .resolve_reward(
+                b"wrong action",
                 br#"{"type":"rule_reward","target":"20"}"#,
-                0.5,
+                1.0,
             )
-            .expect("evaluate");
+            .expect("resolve");
         assert_eq!(reward, 1.0);
     }
 
     #[test]
-    fn rule_reward_mismatch_target() {
+    fn worker_scorer_uses_generic_exact_match() {
         let engine = RewardEngine::new();
         let reward = engine
-            .evaluate_rule_reward(
-                b"19",
-                br#"{"type":"rule_reward","target":"20"}"#,
-                0.5,
+            .resolve_reward(
+                b"20",
+                br#"{"type":"rule_reward","target":"20","scorer":"worker"}"#,
+                0.0,
             )
-            .expect("evaluate");
+            .expect("resolve");
+        assert_eq!(reward, 1.0);
+    }
+
+    #[test]
+    fn worker_scorer_does_not_extract_gsm8k_markers() {
+        let engine = RewardEngine::new();
+        let action = format!("Reasoning\n{} 20", "####");
+        let reward = engine
+            .resolve_reward(
+                action.as_bytes(),
+                br#"{"type":"rule_reward","target":"20","scorer":"worker"}"#,
+                0.0,
+            )
+            .expect("resolve");
         assert_eq!(reward, 0.0);
     }
 }

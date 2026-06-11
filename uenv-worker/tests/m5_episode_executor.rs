@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use prost::Message;
-use uenv_worker::episode::executor::EpisodeExecutor;
+use uenv_worker::episode::executor::{EpisodeExecutor, ExecuteContext};
 use uenv_worker::plugin::host::PluginHost;
 use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
 use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult};
@@ -38,8 +38,13 @@ async fn m5_single_round_math_matches_expected_reward_and_status() {
         .await
         .expect("prewarm pool");
     let executor = EpisodeExecutor::new(host, pool);
+    let ctx = ExecuteContext {
+        worker_id: "test-worker".to_string(),
+        worker_capacity: 1,
+        active_episodes: 1,
+    };
     let output = executor
-        .execute_single_round(&request)
+        .execute_single_round(&request, &ctx)
         .await
         .expect("execute episode");
 
