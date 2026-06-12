@@ -310,7 +310,7 @@ mod tests {
         let wal = WalWriter::new(&wal_dir).expect("create wal");
         WorkerGrpcServiceImpl::new(
             control_plane,
-            EpisodeExecutor::new(host, pool.clone()),
+            EpisodeExecutor::new(host, pool.clone(), crate::llm::LlmConfig::default()),
             MetricsExporter::new(),
             pool,
             1,

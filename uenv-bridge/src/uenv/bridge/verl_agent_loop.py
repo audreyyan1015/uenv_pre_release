@@ -131,7 +131,7 @@ def _bool_value(value: Any, default: bool = False) -> bool:
 
 @dataclass(slots=True)
 class UEnvAgentLoopConfig:
-    client_mode: str = "fake"
+    client_mode: str = "rust_core"
     endpoint: str = "127.0.0.1:50051"
     timeout_seconds: float = 300.0
     startup_timeout_seconds: float = 30.0
@@ -140,8 +140,8 @@ class UEnvAgentLoopConfig:
     fake_reward: float = 1.0
     fake_response_text: str = ""
     default_env_type: str = "math"
-    default_model_endpoint: str = "http://uenv-rollout.default.svc:8000/v1"
-    default_model_name: str = "policy-model"
+    default_model_endpoint: str = "https://openrouter.ai/api/v1"
+    default_model_name: str = "qwen/qwen-2.5-7b-instruct"
     default_max_steps: int = 10
     default_max_turns: int = 1
     seed_base: int = 42
@@ -171,8 +171,8 @@ class UEnvAgentLoop(AgentLoopBase):
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
         default_env_type: str = "math",
-        default_model_endpoint: str = "http://uenv-rollout.default.svc:8000/v1",
-        default_model_name: str = "policy-model",
+        default_model_endpoint: str = "https://openrouter.ai/api/v1",
+        default_model_name: str = "qwen/qwen-2.5-7b-instruct",
         default_max_steps: int = 10,
         default_max_turns: int = 1,
         seed_base: int = 42,
@@ -181,7 +181,7 @@ class UEnvAgentLoop(AgentLoopBase):
         super().__init__(*args, **kwargs)
         client_mode = client_mode or mode
         self.config_for_uenv = UEnvAgentLoopConfig(
-            client_mode=_optional_string(client_mode) or "fake",
+            client_mode=_optional_string(client_mode) or "rust_core",
             endpoint=_optional_string(endpoint) or "127.0.0.1:50051",
             timeout_seconds=_float_value(timeout_seconds, 300.0),
             startup_timeout_seconds=_float_value(startup_timeout_seconds, 30.0),
@@ -282,6 +282,10 @@ class UEnvAgentLoop(AgentLoopBase):
         task_name = self._task_name(sample_kwargs, env_type)
         prompt_as_text = prompt_text(raw_prompt)
         model_endpoint = self._model_endpoint(sample_kwargs, sampling_params)
+        extra_info = self._jsonable(sample_kwargs.get("extra_info") or {})
+        worker_question = self._worker_llm_question(raw_prompt, prompt_as_text)
+        if worker_question:
+            extra_info["question"] = worker_question
 
         metadata = {
             "batch_id": batch_id,
@@ -291,7 +295,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "task_name": task_name,
             "data_source": data_source,
             "ability": self._string_or_none(sample_kwargs.get("ability")),
-            "extra_info": self._jsonable(sample_kwargs.get("extra_info") or {}),
+            "extra_info": extra_info,
             "rollout_n": self._value_from_extra_info(sample_kwargs, "rollout_n", None),
             "global_steps": self._value_from_extra_info(sample_kwargs, "global_steps", None),
             "required_result_fields": [
@@ -362,6 +366,15 @@ class UEnvAgentLoop(AgentLoopBase):
     async def _prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
         prompt_ids = await self.apply_chat_template(messages)
         return [int(token_id) for token_id in prompt_ids]
+
+    def _worker_llm_question(self, raw_prompt: Any, prompt_as_text: str) -> str:
+        """Full user prompt for Worker LLM (GSM8K includes #### instruction)."""
+        for message in reversed(self._messages_from_raw_prompt(raw_prompt)):
+            if message.get("role") == "user":
+                content = message.get("content")
+                if content is not None and str(content).strip():
+                    return str(content).strip()
+        return prompt_as_text.strip()
 
     def _messages_from_raw_prompt(self, raw_prompt: Any) -> list[dict[str, Any]]:
         value = self._python_value(raw_prompt)

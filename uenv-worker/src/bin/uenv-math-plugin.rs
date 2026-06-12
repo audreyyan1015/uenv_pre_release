@@ -114,6 +114,7 @@ impl PluginService for MathPlugin {
         let s = self.state.lock().await;
         let reward = score_action(&s.dataset, &action, &s.answer);
         let mut info = HashMap::new();
+        info.insert("response_text".to_string(), action.clone());
         info.insert("expected".to_string(), s.answer.clone());
         info.insert("dataset".to_string(), s.dataset.clone());
         Ok(Response::new(StepResponse {

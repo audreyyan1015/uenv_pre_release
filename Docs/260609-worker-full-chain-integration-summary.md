@@ -1,8 +1,8 @@
 ﻿# 三、UENV Worker
 
-> **版本**：2026-06-09  
-> **依据**：四端实机联调（7142 Python Adapter → `8.130.86.71:8088` adapter-core+Server → 7143 Worker → Hub `8.130.95.176:8088`）  
-> **日志包**：[`logs/e2e-full-chain-20260609T102437Z/`](../logs/e2e-full-chain-20260609T102437Z/)（`test_pass=true`，`reward=1.0`）  
+> **版本**：2026-06-12（§1.2 已同步代码现状；§2 实机记录仍为 2026-06-09）  
+> **依据**：四端实机联调（7142 VeRL AgentLoop → `8.130.86.71:8088` adapter-core+Server → 7143 Worker → Hub `8.130.95.176:8088`）  
+> **历史日志包**：[`logs/e2e-full-chain-20260609T102437Z/`](../logs/e2e-full-chain-20260609T102437Z/)（stub 链路，`reward=1.0`；**非** AgentLoop 真实 GSM8K）  
 > **相关**：[worker-pool-layer-design.md](./worker-pool-layer-design.md)、[260608-verl-gsm8k-real-testing-adjustments.md](./260608-verl-gsm8k-real-testing-adjustments.md)
 
 
@@ -15,7 +15,7 @@
 **运行时**	读 YAML 配置、加载插件目录、启动 gRPC + 可观测性 HTTP	`runtime.rs`, `main.rs`
 **控制面 Client**	向 Server 注册、双向流心跳、上报 Episode 结果	`control_plane/client.rs`
 **数据面 Server**	接收 `DispatchEpisode`，流式返回 `StreamReport`	`grpc_server/worker_service.rs`
-**Episode 执行**	单轮：`acquire → reset → infer_action → step → release → 判分`	`episode/executor.rs`
+**Episode 执行**	多步主循环（GSM8K 单步终止）：`acquire → reset → (infer → step)* → release`	`episode/executor.rs`
 **预热池**	按 `env_type` 维护 Warm 实例；命中/未命中指标	`pool/warmup_pool.rs`
 **插件宿主**	`ProcessBackend` 子进程 + Proto/UDS；`plugins/math/`	`plugin/host.rs`, `backend/process.rs`
 **Hub 元数据**	启动 pull manifest；`EnvResolver` 缺实例前校验	`hub/mod.rs`, `hub/env_resolver.rs`
@@ -24,28 +24,36 @@
 **Lease 校验**	`dispatch_lease_id` 必填、过期/冲突拒绝	`worker_service.rs`
 **并发控制**	`Semaphore(max_concurrent)`	`worker_service.rs`
 
-7143 实机关键环境变量（见日志 `03-worker-7143.log`）：
+7143 实机关键环境变量：
 
 ```bash
+# LLM（AgentLoop 全栈必须，见 config/uenv-worker-llm.env）
+UENV_LLM_ENDPOINT=http://<vllm-host>:8000/v1
+UENV_LLM_MODEL_NAME=policy-model
+
 UENV_MATH_PLUGIN_BIN=/root/UEnv/target/release/uenv-math-plugin
 UENV_PLUGIN_DIR=/root/UEnv/plugins
 UENV_HUB_TOKEN=<Bearer token>
 UENV_PREWARM_ON_STARTUP=true
 ```
 
-### 1.2 仍为 Mock / Stub / 占位
+### 1.2 代码现状 vs 仍待实机验收（2026-06-12 更新）
 
-位置	现状	影响
-**`uenv-math-plugin`**	`reset` 写死固定数学题，答案恒为 `"20"`；不读 Episode `payload`	E2E 得 `reward=1.0` 依赖 fixture 与 stub 对齐，**非真实 GSM8K**
-**`ModelClient`**	若 `reward_config.type=rule_reward` 且有 `target`，**直接把 target 当 action**，不调 LLM	联调捷径；VeRL 路径应改用 `response_text`
-**`RewardEngine`**	仅识别 `rule_reward`；Bridge 来的 `rubric_config` 未映射时 fallback 插件 step reward	与 Bridge payload 格式未完全打通
-**心跳 `load`**	恒为 `0`（未上报真实活跃 Episode 数）	Server 调度看不到 Worker 负载
-**`RegisterWorker.resource`**	发送 `None`	`ResourceSpec` 未参与注册
-**`StreamReport`**	主要填 `phase`；`report_type` 等 PRD 扩展字段多为默认	流式进度语义不完整
-**Hub 集成**	仅 HTTP 拉 manifest 元数据；**不下载**镜像/插件包	仍依赖本地 `plugins/` + `UENV_MATH_PLUGIN_BIN`
-**Episode 步数**	仅 `execute_single_round`（1 step）	多轮 Agent 未实现
-**Podman 后端**	代码存在，7143 使用 `process`	容器化插件未验收
-**`registry/worker_pool.rs`**	占位注释	内存 Registry 未用于热路径
+> **说明**：下表替代 2026-06-09 版「仍为 Mock/Stub」描述；2026-06-09 实机日志为 **stub 题对齐** 链路，不能代表当前 AgentLoop + 真实 GSM8K 能力。
+
+| 位置 | 代码现状（2026-06-12） | 仍待 |
+|------|------------------------|------|
+| **`uenv-math-plugin`** | ✅ reset 读 `{uds}.episode.json`；`dataset=gsm8k` + `answers_match` | 实机 ≥2 题验收 |
+| **`ModelClient`** | ✅ 有 `uenv-worker-llm.env` 时调 LLM；无 LLM 时 `rule_reward` 短路（grpcurl） | 7143 配通 vLLM 并跑 AgentLoop |
+| **`RewardEngine`** | ✅ 采信插件 `step.reward` | — |
+| **Bridge `core.rs`** | ✅ `question` / `dataset=gsm8k` / `rule_reward` 映射 | 实机与 AgentLoop 联调 |
+| **心跳 `load`** | ✅ 上报 `active_episode_count` | 多 Worker 调度 E2E |
+| **`RegisterWorker.resource`** | ✅ `detect_resource_spec()` | 异构调度 E2E |
+| **`StreamReport`** | ✅ 多步 `STEP_COMPLETE` + 扩展字段 | 实机复验 |
+| **Hub 集成** | 仅启动拉 manifest 元数据 | H-6 热路径拉制品 |
+| **Episode 步数** | ✅ `execute_episode` 多步循环；math 环境单步 `terminated` | 多轮 Agent 环境（非 GSM8K） |
+| **Podman 后端** | 代码存在，7143 用 `process` | W-10 可选验收 |
+| **`registry/worker_pool.rs`** | 占位 | P2 |
 
   
 

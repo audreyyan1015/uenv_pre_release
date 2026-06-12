@@ -8,18 +8,20 @@ use uenv_worker::runtime::WorkerRuntime;
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let cfg = WorkerConfig::load(&CliOverrides {
+    let loaded = WorkerConfig::load(&CliOverrides {
         config: cli.config.clone(),
         log_level: cli.log_level.clone(),
         log_file: cli.log_file.clone(),
     });
-    let cfg = match cfg {
+    let loaded = match loaded {
         Ok(v) => v,
         Err(err) => {
             eprintln!("failed to load config: {err}");
             std::process::exit(2);
         }
     };
+    let cfg = loaded.worker;
+    let llm = loaded.llm;
     if let Err(err) = logging::init(&cfg.logging.level, &cfg.logging.file) {
         eprintln!("failed to init logging: {err}");
         std::process::exit(2);
@@ -62,6 +64,7 @@ async fn main() {
                 hub_enabled: cfg.hub.enabled,
                 hub_endpoint: cfg.hub.endpoint.clone(),
                 hub_token: cfg.hub.token.clone(),
+                llm,
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

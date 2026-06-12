@@ -11,6 +11,7 @@ use crate::control_plane::client::{
     detect_resource_spec, ControlPlane, SchedulerControlPlaneClient, SchedulerMode,
 };
 use crate::episode::executor::EpisodeExecutor;
+use crate::llm::LlmConfig;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
 use crate::hub::{self, EnvResolver};
 use crate::metrics::MetricsExporter;
@@ -40,6 +41,7 @@ pub struct WorkerRuntime {
     pub hub_enabled: bool,
     pub hub_endpoint: Option<String>,
     pub hub_token: Option<String>,
+    pub llm: LlmConfig,
 }
 
 impl WorkerRuntime {
@@ -182,7 +184,7 @@ impl WorkerRuntime {
         control_plane.spawn_replay_loop(wal.clone(), metrics.clone());
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
-            EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone()),
+            EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone()),
             metrics.clone(),
             warmup_pool,
             self.max_concurrent.max(1),

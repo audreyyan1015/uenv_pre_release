@@ -37,7 +37,7 @@ async fn m5_single_round_math_matches_expected_reward_and_status() {
     pool.prewarm(&["math".to_string()])
         .await
         .expect("prewarm pool");
-    let executor = EpisodeExecutor::new(host, pool);
+    let executor = EpisodeExecutor::new(host, pool, uenv_worker::llm::LlmConfig::default());
     let ctx = ExecuteContext {
         worker_id: "test-worker".to_string(),
         worker_capacity: 1,

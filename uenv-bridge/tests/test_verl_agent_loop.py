@@ -110,6 +110,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(payload["episode_config"]["initial_observation"]["prompt_ids"], [10, 11])
         self.assertEqual(payload["reward_config"]["rubric_config"]["ground_truth"], "4")
         self.assertEqual(payload["metadata"]["sample_index"], 5)
+        self.assertEqual(payload["metadata"]["extra_info"]["question"], "What is 2 + 2?")
         self.assertIn("response_ids", payload["metadata"]["required_result_fields"])
 
     def test_run_returns_agent_loop_output_from_episode_result(self) -> None:

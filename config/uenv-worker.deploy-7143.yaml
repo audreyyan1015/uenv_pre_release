@@ -37,6 +37,9 @@ logging:
 wal:
   dir: "/tmp/uenv/wal"
 
+llm:
+  env_file: "config/uenv-worker-llm.env"
+
 observability:
   metrics_listen: "0.0.0.0:28777"
   health_listen: "0.0.0.0:28777"
