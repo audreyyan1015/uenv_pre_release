@@ -28,8 +28,9 @@ pub struct HubPullSummary {
 pub async fn pull_env_manifest(
     hub_endpoint: &str,
     env_type: &str,
+    hub_token: Option<&str>,
 ) -> Result<HubPullSummary, Box<dyn std::error::Error + Send + Sync>> {
-    let manifest = pull_full_manifest(hub_endpoint, env_type).await?;
+    let manifest = pull_full_manifest(hub_endpoint, env_type, hub_token).await?;
     Ok(HubPullSummary {
         env_type: manifest.env_type,
         version: manifest.version,
@@ -40,10 +41,11 @@ pub async fn pull_env_manifest(
 pub async fn sync_env_types_from_hub(
     hub_endpoint: &str,
     env_types: &[String],
+    hub_token: Option<&str>,
 ) -> Vec<Result<HubPullSummary, String>> {
     let mut results = Vec::with_capacity(env_types.len());
     for env_type in env_types {
-        let result = pull_env_manifest(hub_endpoint, env_type)
+        let result = pull_env_manifest(hub_endpoint, env_type, hub_token)
             .await
             .map_err(|err| err.to_string());
         results.push(result);
@@ -54,13 +56,18 @@ pub async fn sync_env_types_from_hub(
 pub async fn pull_full_manifest(
     hub_endpoint: &str,
     env_type: &str,
+    hub_token: Option<&str>,
 ) -> Result<HubEnvManifest, Box<dyn std::error::Error + Send + Sync>> {
     let base = hub_endpoint.trim().trim_end_matches('/');
     let url = format!("{base}/api/v1/envs/{env_type}/versions/latest");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
-    let response = client.get(&url).send().await?;
+    let mut request = client.get(&url);
+    if let Some(token) = hub_token.filter(|t| !t.is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
     if !response.status().is_success() {
         return Err(format!(
             "hub GET {url} returned {}",

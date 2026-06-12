@@ -4,4 +4,5 @@ members = [
     "uenv-worker",
     "uenv-server",
     "uenv-bridge/core",
+    "plugins/math",
 ]
