@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use scheduler::RoundRobinScheduler;
 
 pub use service::{
-    AdminServiceImpl, EpisodeService, EpisodeServiceError, UEnvEpisodeService, UEnvServiceImpl,
+    AdminServiceImpl, EpisodeService, EpisodeServiceError, UEnvEpisodeService,
 };
 
 pub fn create_default_state() -> Arc<state::ServerState> {

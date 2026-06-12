@@ -28,10 +28,10 @@ if _version_not_supported:
 class AdapterCoreServiceStub(object):
     """Local Python shim -> Rust adapter core API.
 
-    The Python side owns VeRL-specific objects such as DataProto, tensors,
-    tokenizer output, and non_tensor_batch. The Rust core receives normalized
-    sample envelopes, converts them to UEnv EpisodeRequest values, and calls the
-    in-process UEnv Server API by function call.
+    The Python side owns VeRL AgentLoop objects such as prompt tokens, sampling
+    parameters, reward config, and sample metadata. The Rust core receives
+    normalized sample envelopes, converts them to UEnv EpisodeRequest values,
+    and calls the in-process UEnv Server API by function call.
     """
 
     def __init__(self, channel):
@@ -60,10 +60,10 @@ class AdapterCoreServiceStub(object):
 class AdapterCoreServiceServicer(object):
     """Local Python shim -> Rust adapter core API.
 
-    The Python side owns VeRL-specific objects such as DataProto, tensors,
-    tokenizer output, and non_tensor_batch. The Rust core receives normalized
-    sample envelopes, converts them to UEnv EpisodeRequest values, and calls the
-    in-process UEnv Server API by function call.
+    The Python side owns VeRL AgentLoop objects such as prompt tokens, sampling
+    parameters, reward config, and sample metadata. The Rust core receives
+    normalized sample envelopes, converts them to UEnv EpisodeRequest values,
+    and calls the in-process UEnv Server API by function call.
     """
 
     def ExecuteBatch(self, request, context):
@@ -113,10 +113,10 @@ def add_AdapterCoreServiceServicer_to_server(servicer, server):
 class AdapterCoreService(object):
     """Local Python shim -> Rust adapter core API.
 
-    The Python side owns VeRL-specific objects such as DataProto, tensors,
-    tokenizer output, and non_tensor_batch. The Rust core receives normalized
-    sample envelopes, converts them to UEnv EpisodeRequest values, and calls the
-    in-process UEnv Server API by function call.
+    The Python side owns VeRL AgentLoop objects such as prompt tokens, sampling
+    parameters, reward config, and sample metadata. The Rust core receives
+    normalized sample envelopes, converts them to UEnv EpisodeRequest values,
+    and calls the in-process UEnv Server API by function call.
     """
 
     @staticmethod

@@ -4,29 +4,41 @@ import argparse
 import json
 from pathlib import Path
 
-from .clients import DryRunEpisodeClient
 from .protocol import request_to_jsonable
-from .verl import VeRLAdapter
+from .verl_agent_loop import UEnvAgentLoop
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="uenv-bridge")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    dry_run = subparsers.add_parser("dry-run-verl-json", help="Convert a simplified VeRL batch JSON to EpisodeRequest JSON.")
-    dry_run.add_argument("--input", required=True, help="Path to simplified VeRL batch JSON.")
-    dry_run.add_argument("--output", required=True, help="Path to write converted EpisodeRequest JSON.")
+    dry_run = subparsers.add_parser(
+        "dry-run-agent-loop-json",
+        help="Convert one pre-rollout VeRL sample JSON into an EpisodeRequest JSON.",
+    )
+    dry_run.add_argument("--input", required=True, help="Path to sample JSON.")
+    dry_run.add_argument("--output", required=True, help="Path to write EpisodeRequest JSON.")
 
     args = parser.parse_args()
-    if args.command == "dry-run-verl-json":
-        input_path = Path(args.input)
+    if args.command == "dry-run-agent-loop-json":
+        sample = json.loads(Path(args.input).read_text(encoding="utf-8"))
+        prompt_ids = [int(item) for item in sample.get("prompt_ids", [])]
+        sampling_params = sample.get("sampling_params") or {}
+        raw_prompt = sample.get("raw_prompt")
+        sample_kwargs = {key: value for key, value in sample.items() if key not in {"prompt_ids", "sampling_params", "raw_prompt"}}
+
+        loop = UEnvAgentLoop(tokenizer=None)
+        request = loop.build_episode_request(
+            sampling_params=sampling_params,
+            prompt_ids=prompt_ids,
+            raw_prompt=raw_prompt,
+            sample_kwargs=sample_kwargs,
+        )
+
         output_path = Path(args.output)
-        batch = json.loads(input_path.read_text(encoding="utf-8"))
-        adapter = VeRLAdapter(client=DryRunEpisodeClient(output_path.parent))
-        requests = adapter.to_episode_requests(batch)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
-            json.dumps([request_to_jsonable(request) for request in requests], ensure_ascii=False, indent=2),
+            json.dumps(request_to_jsonable(request), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 

@@ -1,18 +1,7 @@
 syntax = "proto3";
 package uenv.v1;
 
-import "uenv/v1/episode.proto";
 import "uenv/v1/scheduler.proto";
-
-// UEnvService — 训练侧 / Bridge → UEnv Server（PRD §4.2）
-service UEnvService {
-    rpc SubmitEpisode(EpisodeRequest) returns (EpisodeResult);
-    rpc SubmitEpisodeStream(stream EpisodeRequest) returns (stream EpisodeResult);
-    rpc SubmitBatch(BatchRequest) returns (BatchResult);
-    rpc SubmitEpisodeAsync(EpisodeRequest) returns (SubmitAck);
-    rpc GetEpisodeResult(GetResultRequest) returns (EpisodeResult);
-    rpc WatchEpisodes(WatchRequest) returns (stream EpisodeResult);
-}
 
 // AdminService — 运维管理（PRD §4.2 扩展）
 service AdminService {
@@ -20,40 +9,6 @@ service AdminService {
     rpc DrainWorker(DrainWorkerRequest) returns (DrainWorkerResponse);
     rpc CancelEpisode(CancelEpisodeRequest) returns (CancelEpisodeResponse);
     rpc GetServerStatus(GetServerStatusRequest) returns (ServerStatus);
-}
-
-// ─── 批量 / 异步（Phase 2+）──────────────────────────────────
-
-message BatchRequest {
-    string batch_id = 1;
-    repeated EpisodeRequest episodes = 2;
-    int32 timeout_seconds = 3;
-    bool partial_results = 4;
-}
-
-message BatchResult {
-    string batch_id = 1;
-    int32 completed_count = 2;
-    int32 failed_count = 3;
-    int32 total_count = 4;
-    bool batch_complete = 5;
-    repeated EpisodeResult results = 6;
-}
-
-message SubmitAck {
-    string episode_id = 1;
-    bool accepted = 2;
-    int32 queue_position = 3;
-    int32 estimated_wait_seconds = 4;
-}
-
-message GetResultRequest {
-    string episode_id = 1;
-    uint32 attempt_id = 2;
-}
-
-message WatchRequest {
-    string correlation_id = 1;
 }
 
 // ─── Admin ───────────────────────────────────────────────────

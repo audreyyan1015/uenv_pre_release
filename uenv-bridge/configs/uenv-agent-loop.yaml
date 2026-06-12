@@ -1,0 +1,16 @@
+- name: uenv_agent
+  _target_: uenv.bridge.verl_agent_loop.UEnvAgentLoop
+  mode: ${oc.env:UENV_AGENT_LOOP_CLIENT,fake}
+  endpoint: ${oc.env:UENV_ADAPTER_CORE_ENDPOINT,127.0.0.1:50051}
+  timeout_seconds: ${oc.env:UENV_AGENT_LOOP_TIMEOUT_SECONDS,300}
+  startup_timeout_seconds: ${oc.env:UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS,60}
+  auto_start: ${oc.env:UENV_ADAPTER_CORE_AUTO_START,false}
+  binary: ${oc.env:UENV_ADAPTER_CORE_BINARY,/tmp/uenv-bridge/core/target/debug/uenv-adapter-core}
+  fake_reward: ${oc.env:UENV_AGENT_LOOP_FAKE_REWARD,1.0}
+  fake_response_text: ${oc.env:UENV_AGENT_LOOP_FAKE_RESPONSE_TEXT,""}
+  default_env_type: math
+  default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,http://uenv-rollout.default.svc:8000/v1}
+  default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,policy-model}
+  default_max_steps: 10
+  default_max_turns: 1
+  seed_base: 42

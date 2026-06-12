@@ -3,10 +3,10 @@ package uenv.bridge.v1;
 
 // Local Python shim -> Rust adapter core API.
 //
-// The Python side owns VeRL-specific objects such as DataProto, tensors,
-// tokenizer output, and non_tensor_batch. The Rust core receives normalized
-// sample envelopes, converts them to UEnv EpisodeRequest values, and calls the
-// in-process UEnv Server API by function call.
+// The Python side owns VeRL AgentLoop objects such as prompt tokens, sampling
+// parameters, reward config, and sample metadata. The Rust core receives
+// normalized sample envelopes, converts them to UEnv EpisodeRequest values,
+// and calls the in-process UEnv Server API by function call.
 service AdapterCoreService {
   rpc ExecuteBatch(ExecuteBatchRequest) returns (ExecuteBatchResponse);
   rpc ExecuteBatchStream(stream SampleEnvelope) returns (stream SampleResult);
