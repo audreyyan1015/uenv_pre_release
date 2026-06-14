@@ -20,6 +20,7 @@
 //     |                          |                   客户端收到结果|
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -77,6 +78,8 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 1
             },
             current_load: 0,  // 初始负载为 0
+            resource: req.resource.clone(),
+            draining: false,
         };
 
         // 注册到调度器（内部会先删除同 ID 的旧记录，再插入新记录，实现幂等注册）
@@ -104,8 +107,9 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
     ///
     /// worker 定期（默认每 5 秒）发送心跳，包含自身当前的负载信息。
     /// 服务器收到心跳后：
-    ///   1. 更新调度器中该 worker 的负载记录（使 worker 的真实负载反映到调度决策中）
-    ///   2. 回复确认，告知 worker 下次心跳的建议间隔时间
+    ///   1. 计算心跳单程延迟（server 收到时间 - worker 发送时间）并记录日志
+    ///   2. 更新调度器中该 worker 的负载记录（使 worker 的真实负载反映到调度决策中）
+    ///   3. 回复确认，告知 worker 下次心跳的建议间隔时间
     ///
     /// 实现方式：把实际的流处理逻辑放到后台 tokio task 中，
     /// 函数本身立即返回，不阻塞 gRPC 框架的调度线程。
@@ -128,6 +132,14 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             while let Some(next) = stream.next().await {
                 match next {
                     Ok(heartbeat) => {
+                        // 计算心跳单程延迟：server 收到时间 - worker 发送时间。
+                        // 要求两端时钟大致同步；偏差过大时 lag_ms 可能为负，用 max(0) 截断。
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let lag_ms = (now_ms - heartbeat.timestamp_ms).max(0);
+
                         // 用心跳中的负载数据更新调度器里该 worker 的状态。
                         // max(0)：proto 中 load/max_load 是有符号 i32，
                         // 确保不会把负数转成 u32（负数转 u32 会溢出成超大值）。
@@ -135,6 +147,14 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                             &heartbeat.worker_id,
                             heartbeat.load.max(0) as u32,
                             heartbeat.max_load.max(0) as u32,
+                        );
+
+                        info!(
+                            worker_id = %heartbeat.worker_id,
+                            load = heartbeat.load,
+                            max_load = heartbeat.max_load,
+                            lag_ms = lag_ms,
+                            "heartbeat_received"
                         );
 
                         // 构造心跳响应，通知 worker 服务器一切正常
@@ -176,6 +196,22 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
     ) -> Result<Response<ReportResultResponse>, Status> {
         let req = request.into_inner();
 
+        // epoch 校验：server_epoch 非零时必须与当前 epoch 匹配。
+        // 不匹配说明结果来自旧的 server 实例（server 已重启），应拒绝，避免把过期结果
+        // 路由到新 server 实例上等待中的 episode（两者的 pending_results 不互通）。
+        if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
+            warn!(
+                worker_id = %req.worker_id,
+                report_epoch = req.server_epoch,
+                current_epoch = self.state.epoch(),
+                "report_result_stale_epoch_rejected"
+            );
+            return Ok(Response::new(ReportResultResponse {
+                ack: false,
+                duplicate: false,
+            }));
+        }
+
         // 幂等性检查：把 idempotency_key 插入已处理集合。
         // HashSet::insert 返回 true 表示插入成功（key 是新的），false 表示已存在（重复请求）。
         // 取反后：duplicate=true 表示这是重复上报，应跳过处理。
@@ -216,6 +252,14 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             }
         }
 
+        // 结果已处理完毕，从幂等集合中删除该 key，避免长期运行内存无限增长。
+        // 此时重复上报的窗口已关闭：pending_results 已移除，channel 已关闭，
+        // 即使 worker 再次重发同一 key，也只会拿到空的 pending_results 而无副作用。
+        {
+            let mut seen = self.state.seen_idempotency.lock();
+            seen.remove(&req.idempotency_key);
+        }
+
         Ok(Response::new(ReportResultResponse {
             ack: true,
             duplicate,
@@ -250,7 +294,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 supported_env_types: w.supported_env_types,
                 load: w.current_load as i32,
                 max_load: w.capacity as i32,
-                status: "ready".to_string(),
+                status: if w.draining { "draining" } else { "ready" }.to_string(),
                 endpoint: w.endpoint,
             })
             .collect();

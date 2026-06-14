@@ -15,7 +15,7 @@ use traits::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::proto::v1::EpisodeRequest;
+use crate::proto::v1::{EpisodeRequest, ResourceSpec};
 
 /// WorkerSnapshot：list_workers 方法返回的 worker 信息快照。
 /// 字段与 traits::WorkerInfo 相同，但作为独立类型使用，
@@ -26,6 +26,7 @@ pub struct WorkerSnapshot {
     pub supported_env_types: Vec<String>,
     pub capacity: u32,
     pub current_load: u32,
+    pub draining: bool,
 }
 
 /// 轮询调度器。
@@ -57,6 +58,7 @@ impl RoundRobinScheduler {
                 supported_env_types: w.supported_env_types.clone(),
                 capacity: w.capacity,
                 current_load: w.current_load,
+                draining: w.draining,
             })
             .collect()
     }
@@ -85,6 +87,15 @@ impl RoundRobinScheduler {
         }
     }
 
+    /// 将指定 worker 标记为 draining 状态，使其不再参与新的调度。
+    /// draining 之后仍保留在列表中，正在执行的 episode 可以正常完成。
+    /// 实际注销（从列表移除）由调用方在 grace period 结束后执行。
+    pub fn set_worker_draining(&mut self, worker_id: &str) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.draining = true;
+        }
+    }
+
     /// 根据心跳数据更新指定 worker 的负载和容量。
     /// 心跳由 worker 主动上报，反映 worker 自己观察到的实际负载情况，
     /// 比服务器侧的计数更准确（例如 worker 重启后负载归零）。
@@ -99,12 +110,32 @@ impl RoundRobinScheduler {
     }
 }
 
+/// 资源匹配检查：worker 实际资源是否满足 episode 请求的最低要求。
+///
+/// 规则：
+/// - 若请求未指定 resource_spec（None）或所有字段均为 0，则无限制，直接通过。
+/// - 若 worker 未上报资源（resource 为 None），但请求有非零要求，则不匹配。
+/// - cpu_cores / memory_mb / gpu_count 为 0 表示该维度无要求。
+/// - gpu_type 为空字符串表示不限型号。
+fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> bool {
+    let Some(req) = req.as_ref() else { return true; };
+    if req.cpu_cores == 0 && req.memory_mb == 0 && req.gpu_count == 0 && req.gpu_type.is_empty() {
+        return true;
+    }
+    let Some(w) = worker.as_ref() else { return false; };
+    (req.cpu_cores == 0 || w.cpu_cores >= req.cpu_cores)
+        && (req.memory_mb == 0 || w.memory_mb >= req.memory_mb)
+        && (req.gpu_count == 0 || w.gpu_count >= req.gpu_count)
+        && (req.gpu_type.is_empty() || w.gpu_type == req.gpu_type)
+}
+
 impl Scheduler for RoundRobinScheduler {
     /// 注册一个新 worker，或更新已有 worker 的信息。
     /// 如果 worker_id 已存在，先删除旧记录再插入新记录（实现重新注册/信息更新）。
     fn register_worker(&mut self, info: WorkerInfo) {
         tracing::info!(worker_id = %info.worker_id, endpoint = %info.endpoint, "worker registered");
         // retain：保留所有 worker_id 不等于新 worker 的元素（即删除同 ID 的旧记录）
+        // 重新注册时，draining 状态由新 info 决定（注册的 worker 默认 draining=false）
         self.workers.retain(|w| w.worker_id != info.worker_id);
         self.workers.push(info);
     }
@@ -130,8 +161,10 @@ impl Scheduler for RoundRobinScheduler {
             .workers
             .iter()
             .filter(|w| {
-                w.supported_env_types.contains(&request.env_type)
+                !w.draining
+                    && w.supported_env_types.contains(&request.env_type)
                     && w.current_load < w.capacity
+                    && resource_fits(&w.resource, &request.resource_spec)
             })
             .collect();
 

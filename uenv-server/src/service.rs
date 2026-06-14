@@ -48,8 +48,6 @@ impl UEnvEpisodeService {
         }
 
         let episode_id = req.episode_id.clone();
-        let attempt_id = req.attempt_id;
-
         let timeout_secs = if req.timeout_seconds > 0 {
             req.timeout_seconds as u64
         } else {
@@ -57,71 +55,119 @@ impl UEnvEpisodeService {
         };
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
-        let assignment = loop {
-            let result = self.state.scheduler.read().schedule(&req);
-            match result {
-                Ok(a) => break a,
-                Err(e) => {
-                    if Instant::now() > deadline {
-                        anyhow::bail!("no worker available: {e}");
+        loop {
+            let attempt_id = req.attempt_id;
+
+            if attempt_id > self.state.max_attempts {
+                anyhow::bail!(
+                    "episode {episode_id} exceeded max attempts ({})",
+                    self.state.max_attempts
+                );
+            }
+
+            // 找可用 worker，在 deadline 内持续重试
+            let assignment = loop {
+                let result = self.state.scheduler.read().schedule(&req);
+                match result {
+                    Ok(a) => break a,
+                    Err(e) => {
+                        if Instant::now() > deadline {
+                            anyhow::bail!("no worker available: {e}");
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
-            }
-        };
+            };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.state.pending_results.insert(
-            (episode_id.clone(), attempt_id),
-            crate::state::PendingResult {
-                tx,
-                worker_id: assignment.worker_id.clone(),
-            },
-        );
-        self.state.active_episodes.insert(
-            episode_id.clone(),
-            ActiveEpisode {
-                episode_id: episode_id.clone(),
-                attempt_id,
-                worker_id: assignment.worker_id.clone(),
-                started_at: Instant::now(),
-            },
-        );
-        self.state.scheduler.write().increment_load(&assignment.worker_id);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.state.pending_results.insert(
+                (episode_id.clone(), attempt_id),
+                crate::state::PendingResult {
+                    tx,
+                    worker_id: assignment.worker_id.clone(),
+                },
+            );
+            self.state.active_episodes.insert(
+                episode_id.clone(),
+                ActiveEpisode {
+                    episode_id: episode_id.clone(),
+                    attempt_id,
+                    worker_id: assignment.worker_id.clone(),
+                    started_at: Instant::now(),
+                },
+            );
+            self.state.scheduler.write().increment_load(&assignment.worker_id);
 
-        req.dispatch_lease_id = self.state.next_lease_id();
-        req.scheduler_epoch = self.state.epoch();
-        let expire_at = SystemTime::now() + Duration::from_secs(timeout_secs);
-        req.lease_expire_at = Some(Timestamp {
-            seconds: expire_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-            nanos: 0,
-        });
+            req.dispatch_lease_id = self.state.next_lease_id();
+            req.scheduler_epoch = self.state.epoch();
+            // lease 有效期取剩余时间，至少 1 秒
+            let remaining_secs = deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+                .max(1);
+            let expire_at = SystemTime::now() + Duration::from_secs(remaining_secs);
+            req.lease_expire_at = Some(Timestamp {
+                seconds: expire_at
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+                nanos: 0,
+            });
 
-        let dispatch_result = dispatch_to_worker(&assignment.endpoint, req).await;
-        self.state.scheduler.write().decrement_load(&assignment.worker_id);
-        self.state.active_episodes.remove(&episode_id);
+            // clone req：dispatch 会消耗所有权，外层循环重试时还需要 req
+            let dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone()).await;
+            self.state.scheduler.write().decrement_load(&assignment.worker_id);
+            self.state.active_episodes.remove(&episode_id);
 
-        if let Err(e) = dispatch_result {
-            self.state.pending_results.remove(&(episode_id.clone(), attempt_id));
-            anyhow::bail!("dispatch failed: {e}");
-        }
+            // 判断是否需要重试
+            let retry_reason: Option<String> = match dispatch_result {
+                Err(e) => {
+                    // dispatch 失败（连接问题、worker 拒绝等）
+                    self.state
+                        .pending_results
+                        .remove(&(episode_id.clone(), attempt_id));
+                    Some(format!("dispatch_failed: {e}"))
+                }
+                Ok(()) => {
+                    match tokio::time::timeout(
+                        deadline.saturating_duration_since(Instant::now()),
+                        rx,
+                    )
+                    .await
+                    {
+                        Ok(Ok(result)) => {
+                            // 成功：广播并返回
+                            let _ = self.state.episode_broadcast.send(result.clone());
+                            return Ok(result);
+                        }
+                        Ok(Err(_)) => {
+                            // oneshot 发送端被 drop = worker 崩溃
+                            self.state
+                                .pending_results
+                                .remove(&(episode_id.clone(), attempt_id));
+                            Some("worker_channel_closed".to_string())
+                        }
+                        Err(_) => {
+                            // 整体 deadline 超时，不再重试
+                            self.state
+                                .pending_results
+                                .remove(&(episode_id.clone(), attempt_id));
+                            anyhow::bail!("episode execution timeout");
+                        }
+                    }
+                }
+            };
 
-        match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), rx).await {
-            Ok(Ok(result)) => {
-                // Notify all subscribe() watchers.
-                let _ = self.state.episode_broadcast.send(result.clone());
-                Ok(result)
-            }
-            Ok(Err(_)) => {
-                self.state.pending_results.remove(&(episode_id, attempt_id));
-                anyhow::bail!("report_result channel closed")
-            }
-            Err(_) => {
-                self.state.pending_results.remove(&(episode_id, attempt_id));
-                anyhow::bail!("episode execution timeout")
+            if let Some(reason) = retry_reason {
+                tracing::warn!(
+                    episode_id = %episode_id,
+                    attempt_id = attempt_id,
+                    worker_id = %assignment.worker_id,
+                    reason = %reason,
+                    next_attempt = attempt_id + 1,
+                    "episode_attempt_failed_retrying"
+                );
+                req.attempt_id += 1;
             }
         }
     }
@@ -228,7 +274,7 @@ impl AdminService for AdminServiceImpl {
                 supported_env_types: w.supported_env_types,
                 load: w.current_load as i32,
                 max_load: w.capacity as i32,
-                status: "ready".to_string(),
+                status: if w.draining { "draining" } else { "ready" }.to_string(),
             })
             .collect();
         Ok(Response::new(ListWorkersResponse { workers }))
@@ -238,8 +284,26 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<DrainWorkerRequest>,
     ) -> Result<Response<DrainWorkerResponse>, Status> {
-        let worker_id = request.into_inner().worker_id;
-        self.state.scheduler.write().unregister_worker(&worker_id);
+        let req = request.into_inner();
+        let worker_id = req.worker_id;
+        let grace_period = req.grace_period_sec;
+
+        // 立即停止向该 worker 分配新 episode（标记为 draining）
+        self.state.scheduler.write().set_worker_draining(&worker_id);
+
+        if grace_period > 0 {
+            // 等 grace_period 秒后正式注销，让进行中的 episode 自然完成
+            let state = Arc::clone(&self.state);
+            let wid = worker_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(grace_period as u64)).await;
+                state.scheduler.write().unregister_worker(&wid);
+                tracing::info!(worker_id = %wid, grace_period_sec = grace_period, "worker_drain_complete");
+            });
+        } else {
+            self.state.scheduler.write().unregister_worker(&worker_id);
+        }
+
         Ok(Response::new(DrainWorkerResponse { accepted: true }))
     }
 

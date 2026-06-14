@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, oneshot};
 
 pub struct ServerState {
@@ -14,10 +14,10 @@ pub struct ServerState {
     pub next_lease_seq: AtomicU64,
     pub pending_results: DashMap<(String, u32), PendingResult>,
     pub seen_idempotency: parking_lot::Mutex<std::collections::HashSet<String>>,
-    /// Results of async-submitted episodes (submit_episode_async).
     pub completed_async: DashMap<String, EpisodeResult>,
-    /// Broadcast channel: every completed episode is sent here for subscribe() watchers.
     pub episode_broadcast: broadcast::Sender<EpisodeResult>,
+    /// 单个 episode 最多尝试次数，超过后返回失败。默认 3。
+    pub max_attempts: u32,
 }
 
 pub struct ActiveEpisode {
@@ -38,12 +38,21 @@ impl ServerState {
         Self {
             scheduler,
             active_episodes: DashMap::new(),
-            server_epoch: AtomicU64::new(1),
+            // 用启动时刻的 Unix 秒作为 epoch 初始值。
+            // 每次重启时间不同 → epoch 不同，使 worker 能借此感知 server 实例已切换。
+            // 两次重启之间需要至少相差 1 秒才能保证 epoch 唯一，实际部署中完全满足。
+            server_epoch: AtomicU64::new(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
             next_lease_seq: AtomicU64::new(1),
             pending_results: DashMap::new(),
             seen_idempotency: parking_lot::Mutex::new(std::collections::HashSet::new()),
             completed_async: DashMap::new(),
             episode_broadcast,
+            max_attempts: 3,
         }
     }
 
