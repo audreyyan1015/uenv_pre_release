@@ -1,34 +1,17 @@
-// service.rs：服务实现
-//
-// 本文件实现两个部分：
-//
-// 1. UEnvEpisodeService
-//    供 Rust adapter core 直接调用（非 gRPC）的 episode 执行服务。
-//    复用原 submit_episode 的调度和分发逻辑，但不暴露 gRPC 端点。
-//
-// 2. AdminService（AdminServiceImpl）
-//    管理接口，供运维人员或工具使用（保留 gRPC）。
-//
-// 3. EpisodeService trait + EpisodeServiceError
-//    adapter core 调用 server 的函数调用边界。
-
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
 use prost_types::Timestamp;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::proto::v1::{
-    BatchRequest, BatchResult, CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest,
-    DrainWorkerResponse, EpisodeRequest, EpisodeResult, GetResultRequest, GetServerStatusRequest,
-    ServerStatus, SubmitAck, WatchRequest,
+    CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest, DrainWorkerResponse,
+    EpisodeRequest, EpisodeResult, GetServerStatusRequest, ServerStatus,
 };
-use crate::proto::v1::u_env_service_server::UEnvService;
 use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
 use crate::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
 use crate::proto::worker::v1::DispatchEpisodeRequest;
@@ -37,11 +20,9 @@ use crate::scheduler::traits::Scheduler;
 use crate::state::{ActiveEpisode, ServerState};
 
 // =============================================================================
-// UEnvEpisodeService：供 Rust adapter core 直接调用的 episode 执行服务
+// UEnvEpisodeService
 // =============================================================================
 
-/// 持有 ServerState 的直接 episode 执行服务。
-/// 复用调度器和 dispatch_to_worker 逻辑，不经过 gRPC 层。
 pub struct UEnvEpisodeService {
     state: Arc<ServerState>,
 }
@@ -51,12 +32,10 @@ impl UEnvEpisodeService {
         Self { state }
     }
 
-    /// 暴露 ServerState，供外部注册 worker 等操作。
     pub fn state(&self) -> Arc<ServerState> {
         Arc::clone(&self.state)
     }
 
-    /// 提交单个 episode，等待结果返回。
     pub async fn submit_episode(
         &self,
         mut req: EpisodeRequest,
@@ -78,7 +57,6 @@ impl UEnvEpisodeService {
         };
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
-        // 轮询调度器，直到找到可用 worker 或超时
         let assignment = loop {
             let result = self.state.scheduler.read().schedule(&req);
             match result {
@@ -92,7 +70,6 @@ impl UEnvEpisodeService {
             }
         };
 
-        // 建立 oneshot channel，用于接收 worker 上报的结果
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.state.pending_results.insert(
             (episode_id.clone(), attempt_id),
@@ -112,7 +89,6 @@ impl UEnvEpisodeService {
         );
         self.state.scheduler.write().increment_load(&assignment.worker_id);
 
-        // 填入调度元数据
         req.dispatch_lease_id = self.state.next_lease_id();
         req.scheduler_epoch = self.state.epoch();
         let expire_at = SystemTime::now() + Duration::from_secs(timeout_secs);
@@ -124,7 +100,6 @@ impl UEnvEpisodeService {
             nanos: 0,
         });
 
-        // 下发给 worker，完成后归还负载计数
         let dispatch_result = dispatch_to_worker(&assignment.endpoint, req).await;
         self.state.scheduler.write().decrement_load(&assignment.worker_id);
         self.state.active_episodes.remove(&episode_id);
@@ -134,9 +109,12 @@ impl UEnvEpisodeService {
             anyhow::bail!("dispatch failed: {e}");
         }
 
-        // 等待 worker 通过 ReportResult 上报结果
         match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), rx).await {
-            Ok(Ok(result)) => Ok(result),
+            Ok(Ok(result)) => {
+                // Notify all subscribe() watchers.
+                let _ = self.state.episode_broadcast.send(result.clone());
+                Ok(result)
+            }
             Ok(Err(_)) => {
                 self.state.pending_results.remove(&(episode_id, attempt_id));
                 anyhow::bail!("report_result channel closed")
@@ -148,7 +126,6 @@ impl UEnvEpisodeService {
         }
     }
 
-    /// 并发提交多个 episode，返回结果列表（顺序与输入一致）。
     pub async fn submit_episode_batch(
         &self,
         requests: Vec<EpisodeRequest>,
@@ -160,9 +137,52 @@ impl UEnvEpisodeService {
         });
         join_all(futures).await
     }
+
+    /// Fire-and-forget 提交：后台 spawn 执行，结果存入 `completed_async` 供
+    /// `get_result` 轮询；失败结果额外广播给 watcher（成功结果已由
+    /// `submit_episode` 内部广播）。返回 episode_id（缺省时生成 UUID）。
+    pub fn submit_episode_async(&self, mut req: EpisodeRequest) -> String {
+        if req.episode_id.is_empty() {
+            req.episode_id = Uuid::new_v4().to_string();
+        }
+        let episode_id = req.episode_id.clone();
+        let state = Arc::clone(&self.state);
+        let spawn_episode_id = episode_id.clone();
+
+        tokio::spawn(async move {
+            let svc = UEnvEpisodeService::new(Arc::clone(&state));
+            match svc.submit_episode(req).await {
+                Ok(result) => {
+                    state.completed_async.insert(result.episode_id.clone(), result);
+                }
+                Err(e) => {
+                    let failed = EpisodeResult {
+                        episode_id: spawn_episode_id.clone(),
+                        status: "failed".to_string(),
+                        error_message: e.to_string(),
+                        ..Default::default()
+                    };
+                    // 失败不会经 submit_episode 广播，这里补发给 watcher。
+                    let _ = state.episode_broadcast.send(failed.clone());
+                    state.completed_async.insert(spawn_episode_id, failed);
+                }
+            }
+        });
+
+        episode_id
+    }
+
+    /// 轮询一个异步提交 episode 的结果（按 episode_id）。
+    pub fn get_result(&self, episode_id: &str) -> Option<EpisodeResult> {
+        self.state.completed_async.get(episode_id).map(|r| r.clone())
+    }
+
+    /// 订阅所有完成 episode 的广播流（驱动 WatchEpisodes）。
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EpisodeResult> {
+        self.state.episode_broadcast.subscribe()
+    }
 }
 
-/// 把 episode 请求通过 gRPC 下发给指定的 worker。
 async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::Result<()> {
     let mut client =
         WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
@@ -183,79 +203,9 @@ async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::
 }
 
 // =============================================================================
-// UEnvService gRPC：grpcurl / Bridge 提交 Episode（委托 UEnvEpisodeService）
+// AdminService
 // =============================================================================
 
-pub struct UEnvServiceImpl {
-    episode: UEnvEpisodeService,
-}
-
-impl UEnvServiceImpl {
-    pub fn new(state: Arc<ServerState>) -> Self {
-        Self {
-            episode: UEnvEpisodeService::new(state),
-        }
-    }
-}
-
-#[tonic::async_trait]
-impl UEnvService for UEnvServiceImpl {
-    async fn submit_episode(
-        &self,
-        request: Request<EpisodeRequest>,
-    ) -> Result<Response<EpisodeResult>, Status> {
-        self.episode
-            .submit_episode(request.into_inner())
-            .await
-            .map(Response::new)
-            .map_err(|e| Status::internal(e.to_string()))
-    }
-
-    type SubmitEpisodeStreamStream = ReceiverStream<Result<EpisodeResult, Status>>;
-
-    async fn submit_episode_stream(
-        &self,
-        _request: Request<tonic::Streaming<EpisodeRequest>>,
-    ) -> Result<Response<Self::SubmitEpisodeStreamStream>, Status> {
-        Err(Status::unimplemented("stream mode not used"))
-    }
-
-    async fn submit_batch(
-        &self,
-        _request: Request<BatchRequest>,
-    ) -> Result<Response<BatchResult>, Status> {
-        Err(Status::unimplemented("batch mode not used"))
-    }
-
-    async fn submit_episode_async(
-        &self,
-        _request: Request<EpisodeRequest>,
-    ) -> Result<Response<SubmitAck>, Status> {
-        Err(Status::unimplemented("async mode is Phase 2+"))
-    }
-
-    async fn get_episode_result(
-        &self,
-        _request: Request<GetResultRequest>,
-    ) -> Result<Response<EpisodeResult>, Status> {
-        Err(Status::unimplemented("async mode is Phase 2+"))
-    }
-
-    type WatchEpisodesStream = ReceiverStream<Result<EpisodeResult, Status>>;
-
-    async fn watch_episodes(
-        &self,
-        _request: Request<WatchRequest>,
-    ) -> Result<Response<Self::WatchEpisodesStream>, Status> {
-        Err(Status::unimplemented("watch mode is Phase 2+"))
-    }
-}
-
-// =============================================================================
-// AdminService：管理接口
-// =============================================================================
-
-/// AdminService 的实现结构体。
 pub struct AdminServiceImpl {
     pub state: Arc<ServerState>,
 }
@@ -323,22 +273,15 @@ impl AdminService for AdminServiceImpl {
 }
 
 // =============================================================================
-// EpisodeService trait — adapter core 调用 server 的函数调用边界
+// EpisodeService trait (adapter-core ↔ server boundary)
 // =============================================================================
 
-/// adapter core 调用 episode 执行后端时使用的错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum EpisodeServiceError {
     #[error("{0}")]
     Failed(String),
 }
 
-/// adapter core 和 episode 执行后端之间的函数调用接口。
-///
-/// 生产环境中由 UEnvEpisodeService 实现，测试中可以用任何替身实现。
-/// 定义在 uenv-server 中（而非 adapter core 中）是为了避免循环依赖：
-///   - adapter core 依赖 uenv-server（使用其 proto 类型）
-///   - 如果 uenv-server 也依赖 adapter core 就形成循环
 pub trait EpisodeService: Send + Sync {
     fn submit_episode_batch(
         &self,

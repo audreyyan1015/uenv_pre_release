@@ -184,7 +184,7 @@ impl WarmupPool {
 
         let reset_ok = self
             .plugin_host
-            .reset(&lease.instance_id, None)
+            .reset(&lease.instance_id, None, None)
             .await
             .map(|_| true)
             .unwrap_or(false);

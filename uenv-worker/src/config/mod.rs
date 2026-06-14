@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::llm::LlmConfig;
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct WorkerConfig {
     pub server: ServerConfig,
@@ -14,6 +16,22 @@ pub struct WorkerConfig {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub hub: HubConfig,
+    #[serde(default)]
+    pub llm: LlmConfigSection,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LlmConfigSection {
+    #[serde(default)]
+    pub env_file: String,
+}
+
+impl Default for LlmConfigSection {
+    fn default() -> Self {
+        Self {
+            env_file: "config/uenv-worker-llm.env".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -25,6 +43,8 @@ pub struct ServerConfig {
 pub struct WorkerSection {
     pub id: String,
     pub listen: String,
+    #[serde(default)]
+    pub advertise_endpoint: Option<String>,
     pub max_concurrent: u32,
 }
 
@@ -66,6 +86,8 @@ pub struct HubConfig {
     #[serde(default)]
     pub enabled: bool,
     pub endpoint: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 impl Default for HubConfig {
@@ -73,6 +95,7 @@ impl Default for HubConfig {
         Self {
             enabled: false,
             endpoint: None,
+            token: None,
         }
     }
 }
@@ -101,6 +124,7 @@ impl Default for WorkerConfig {
             worker: WorkerSection {
                 id: "auto".to_string(),
                 listen: "0.0.0.0:50052".to_string(),
+                advertise_endpoint: None,
                 max_concurrent: 4,
             },
             scheduler: SchedulerConfig {
@@ -127,8 +151,15 @@ impl Default for WorkerConfig {
             },
             observability: ObservabilityConfig::default(),
             hub: HubConfig::default(),
+            llm: LlmConfigSection::default(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedWorkerConfig {
+    pub worker: WorkerConfig,
+    pub llm: LlmConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,15 +170,21 @@ pub struct CliOverrides {
 }
 
 impl WorkerConfig {
-    pub fn load(overrides: &CliOverrides) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(overrides: &CliOverrides) -> Result<LoadedWorkerConfig, Box<dyn std::error::Error>> {
         let mut cfg = if let Some(p) = resolve_config_path(overrides.config.as_deref()) {
             load_from_file(&p)?
         } else {
             Self::default()
         };
+        let llm_env_path = std::env::var("UENV_WORKER_LLM_ENV")
+            .unwrap_or_else(|_| cfg.llm.env_file.clone());
+        load_env_file_if_exists(&llm_env_path)?;
         cfg.apply_env();
         cfg.apply_cli(overrides);
-        Ok(cfg)
+        Ok(LoadedWorkerConfig {
+            llm: LlmConfig::from_env(),
+            worker: cfg,
+        })
     }
 
     fn apply_cli(&mut self, overrides: &CliOverrides) {
@@ -165,6 +202,9 @@ impl WorkerConfig {
         }
         if let Ok(v) = std::env::var("UENV_WORKER_LISTEN") {
             self.worker.listen = v;
+        }
+        if let Ok(v) = std::env::var("UENV_WORKER_ADVERTISE_ENDPOINT") {
+            self.worker.advertise_endpoint = Some(v);
         }
         if let Ok(v) = std::env::var("UENV_WORKER_ID") {
             self.worker.id = v;
@@ -233,10 +273,44 @@ impl WorkerConfig {
             self.hub.endpoint = Some(v);
             self.hub.enabled = true;
         }
+        if let Ok(v) = std::env::var("UENV_HUB_TOKEN") {
+            self.hub.token = Some(v);
+        }
         if let Ok(v) = std::env::var("UENV_HUB_ENABLED") {
             self.hub.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
         }
+        if let Ok(v) = std::env::var("UENV_WORKER_LLM_ENV") {
+            self.llm.env_file = v;
+        }
     }
+}
+
+fn load_env_file_if_exists(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = Path::new(path);
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(path)?;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if key.is_empty() {
+            continue;
+        }
+        if std::env::var(key).is_err() {
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_config_path(override_path: Option<&str>) -> Option<PathBuf> {
@@ -289,7 +363,8 @@ mod tests {
             std::env::set_var("UENV_MAX_CONCURRENT", "9");
             std::env::set_var("UENV_LOG_FILE", "./tmp.worker.log");
         }
-        let cfg = WorkerConfig::load(&CliOverrides::default()).expect("load config");
+        let loaded = WorkerConfig::load(&CliOverrides::default()).expect("load config");
+        let cfg = loaded.worker;
         assert_eq!(cfg.worker.listen, "127.0.0.1:61000");
         assert_eq!(cfg.worker.max_concurrent, 9);
         assert_eq!(cfg.env.types, vec!["math".to_string(), "code".to_string()]);

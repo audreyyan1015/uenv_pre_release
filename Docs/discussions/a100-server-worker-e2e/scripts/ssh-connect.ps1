@@ -10,7 +10,7 @@ $Keys = @{
     A = @{
         Port = 7143
         Key  = Join-Path $Secrets "9aa460dab6678381f86a1022b8a54c9f_32e42d1c7902ce68ba6719d551645e02_8.143"
-        Role = "uenv-server (ControlPlane + UEnvService)"
+        Role = "uenv-adapter-core (AdapterCore + ControlPlane + Admin)"
         IP   = "10.10.20.143"
     }
     B = @{

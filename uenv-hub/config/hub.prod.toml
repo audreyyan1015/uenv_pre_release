@@ -1,0 +1,37 @@
+# UEnvHub 生产/联调配置（Phase 3: HTTP API + SQLite）
+#
+# 优先级：内置默认 < 本文件 < 环境变量（前缀 UENV_HUB_，`__` 表示嵌套）
+# 例：UENV_HUB_SERVER__PORT=8088  UENV_HUB_AUTH__REQUIRE_TOKEN=true
+#
+# 说明：
+# - 服务器仅开放 8000 / 8077 / 8088 / 8099 四个端口，文档默认的 8080 未开放，
+#   故 Hub 选用 8088。其他层对接时 Base URL 用公网 EIP http://8.130.95.176:8088。
+# - 服务已公网暴露，启用 Token 鉴权（require_token=true）防止匿名越权。
+#   采用「单一共享 Bearer Token」最简方案：所有层用同一个 token 访问。
+# - Token 不写入本文件（避免随仓库泄露），通过环境变量
+#   UENV_HUB_AUTH__BOOTSTRAP_ADMIN_TOKEN 在首次启动时注入（见 scripts/start-hub.sh）。
+#   首次启动后 token 已持久化进 SQLite，后续重启即使不带该环境变量也仍生效。
+# - /healthz、/metrics、/version 为公开端点，不受鉴权影响（探活/监控可用）。
+
+[server]
+host = "0.0.0.0"
+port = 8088
+
+[database]
+# 持久化 SQLite（自动启用 WAL + foreign_keys）
+url = "sqlite:///root/uenv/uenv-hub/data/hub.db"
+max_connections = 16
+
+[auth]
+# 公网暴露 -> 开启鉴权，阻断匿名越权。
+require_token = true
+# bootstrap_admin_token 不在此明文配置，改由环境变量注入（scripts/start-hub.sh）。
+# bootstrap_admin_token = "uenvh_xxx"
+
+[rate_limit]
+enabled = true
+requests_per_second = 100
+burst = 200
+
+[cors]
+allow_origins = ["*"]

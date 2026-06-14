@@ -1,0 +1,50 @@
+# UEnv Worker — A100 7143 四端联调（公网映射口）
+# 对外业务地址（Register 上报）：219.147.100.43:28888
+#
+# | 用途     | 本机 bind     | 注册 endpoint（advertise_endpoint） |
+# |----------|---------------|--------------------------------------|
+# | gRPC     | 0.0.0.0:28888 | 219.147.100.43:28888                 |
+# | health   | 0.0.0.0:28777 | —                                    |
+
+server:
+  endpoint: "8.130.86.71:8088"
+
+worker:
+  id: "auto"
+  listen: "0.0.0.0:28888"
+  advertise_endpoint: "219.147.100.43:28888"
+  max_concurrent: 4
+
+scheduler:
+  mode: "remote"
+
+env:
+  types: ["math"]
+  backend: "process"
+  plugin_dir: "/root/UEnv/plugins"
+
+pool:
+  warmup_size: 2
+  prewarm_on_startup: false
+  max_idle_time: 300
+  cool_timeout: 60
+  max_episode_count: 1000
+
+logging:
+  level: "INFO"
+  file: "/var/log/uenv/worker.log"
+
+wal:
+  dir: "/tmp/uenv/wal"
+
+llm:
+  env_file: "config/uenv-worker-llm.env"
+
+observability:
+  metrics_listen: "0.0.0.0:28777"
+  health_listen: "0.0.0.0:28777"
+
+hub:
+  enabled: true
+  endpoint: "http://8.130.95.176:8088"
+  # token 勿写入仓库；启动前 export UENV_HUB_TOKEN=...（见 secrets/README.md §1.5）

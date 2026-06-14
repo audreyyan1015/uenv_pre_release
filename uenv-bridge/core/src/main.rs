@@ -1,9 +1,9 @@
-// uenv-adapter-core 启动入口
+// uenv-adapter-core 入口
 //
-// 对外暴露三类 gRPC service：
-//   1. AdapterCoreService  —— Python VeRL 提交 episode batch，获取 reward
-//   2. ControlPlaneService —— Worker 注册、心跳、上报结果
-//   3. AdminService        —— 运维管理（查询 Worker 状态等）
+// 暴露以下 gRPC service：
+//   1. AdapterCoreService  供 Python VeRL 提交 episode batch、获取 reward
+//   2. ControlPlaneService 供 Worker 注册、心跳、上报结果
+//   3. AdminService        供 运维工具查询 Worker 状态等
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,10 +29,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "[::]:50051".to_string())
         .parse()?;
 
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    tracing::info!(%addr, "uenv listening");
     println!("uenv listening on {addr}");
 
     let backend = std::env::var("UENV_ADAPTER_CORE_BACKEND")
-        .unwrap_or_else(|_| "server".to_string());
+        .unwrap_or_else(|_| "server".to_string())
+        .to_ascii_lowercase();
     if backend == "static_rollout" {
         let core = AdapterCore::new(StaticRolloutEpisodeService::from_env());
         let adapter_service = AdapterCoreServiceImpl::new(core);

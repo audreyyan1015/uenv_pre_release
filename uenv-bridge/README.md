@@ -75,7 +75,7 @@ export UENV_ROLLOUT_MODEL_ENDPOINT=http://127.0.0.1:18080/v1
 export UENV_ROLLOUT_MODEL_NAME=policy-model
 ```
 
-`UENV_AGENT_LOOP_CLIENT=fake` 只用于 Python 单测和最小本地验证；真实联调应使用 `rust_core`。
+默认 `UENV_AGENT_LOOP_CLIENT=rust_core` 走 adapter-core `server` backend 与远端 Worker 真实链路；仅 Python 单测可显式注入 `StaticRolloutEpisodeClient`。
 
 ## EpisodeRequest
 

@@ -2004,15 +2004,20 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tracing",
+ "tracing-subscriber",
  "uenv-server",
 ]
+
+[[package]]
+name = "uenv-math-env"
+version = "0.1.0"
 
 [[package]]
 name = "uenv-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "dashmap",
  "futures",
  "parking_lot",
@@ -2027,7 +2032,6 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -2057,6 +2061,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uenv-math-env",
 ]
 
 [[package]]

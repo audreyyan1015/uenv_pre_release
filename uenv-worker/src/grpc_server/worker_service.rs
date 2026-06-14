@@ -8,7 +8,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::control_plane::client::ControlPlane;
-use crate::episode::executor::EpisodeExecutor;
+use crate::episode::executor::{EpisodeExecutor, ExecuteContext};
 use crate::metrics::MetricsExporter;
 use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::v1::{EpisodeResult, StreamReport};
@@ -29,6 +29,7 @@ pub struct WorkerGrpcServiceImpl {
     metrics: MetricsExporter,
     warmup_pool: WarmupPool,
     semaphore: Arc<Semaphore>,
+    max_concurrent: u32,
     active_leases: Arc<Mutex<HashMap<(String, u32), String>>>,
     completed: Arc<Mutex<HashSet<(String, u32)>>>,
     wal: WalWriter,
@@ -51,6 +52,7 @@ impl WorkerGrpcServiceImpl {
             metrics,
             warmup_pool,
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
+            max_concurrent,
             active_leases: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashSet::new())),
             wal,
@@ -126,9 +128,15 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             .await
             .map_err(|_| Status::resource_exhausted("max_concurrency_reached"))?;
         self.metrics.inc_active();
+        let active_episodes = self.metrics.active_episode_count() as u32;
+        let exec_ctx = ExecuteContext {
+            worker_id: worker_id.clone(),
+            worker_capacity: self.max_concurrent,
+            active_episodes,
+        };
         let exec = self
             .executor
-            .execute_single_round(&episode)
+            .execute_episode(&episode, &exec_ctx)
             .await
             .map_err(|err| Status::internal(format!("execute_episode_failed: {err}")))?;
         self.metrics.observe_episode(
@@ -154,8 +162,10 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
         self.metrics.dec_active();
         drop(permit);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let _ = tx.send(Ok(exec.stream_report)).await;
+        let (tx, rx) = tokio::sync::mpsc::channel(exec.stream_reports.len().max(1));
+        for report in exec.stream_reports {
+            let _ = tx.send(Ok(report)).await;
+        }
         drop(tx);
 
         let cp = Arc::clone(&self.control_plane);
@@ -300,7 +310,7 @@ mod tests {
         let wal = WalWriter::new(&wal_dir).expect("create wal");
         WorkerGrpcServiceImpl::new(
             control_plane,
-            EpisodeExecutor::new(host, pool.clone()),
+            EpisodeExecutor::new(host, pool.clone(), crate::llm::LlmConfig::default()),
             MetricsExporter::new(),
             pool,
             1,

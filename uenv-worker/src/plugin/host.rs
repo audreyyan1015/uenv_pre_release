@@ -164,8 +164,13 @@ impl PluginHost {
         &self,
         instance_id: &str,
         seed: Option<i32>,
+        episode_config: Option<&[u8]>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let uds_path = self.running_socket(instance_id).await?;
+        if let Some(config) = episode_config {
+            let config_path = format!("{}.episode.json", uds_path.display());
+            tokio::fs::write(&config_path, config).await?;
+        }
         let mut client = PluginRpcClient::connect_uds(&uds_path).await?;
         client.reset(seed).await
     }

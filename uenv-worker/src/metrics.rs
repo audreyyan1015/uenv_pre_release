@@ -34,6 +34,10 @@ impl MetricsExporter {
         self.active_episode_count.fetch_sub(1, Ordering::Relaxed);
     }
 
+    pub fn active_episode_count(&self) -> u64 {
+        self.active_episode_count.load(Ordering::Relaxed)
+    }
+
     pub fn observe_episode(&self, duration_ms: u64, env_step_duration_ms: u64, model_duration_ms: u64) {
         self.episode_total.fetch_add(1, Ordering::Relaxed);
         self.episode_duration_ms_sum
