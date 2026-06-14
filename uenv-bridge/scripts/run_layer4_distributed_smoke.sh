@@ -6,14 +6,6 @@ usage() {
   cat <<'EOF'
 Run the distributed Layer 4 pre-rollout smoke test for the shared test hosts.
 
-Host assignment from /data/ronghao/uenv/测试环境主机分配.md:
-  adapter login: ssh -p 142 <user>@219.147.100.43
-  worker login : ssh -p 143 <user>@219.147.100.43
-  server login : ssh scauni@8.130.89.198
-  hub login    : ssh nemo@8.130.179.41
-
-The 142/143 values above are SSH login ports, not UEnv gRPC service ports.
-
 This script is intended to run on the adapter login host. It starts:
   1. optional mock OpenAI-compatible model endpoint on the adapter host
   2. real VeRL trainer container with UEnvAgentLoop enabled
@@ -55,13 +47,6 @@ fi
 # uenv 工作区。
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 WORKSPACE_ROOT=${WORKSPACE_ROOT:-"$(cd "${REPO_DIR}/.." && pwd)"}
-
-# 配置 SSH 登录入口。这里的 142/143 是登录端口，不是业务 gRPC 端口。
-PUBLIC_SSH_HOST=${PUBLIC_SSH_HOST:-219.147.100.43}
-ADAPTER_SSH_PORT=${ADAPTER_SSH_PORT:-142}
-WORKER_SSH_PORT=${WORKER_SSH_PORT:-143}
-SERVER_SSH=${SERVER_SSH:-scauni@8.130.89.198}
-HUB_SSH=${HUB_SSH:-nemo@8.130.179.41}
 
 # 配置 server 侧已经启动的 Rust adapter core 地址。Python/VeRL 只连接
 # 这个 endpoint，不在 adapter 侧启动 core。
@@ -208,13 +193,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Distributed Layer 4 host assignment:"
-echo "  adapter login: ssh -p ${ADAPTER_SSH_PORT} <user>@${PUBLIC_SSH_HOST} (this script)"
-echo "  worker login : ssh -p ${WORKER_SSH_PORT} <user>@${PUBLIC_SSH_HOST}"
-echo "  server login : ssh ${SERVER_SSH} (server side starts Rust adapter core)"
-echo "  hub login    : ssh ${HUB_SSH} (not started by this bridge script)"
-echo "  server-side adapter core endpoint: ${SERVER_ADAPTER_CORE_ENDPOINT}"
-echo "  model endpoint passed to UEnv    : ${ROLLOUT_ENDPOINT}"
 
 # 先检查 server 侧 adapter core endpoint 是否已可连接。这里不启动 core。
 wait_for_addr "server-side adapter core" "${SERVER_ADAPTER_CORE_ENDPOINT}" 20

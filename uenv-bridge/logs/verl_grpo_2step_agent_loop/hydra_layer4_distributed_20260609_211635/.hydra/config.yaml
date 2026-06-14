@@ -432,8 +432,8 @@ actor_rollout_ref:
 data:
   tokenizer: null
   use_shm: false
-  train_files: /tmp/uenv-bridge/tmp/verl_grpo_1step_agent_loop_data/train.parquet
-  val_files: /tmp/uenv-bridge/tmp/verl_grpo_1step_agent_loop_data/test.parquet
+  train_files: /tmp/uenv-bridge/tmp/verl_grpo_2step_agent_loop_data/train.parquet
+  val_files: /tmp/uenv-bridge/tmp/verl_grpo_2step_agent_loop_data/test.parquet
   train_max_samples: -1
   val_max_samples: -1
   prompt_key: prompt
@@ -828,9 +828,9 @@ distillation:
 trainer:
   balance_batch: true
   total_epochs: 1
-  total_training_steps: 1
+  total_training_steps: 2
   project_name: uenv_bridge
-  experiment_name: qwen25_05b_gsm8k_grpo_1step_uenv_agent_loop
+  experiment_name: qwen25_05b_gsm8k_grpo_2step_uenv_agent_loop
   logger: console
   log_val_generations: 0
   rollout_data_dir: null
@@ -847,7 +847,7 @@ trainer:
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: false
-  default_local_dir: /tmp/uenv-bridge/tmp/verl_grpo_1step_agent_loop_ckpt
+  default_local_dir: /tmp/uenv-bridge/tmp/verl_grpo_2step_agent_loop_ckpt
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300

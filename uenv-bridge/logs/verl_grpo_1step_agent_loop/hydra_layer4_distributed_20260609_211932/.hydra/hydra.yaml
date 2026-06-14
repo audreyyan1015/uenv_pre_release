@@ -1,6 +1,6 @@
 hydra:
   run:
-    dir: /tmp/uenv-bridge/logs/verl_grpo_1step_agent_loop/hydra_layer4_distributed_20260609_165416
+    dir: /tmp/uenv-bridge/logs/verl_grpo_1step_agent_loop/hydra_layer4_distributed_20260609_211932
   sweep:
     dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}
@@ -110,7 +110,7 @@ hydra:
   output_subdir: .hydra
   overrides:
     hydra:
-    - hydra.run.dir=/tmp/uenv-bridge/logs/verl_grpo_1step_agent_loop/hydra_layer4_distributed_20260609_165416
+    - hydra.run.dir=/tmp/uenv-bridge/logs/verl_grpo_1step_agent_loop/hydra_layer4_distributed_20260609_211932
     - hydra.mode=RUN
     task:
     - algorithm.adv_estimator=grpo
@@ -205,7 +205,7 @@ hydra:
     - path: ''
       schema: structured
       provider: schema
-    output_dir: /tmp/uenv-bridge/logs/verl_grpo_1step_agent_loop/hydra_layer4_distributed_20260609_165416
+    output_dir: /tmp/uenv-bridge/logs/verl_grpo_1step_agent_loop/hydra_layer4_distributed_20260609_211932
     choices:
       distillation: distillation
       algorithm@algorithm.rollout_correction: rollout_correction
