@@ -82,8 +82,27 @@ impl LlmConfig {
     }
 
     pub fn chat_completions_url(&self) -> String {
-        format!("{}/chat/completions", self.endpoint.trim_end_matches('/'))
+        chat_completions_url_for_endpoint(&self.endpoint)
     }
+
+    pub fn endpoint_requires_api_key(endpoint: &str) -> bool {
+        endpoint.contains("openrouter.ai")
+    }
+
+    pub fn llm_call_ready(endpoint: &str, _llm: &Self) -> bool {
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty() {
+            return false;
+        }
+        if Self::endpoint_requires_api_key(endpoint) {
+            return !_llm.api_key.trim().is_empty();
+        }
+        true
+    }
+}
+
+pub fn chat_completions_url_for_endpoint(endpoint: &str) -> String {
+    format!("{}/chat/completions", endpoint.trim_end_matches('/'))
 }
 
 #[cfg(test)]

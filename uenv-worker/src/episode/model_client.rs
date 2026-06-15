@@ -3,7 +3,7 @@ use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
 
-use crate::llm::LlmConfig;
+use crate::llm::{chat_completions_url_for_endpoint, LlmConfig};
 
 #[derive(Clone)]
 pub struct ModelClient {
@@ -30,6 +30,7 @@ impl ModelClient {
         payload: &[u8],
         reward_config: &[u8],
         step_index: u32,
+        episode_model_endpoint: &str,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let payload_json: Value = if payload.is_empty() {
             Value::Null
@@ -46,7 +47,9 @@ impl ModelClient {
             }
         }
 
-        let llm_ready = self.llm.is_configured();
+        let endpoint_base =
+            resolve_endpoint_base(&payload_json, episode_model_endpoint, &self.llm);
+        let llm_ready = LlmConfig::llm_call_ready(&endpoint_base, &self.llm);
         let question = payload_json
             .get("question")
             .and_then(Value::as_str)
@@ -68,28 +71,20 @@ impl ModelClient {
         }
 
         if !llm_ready {
-            if self.llm.is_openrouter() {
+            if LlmConfig::endpoint_requires_api_key(&endpoint_base) {
                 return Err(
                     "model client: OpenRouter requires UENV_LLM_API_KEY in config/uenv-worker-llm.env"
                         .into(),
                 );
             }
             return Err(
-                "model client: UENV_LLM_ENDPOINT is unset; configure config/uenv-worker-llm.env"
+                "model client: no model endpoint in episode payload and UENV_LLM_ENDPOINT is unset"
                     .into(),
             );
         }
         let question = question.ok_or("model client: payload missing question")?;
 
-        let model_name = if llm_ready {
-            self.llm.model_name.as_str()
-        } else {
-            payload_json
-                .get("model_name")
-                .and_then(Value::as_str)
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(self.llm.model_name.as_str())
-        };
+        let model_name = resolve_model_name(&payload_json, &self.llm);
 
         let gen_cfg = payload_json
             .get("generation_config")
@@ -114,14 +109,14 @@ impl ModelClient {
             "stream": false,
         });
 
-        let url = self.llm.chat_completions_url();
+        let url = chat_completions_url_for_endpoint(&endpoint_base);
         let client = Client::new();
 
         let max_retries: usize = 30;
         let mut last_err = String::new();
         for attempt in 0..max_retries {
             let mut request = client.post(&url).json(&request_body.clone());
-            request = self.apply_llm_headers(request)?;
+            request = self.apply_llm_headers(request, &endpoint_base)?;
             match request.send().await {
                 Ok(resp) => {
                     let status = resp.status();
@@ -153,9 +148,12 @@ impl ModelClient {
     fn apply_llm_headers(
         &self,
         request: reqwest::RequestBuilder,
+        endpoint_base: &str,
     ) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
         let mut req = request;
-        if !self.llm.api_key.trim().is_empty() {
+        if !self.llm.api_key.trim().is_empty()
+            && LlmConfig::endpoint_requires_api_key(endpoint_base)
+        {
             let auth = format!("Bearer {}", self.llm.api_key.trim());
             req = req.header(
                 AUTHORIZATION,
@@ -163,7 +161,7 @@ impl ModelClient {
                     .map_err(|err| format!("model client: invalid Authorization header: {err}"))?,
             );
         }
-        if self.llm.is_openrouter() {
+        if LlmConfig::endpoint_requires_api_key(endpoint_base) {
             if !self.llm.http_referer.trim().is_empty() {
                 req = req.header("HTTP-Referer", self.llm.http_referer.trim());
             }
@@ -175,9 +173,87 @@ impl ModelClient {
     }
 }
 
+fn resolve_endpoint_base(
+    payload: &Value,
+    episode_model_endpoint: &str,
+    llm: &LlmConfig,
+) -> String {
+    if let Some(endpoint) = payload
+        .get("model_endpoint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return endpoint.to_string();
+    }
+    let episode_endpoint = episode_model_endpoint.trim();
+    if !episode_endpoint.is_empty() {
+        return episode_endpoint.to_string();
+    }
+    llm.endpoint.trim().to_string()
+}
+
+fn resolve_model_name(payload: &Value, llm: &LlmConfig) -> String {
+    payload
+        .get("model_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| llm.model_name.clone())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ModelClient;
+    use super::{resolve_endpoint_base, resolve_model_name, ModelClient};
+    use crate::llm::LlmConfig;
+    use serde_json::json;
+
+    #[test]
+    fn prefers_payload_model_endpoint_over_episode_and_local() {
+        let llm = LlmConfig {
+            endpoint: "http://local-vllm:8000/v1".to_string(),
+            ..LlmConfig::default()
+        };
+        let payload = json!({"model_endpoint": "https://openrouter.ai/api/v1"});
+        assert_eq!(
+            resolve_endpoint_base(&payload, "http://episode-vllm:8000/v1", &llm),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_episode_model_endpoint() {
+        let llm = LlmConfig {
+            endpoint: "http://local-vllm:8000/v1".to_string(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(
+            resolve_endpoint_base(&json!({}), "https://openrouter.ai/api/v1", &llm),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
+    fn prefers_payload_model_name_over_local() {
+        let llm = LlmConfig {
+            model_name: "local-model".to_string(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(
+            resolve_model_name(&json!({"model_name": "qwen/qwen3-max"}), &llm),
+            "qwen/qwen3-max"
+        );
+    }
+
+    #[test]
+    fn vllm_endpoint_ready_without_api_key() {
+        let llm = LlmConfig::default();
+        assert!(LlmConfig::llm_call_ready(
+            "http://10.10.20.142:8004/v1",
+            &llm
+        ));
+    }
 
     #[tokio::test]
     async fn prefers_response_text_over_rule_reward() {
@@ -188,6 +264,7 @@ mod tests {
                 payload.as_bytes(),
                 br#"{"type":"rule_reward","target":"20"}"#,
                 1,
+                "",
             )
             .await
             .expect("infer");
@@ -202,6 +279,7 @@ mod tests {
                 br#"{}"#,
                 br#"{"type":"rule_reward","target":"20"}"#,
                 1,
+                "",
             )
             .await
             .expect("infer");
@@ -210,12 +288,13 @@ mod tests {
 
     #[tokio::test]
     async fn openrouter_requires_api_key_before_http_call() {
-        let client = ModelClient::with_config(crate::llm::LlmConfig::default());
+        let client = ModelClient::with_config(LlmConfig::default());
         let result = client
             .infer_action(
-                br#"{"question":"q"}"#,
+                br#"{"question":"q","model_endpoint":"https://openrouter.ai/api/v1"}"#,
                 br#"{"type":"rule_reward","target":"20"}"#,
                 1,
+                "",
             )
             .await;
         let err = result.expect_err("should fail without api key");
@@ -224,15 +303,16 @@ mod tests {
 
     #[tokio::test]
     async fn openrouter_calls_remote_api_with_api_key() {
-        let client = ModelClient::with_config(crate::llm::LlmConfig {
+        let client = ModelClient::with_config(LlmConfig {
             api_key: "sk-test".to_string(),
-            ..crate::llm::LlmConfig::default()
+            ..LlmConfig::default()
         });
         let result = client
             .infer_action(
-                br#"{"question":"q"}"#,
+                br#"{"question":"q","model_endpoint":"https://openrouter.ai/api/v1","model_name":"qwen/qwen3-max"}"#,
                 br#"{"type":"rule_reward","target":"20"}"#,
                 1,
+                "",
             )
             .await;
         assert!(result.is_err());
