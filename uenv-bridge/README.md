@@ -151,6 +151,8 @@ UEnv Server/Worker 返回的 `EpisodeResult` 至少需要满足：
 
 如果没有 `response_ids`，`UEnvAgentLoop` 会把最后一步 `action` 或 `response_text` 用 VeRL tokenizer 重新编码。真实训练联调建议直接返回 token ids，避免 tokenizer 或 chat template 不一致。
 
+Adapter 侧结果记录里的 `response_ids` 表示 Server/Worker 原始返回的 token ids；`verl_response_ids` 表示 Python shim 最终交给 VeRL 的 token ids。如果 Server/Worker 只返回 `response_text`，`response_ids` 可能为空，但 `verl_response_ids` 仍会由 tokenizer fallback 得到。
+
 ## Serve 侧对接
 
 Serve 侧只需要关注 Rust adapter core 暴露的函数边界：
@@ -232,7 +234,7 @@ python3 scripts/verify_pre_rollout_rust_core_loop.py --skip-build'
 
 Layer 4：真实 VeRL + Serve/Worker pre-rollout 联动 smoke test。
 
-Layer 4 当前主入口是 pre-rollout AgentLoop wrapper。脚本会启动本地 mock OpenAI-compatible model endpoint、Rust adapter core 和 worker，然后让真实 `verl.trainer.main_ppo` 通过 `UEnvAgentLoop` 在 rollout 前把 sample 交给 UEnv：
+Layer 4 当前主入口是 pre-rollout AgentLoop wrapper。下面这个本地脚本会启动本地 mock OpenAI-compatible model endpoint、Rust adapter core 和 worker，然后让真实 `verl.trainer.main_ppo` 通过 `UEnvAgentLoop` 在 rollout 前把 sample 交给 UEnv：
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
@@ -244,6 +246,24 @@ ROLLOUT_N=2 \
 ./scripts/run_layer4_smoke_with_services.sh
 ```
 
+分布式联调时使用 `scripts/run_layer4_distributed_smoke.sh`，该脚本只运行 VeRL/adapter 侧逻辑，并连接 server 侧已经启动的 Rust adapter core。此时 Worker 可以使用自己的模型服务，adapter 不负责启动或替代 Worker 的模型。
+
+每次 Layer 4 运行都会在对应服务日志目录写入 adapter 侧结果记录：
+
+```text
+logs/layer4_distributed/<RUN_ID>/agent-loop-results.jsonl
+tmp/layer4_smoke/<RUN_ID>/agent-loop-results.jsonl
+```
+
+可以直接汇总 reward、response 和 trajectory 摘要：
+
+```bash
+python3 scripts/summarize_agent_loop_results.py \
+  logs/layer4_distributed/<RUN_ID>/agent-loop-results.jsonl
+```
+
+结果记录中重点看 `reward`、`trajectory`、`response_ids` 和 `verl_response_ids`。前者表示 Server/Worker 是否直接返回 token ids，后者表示最终回填给 VeRL 的 token ids。
+
 如果需要验证多步训练，把 `TRAINING_STEPS` 改为 2。Layer 4 脚本默认设置 `ROLLOUT_FREE_CACHE_ENGINE=False` 和 `ROLLOUT_ENABLE_SLEEP_MODE=False`，用于避开 vLLM 在多步 smoke test 中每步 sleep/free cache 时可能触发的 Python `multiprocessing.resource_tracker` shared-memory 清理异常。
 
 ```bash
@@ -252,8 +272,12 @@ TRAINING_STEPS=2 \
 SAMPLE_COUNT=4 \
 TRAIN_BATCH_SIZE=2 \
 ROLLOUT_N=2 \
+CUDA_VISIBLE_DEVICES_IN_CONTAINER=0 \
+ROLLOUT_GPU_MEMORY_UTILIZATION=0.2 \
 ./scripts/run_layer4_smoke_with_services.sh
 ```
+
+`CUDA_VISIBLE_DEVICES_IN_CONTAINER` 用于选择容器内训练 GPU；`ROLLOUT_GPU_MEMORY_UTILIZATION` 会传给 VeRL 的 vLLM rollout server。显存紧张时可以降低该值，避免 vLLM 启动时报 free memory 不足。
 
 如需接入真实模型服务，设置：
 

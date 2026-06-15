@@ -46,7 +46,16 @@ impl ModelClient {
             }
         }
 
-        let llm_ready = self.llm.is_configured();
+        let endpoint_override = payload_json
+            .get("model_endpoint")
+            .and_then(|value| match value {
+                Value::String(text) => Some(text.as_str()),
+                Value::Object(map) => map.get("url").and_then(Value::as_str),
+                _ => None,
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let llm_ready = endpoint_override.is_some() || self.llm.is_configured();
         let question = payload_json
             .get("question")
             .and_then(Value::as_str)
@@ -81,15 +90,12 @@ impl ModelClient {
         }
         let question = question.ok_or("model client: payload missing question")?;
 
-        let model_name = if llm_ready {
-            self.llm.model_name.as_str()
-        } else {
-            payload_json
-                .get("model_name")
-                .and_then(Value::as_str)
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(self.llm.model_name.as_str())
-        };
+        let model_name = payload_json
+            .get("model_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.llm.model_name.as_str());
 
         let gen_cfg = payload_json
             .get("generation_config")
@@ -114,7 +120,9 @@ impl ModelClient {
             "stream": false,
         });
 
-        let url = self.llm.chat_completions_url();
+        let url = endpoint_override
+            .map(chat_completions_url)
+            .unwrap_or_else(|| self.llm.chat_completions_url());
         let client = Client::new();
 
         let max_retries: usize = 30;
@@ -175,9 +183,16 @@ impl ModelClient {
     }
 }
 
+fn chat_completions_url(endpoint: &str) -> String {
+    format!("{}/chat/completions", endpoint.trim_end_matches('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ModelClient;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[tokio::test]
     async fn prefers_response_text_over_rule_reward() {
@@ -236,5 +251,44 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn uses_payload_model_endpoint_override() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_for_task = captured.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0; 8192];
+            let n = stream.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+            *captured_for_task.lock().expect("lock") = request;
+            let body = b"{\"choices\":[{\"message\":{\"content\":\"#### 4\"},\"finish_reason\":\"stop\"}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let client = ModelClient::new();
+        let payload = format!(
+            r#"{{"question":"2+2?","model_endpoint":"http://{}/v1","model_name":"payload-model","generation_config":{{"max_new_tokens":16}}}}"#,
+            addr
+        );
+        let action = client
+            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"4"}"#, 1)
+            .await
+            .expect("infer");
+
+        assert_eq!(action, b"#### 4");
+        let request = captured.lock().expect("lock").clone();
+        assert!(request.starts_with("POST /v1/chat/completions "));
+        assert!(request.contains(r#""model":"payload-model""#));
+        assert!(request.contains(r#""max_tokens":16"#));
     }
 }

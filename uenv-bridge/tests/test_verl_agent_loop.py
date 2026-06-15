@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from uenv.bridge.clients import RustCoreClientConfig, RustCoreEpisodeClient
 from uenv.bridge.protocol import EpisodeResult, EpisodeSummary, StepRecord, Trajectory
@@ -33,6 +35,19 @@ class RecordingEpisodeClient:
     def submit_episode_stream(self, requests):
         for request in requests:
             yield self.submit_episode(request)
+
+
+class FakeServerManager:
+    def __init__(self, addresses):
+        self.server_addresses = addresses
+
+
+class AttrDict(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
 
 
 class FakeCoreTrajectoryStub:
@@ -151,6 +166,93 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.response_ids, [52])
         self.assertEqual(output.response_mask, [1])
         self.assertEqual(output.reward_score, 0.5)
+
+    def test_run_records_episode_result_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record_path = Path(tmpdir) / "results.jsonl"
+            client = RecordingEpisodeClient(self._result_with_token_ids())
+            loop = UEnvAgentLoop(
+                tokenizer=FakeTokenizer(),
+                client=client,
+                result_record_path=str(record_path),
+            )
+
+            asyncio.run(
+                loop.run(
+                    {},
+                    raw_prompt=[{"role": "user", "content": "2+2?"}],
+                    data_source="gsm8k",
+                    reward_model={"ground_truth": "4"},
+                    extra_info={"batch_id": "batch-record", "sample_index": 3},
+                )
+            )
+
+            records = [json.loads(line) for line in record_path.read_text().splitlines()]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["batch_id"], "batch-record")
+            self.assertEqual(records[0]["sample_index"], 3)
+            self.assertEqual(records[0]["reward"], 2.0)
+            self.assertEqual(records[0]["response_text"], "4")
+            self.assertEqual(records[0]["response_ids"], [101, 102])
+            self.assertEqual(records[0]["verl_response_ids"], [101, 102])
+            self.assertEqual(records[0]["verl_response_mask"], [1, 0])
+            self.assertEqual(records[0]["trajectory"][0]["reward"], 2.0)
+
+    def test_run_prefers_verl_runtime_model_endpoint(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=client,
+            server_manager=FakeServerManager(["10.10.20.142:46541"]),
+            trainer_config=AttrDict(
+                actor_rollout_ref=AttrDict(
+                    model=AttrDict(path="/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct"),
+                    rollout=AttrDict(
+                        prometheus=AttrDict(served_model_name="/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct")
+                    ),
+                )
+            ),
+            default_model_endpoint="https://openrouter.ai/api/v1",
+            default_model_name="mock-policy",
+        )
+
+        asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        payload = json.loads(client.last_request.payload.decode("utf-8"))
+        self.assertEqual(client.last_request.model_endpoint, "http://10.10.20.142:46541/v1")
+        self.assertEqual(payload["model_endpoint"]["url"], "http://10.10.20.142:46541/v1")
+        self.assertEqual(payload["model_endpoint"]["model_name"], "/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct")
+
+    def test_run_keeps_explicit_model_endpoint_override(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=client,
+            server_manager=FakeServerManager(["10.10.20.142:46541"]),
+            default_model_endpoint="https://openrouter.ai/api/v1",
+        )
+
+        asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+                extra_info={"model_endpoint": "http://manual.example/v1", "model_name": "manual-model"},
+            )
+        )
+
+        payload = json.loads(client.last_request.payload.decode("utf-8"))
+        self.assertEqual(client.last_request.model_endpoint, "http://manual.example/v1")
+        self.assertEqual(payload["model_endpoint"]["url"], "http://manual.example/v1")
+        self.assertEqual(payload["model_endpoint"]["model_name"], "manual-model")
 
     def test_rust_core_client_preserves_trajectory_json(self) -> None:
         client = RustCoreEpisodeClient(RustCoreClientConfig(), stub=FakeCoreTrajectoryStub())

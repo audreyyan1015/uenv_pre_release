@@ -14,3 +14,4 @@
   default_max_steps: 10
   default_max_turns: 1
   seed_base: 42
+  result_record_path: ${oc.env:UENV_AGENT_LOOP_RESULT_RECORD_PATH,""}

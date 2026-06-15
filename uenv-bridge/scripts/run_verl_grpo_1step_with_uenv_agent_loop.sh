@@ -18,6 +18,7 @@ TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ROLLOUT_N=${ROLLOUT_N:-2}
 ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.25}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-4}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0}
@@ -32,7 +33,8 @@ UENV_AGENT_LOOP_BUILD_CORE=${UENV_AGENT_LOOP_BUILD_CORE:-1}
 UENV_ADAPTER_CORE_BACKEND=${UENV_ADAPTER_CORE_BACKEND:-server}
 UENV_ROLLOUT_MODEL_ENDPOINT=${UENV_ROLLOUT_MODEL_ENDPOINT:-https://openrouter.ai/api/v1}
 UENV_ROLLOUT_MODEL_NAME=${UENV_ROLLOUT_MODEL_NAME:-qwen/qwen-2.5-7b-instruct}
-DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-32}
+UENV_AGENT_LOOP_RESULT_RECORD_PATH=${UENV_AGENT_LOOP_RESULT_RECORD_PATH:-/tmp/uenv-bridge/logs/verl_grpo_${TRAINING_STEPS}step_agent_loop/${RUN_ID}_agent_loop_results.jsonl}
+DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-256}
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:-}
 
 REQUIRED_SAMPLE_COUNT=$((TRAINING_STEPS * TRAIN_BATCH_SIZE))
@@ -114,6 +116,7 @@ export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
 export UENV_ADAPTER_CORE_BACKEND=${UENV_ADAPTER_CORE_BACKEND}
 export UENV_ROLLOUT_MODEL_ENDPOINT=\"${UENV_ROLLOUT_MODEL_ENDPOINT}\"
 export UENV_ROLLOUT_MODEL_NAME=\"${UENV_ROLLOUT_MODEL_NAME}\"
+export UENV_AGENT_LOOP_RESULT_RECORD_PATH=\"${UENV_AGENT_LOOP_RESULT_RECORD_PATH}\"
 if [ \"${UENV_AGENT_LOOP_CLIENT}\" = \"rust_core\" ] && [ \"${UENV_AGENT_LOOP_BUILD_CORE}\" != \"0\" ]; then
   cd /tmp/uenv-bridge
   ./scripts/generate_adapter_core_proto.sh
@@ -152,7 +155,7 @@ python3 -m verl.trainer.main_ppo \\
   actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \\
   actor_rollout_ref.rollout.name=vllm \\
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \\
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \\
+  actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION} \\
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \\
   actor_rollout_ref.rollout.agent.num_workers=${AGENT_NUM_WORKERS} \\
   actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent \\

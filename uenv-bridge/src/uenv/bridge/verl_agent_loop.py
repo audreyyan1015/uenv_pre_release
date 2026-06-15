@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .agent_loop_clients import build_agent_loop_episode_client
@@ -145,6 +148,7 @@ class UEnvAgentLoopConfig:
     default_max_steps: int = 10
     default_max_turns: int = 1
     seed_base: int = 42
+    result_record_path: str = ""
 
 
 @register("uenv_agent")
@@ -176,6 +180,7 @@ class UEnvAgentLoop(AgentLoopBase):
         default_max_steps: int = 10,
         default_max_turns: int = 1,
         seed_base: int = 42,
+        result_record_path: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -195,6 +200,7 @@ class UEnvAgentLoop(AgentLoopBase):
             default_max_steps=_int_value(default_max_steps, 10),
             default_max_turns=_int_value(default_max_turns, 1),
             seed_base=_int_value(seed_base, 42),
+            result_record_path=_optional_string(result_record_path) or "",
         )
         self.client = client or build_agent_loop_episode_client(
             mode=self.config_for_uenv.client_mode,
@@ -211,12 +217,15 @@ class UEnvAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         messages = self._messages_from_raw_prompt(kwargs.get("raw_prompt"))
         prompt_ids = await self._prompt_ids(messages)
+        runtime_model = await self._runtime_model_endpoint(sampling_params, kwargs)
 
         request = self.build_episode_request(
             sampling_params=sampling_params,
             prompt_ids=prompt_ids,
             raw_prompt=kwargs.get("raw_prompt"),
             sample_kwargs=kwargs,
+            model_endpoint_override=runtime_model[0],
+            model_name_override=runtime_model[1],
         )
 
         metrics: dict[str, float] = {}
@@ -239,6 +248,8 @@ class UEnvAgentLoop(AgentLoopBase):
         response_mask = response_mask[: len(response_ids)]
         if len(response_mask) < len(response_ids):
             response_mask.extend([1] * (len(response_ids) - len(response_mask)))
+
+        self._record_episode_result(request, result, response_ids=response_ids, response_mask=response_mask)
 
         agent_metrics = AgentLoopMetrics(
             generate_sequences=float(metrics.get("generate_sequences", 0.0)),
@@ -270,6 +281,8 @@ class UEnvAgentLoop(AgentLoopBase):
         prompt_ids: list[int],
         raw_prompt: Any,
         sample_kwargs: dict[str, Any],
+        model_endpoint_override: str | None = None,
+        model_name_override: str | None = None,
     ) -> EpisodeRequest:
         request_id = str(uuid.uuid4())
         env_type = self._env_type(sample_kwargs)
@@ -281,7 +294,8 @@ class UEnvAgentLoop(AgentLoopBase):
         data_source = self._string_or_none(sample_kwargs.get("data_source"))
         task_name = self._task_name(sample_kwargs, env_type)
         prompt_as_text = prompt_text(raw_prompt)
-        model_endpoint = self._model_endpoint(sample_kwargs, sampling_params)
+        model_endpoint = model_endpoint_override or self._model_endpoint(sample_kwargs, sampling_params)
+        model_name = model_name_override or self._model_name(sample_kwargs, sampling_params)
         extra_info = self._jsonable(sample_kwargs.get("extra_info") or {})
         worker_question = self._worker_llm_question(raw_prompt, prompt_as_text)
         if worker_question:
@@ -328,7 +342,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "model_endpoint": {
                 "endpoint_type": "http",
                 "url": model_endpoint,
-                "model_name": self.config_for_uenv.default_model_name,
+                "model_name": model_name,
                 "generation_config": {key: value for key, value in generation_config.items() if value is not None},
                 "max_retries": 3,
             },
@@ -408,6 +422,68 @@ class UEnvAgentLoop(AgentLoopBase):
                 return [1 if item else 0 for item in mask]
         return [1] * fallback_len
 
+    def _record_episode_result(
+        self,
+        request: EpisodeRequest,
+        result: EpisodeResult,
+        *,
+        response_ids: list[int],
+        response_mask: list[int],
+    ) -> None:
+        path_text = self.config_for_uenv.result_record_path
+        if not path_text:
+            return
+
+        payload = self._payload_from_request(request)
+        metadata = payload.get("metadata") if isinstance(payload, dict) else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        record = {
+            "ts": time.time(),
+            "request_id": result.request_id,
+            "status": result.status,
+            "batch_id": metadata.get("batch_id"),
+            "sample_index": metadata.get("sample_index"),
+            "reward": result.summary.total_reward,
+            "total_steps": result.trajectory.total_steps,
+            "termination_reason": result.summary.terminate_reason,
+            "response_text": self._result_response_text(result),
+            "response_ids": self._result_response_ids(result),
+            "verl_response_ids": response_ids,
+            "verl_response_mask": response_mask,
+            "trajectory": self._trajectory_to_jsonable(result),
+        }
+
+        path = Path(os.path.expandvars(path_text)).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(to_jsonable(record), ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    def _payload_from_request(self, request: EpisodeRequest) -> dict[str, Any]:
+        try:
+            payload = json.loads(request.payload.decode("utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _result_response_text(self, result: EpisodeResult) -> str:
+        for step in reversed(result.trajectory.steps):
+            text = step.info.get("response_text")
+            if text:
+                return text
+            action = step.action.decode("utf-8", errors="replace")
+            if action:
+                return action
+        return ""
+
+    def _result_response_ids(self, result: EpisodeResult) -> list[int]:
+        for step in reversed(result.trajectory.steps):
+            ids = self._ids_from_info(step.info, "response_ids")
+            if ids:
+                return ids
+        return []
+
     def _ids_from_info(self, info: dict[str, str], key: str) -> list[int]:
         raw = info.get(key)
         if raw is None:
@@ -476,6 +552,147 @@ class UEnvAgentLoop(AgentLoopBase):
             or self.config_for_uenv.default_model_endpoint
         )
         return str(endpoint)
+
+    def _model_name(self, sample_kwargs: dict[str, Any], sampling_params: dict[str, Any]) -> str:
+        model_name = (
+            self._value_from_extra_info(sample_kwargs, "model_name", None)
+            or sampling_params.get("model_name")
+            or self.config_for_uenv.default_model_name
+        )
+        return str(model_name)
+
+    async def _runtime_model_endpoint(
+        self,
+        sampling_params: dict[str, Any],
+        sample_kwargs: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """Return VeRL-managed rollout endpoint and served model name.
+
+        VeRL normally passes an LLMServerClient into AgentLoop. That client routes
+        through a Ray load-balancer actor, while some test/runtime variants expose
+        addresses directly on the manager. We support both shapes and fall back to
+        static config when neither is available.
+        """
+        explicit = (
+            self._value_from_extra_info(sample_kwargs, "model_endpoint", None)
+            or sampling_params.get("model_endpoint")
+        )
+        if explicit:
+            return str(explicit), self._model_name(sample_kwargs, sampling_params)
+
+        for candidate in await self._runtime_model_endpoint_candidates():
+            endpoint = self._normalize_openai_endpoint(candidate)
+            if endpoint:
+                return endpoint, self._runtime_model_name(sample_kwargs, sampling_params)
+        return None, None
+
+    def _runtime_model_name(
+        self,
+        sample_kwargs: dict[str, Any],
+        sampling_params: dict[str, Any],
+    ) -> str:
+        explicit = (
+            self._value_from_extra_info(sample_kwargs, "model_name", None)
+            or sampling_params.get("model_name")
+        )
+        if explicit:
+            return str(explicit)
+
+        candidates = [
+            self._nested_value(self.config, ("actor_rollout_ref", "rollout", "prometheus", "served_model_name")),
+            self._nested_value(self.rollout_config, ("prometheus", "served_model_name")),
+            self._nested_value(self.config, ("actor_rollout_ref", "model", "path")),
+            getattr(self.tokenizer, "name_or_path", None),
+        ]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return self.config_for_uenv.default_model_name
+
+    def _nested_value(self, value: Any, path: tuple[str, ...]) -> Any:
+        current = value
+        for key in path:
+            if current is None:
+                return None
+            if isinstance(current, dict):
+                current = current.get(key)
+                continue
+            getter = getattr(current, "get", None)
+            if callable(getter):
+                try:
+                    current = getter(key)
+                    continue
+                except Exception:
+                    pass
+            current = getattr(current, key, None)
+        return current
+
+    async def _runtime_model_endpoint_candidates(self) -> list[Any]:
+        manager = getattr(self, "server_manager", None)
+        if manager is None:
+            return []
+
+        values: list[Any] = []
+        for attr in ("server_addresses", "addresses"):
+            value = getattr(manager, attr, None)
+            if value:
+                values.extend(value if isinstance(value, (list, tuple, set)) else [value])
+
+        for method_name in ("get_addresses", "get_server_addresses"):
+            method = getattr(manager, method_name, None)
+            if callable(method):
+                try:
+                    value = method()
+                    if inspect.isawaitable(value):
+                        value = await value
+                    if value:
+                        values.extend(value if isinstance(value, (list, tuple, set)) else [value])
+                except Exception:
+                    pass
+
+        load_balancer = getattr(manager, "_load_balancer", None)
+        get_all_servers = getattr(load_balancer, "get_all_servers", None)
+        remote = getattr(get_all_servers, "remote", None)
+        if callable(remote):
+            try:
+                ray_ref = remote()
+                values.extend(await self._await_ray_value(ray_ref))
+            except Exception:
+                pass
+
+        return values
+
+    async def _await_ray_value(self, value: Any) -> list[Any]:
+        if inspect.isawaitable(value):
+            try:
+                resolved = await value
+            except Exception:
+                return []
+            if isinstance(resolved, (list, tuple, set)):
+                return list(resolved)
+            return [resolved]
+        try:
+            import ray  # type: ignore
+
+            resolved = await asyncio.to_thread(ray.get, value)
+        except Exception:
+            return []
+        if isinstance(resolved, (list, tuple, set)):
+            return list(resolved)
+        return [resolved]
+
+    def _normalize_openai_endpoint(self, value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.startswith(("http://", "https://")):
+            base = text.rstrip("/")
+        else:
+            base = f"http://{text.rstrip('/')}"
+        if base.endswith("/v1"):
+            return base
+        return f"{base}/v1"
 
     def _sample_index(self, sample_kwargs: dict[str, Any]) -> int:
         value = self._value_from_extra_info(
