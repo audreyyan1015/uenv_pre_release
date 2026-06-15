@@ -240,7 +240,7 @@ export UENV_LLM_TEMPERATURE=1.0
 | `UENV_LLM_TEMPERATURE` | `1.0` | 否 | 采样温度 |
 | `UENV_WORKER_LLM_ENV` | `config/uenv-worker-llm.env` | 否 | 覆盖 env 文件路径 |
 
-**权威来源**：Worker 已配置 `uenv-worker-llm.env` 时，**以 Worker 侧 LLM 配置为准**，不使用 Episode payload 里的 `model_endpoint`（Bridge 写入的 `UENV_ROLLOUT_MODEL_ENDPOINT` 仅作 envelope 元数据）。
+**权威来源**：Worker `ModelClient` **优先使用 Episode 传入的** `model_endpoint` / `model_name` / `generation_config`；API Key 与 OpenRouter 归因头仍由 `uenv-worker-llm.env` 提供。Episode 未带 endpoint 时回退 `UENV_LLM_ENDPOINT`。
 
 #### 1.7.5 连通性自检（7143 上）
 

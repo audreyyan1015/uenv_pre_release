@@ -125,7 +125,7 @@ GSM8K parquet（question + #### answer）
 | # | 文件 | 状态 | 说明 |
 |---|------|------|------|
 | W-1 | `model_client.rs` | ✅ | 首步优先 `response_text`；有 LLM 配置时调 HTTP 生成 |
-| W-2 | `model_client.rs` | ✅ 2026-06-12 | **有 `uenv-worker-llm.env` 或 payload `model_endpoint` 时禁止 `rule_reward` 短路**；仅无 LLM 且无 question 时短路（grpcurl 联调） |
+| W-2 | `model_client.rs` | ✅ 2026-06-15 | **优先使用 Episode `model_endpoint` / `model_name` / `generation_config`**；API Key 仍来自 `uenv-worker-llm.env`；仅无 LLM 且无 question 时 `rule_reward` 短路 |
 | W-3 | `reward_engine.rs` | ✅ | 采信插件 `step.reward` |
 | W-4 | `executor.rs` / `payload.rs` | ✅ | reset 传题；`dataset` 二次规范化；`step.info.response_text` |
 | W-5 | 7143 部署 | ✅ 2026-06-13 | `UENV_MATH_PLUGIN_BIN`、`UENV_PREWARM_ON_STARTUP`、`UENV_HUB_TOKEN`；`plugins/math/run.sh` 须 **LF**（禁 CRLF） |
@@ -215,7 +215,7 @@ Phase D～F（规模化）
 3. 生成文本作为 action → math 插件 GSM8K 判分
 4. `step.info.response_text` 回传；AgentLoop 可 fallback 用 tokenizer 编码为 `response_ids`
 
-**注意**：`UENV_ROLLOUT_MODEL_ENDPOINT`（VeRL/AgentLoop 构建请求时写入 envelope）在 Worker 已配置 `uenv-worker-llm.env` 时**不覆盖** Worker LLM 地址；以 Worker `.env` 为权威。
+**注意**：`UENV_ROLLOUT_MODEL_ENDPOINT` / `model_name` 由 Adapter 写入 Episode；Worker `ModelClient` **优先应用 Episode 配置**调 OpenRouter。`UENV_LLM_API_KEY` 仅在 Worker 本地 env，不进 Bridge。
 
 ### 4.4 已移除的假链路
 

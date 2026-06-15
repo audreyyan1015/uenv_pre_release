@@ -106,6 +106,7 @@ impl EpisodeExecutor {
                     &episode.payload,
                     &episode.reward_config,
                     step_index as u32,
+                    &episode.model_endpoint,
                 )
                 .await
                 .map_err(|err| {
