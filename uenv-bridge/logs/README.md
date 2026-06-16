@@ -1,8 +1,30 @@
 # UEnv Bridge Logs
 
-This directory stores selected smoke-test logs that are useful for cross-team debugging and review. Routine runtime artifacts, datasets, checkpoints, and Hydra output should stay under `tmp/` and should not be committed.
+`logs/` is only for curated evidence that should be reviewed or shared. Normal script output must stay under `temp/logs/`, which is ignored by git.
 
-Current included run:
+Recommended layout:
 
-- `verl_grpo_1step_agent_loop/layer4_distributed_20260609_154224.log`: real VeRL Layer 4 distributed pre-rollout run. It reached `UEnvAgentLoop` and received a failed episode result from the server-side adapter core: `dispatch failed: transport error`.
-- `layer4_distributed/layer4_distributed_20260609_154224/mock-model.log`: local mock OpenAI-compatible model endpoint log for the same run. It only shows startup, which indicates the request did not reach worker model inference in that run.
+```text
+logs/
+  README.md
+  curated/
+    <run_id>/
+      summary.md
+      key.log
+      metrics.csv
+      plots/
+```
+
+Default runtime layout:
+
+```text
+temp/logs/
+  layer4_distributed/<run_id>/
+    agent-loop-requests.jsonl
+    agent-loop-results.jsonl
+  verl_layer4_agent_loop/
+    <run_id>.log
+    hydra_<run_id>/
+```
+
+When a run is worth keeping, copy only the minimum evidence into `logs/curated/<run_id>/`: a short summary, key log excerpts, metrics CSV, and a few plots if needed. Do not commit raw Hydra directories or full routine run logs.

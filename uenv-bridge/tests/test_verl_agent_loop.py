@@ -26,6 +26,7 @@ class RecordingEpisodeClient:
     def __init__(self, result: EpisodeResult) -> None:
         self.result = result
         self.last_request = None
+        self.stream_calls = []
 
     def submit_episode(self, request):
         self.last_request = request
@@ -33,8 +34,81 @@ class RecordingEpisodeClient:
         return self.result
 
     def submit_episode_stream(self, requests):
-        for request in requests:
+        request_list = list(requests)
+        self.stream_calls.append(request_list)
+        for request in request_list:
             yield self.submit_episode(request)
+
+
+class BatchRecordingEpisodeClient:
+    def __init__(self) -> None:
+        self.stream_calls = []
+
+    def submit_episode(self, request):
+        return next(self.submit_episode_stream([request]))
+
+    def submit_episode_stream(self, requests):
+        request_list = list(requests)
+        self.stream_calls.append(request_list)
+        for index, request in enumerate(request_list):
+            yield EpisodeResult(
+                request_id=request.request_id,
+                status="completed",
+                trajectory=Trajectory(
+                    steps=[
+                        StepRecord(
+                            step_index=0,
+                            action=f"answer-{index}".encode("utf-8"),
+                            reward=float(index + 1),
+                            terminated=True,
+                            info={
+                                "response_ids": json.dumps([200 + index]),
+                                "response_mask": "[1]",
+                                "response_text": f"answer-{index}",
+                            },
+                        )
+                    ],
+                    total_reward=float(index + 1),
+                    total_steps=1,
+                ),
+                summary=EpisodeSummary(total_reward=float(index + 1), total_steps=1, terminate_reason="done"),
+            )
+
+
+class CapacityAwareEpisodeClient(BatchRecordingEpisodeClient):
+    def submit_episode_stream(self, requests):
+        request_list = list(requests)
+        self.stream_calls.append(request_list)
+        if len(request_list) > 1:
+            for request in request_list:
+                yield EpisodeResult(
+                    request_id=request.request_id,
+                    status="failed",
+                    trajectory=Trajectory(steps=[], total_reward=0.0, total_steps=0),
+                    summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="failed"),
+                    error_message="no worker available: all workers at capacity",
+                )
+            return
+
+        request = request_list[0]
+        yield EpisodeResult(
+            request_id=request.request_id,
+            status="completed",
+            trajectory=Trajectory(
+                steps=[
+                    StepRecord(
+                        step_index=0,
+                        action=b"ok",
+                        reward=1.0,
+                        terminated=True,
+                        info={"response_ids": "[42]", "response_mask": "[1]", "response_text": "ok"},
+                    )
+                ],
+                total_reward=1.0,
+                total_steps=1,
+            ),
+            summary=EpisodeSummary(total_reward=1.0, total_steps=1, terminate_reason="done"),
+        )
 
 
 class FakeServerManager:
@@ -94,6 +168,46 @@ class FakeCoreTrajectoryStub:
         }
 
 
+class FakeCoreBatchStub:
+    def __init__(self) -> None:
+        self.last_request = None
+
+    def ExecuteBatch(self, request, timeout=None):
+        self.last_request = request
+        return {
+            "request_id": request["request_id"],
+            "batch_id": request["batch_id"],
+            "results": [
+                {
+                    "request_id": sample["request_id"],
+                    "batch_id": sample["batch_id"],
+                    "sample_index": sample["sample_index"],
+                    "status": "completed",
+                    "reward": float(sample["sample_index"]),
+                    "done": True,
+                    "termination_reason": "done",
+                    "trajectory_json": json.dumps(
+                        {
+                            "steps": [
+                                {
+                                    "step_index": 0,
+                                    "action": str(sample["sample_index"]),
+                                    "reward": float(sample["sample_index"]),
+                                    "terminated": True,
+                                }
+                            ],
+                            "total_reward": float(sample["sample_index"]),
+                            "total_steps": 1,
+                        }
+                    ).encode("utf-8"),
+                    "error_code": "",
+                    "error_message": "",
+                }
+                for sample in request["samples"]
+            ],
+        }
+
+
 class UEnvAgentLoopTest(unittest.TestCase):
     def test_build_episode_request_uses_prd_episode_shape(self) -> None:
         loop = UEnvAgentLoop(
@@ -148,6 +262,56 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.extra_fields["uenv_status"], "completed")
         self.assertIsNotNone(client.last_request)
 
+    def test_run_batch_submits_one_core_batch(self) -> None:
+        client = BatchRecordingEpisodeClient()
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+
+        outputs = asyncio.run(
+            loop.run_batch(
+                [{"temperature": 1.0}, {"temperature": 0.5}],
+                [
+                    {
+                        "raw_prompt": [{"role": "user", "content": "1+1?"}],
+                        "data_source": "gsm8k",
+                        "reward_model": {"ground_truth": "2"},
+                    },
+                    {
+                        "raw_prompt": [{"role": "user", "content": "2+2?"}],
+                        "data_source": "gsm8k",
+                        "reward_model": {"ground_truth": "4"},
+                    },
+                ],
+                batch_id="batch-test",
+            )
+        )
+
+        self.assertEqual(len(client.stream_calls), 1)
+        self.assertEqual(len(client.stream_calls[0]), 2)
+        self.assertEqual([output.response_ids for output in outputs], [[200], [201]])
+        self.assertEqual([output.reward_score for output in outputs], [1.0, 2.0])
+        payloads = [json.loads(request.payload.decode("utf-8")) for request in client.stream_calls[0]]
+        self.assertEqual([payload["metadata"]["batch_id"] for payload in payloads], ["batch-test", "batch-test"])
+        self.assertEqual([payload["metadata"]["sample_index"] for payload in payloads], [0, 1])
+
+    def test_run_batch_splits_capacity_failures(self) -> None:
+        client = CapacityAwareEpisodeClient()
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client, batch_size=4, batch_retry_delay_seconds=0)
+
+        outputs = asyncio.run(
+            loop.run_batch(
+                [{}, {}, {}],
+                [
+                    {"raw_prompt": "a", "data_source": "gsm8k"},
+                    {"raw_prompt": "b", "data_source": "gsm8k"},
+                    {"raw_prompt": "c", "data_source": "gsm8k"},
+                ],
+                batch_id="batch-capacity",
+            )
+        )
+
+        self.assertEqual([len(call) for call in client.stream_calls], [3, 1, 2, 1, 1])
+        self.assertEqual([output.response_ids for output in outputs], [[42], [42], [42]])
+
     def test_run_can_fall_back_to_action_text(self) -> None:
         result = EpisodeResult(
             request_id="result-1",
@@ -166,6 +330,43 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.response_ids, [52])
         self.assertEqual(output.response_mask, [1])
         self.assertEqual(output.reward_score, 0.5)
+
+    def test_run_concatenates_multi_step_trajectory_for_training_response(self) -> None:
+        result = EpisodeResult(
+            request_id="result-1",
+            status="completed",
+            trajectory=Trajectory(
+                steps=[
+                    StepRecord(
+                        step_index=1,
+                        action=b"first action",
+                        reward=0.25,
+                        terminated=False,
+                        info={"response_ids": "[11, 12]", "response_mask": "[1, 0]", "response_text": "first"},
+                    ),
+                    StepRecord(
+                        step_index=2,
+                        action=b"second action",
+                        reward=0.75,
+                        terminated=True,
+                        info={"response_ids": "[21, 22, 23]", "response_mask": "[1, 1, 0]", "response_text": "second"},
+                    ),
+                ],
+                total_reward=1.0,
+                total_steps=2,
+            ),
+            summary=EpisodeSummary(total_reward=1.0, total_steps=2, terminate_reason="done"),
+        )
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result))
+
+        output = asyncio.run(loop.run({}, raw_prompt="multi-step task", data_source="agent"))
+
+        self.assertEqual(output.response_ids, [11, 12, 21, 22, 23])
+        self.assertEqual(output.response_mask, [1, 0, 1, 1, 0])
+        self.assertEqual(output.reward_score, 1.0)
+        self.assertEqual(output.num_turns, 3)
+        self.assertEqual(output.extra_fields["uenv_trajectory"][0]["action"], "first action")
+        self.assertEqual(output.extra_fields["uenv_trajectory"][1]["action"], "second action")
 
     def test_run_records_episode_result_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -191,12 +392,43 @@ class UEnvAgentLoopTest(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["batch_id"], "batch-record")
             self.assertEqual(records[0]["sample_index"], 3)
+            self.assertEqual(records[0]["request_model_endpoint"], "https://openrouter.ai/api/v1")
+            self.assertEqual(records[0]["request_model_name"], "qwen/qwen-2.5-7b-instruct")
             self.assertEqual(records[0]["reward"], 2.0)
             self.assertEqual(records[0]["response_text"], "4")
             self.assertEqual(records[0]["response_ids"], [101, 102])
             self.assertEqual(records[0]["verl_response_ids"], [101, 102])
             self.assertEqual(records[0]["verl_response_mask"], [1, 0])
             self.assertEqual(records[0]["trajectory"][0]["reward"], 2.0)
+
+    def test_run_records_episode_request_jsonl_before_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record_path = Path(tmpdir) / "requests.jsonl"
+            client = RecordingEpisodeClient(self._result_with_token_ids())
+            loop = UEnvAgentLoop(
+                tokenizer=FakeTokenizer(),
+                client=client,
+                request_record_path=str(record_path),
+            )
+
+            asyncio.run(
+                loop.run(
+                    {"temperature": 0.7},
+                    raw_prompt=[{"role": "user", "content": "2+2?"}],
+                    data_source="gsm8k",
+                    reward_model={"ground_truth": "4"},
+                    extra_info={"batch_id": "batch-request", "sample_index": 2},
+                )
+            )
+
+            records = [json.loads(line) for line in record_path.read_text().splitlines()]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["phase"], "submit_single")
+            self.assertEqual(records[0]["batch_id"], "batch-request")
+            self.assertEqual(records[0]["sample_index"], 2)
+            self.assertEqual(records[0]["prompt_text"], "user: 2+2?")
+            self.assertEqual(records[0]["generation_config"]["temperature"], 0.7)
+            self.assertEqual(records[0]["payload"]["metadata"]["batch_id"], "batch-request")
 
     def test_run_prefers_verl_runtime_model_endpoint(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
@@ -269,6 +501,27 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(result.summary.total_reward, 0.75)
         self.assertEqual(result.trajectory.steps[0].action, b"42")
         self.assertEqual(result.trajectory.steps[0].info["response_ids"], "[101,102]")
+
+    def test_rust_core_client_sends_multiple_samples_in_one_execute_batch(self) -> None:
+        stub = FakeCoreBatchStub()
+        client = RustCoreEpisodeClient(RustCoreClientConfig(), stub=stub)
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+        requests = [
+            loop.build_episode_request(
+                sampling_params={},
+                prompt_ids=[10],
+                raw_prompt=f"question-{index}",
+                sample_kwargs={"extra_info": {"batch_id": "batch-core", "sample_index": index}},
+            )
+            for index in range(3)
+        ]
+
+        results = list(client.submit_episode_stream(requests))
+
+        self.assertEqual(len(stub.last_request["samples"]), 3)
+        self.assertEqual([sample["sample_index"] for sample in stub.last_request["samples"]], [0, 1, 2])
+        self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
+        self.assertEqual([result.summary.total_reward for result in results], [0.0, 1.0, 2.0])
 
     def _result_with_token_ids(self) -> EpisodeResult:
         step = StepRecord(
