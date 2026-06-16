@@ -14,3 +14,8 @@
   default_max_steps: 10
   default_max_turns: 1
   seed_base: 42
+  result_record_path: ${oc.env:UENV_AGENT_LOOP_RESULT_RECORD_PATH,""}
+  request_record_path: ${oc.env:UENV_AGENT_LOOP_REQUEST_RECORD_PATH,""}
+  batch_size: ${oc.env:UENV_AGENT_LOOP_BATCH_SIZE,1}
+  batch_retry_attempts: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS,3}
+  batch_retry_delay_seconds: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS,5}

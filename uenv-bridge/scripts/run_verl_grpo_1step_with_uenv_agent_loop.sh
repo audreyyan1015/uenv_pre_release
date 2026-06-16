@@ -9,7 +9,7 @@ MODEL_ID=${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}
 HOST_MODEL_PATH=${HOST_MODEL_PATH:-${MODEL_CACHE}/modelscope/Qwen/Qwen2___5-0___5B-Instruct}
 MODEL_PATH=${MODEL_PATH:-/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct}
 TRAINING_STEPS=${TRAINING_STEPS:-1}
-DATA_DIR=${DATA_DIR:-${REPO_DIR}/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_data}
+DATA_DIR=${DATA_DIR:-${REPO_DIR}/data/}
 CONTAINER_DATA_DIR=/tmp/uenv-bridge/tmp/verl_grpo_${TRAINING_STEPS}step_agent_loop_data
 DATA_MARKER=${DATA_MARKER:-${DATA_DIR}/.sample_count}
 LOG_DIR=${LOG_DIR:-${REPO_DIR}/logs/verl_grpo_${TRAINING_STEPS}step_agent_loop}
@@ -18,9 +18,10 @@ TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ROLLOUT_N=${ROLLOUT_N:-2}
 ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.25}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-4}
-CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0}
+CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-7}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen25_05b_gsm8k_grpo_${TRAINING_STEPS}step_uenv_agent_loop}
 RUN_ID=${RUN_ID:-$(date +%Y%m%d_%H%M%S)}
 LOG_FILE=${LOG_FILE:-${LOG_DIR}/${RUN_ID}.log}
@@ -32,7 +33,9 @@ UENV_AGENT_LOOP_BUILD_CORE=${UENV_AGENT_LOOP_BUILD_CORE:-1}
 UENV_ADAPTER_CORE_BACKEND=${UENV_ADAPTER_CORE_BACKEND:-server}
 UENV_ROLLOUT_MODEL_ENDPOINT=${UENV_ROLLOUT_MODEL_ENDPOINT:-https://openrouter.ai/api/v1}
 UENV_ROLLOUT_MODEL_NAME=${UENV_ROLLOUT_MODEL_NAME:-qwen/qwen-2.5-7b-instruct}
-DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-32}
+UENV_AGENT_LOOP_REQUEST_RECORD_PATH=${UENV_AGENT_LOOP_REQUEST_RECORD_PATH:-/tmp/uenv-bridge/logs/verl_grpo_${TRAINING_STEPS}step_agent_loop/${RUN_ID}_agent_loop_requests.jsonl}
+UENV_AGENT_LOOP_RESULT_RECORD_PATH=${UENV_AGENT_LOOP_RESULT_RECORD_PATH:-/tmp/uenv-bridge/logs/verl_grpo_${TRAINING_STEPS}step_agent_loop/${RUN_ID}_agent_loop_results.jsonl}
+DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-256}
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:-}
 
 REQUIRED_SAMPLE_COUNT=$((TRAINING_STEPS * TRAIN_BATCH_SIZE))
@@ -56,29 +59,6 @@ print(path)
 PY"
 fi
 
-if [ ! -f "${DATA_DIR}/train.parquet" ] ||
-   [ ! -f "${DATA_DIR}/test.parquet" ] ||
-   [ ! -f "${DATA_MARKER}" ] ||
-   [ "$(cat "${DATA_MARKER}" 2>/dev/null || true)" != "${SAMPLE_COUNT}" ]; then
-  echo "Preparing VeRL-format GSM8K samples under ${DATA_DIR}..."
-  podman run --rm --entrypoint bash \
-    --workdir /tmp/uenv-bridge \
-    -e SAMPLE_COUNT="${SAMPLE_COUNT}" \
-    -e CONTAINER_DATA_DIR="${CONTAINER_DATA_DIR}" \
-    -v "${VERL_WORKSPACE}:/workspace" \
-    -v "${REPO_DIR}:/tmp/uenv-bridge" \
-    "${IMAGE}" \
-    -lc 'python scripts/prepare_verl_gsm8k_sample.py \
-        --input /workspace/data/gsm8k/train.parquet \
-        --output "${CONTAINER_DATA_DIR}/train.parquet" \
-        --n "${SAMPLE_COUNT}" && \
-      python scripts/prepare_verl_gsm8k_sample.py \
-        --input /workspace/data/gsm8k/test.parquet \
-        --output "${CONTAINER_DATA_DIR}/test.parquet" \
-        --n "${SAMPLE_COUNT}"'
-  printf '%s\n' "${SAMPLE_COUNT}" >"${DATA_MARKER}"
-fi
-
 echo "Running ${TRAINING_STEPS}-step GRPO with UEnv pre-rollout AgentLoop; log: ${LOG_FILE}"
 podman run --rm \
   ${PODMAN_NETWORK_ARGS} \
@@ -87,6 +67,7 @@ podman run --rm \
   --entrypoint bash \
   --workdir /workspace/verl \
   -v "${VERL_WORKSPACE}:/workspace" \
+  -v "${DATA_DIR}:${CONTAINER_DATA_DIR}" \
   -v "${REPO_DIR}:/tmp/uenv-bridge" \
   -v "${MODEL_CACHE}:/models" \
   "${IMAGE}" \
@@ -96,6 +77,7 @@ export PYTHONPATH=/workspace/verl:/tmp/uenv-bridge/src
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_IN_CONTAINER}
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
+export VLLM_NO_USAGE_STATS=1
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export RAY_DEDUP_LOGS=0
@@ -103,6 +85,7 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
 export UENV_PATCH_RESOURCE_TRACKER=1
+export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
 pip install -q 'grpcio>=1.80' --break-system-packages 2>/dev/null || pip install -q 'grpcio>=1.80'
 export UENV_AGENT_LOOP_CLIENT=${UENV_AGENT_LOOP_CLIENT}
 export UENV_ADAPTER_CORE_ENDPOINT=${UENV_AGENT_LOOP_ENDPOINT}
@@ -112,6 +95,8 @@ export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
 export UENV_ADAPTER_CORE_BACKEND=${UENV_ADAPTER_CORE_BACKEND}
 export UENV_ROLLOUT_MODEL_ENDPOINT=\"${UENV_ROLLOUT_MODEL_ENDPOINT}\"
 export UENV_ROLLOUT_MODEL_NAME=\"${UENV_ROLLOUT_MODEL_NAME}\"
+export UENV_AGENT_LOOP_REQUEST_RECORD_PATH=\"${UENV_AGENT_LOOP_REQUEST_RECORD_PATH}\"
+export UENV_AGENT_LOOP_RESULT_RECORD_PATH=\"${UENV_AGENT_LOOP_RESULT_RECORD_PATH}\"
 if [ \"${UENV_AGENT_LOOP_CLIENT}\" = \"rust_core\" ] && [ \"${UENV_AGENT_LOOP_BUILD_CORE}\" != \"0\" ]; then
   cd /tmp/uenv-bridge
   ./scripts/generate_adapter_core_proto.sh
@@ -150,7 +135,7 @@ python3 -m verl.trainer.main_ppo \\
   actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \\
   actor_rollout_ref.rollout.name=vllm \\
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \\
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \\
+  actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION} \\
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \\
   actor_rollout_ref.rollout.agent.num_workers=${AGENT_NUM_WORKERS} \\
   actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent \\

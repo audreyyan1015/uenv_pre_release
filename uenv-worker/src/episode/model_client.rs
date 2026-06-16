@@ -195,7 +195,11 @@ fn resolve_endpoint_base(
 ) -> String {
     if let Some(endpoint) = payload
         .get("model_endpoint")
-        .and_then(Value::as_str)
+        .and_then(|value| match value {
+            Value::String(text) => Some(text.as_str()),
+            Value::Object(map) => map.get("url").and_then(Value::as_str),
+            _ => None,
+        })
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
@@ -223,6 +227,9 @@ mod tests {
     use super::{resolve_endpoint_base, resolve_model_name, ModelClient};
     use crate::llm::LlmConfig;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn prefers_payload_model_endpoint_over_episode_and_local() {
@@ -268,6 +275,19 @@ mod tests {
             "http://10.10.20.142:8004/v1",
             &llm
         ));
+    }
+
+    #[test]
+    fn accepts_payload_model_endpoint_object() {
+        let llm = LlmConfig {
+            endpoint: "http://local-vllm:8000/v1".to_string(),
+            ..LlmConfig::default()
+        };
+        let payload = json!({"model_endpoint": {"url": "http://runtime-vllm:9000/v1"}});
+        assert_eq!(
+            resolve_endpoint_base(&payload, "http://episode-vllm:8000/v1", &llm),
+            "http://runtime-vllm:9000/v1"
+        );
     }
 
     #[tokio::test]
@@ -331,5 +351,44 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn uses_payload_model_endpoint_override() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_for_task = captured.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0; 8192];
+            let n = stream.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+            *captured_for_task.lock().expect("lock") = request;
+            let body = b"{\"choices\":[{\"message\":{\"content\":\"#### 4\"},\"finish_reason\":\"stop\"}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let client = ModelClient::new();
+        let payload = format!(
+            r#"{{"question":"2+2?","model_endpoint":"http://{}/v1","model_name":"payload-model","generation_config":{{"max_new_tokens":16}}}}"#,
+            addr
+        );
+        let action = client
+            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"4"}"#, 1, "")
+            .await
+            .expect("infer");
+
+        assert_eq!(action, b"#### 4");
+        let request = captured.lock().expect("lock").clone();
+        assert!(request.starts_with("POST /v1/chat/completions "));
+        assert!(request.contains(r#""model":"payload-model""#));
+        assert!(request.contains(r#""max_tokens":16"#));
     }
 }

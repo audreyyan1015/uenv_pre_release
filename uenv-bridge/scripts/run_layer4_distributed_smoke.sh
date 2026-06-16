@@ -6,14 +6,6 @@ usage() {
   cat <<'EOF'
 Run the distributed Layer 4 pre-rollout smoke test for the shared test hosts.
 
-Host assignment from /data/ronghao/uenv/测试环境主机分配.md:
-  adapter login: ssh -p 142 <user>@219.147.100.43
-  worker login : ssh -p 143 <user>@219.147.100.43
-  server login : ssh scauni@8.130.89.198
-  hub login    : ssh nemo@8.130.179.41
-
-The 142/143 values above are SSH login ports, not UEnv gRPC service ports.
-
 This script is intended to run on the adapter login host. It starts:
   1. optional mock OpenAI-compatible model endpoint on the adapter host
   2. real VeRL trainer container with UEnvAgentLoop enabled
@@ -32,10 +24,12 @@ Common environment overrides:
   SAMPLE_COUNT                  Default: 2
   TRAIN_BATCH_SIZE              Default: 2
   ROLLOUT_N                     Default: 2
+  DATA_MAX_RESPONSE_LENGTH      Default: 256; GSM8K answers need enough room for final #### answer.
   SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.89.198:50053
   MODEL_NAME                    Default: mock-policy
   START_MOCK_MODEL              Start adapter-host mock model endpoint. Default: 1
   UENV_ROLLOUT_MODEL_ENDPOINT   Required only when START_MOCK_MODEL=0
+  AGENT_LOOP_REQUEST_RECORD_PATH Request JSONL path inside the container.
   LOG_ROOT                      Directory for run logs. Default: <repo>/logs
   KEEP_SERVICES                 Do not stop local mock model after run. Default: 0
 
@@ -56,13 +50,6 @@ fi
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 WORKSPACE_ROOT=${WORKSPACE_ROOT:-"$(cd "${REPO_DIR}/.." && pwd)"}
 
-# 配置 SSH 登录入口。这里的 142/143 是登录端口，不是业务 gRPC 端口。
-PUBLIC_SSH_HOST=${PUBLIC_SSH_HOST:-219.147.100.43}
-ADAPTER_SSH_PORT=${ADAPTER_SSH_PORT:-142}
-WORKER_SSH_PORT=${WORKER_SSH_PORT:-143}
-SERVER_SSH=${SERVER_SSH:-scauni@8.130.89.198}
-HUB_SSH=${HUB_SSH:-nemo@8.130.179.41}
-
 # 配置 server 侧已经启动的 Rust adapter core 地址。Python/VeRL 只连接
 # 这个 endpoint，不在 adapter 侧启动 core。
 SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-${UENV_AGENT_LOOP_ENDPOINT:-8.130.86.71:8088}}
@@ -77,11 +64,13 @@ TRAINING_STEPS=${TRAINING_STEPS:-1}
 SAMPLE_COUNT=${SAMPLE_COUNT:-2}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ROLLOUT_N=${ROLLOUT_N:-2}
+DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-256}
 ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.25}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-4}
-CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0}
+CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-7}
 
 # 配置模型 endpoint。默认在 adapter login host 起一个 mock endpoint；
 # worker 能访问到该地址时，server/worker 侧可以使用它完成 smoke test。
@@ -113,7 +102,10 @@ PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 RUN_ID=${RUN_ID:-layer4_distributed_$(date +%Y%m%d_%H%M%S)}
 LOG_ROOT=${LOG_ROOT:-${REPO_DIR}/logs}
 SERVICE_DIR=${SERVICE_DIR:-${LOG_ROOT}/layer4_distributed/${RUN_ID}}
+CONTAINER_SERVICE_DIR=/tmp/uenv-bridge/logs/layer4_distributed/${RUN_ID}
 MOCK_MODEL_LOG=${MOCK_MODEL_LOG:-${SERVICE_DIR}/mock-model.log}
+AGENT_LOOP_REQUEST_RECORD_PATH=${AGENT_LOOP_REQUEST_RECORD_PATH:-${CONTAINER_SERVICE_DIR}/agent-loop-requests.jsonl}
+AGENT_LOOP_RESULT_RECORD_PATH=${AGENT_LOOP_RESULT_RECORD_PATH:-${CONTAINER_SERVICE_DIR}/agent-loop-results.jsonl}
 mkdir -p "${SERVICE_DIR}"
 
 # 记录本脚本启动的本地服务进程 id，退出时统一清理。
@@ -208,13 +200,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Distributed Layer 4 host assignment:"
-echo "  adapter login: ssh -p ${ADAPTER_SSH_PORT} <user>@${PUBLIC_SSH_HOST} (this script)"
-echo "  worker login : ssh -p ${WORKER_SSH_PORT} <user>@${PUBLIC_SSH_HOST}"
-echo "  server login : ssh ${SERVER_SSH} (server side starts Rust adapter core)"
-echo "  hub login    : ssh ${HUB_SSH} (not started by this bridge script)"
-echo "  server-side adapter core endpoint: ${SERVER_ADAPTER_CORE_ENDPOINT}"
-echo "  model endpoint passed to UEnv    : ${ROLLOUT_ENDPOINT}"
 
 # 先检查 server 侧 adapter core endpoint 是否已可连接。这里不启动 core。
 wait_for_addr "server-side adapter core" "${SERVER_ADAPTER_CORE_ENDPOINT}" 20
@@ -283,8 +268,10 @@ TRAINING_STEPS="${TRAINING_STEPS}" \
 SAMPLE_COUNT="${SAMPLE_COUNT}" \
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE}" \
 ROLLOUT_N="${ROLLOUT_N}" \
+DATA_MAX_RESPONSE_LENGTH="${DATA_MAX_RESPONSE_LENGTH}" \
 ROLLOUT_FREE_CACHE_ENGINE="${ROLLOUT_FREE_CACHE_ENGINE}" \
 ROLLOUT_ENABLE_SLEEP_MODE="${ROLLOUT_ENABLE_SLEEP_MODE}" \
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
 AGENT_NUM_WORKERS="${AGENT_NUM_WORKERS}" \
 RAY_NUM_CPUS="${RAY_NUM_CPUS}" \
 CUDA_VISIBLE_DEVICES_IN_CONTAINER="${CUDA_VISIBLE_DEVICES_IN_CONTAINER}" \
@@ -295,6 +282,8 @@ UENV_AGENT_LOOP_BUILD_CORE=0 \
 UENV_ADAPTER_CORE_BACKEND=server \
 UENV_ROLLOUT_MODEL_ENDPOINT="${ROLLOUT_ENDPOINT}" \
 UENV_ROLLOUT_MODEL_NAME="${MODEL_NAME}" \
+UENV_AGENT_LOOP_REQUEST_RECORD_PATH="${AGENT_LOOP_REQUEST_RECORD_PATH}" \
+UENV_AGENT_LOOP_RESULT_RECORD_PATH="${AGENT_LOOP_RESULT_RECORD_PATH}" \
 PODMAN_NETWORK_ARGS="${PODMAN_NETWORK_ARGS}" \
 RUN_ID="${RUN_ID}" \
 LOG_DIR="${LOG_ROOT}/verl_grpo_${TRAINING_STEPS}step_agent_loop" \

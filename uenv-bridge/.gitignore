@@ -1,6 +1,10 @@
-/docs/
 /tmp/
 /core/target/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+/temp/
+/logs/*
+!/logs/README.md
+!/logs/curated/
+!/logs/curated/**

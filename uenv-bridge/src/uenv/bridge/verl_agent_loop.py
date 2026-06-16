@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .agent_loop_clients import build_agent_loop_episode_client
 from .clients import EpisodeClient
-from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec
+from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec, request_to_jsonable
 from .utils import prompt_text, to_jsonable
 
 try:
@@ -131,7 +133,7 @@ def _bool_value(value: Any, default: bool = False) -> bool:
 
 @dataclass(slots=True)
 class UEnvAgentLoopConfig:
-    client_mode: str = "rust_core"
+    client_mode: str = "fake"
     endpoint: str = "127.0.0.1:50051"
     timeout_seconds: float = 300.0
     startup_timeout_seconds: float = 30.0
@@ -140,11 +142,12 @@ class UEnvAgentLoopConfig:
     fake_reward: float = 1.0
     fake_response_text: str = ""
     default_env_type: str = "math"
-    default_model_endpoint: str = "https://openrouter.ai/api/v1"
-    default_model_name: str = "qwen/qwen-2.5-7b-instruct"
+    default_model_endpoint: str = "http://uenv-rollout.default.svc:8000/v1"
+    default_model_name: str = "policy-model"
     default_max_steps: int = 10
     default_max_turns: int = 1
     seed_base: int = 42
+    request_record_path: str = ""
 
 
 @register("uenv_agent")
@@ -171,17 +174,18 @@ class UEnvAgentLoop(AgentLoopBase):
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
         default_env_type: str = "math",
-        default_model_endpoint: str = "https://openrouter.ai/api/v1",
-        default_model_name: str = "qwen/qwen-2.5-7b-instruct",
+        default_model_endpoint: str = "http://uenv-rollout.default.svc:8000/v1",
+        default_model_name: str = "policy-model",
         default_max_steps: int = 10,
         default_max_turns: int = 1,
         seed_base: int = 42,
+        request_record_path: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         client_mode = client_mode or mode
         self.config_for_uenv = UEnvAgentLoopConfig(
-            client_mode=_optional_string(client_mode) or "rust_core",
+            client_mode=_optional_string(client_mode) or "fake",
             endpoint=_optional_string(endpoint) or "127.0.0.1:50051",
             timeout_seconds=_float_value(timeout_seconds, 300.0),
             startup_timeout_seconds=_float_value(startup_timeout_seconds, 30.0),
@@ -195,6 +199,7 @@ class UEnvAgentLoop(AgentLoopBase):
             default_max_steps=_int_value(default_max_steps, 10),
             default_max_turns=_int_value(default_max_turns, 1),
             seed_base=_int_value(seed_base, 42),
+            request_record_path=_optional_string(request_record_path) or "",
         )
         self.client = client or build_agent_loop_episode_client(
             mode=self.config_for_uenv.client_mode,
@@ -211,16 +216,20 @@ class UEnvAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         messages = self._messages_from_raw_prompt(kwargs.get("raw_prompt"))
         prompt_ids = await self._prompt_ids(messages)
+        runtime_model = await self._runtime_model_endpoint(sampling_params, kwargs)
 
         request = self.build_episode_request(
             sampling_params=sampling_params,
             prompt_ids=prompt_ids,
             raw_prompt=kwargs.get("raw_prompt"),
             sample_kwargs=kwargs,
+            model_endpoint_override=runtime_model[0],
+            model_name_override=runtime_model[1],
         )
 
         metrics: dict[str, float] = {}
         with simple_timer("generate_sequences", metrics):
+            self._record_episode_requests([request], phase="submit_single")
             result = await asyncio.to_thread(self.client.submit_episode, request)
 
         if result.status not in {"completed", "recorded"}:
@@ -270,6 +279,8 @@ class UEnvAgentLoop(AgentLoopBase):
         prompt_ids: list[int],
         raw_prompt: Any,
         sample_kwargs: dict[str, Any],
+        model_endpoint_override: str | None = None,
+        model_name_override: str | None = None,
     ) -> EpisodeRequest:
         request_id = str(uuid.uuid4())
         env_type = self._env_type(sample_kwargs)
@@ -281,11 +292,8 @@ class UEnvAgentLoop(AgentLoopBase):
         data_source = self._string_or_none(sample_kwargs.get("data_source"))
         task_name = self._task_name(sample_kwargs, env_type)
         prompt_as_text = prompt_text(raw_prompt)
-        model_endpoint = self._model_endpoint(sample_kwargs, sampling_params)
-        extra_info = self._jsonable(sample_kwargs.get("extra_info") or {})
-        worker_question = self._worker_llm_question(raw_prompt, prompt_as_text)
-        if worker_question:
-            extra_info["question"] = worker_question
+        model_endpoint = model_endpoint_override or self._model_endpoint(sample_kwargs, sampling_params)
+        model_name = model_name_override or self._model_name(sample_kwargs, sampling_params)
 
         metadata = {
             "batch_id": batch_id,
@@ -295,7 +303,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "task_name": task_name,
             "data_source": data_source,
             "ability": self._string_or_none(sample_kwargs.get("ability")),
-            "extra_info": extra_info,
+            "extra_info": self._jsonable(sample_kwargs.get("extra_info") or {}),
             "rollout_n": self._value_from_extra_info(sample_kwargs, "rollout_n", None),
             "global_steps": self._value_from_extra_info(sample_kwargs, "global_steps", None),
             "required_result_fields": [
@@ -328,7 +336,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "model_endpoint": {
                 "endpoint_type": "http",
                 "url": model_endpoint,
-                "model_name": self.config_for_uenv.default_model_name,
+                "model_name": model_name,
                 "generation_config": {key: value for key, value in generation_config.items() if value is not None},
                 "max_retries": 3,
             },
@@ -363,18 +371,50 @@ class UEnvAgentLoop(AgentLoopBase):
             seed=seed,
         )
 
+    def _record_episode_requests(self, requests: list[EpisodeRequest], *, phase: str) -> None:
+        if not self.config_for_uenv.request_record_path:
+            return
+
+        path = Path(self.config_for_uenv.request_record_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as file:
+            for request in requests:
+                payload = self._payload_dict(request)
+                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                model_endpoint = payload.get("model_endpoint") if isinstance(payload.get("model_endpoint"), dict) else {}
+                initial_observation = {}
+                episode_config = payload.get("episode_config")
+                if isinstance(episode_config, dict) and isinstance(episode_config.get("initial_observation"), dict):
+                    initial_observation = episode_config["initial_observation"]
+                record = {
+                    "ts": time.time(),
+                    "phase": phase,
+                    "request_id": request.request_id,
+                    "batch_id": metadata.get("batch_id"),
+                    "sample_index": metadata.get("sample_index"),
+                    "env_type": request.env_type,
+                    "mode": request.mode,
+                    "max_steps": request.max_steps,
+                    "seed": request.seed,
+                    "model_endpoint": request.model_endpoint,
+                    "payload_model_endpoint": model_endpoint,
+                    "generation_config": model_endpoint.get("generation_config", {}),
+                    "prompt_text": initial_observation.get("prompt_text") or payload.get("env_config", {}).get("raw_prompt"),
+                    "request": request_to_jsonable(request),
+                    "payload": payload,
+                }
+                file.write(json.dumps(to_jsonable(record), ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    def _payload_dict(self, request: EpisodeRequest) -> dict[str, Any]:
+        try:
+            value = json.loads(request.payload.decode("utf-8", errors="replace"))
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
     async def _prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
         prompt_ids = await self.apply_chat_template(messages)
         return [int(token_id) for token_id in prompt_ids]
-
-    def _worker_llm_question(self, raw_prompt: Any, prompt_as_text: str) -> str:
-        """Full user prompt for Worker LLM (GSM8K includes #### instruction)."""
-        for message in reversed(self._messages_from_raw_prompt(raw_prompt)):
-            if message.get("role") == "user":
-                content = message.get("content")
-                if content is not None and str(content).strip():
-                    return str(content).strip()
-        return prompt_as_text.strip()
 
     def _messages_from_raw_prompt(self, raw_prompt: Any) -> list[dict[str, Any]]:
         value = self._python_value(raw_prompt)
@@ -476,6 +516,136 @@ class UEnvAgentLoop(AgentLoopBase):
             or self.config_for_uenv.default_model_endpoint
         )
         return str(endpoint)
+
+    def _model_name(self, sample_kwargs: dict[str, Any], sampling_params: dict[str, Any]) -> str:
+        model_name = (
+            self._value_from_extra_info(sample_kwargs, "model_name", None)
+            or sampling_params.get("model_name")
+            or self.config_for_uenv.default_model_name
+        )
+        return str(model_name)
+
+    async def _runtime_model_endpoint(
+        self,
+        sampling_params: dict[str, Any],
+        sample_kwargs: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        explicit_endpoint = (
+            self._value_from_extra_info(sample_kwargs, "model_endpoint", None)
+            or sampling_params.get("model_endpoint")
+        )
+        if explicit_endpoint:
+            return str(explicit_endpoint), self._model_name(sample_kwargs, sampling_params)
+
+        for candidate in await self._runtime_model_endpoint_candidates():
+            endpoint = self._normalize_openai_endpoint(candidate)
+            if endpoint:
+                return endpoint, self._runtime_model_name(sample_kwargs, sampling_params)
+        return None, None
+
+    def _runtime_model_name(
+        self,
+        sample_kwargs: dict[str, Any],
+        sampling_params: dict[str, Any],
+    ) -> str:
+        explicit_name = self._value_from_extra_info(sample_kwargs, "model_name", None) or sampling_params.get("model_name")
+        if explicit_name:
+            return str(explicit_name)
+
+        candidates = [
+            self._nested_value(self.config, ("actor_rollout_ref", "rollout", "prometheus", "served_model_name")),
+            self._nested_value(self.rollout_config, ("prometheus", "served_model_name")),
+            self._nested_value(self.config, ("actor_rollout_ref", "model", "path")),
+            getattr(self.tokenizer, "name_or_path", None),
+        ]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return self.config_for_uenv.default_model_name
+
+    def _nested_value(self, value: Any, path: tuple[str, ...]) -> Any:
+        current = value
+        for key in path:
+            if current is None:
+                return None
+            if isinstance(current, dict):
+                current = current.get(key)
+                continue
+            getter = getattr(current, "get", None)
+            if callable(getter):
+                try:
+                    current = getter(key)
+                    continue
+                except Exception:
+                    pass
+            current = getattr(current, key, None)
+        return current
+
+    async def _runtime_model_endpoint_candidates(self) -> list[Any]:
+        manager = getattr(self, "server_manager", None)
+        if manager is None:
+            return []
+
+        values: list[Any] = []
+        for attr in ("server_addresses", "addresses"):
+            value = getattr(manager, attr, None)
+            if value:
+                values.extend(value if isinstance(value, (list, tuple, set)) else [value])
+
+        for method_name in ("get_addresses", "get_server_addresses"):
+            method = getattr(manager, method_name, None)
+            if callable(method):
+                try:
+                    value = method()
+                    if inspect.isawaitable(value):
+                        value = await value
+                    if value:
+                        values.extend(value if isinstance(value, (list, tuple, set)) else [value])
+                except Exception:
+                    pass
+
+        load_balancer = getattr(manager, "_load_balancer", None)
+        get_all_servers = getattr(load_balancer, "get_all_servers", None)
+        remote = getattr(get_all_servers, "remote", None)
+        if callable(remote):
+            try:
+                values.extend(await self._await_ray_value(remote()))
+            except Exception:
+                pass
+
+        return values
+
+    async def _await_ray_value(self, value: Any) -> list[Any]:
+        if inspect.isawaitable(value):
+            try:
+                resolved = await value
+            except Exception:
+                return []
+            if isinstance(resolved, (list, tuple, set)):
+                return list(resolved)
+            return [resolved]
+        try:
+            import ray  # type: ignore
+
+            resolved = await asyncio.to_thread(ray.get, value)
+        except Exception:
+            return []
+        if isinstance(resolved, (list, tuple, set)):
+            return list(resolved)
+        return [resolved]
+
+    def _normalize_openai_endpoint(self, value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.startswith(("http://", "https://")):
+            base = text.rstrip("/")
+        else:
+            base = f"http://{text.rstrip('/')}"
+        if base.endswith("/v1"):
+            return base
+        return f"{base}/v1"
 
     def _sample_index(self, sample_kwargs: dict[str, Any]) -> int:
         value = self._value_from_extra_info(
