@@ -5,6 +5,7 @@ pub mod control_plane;
 pub mod episode;
 pub mod grpc_server;
 pub mod hub;
+pub mod llm;
 pub mod logging;
 pub mod metrics;
 pub mod plugin;

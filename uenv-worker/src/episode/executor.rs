@@ -3,6 +3,7 @@ use std::time::Instant;
 use sha2::{Digest, Sha256};
 
 use crate::episode::model_client::ModelClient;
+use crate::llm::LlmConfig;
 use crate::episode::payload::build_reset_config;
 use crate::episode::reward_engine::RewardEngine;
 use crate::plugin::host::PluginHost;
@@ -35,11 +36,11 @@ pub struct ExecuteOutput {
 }
 
 impl EpisodeExecutor {
-    pub fn new(plugin_host: PluginHost, warmup_pool: WarmupPool) -> Self {
+    pub fn new(plugin_host: PluginHost, warmup_pool: WarmupPool, llm: LlmConfig) -> Self {
         Self {
             warmup_pool,
             plugin_host,
-            model_client: ModelClient::new(),
+            model_client: ModelClient::with_config(llm),
             reward_engine: RewardEngine::new(),
         }
     }
@@ -105,6 +106,7 @@ impl EpisodeExecutor {
                     &episode.payload,
                     &episode.reward_config,
                     step_index as u32,
+                    &episode.model_endpoint,
                 )
                 .await
                 .map_err(|err| {
@@ -133,6 +135,14 @@ impl EpisodeExecutor {
             total_reward += reward;
             last_reward = reward;
 
+            let mut step_info = step.info;
+            if let Ok(action_text) = std::str::from_utf8(&action) {
+                if !action_text.trim().is_empty() {
+                    step_info
+                        .entry("response_text".to_string())
+                        .or_insert_with(|| action_text.to_string());
+                }
+            }
             let step_record = StepRecord {
                 step_index,
                 observation: current_observation.clone(),
@@ -140,7 +150,7 @@ impl EpisodeExecutor {
                 reward,
                 terminated: step.terminated,
                 truncated: step.truncated,
-                info: step.info,
+                info: step_info,
                 duration_ms: step_duration_ms as i64,
             };
             current_observation = step.observation;

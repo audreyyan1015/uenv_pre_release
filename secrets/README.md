@@ -1,6 +1,88 @@
 # A100 测试机联调指南
 
-本目录存放两台 A100 测试机的 SSH 私钥，以及四端联调的主机/端口/账号说明。**请勿将私钥或账号密码提交到公开仓库或分享给无关人员。**
+本目录存放两台 A100 测试机的 SSH 私钥，以及四端联调的主机/端口/账号/硬件说明。**请勿将私钥或账号密码提交到公开仓库或分享给无关人员。**
+
+---
+
+## 0. 机器硬件资源
+
+> **最后实机采集**：2026-06-16（SSH 登录各机执行 `nproc` / `free -h` / `df -h` / `nvidia-smi`）。占用率为采集时刻快照，随训练任务波动。
+
+### 0.1 总览
+
+| 机器 | 角色 | CPU | 内存 | 系统盘 | GPU |
+|------|------|-----|------|--------|-----|
+| **7142**（`10.10.20.142`） | VeRL / Python Adapter | 128 逻辑核 | **1 TiB** | **850 GB** | 8× A100-SXM4-80GB |
+| **7143**（`10.10.20.143`） | uenv-worker | 128 逻辑核 | **1 TiB** | **850 GB** | 8× A100-SXM4-80GB |
+| **`8.130.86.71`** | uenv-adapter-core + Server | **4 vCPU** | **16 GiB** | **99 GB** NVMe | 无 |
+| **`8.130.95.176`** | uenv-hub | **4 vCPU** | **16 GiB** | **99 GB** NVMe | 无 |
+
+### 0.2 A100 7142（Adapter / VeRL 训练侧）
+
+| 项 | 规格 |
+|----|------|
+| 公网 SSH | `219.147.100.43:7142` |
+| 内网 IP | `10.10.20.142` |
+| CPU | AMD EPYC 7742 × 2 Socket，**128 逻辑核**（`nproc=128`） |
+| 内存 | **1.0 TiB** 总量；Swap **39 GiB** |
+| 磁盘 | `/dev/sda4` **850 GB**（采集时已用约 **78%**，剩余约 **188 GB**） |
+| GPU | **8× NVIDIA A100-SXM4-80GB**（每卡 81920 MiB） |
+
+**实机注意**：7142 与 7143 为同一物理 A100 宿主机上的两台 VM，共用公网 IP `219.147.100.43`；`lscpu` / `nvidia-smi` 可见**整台宿主机**资源，实际可用 GPU/内存受宿主机调度与其他任务影响，**并非每台 VM 独占 128 核 + 8 卡**。VeRL 容器内 vLLM 默认占 GPU 0 易 OOM，联调建议 `CUDA_VISIBLE_DEVICES_IN_CONTAINER=4`（按 `nvidia-smi` 选空闲卡，见 §1.6）。
+
+### 0.3 A100 7143（Worker）
+
+| 项 | 规格 |
+|----|------|
+| 公网 SSH | `219.147.100.43:7143` |
+| 内网 IP | `10.10.20.143` |
+| CPU | 与 7142 相同（EPYC 7742，**128 逻辑核**） |
+| 内存 | **1.0 TiB** 总量；Swap **39 GiB** |
+| 磁盘 | `/dev/sda4` **850 GB**（采集时已用约 **66%**，剩余约 **294 GB**） |
+| GPU | **8× NVIDIA A100-SXM4-80GB** |
+
+**软件层资源配额**（`config/uenv-worker.deploy-7143.yaml`）：
+
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| `worker.max_concurrent` | 4 | 最多 4 个并发 Episode |
+| `pool.warmup_size` | 2 | math 预热池实例数 |
+| LLM 推理 | OpenRouter 云端 | AgentLoop 路径下 Worker **不占用本地 GPU** 做 completion |
+
+**Register 上报（可选 env 覆盖）**：`UENV_WORKER_GPU_COUNT=1`、`UENV_WORKER_GPU_TYPE=A100`；未设置时 `detect_resource_spec()` 默认内存 **8192 MB**、GPU **0**（仅影响 Register 字段，不影响物理资源）。
+
+### 0.4 阿里云 8.130.86.71（Server / adapter-core）
+
+| 项 | 规格 |
+|----|------|
+| CPU | **4 vCPU**（Intel Xeon 6982P-C，2 线程/核） |
+| 内存 | **16 GiB**（无 Swap） |
+| 磁盘 | `/dev/nvme0n1p3` **99 GB** NVMe（采集时已用约 **12%**，剩余约 **83 GB**） |
+| GPU | 无 |
+| 部署进程 | 仅 `uenv-adapter-core`（见 §1.4、§6.1） |
+
+### 0.5 阿里云 8.130.95.176（Hub）
+
+| 项 | 规格 |
+|----|------|
+| CPU | **4 vCPU**（与 Server 同规格） |
+| 内存 | **16 GiB**（无 Swap） |
+| 磁盘 | `/dev/nvme0n1p3` **99 GB** NVMe（采集时已用约 **7%**，剩余约 **88 GB**） |
+| GPU | 无 |
+| 内网 IP（同 VPC） | `192.168.0.133`（可选用 `http://192.168.0.133:8088`） |
+| 持久化 | SQLite `/root/uenv/uenv-hub/data/hub.db` |
+
+### 0.6 资源自检命令
+
+```bash
+# A100 7142 / 7143（私钥见 §2）
+ssh -i secrets/<key> -p 7142 root@219.147.100.43 'nproc; free -h; df -h /; nvidia-smi -L'
+ssh -i secrets/<key> -p 7143 root@219.147.100.43 'nproc; free -h; df -h /; nvidia-smi -L'
+
+# 阿里云 Server / Hub（密码见 §3.1）
+ssh root@8.130.86.71 'nproc; free -h; df -h /'
+ssh root@8.130.95.176 'nproc; free -h; df -h /'
+```
 
 ---
 
@@ -139,20 +221,21 @@ curl -s -H "Authorization: Bearer $UENV_HUB_TOKEN" \
 
 > **Token 不会自动获取**：`UENV_HUB_TOKEN` 为部署期注入的共享 API 密钥（与 Hub `data/.admin_token` 一致），Worker 不会 SSH 登录 Hub 拉取。7143 上可写入 **`/root/.uenv-worker.env`**（权限 600，**勿提交仓库**），启动前 `source` 即可。
 
-### 1.6 全链路（VeRL → Worker）注意事项
+### 1.6 全链路（VeRL AgentLoop → Worker）注意事项
 
-**发起位置**：VeRL 训练在 **7142**（Python `uenv-bridge` / `UEnvBridgeRewardManager`），**不要**在 7142 再起 `uenv-adapter-core`（Core+Server 已在 **`8.130.86.71:8088`**）。
+**发起位置**：VeRL 训练在 **7142**，通过 **`UEnvAgentLoop`（`default_agent_loop=uenv_agent`）** 将 GSM8K rollout 交给 UEnv；**不要**在 7142 再起 `uenv-adapter-core`（Core+Server 已在 **`8.130.86.71:8088`**）。
 
-**7142 Python Adapter 连远端 Core（必配）**：
+**7142 VeRL / AgentLoop 连远端 Core（必配）**：
 
 ```bash
-export UENV_BRIDGE_CLIENT=rust_core
+export UENV_AGENT_LOOP_CLIENT=rust_core
 export UENV_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088
-export UENV_ADAPTER_CORE_AUTO_START=0    # Core 已在阿里云，勿本机 auto_start
+export UENV_ADAPTER_CORE_AUTO_START=0
+export UENV_ADAPTER_CORE_BACKEND=server
 # VeRL 容器内需：grpcio、uenv-bridge 代码与 adapter_core proto stub
 ```
 
-**7143 Worker 跑 Episode 必配环境变量**（缺任一则易出现 `plugin math-1 not ready`）：
+**7143 Worker 跑 Episode 必配环境变量**（缺任一则易出现 `plugin math-1 not ready` 或 LLM 调用失败）：
 
 | 变量 | 值（7143 示例） | 说明 |
 |------|-----------------|------|
@@ -160,16 +243,129 @@ export UENV_ADAPTER_CORE_AUTO_START=0    # Core 已在阿里云，勿本机 auto
 | `UENV_PLUGIN_DIR` | `/root/UEnv/plugins` | 与 yaml `plugin_dir` 一致 |
 | `UENV_HUB_TOKEN` | Hub `.admin_token` | Hub manifest 拉取（可选降级本地） |
 | `UENV_PREWARM_ON_STARTUP` | 建议 `true`（VeRL 联调） | 启动即预热 math 插件，避免首条 Dispatch 超时 |
+| **LLM（OpenRouter）** | 见 **§1.7** | AgentLoop 全栈时 Worker 负责调 LLM 生成答案 |
 
-**推荐启动（7143，已验证 E2E）**：
+**推荐启动（7143）**：
 
 ```bash
-source /root/.uenv-worker.env
+source /root/.uenv-worker.env    # 含 Hub Token、OpenRouter API Key 等（勿提交仓库）
 bash /root/UEnv/scripts/start-worker-7143-hub.sh
 # 日志期望：hub_manifest_pulled、warmup_pool_prewarmed_on_startup、register、heartbeat
 ```
 
-**链路自检（不跑完整 VeRL 时）**：本机或 7142 用 `uenv-bridge` 的 `VeRLAdapter` + `RustCoreEpisodeClient(endpoint=8.130.86.71:8088, auto_start=False)` 提交 math batch；Worker 日志应出现 `dispatch_received` → `warmup_hit=true instance_id=math-1` → `report_result`。
+**链路自检（不跑完整 VeRL 时）**：
+
+```bash
+PYTHONPATH=uenv-bridge/src python uenv-bridge/scripts/verify_pre_rollout_rust_core_loop.py
+# Worker 日志应出现 dispatch_received → model_callback → step_complete → report_result
+```
+
+---
+
+### 1.7 Worker LLM 配置（OpenRouter，AgentLoop 全栈必配）
+
+AgentLoop 路径下，VeRL **不在本地生成** GSM8K completion，而是由 **7143 Worker** 的 `ModelClient` 调 LLM，再将生成文本交给 math 插件判分。默认提供商为 **[OpenRouter](https://openrouter.ai)**（OpenAI 兼容 `POST /chat/completions`）。
+
+#### 1.7.1 配置文件位置
+
+| 文件 | 说明 |
+|------|------|
+| `config/uenv-worker-llm.env.example` | 仓库内模板（**可提交**） |
+| `config/uenv-worker-llm.env` | 实机配置（`**/*.env` 已被 gitignore，勿提交**） |
+| `/root/.uenv-worker.env` | 7143 推荐：与 `UENV_HUB_TOKEN` 等同文件 `source` |
+
+Worker 启动时自动加载 `config/uenv-worker-llm.env`；可用 `UENV_WORKER_LLM_ENV` 覆盖路径。`deploy-7143.yaml` 中 `llm.env_file` 可改默认路径。
+
+#### 1.7.2 首次部署（7143）
+
+```bash
+cd /root/UEnv
+cp config/uenv-worker-llm.env.example config/uenv-worker-llm.env
+chmod 600 config/uenv-worker-llm.env
+
+# 编辑：填入 OpenRouter API Key（见 1.7.3）
+vi config/uenv-worker-llm.env
+```
+
+或合并进 `/root/.uenv-worker.env`（权限 **600**）：
+
+```bash
+# --- OpenRouter（Worker LLM）---
+export UENV_LLM_PROVIDER=openrouter
+export UENV_LLM_ENDPOINT=https://openrouter.ai/api/v1
+export UENV_LLM_MODEL_NAME=qwen/qwen-2.5-7b-instruct
+export UENV_LLM_API_KEY=sk-or-v1-xxxxxxxx    # 勿提交仓库
+export UENV_LLM_HTTP_REFERER=https://github.com/your-org/UEnv
+export UENV_LLM_APP_TITLE=UEnv
+export UENV_LLM_MAX_TOKENS=512
+export UENV_LLM_TEMPERATURE=1.0
+```
+
+#### 1.7.3 获取 OpenRouter API Key
+
+1. 登录 [openrouter.ai](https://openrouter.ai) 注册账号。
+2. 进入 **Keys** 页面创建 API Key（形如 `sk-or-v1-...`）。
+3. 确保账户有足够 credits；GSM8K smoke 建议先用较小模型（默认 `qwen/qwen-2.5-7b-instruct`）。
+4. 将 Key 写入 `UENV_LLM_API_KEY`，**不要**写入仓库、不要贴在群聊。
+
+#### 1.7.4 环境变量说明
+
+| 变量 | 默认值 | 必填 | 说明 |
+|------|--------|------|------|
+| `UENV_LLM_PROVIDER` | `openrouter` | 否 | 当前仅实现 OpenRouter 兼容调用 |
+| `UENV_LLM_ENDPOINT` | `https://openrouter.ai/api/v1` | 否 | OpenRouter API 根路径 |
+| `UENV_LLM_MODEL_NAME` | `qwen/qwen-2.5-7b-instruct` | 否 | OpenRouter 模型 slug，见 [模型列表](https://openrouter.ai/models) |
+| `UENV_LLM_API_KEY` | — | **是** | `Authorization: Bearer <key>` |
+| `UENV_LLM_HTTP_REFERER` | 空 | 建议 | OpenRouter 可选排行/归因头 `HTTP-Referer` |
+| `UENV_LLM_APP_TITLE` | `UEnv` | 否 | OpenRouter 可选头 `X-Title` |
+| `UENV_LLM_MAX_TOKENS` | `512` | 否 | 单次 completion 上限 |
+| `UENV_LLM_TEMPERATURE` | `1.0` | 否 | 采样温度 |
+| `UENV_WORKER_LLM_ENV` | `config/uenv-worker-llm.env` | 否 | 覆盖 env 文件路径 |
+
+**权威来源**：Worker `ModelClient` **优先使用 Episode 传入的** `model_endpoint` / `model_name` / `generation_config`；API Key 与 OpenRouter 归因头仍由 `uenv-worker-llm.env` 提供。Episode 未带 endpoint 时回退 `UENV_LLM_ENDPOINT`。
+
+#### 1.7.5 连通性自检（7143 上）
+
+```bash
+# 需已 export UENV_LLM_API_KEY（或 source uenv-worker-llm.env）
+curl -s https://openrouter.ai/api/v1/models \
+  -H "Authorization: Bearer $UENV_LLM_API_KEY" | head -c 200
+
+curl -s https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $UENV_LLM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "HTTP-Referer: https://github.com/your-org/UEnv" \
+  -H "X-Title: UEnv" \
+  -d '{
+    "model": "qwen/qwen-2.5-7b-instruct",
+    "messages": [{"role":"user","content":"What is 2+2? Answer with #### 4"}],
+    "max_tokens": 32
+  }'
+```
+
+期望：HTTP 200，响应 JSON 中 `choices[0].message.content` 含答案文本。
+
+#### 1.7.6 注意事项
+
+| 项 | 说明 |
+|----|------|
+| **出站网络** | 7143 Worker 需能访问 **`https://openrouter.ai:443`**（见 §7 防火墙） |
+| **勿用 rule_reward 捷径** | 已配置 LLM 时 Worker **不会**把 `ground_truth` 当 action；必须真实调 OpenRouter |
+| **API Key 安全** | 仅放 `uenv-worker-llm.env` 或 `/root/.uenv-worker.env`；权限 `600`；勿提交 git |
+| **模型选择** | OpenRouter 模型名带厂商前缀，如 `qwen/qwen-2.5-7b-instruct`、`google/gemma-2-9b-it:free` |
+| **与 7142 vLLM 关系** | GRPO 训练侧容器内仍有 vLLM；**GSM8K rollout 生成**在 AgentLoop 路径由 Worker+OpenRouter 完成 |
+| **错误排查** | `OpenRouter requires UENV_LLM_API_KEY` → 未配 Key；HTTP 401 → Key 无效；HTTP 402 → 余额不足 |
+
+#### 1.7.7 与 VeRL 脚本默认值对齐（7142，可选）
+
+`run_verl_grpo_1step_with_uenv_agent_loop.sh` 中 envelope 默认与 Worker 一致：
+
+```bash
+export UENV_ROLLOUT_MODEL_ENDPOINT=https://openrouter.ai/api/v1
+export UENV_ROLLOUT_MODEL_NAME=qwen/qwen-2.5-7b-instruct
+```
+
+实际 HTTP 调用与鉴权仅在 **7143 Worker** 发生；7142 **不需要**配置 `UENV_LLM_API_KEY`。
 
 ---
 
@@ -318,6 +514,7 @@ export UENV_MATH_PLUGIN_BIN=/root/UEnv/target/release/uenv-math-plugin
 export UENV_PLUGIN_DIR=/root/UEnv/plugins
 export UENV_HUB_TOKEN=...        # 见 §1.5
 export UENV_PREWARM_ON_STARTUP=true   # VeRL 联调建议开启
+# OpenRouter：cp config/uenv-worker-llm.env.example config/uenv-worker-llm.env 并填入 UENV_LLM_API_KEY（§1.7）
 
 ./target/release/uenv-worker --config config/uenv-worker.deploy-7143.yaml serve
 ```
@@ -353,6 +550,7 @@ nc -zv 8.130.86.71 8088
 | Server → Worker | **`219.147.100.43:28888`** | DispatchEpisode |
 | 运维 | **`219.147.100.43:28777`** | Worker `/health`、`/metrics` |
 | Worker → Hub | **`http://8.130.95.176:8088`** | 可选 manifest pull（`/api/v1/**` 需 token） |
+| Worker → OpenRouter | **`https://openrouter.ai:443`** | AgentLoop 全栈时 LLM 生成（见 §1.7） |
 | Adapter（7142） | `219.147.100.43:18xxx` | 按 Adapter 实际 bind 配置 |
 
 ---
@@ -365,10 +563,13 @@ nc -zv 8.130.86.71 8088
 | Dispatch 超时 | Server 能否访问 **`219.147.100.43:28888`** |
 | **`plugin math-1 not ready`** | Worker 进程是否带 **`UENV_MATH_PLUGIN_BIN`**；`plugins/math/run.sh` 是否可执行；手工 `bash run.sh --uds-path /tmp/t.sock` 能否创建 sock |
 | Hub 401 / 无 manifest | 是否 `export UENV_HUB_TOKEN=...`（见 §1.5） |
-| 7142 Adapter 报 stub 错误 | 容器内是否安装 **`grpcio`**；`core.endpoint` 是否 **`8.130.86.71:8088`** 且 **`AUTO_START=0`** |
+| 7142 AgentLoop 报 stub 错误 | 容器内是否安装 **`grpcio`**；`UENV_ADAPTER_CORE_ENDPOINT` 是否 **`8.130.86.71:8088`** 且 **`AUTO_START=0`** |
 | 8088 端口冲突 | 确认只有 **`uenv-adapter-core`** 占用 8088，不要 Adapter/Server 各起一个进程 |
 | 7142 上误跑 Worker | Worker 应只在 **7143**；7142 为 Python Adapter 客户端 |
 | 插件启动失败 | Linux + `UENV_MATH_PLUGIN_BIN` + `plugins/math/run.sh` 可执行 |
+| **`OpenRouter requires UENV_LLM_API_KEY`** | 7143 上配置 `config/uenv-worker-llm.env` 或 `/root/.uenv-worker.env`（§1.7） |
+| **model client HTTP 401/402** | OpenRouter Key 无效或余额不足；`curl` 自检 §1.7.5 |
+| **GSM8K reward 恒为 1.0 但答案明显错** | 检查是否未配 LLM 却走了旧 stub；确认日志有 `model_callback` 且非 rule_reward 短路 |
 
 ---
 

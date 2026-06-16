@@ -35,27 +35,27 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def parse_ids(value: str) -> list[int]:
-    raw = value.strip()
-    if raw.startswith("[") and raw.endswith("]"):
-        raw = raw[1:-1]
-    return [int(item.strip()) for item in raw.split(",") if item.strip()]
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify pre-rollout AgentLoop -> Rust adapter core local gRPC loop",
+        description="Verify pre-rollout AgentLoop -> adapter-core(server) -> Worker real chain",
     )
-    parser.add_argument("--endpoint", default=None)
-    parser.add_argument("--reward", type=float, default=0.73)
-    parser.add_argument("--response-ids", default="201,202,203")
-    parser.add_argument("--response-text", default="static external rollout")
+    parser.add_argument(
+        "--endpoint",
+        default=os.getenv("UENV_ADAPTER_CORE_ENDPOINT", "8.130.86.71:8088"),
+        help="adapter-core endpoint (must have a registered Worker for env_type=math)",
+    )
     parser.add_argument("--startup-timeout", type=float, default=60.0)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument(
+        "--auto-start",
+        action="store_true",
+        help="Start local adapter-core; requires a Worker registered to that endpoint",
+    )
     args = parser.parse_args()
 
-    endpoint = args.endpoint or f"127.0.0.1:{free_port()}"
-    response_ids = parse_ids(args.response_ids)
+    endpoint = args.endpoint
+    if args.auto_start and args.endpoint == os.getenv("UENV_ADAPTER_CORE_ENDPOINT", "8.130.86.71:8088"):
+        endpoint = f"127.0.0.1:{free_port()}"
 
     generated_stub = SRC / "uenv" / "bridge" / "gen" / "adapter_core_pb2_grpc.py"
     if not args.skip_build or not generated_stub.exists():
@@ -64,20 +64,18 @@ def main() -> int:
         subprocess.run(["cargo", "build"], cwd=ROOT / "core", check=True)
 
     env = os.environ.copy()
-    env["UENV_ADAPTER_CORE_BACKEND"] = "static_rollout"
-    env["UENV_ADAPTER_CORE_STATIC_REWARD"] = str(args.reward)
-    env["UENV_ADAPTER_CORE_STATIC_RESPONSE_IDS"] = json.dumps(response_ids)
-    env["UENV_ADAPTER_CORE_STATIC_RESPONSE_TEXT"] = args.response_text
+    env["UENV_ADAPTER_CORE_BACKEND"] = "server"
 
     binary = os.getenv("UENV_ADAPTER_CORE_BINARY") or str(ROOT / "core" / "target" / "debug" / "uenv-adapter-core")
     old_env = os.environ.copy()
     os.environ.update(env)
     client = None
+    output = None
     try:
         client = RustCoreEpisodeClient(
             RustCoreClientConfig(
                 endpoint=endpoint,
-                auto_start=True,
+                auto_start=args.auto_start,
                 binary=binary,
                 startup_timeout_seconds=args.startup_timeout,
             )
@@ -85,48 +83,43 @@ def main() -> int:
         loop = UEnvAgentLoop(
             tokenizer=FakeTokenizer(),
             client=client,
-            default_model_endpoint="http://policy.example/v1",
+            client_mode="rust_core",
+            default_model_endpoint=os.getenv(
+                "UENV_ROLLOUT_MODEL_ENDPOINT", "https://openrouter.ai/api/v1"
+            ),
         )
         output = asyncio.run(
             loop.run(
-                {"temperature": 0.0, "top_p": 1.0},
-                raw_prompt=[{"role": "user", "content": "What is 2 + 2?"}],
+                {"temperature": 0.0, "max_new_tokens": 32},
+                raw_prompt=[{"role": "user", "content": "Natalia sold clips to 48 friends. How many clips did she sell?"}],
                 data_source="openai/gsm8k",
-                reward_model={"ground_truth": "4"},
+                reward_model={"ground_truth": "72", "style": "rule"},
                 extra_info={
-                    "batch_id": "layer3-pre-rollout",
-                    "sample_index": 0,
-                    "question": "What is 2 + 2?",
+                    "batch_id": "verify-batch",
+                    "question": "Natalia sold clips to 48 friends. How many clips did she sell?",
                 },
             )
         )
-        if output.response_ids != response_ids:
-            raise RuntimeError(f"unexpected response_ids: {output.response_ids}")
-        if output.response_mask != [1] * len(response_ids):
-            raise RuntimeError(f"unexpected response_mask: {output.response_mask}")
-        if float(output.reward_score) != args.reward:
-            raise RuntimeError(f"unexpected reward_score: {output.reward_score}")
-
-        print(
-            json.dumps(
-                {
-                    "endpoint": endpoint,
-                    "prompt_ids": output.prompt_ids,
-                    "response_ids": output.response_ids,
-                    "response_mask": output.response_mask,
-                    "reward_score": output.reward_score,
-                    "uenv_status": output.extra_fields.get("uenv_status"),
-                    "uenv_termination_reason": output.extra_fields.get("uenv_termination_reason"),
-                },
-                ensure_ascii=False,
-            )
-        )
-        return 0
     finally:
-        if client is not None:
-            client.close()
         os.environ.clear()
         os.environ.update(old_env)
+        if client is not None:
+            client.close()
+
+    if output is None:
+        raise RuntimeError("pre-rollout verification failed before AgentLoop returned output")
+
+    print(json.dumps({
+        "endpoint": endpoint,
+        "backend": "server",
+        "reward_score": output.reward_score,
+        "response_ids": output.response_ids,
+        "response_mask": output.response_mask,
+        "uenv_request_id": output.extra_fields.get("uenv_request_id"),
+        "uenv_status": output.extra_fields.get("uenv_status"),
+        "uenv_termination_reason": output.extra_fields.get("uenv_termination_reason"),
+    }, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,271 +1,297 @@
 # VeRL 真实测 GSM8K — 调整清单
 
-> **版本**：2026-06-11（功能边界重构）  
-> **背景**：MVP Phase 0 已跑通 `env_type=math` 四端链路（7142 VeRL → 8.130.86.71 adapter-core → 7143 Worker → math 插件），但 **GSM8K benchmark 语义尚未真实落地**。本文列出若要用 VeRL **真实测量 GSM8K 表现**（而非 stub 联调）需要调整的位置、优先级与验收标准。  
-> **相关文档**：[260530-full-stack-integration-gaps.md](./260530-full-stack-integration-gaps.md)、[worker-pool-layer-design.md §9](./worker-pool-layer-design.md)、[PROTOCOL.md](../PROTOCOL.md)、[260609-worker-full-chain-integration-summary.md §1.2](./260609-worker-full-chain-integration-summary.md)
+> **版本**：2026-06-13（A100 四端实机验收：单条 GSM8K + 1-step GRPO）  
+> **背景**：MVP Phase 0 已跑通 `env_type=math` 四端链路；2026-06-12 起集成路径切换为 **VeRL `UEnvAgentLoop` 预 rollout**（替代已移除的 `UEnvBridgeRewardManager` + `verl.py`）。2026-06-13 在 7142/7143/`8.130.86.71` 完成 AgentLoop 全栈实机验收（OpenRouter + math 插件判分 + 1-step GRPO）。详见 [更新日志.md](./更新日志.md) `2026-06-13 01:00`。  
+> **相关文档**：[260530-full-stack-integration-gaps.md](./260530-full-stack-integration-gaps.md)、[worker-pool-layer-design.md §9](./worker-pool-layer-design.md)、[PROTOCOL.md](../PROTOCOL.md)、[260609-worker-full-chain-integration-summary.md](./260609-worker-full-chain-integration-summary.md)
 
 ---
 
 ## 1. 现状与目标差距
 
-### 1.1 当前能做什么
+### 1.1 当前能做什么（代码已落地）
 
 | 能力 | 状态 |
 |------|------|
-| VeRL `data_source=gsm8k` → `env_type=math` 映射 | ✅ `uenv-bridge/src/uenv/bridge/verl.py` |
+| VeRL `data_source=gsm8k` → `env_type=math` | ✅ `uenv-bridge/src/uenv/bridge/verl_agent_loop.py` |
 | GSM8K parquet 转 VeRL 样本 | ✅ `uenv-bridge/scripts/prepare_verl_gsm8k_sample.py` |
-| 四端 math 链路 E2E（固定 stub 题/答） | ✅ 已验收 `reward=1.0` |
-| Bridge 本地 rubric 打分（不经 Worker） | ✅ `UENV_BRIDGE_CLIENT=math_proxy` |
+| AgentLoop 预 rollout → adapter-core → Server → Worker | ✅ `UEnvAgentLoop` + `RustCoreEpisodeClient` |
+| Bridge L1 字段映射（question / dataset / rule_reward） | ✅ `uenv-bridge/core/src/core.rs`（`sample_to_worker_payload` / `sample_to_worker_reward_config`） |
+| math 插件按题 reset + GSM8K 判分 | ✅ `uenv-math-plugin` + `plugins/math/.../gsm8k/` |
+| Worker 心跳负载 / 多步执行 / StreamReport | ✅ W-6～W-9（2026-06-11） |
+| Worker LLM 专用配置 | ✅ `config/uenv-worker-llm.env`（见 §4.3） |
+| 默认链路切真实模式 | ✅ `UENV_AGENT_LOOP_CLIENT=rust_core`、`UENV_ADAPTER_CORE_BACKEND=server` |
+| A100 四端联通 + smoke | ✅ 2026-06-13：`verify_pre_rollout_rust_core_loop.py` → `completed` |
+| 单条 1-step GRPO（AgentLoop 全栈） | ✅ 2026-06-13：训练 `1/1`；对比跑 Worker `reward=1.0` |
+| Worker LLM 完整 GSM8K prompt | ✅ 2026-06-13：`verl_agent_loop._worker_llm_question`（含 `####` 指令） |
 
-### 1.2 当前不能代表真实 GSM8K 的原因
+### 1.2 仍待实机验收（非代码阻塞）
 
-| 缺口 | 位置 | 影响 |
-|------|------|------|
-| ~~math 插件写死固定题/答 `"20"`~~ | `uenv-worker/src/bin/uenv-math-plugin.rs` | ✅ 2026-06-11：reset 读 `{uds}.episode.json` 注入 `question`/`target` |
-| ~~`reset` 不读 Episode payload~~ | 同上 + `episode/executor.rs` | ✅ 2026-06-11：`build_reset_config` + UDS 侧 channel 传题 |
-| Bridge → Worker payload 未映射 `question` + `rule_reward` | `uenv-bridge/core/src/core.rs`（缺 `l1_mapping.rs`） | Worker 判分格式与 Bridge rubric 不一致（**Bridge 仍待 B-1～B-6**） |
-| ~~Worker 不消费 VeRL 已生成的 `response_text`~~ | `uenv-worker/src/episode/model_client.rs` | ✅ 2026-06-11：首步优先 `payload.response_text` |
-| adapter-core 无独立 serve 模式开关 | `uenv-bridge/core/src/main.rs` | 脚本默认 `ADAPTER_CORE_REWARD_MODE=fixed`，非真实 Worker reward |
+| 项 | 说明 |
+|----|------|
+| §5.1 链路级 | ≥2 道**不同** GSM8K 题（当前仅验收 1 道 Natalia 样本） |
+| §5.2 Benchmark 级 | ≥100 样本 acc 可复现 |
+| 规模化 §8 | 多 Worker、多 Episode 并发、Hub 热路径（代码骨架有，未 E2E） |
 
-### 1.3 目标数据流（真实 GSM8K）
+### 1.3 目标数据流（真实 GSM8K — AgentLoop 路径，2026-06-12 冻结）
 
 ```text
 GSM8K parquet（question + #### answer）
-  → VeRL rollout（vLLM 生成 response_text）
-  → UEnvBridgeRewardManager（解码 token → uenv_response_text）
-  → VeRLAdapter（env_type=math, dataset=gsm8k, ground_truth）
-  → adapter-core L1 映射（question + rule_reward.target）
+  → VeRL rollout worker：UEnvAgentLoop（拦截本地 vLLM 生成）
+  → build_episode_request（env_type=math, rubric_config.ground_truth）
+  → RustCoreEpisodeClient.ExecuteBatch
+  → adapter-core sample_to_worker_payload / sample_to_worker_reward_config
+       question + dataset=gsm8k + rule_reward.target
   → Server 调度 → Worker
-  → math 插件 reset（加载本题）→ step（**环境内**比对 VeRL 答案 vs ground_truth，返回 reward）
-  → Worker 采信插件 `step.reward` → 回写 VeRL rm_scores / acc
+  → ModelClient 调 Worker 侧 LLM（config/uenv-worker-llm.env）生成 action
+  → math 插件 reset（加载本题）→ step（answers_match 判分）
+  → trajectory（含 response_text / 可选 response_ids）+ reward
+  → AgentLoopOutput.reward_score → VeRL GRPO（reward_manager=naive）
 ```
+
+**与旧路径差异（已废弃）**
+
+| 旧（RewardManager） | 新（AgentLoop） |
+|---------------------|----------------|
+| VeRL vLLM 本地生成 → 解码 `uenv_response_text` → UEnv 只判分 | VeRL **不**在本地生成；UEnv/Worker **负责 rollout + 判分** |
+| `verl.py` + `verl_reward_manager.py` | 已移除；见 `verl_agent_loop.py` |
+| `UENV_BRIDGE_CLIENT=rust_core` | `UENV_AGENT_LOOP_CLIENT=rust_core` |
+| Worker 原则上不调第二个 LLM | Worker **必须**配 LLM（`uenv-worker-llm.env`） |
+
+**GSM8K 步数语义**：benchmark 为 **单轮 completion 判分**（`max_steps` 可 >1，但 math 插件第一步 `terminated=true`）；见 PROTOCOL §5「单轮」。
 
 ### 1.4 功能边界划分（平台 vs 环境）
 
 | 层级 | 目录/组件 | 职责 | **不应包含** |
 |------|-----------|------|--------------|
-| **L1 Worker 平台** | `uenv-worker/src/episode/` | Episode 编排：`ModelClient` 取 action、`executor` reset/step 循环、`payload` 将 L1 字段映射为插件 reset 配置、`RewardEngine` **采信**插件 reward | GSM8K `####` 提取、dataset 判分规则 |
-| **L2 MathEnv 制品** | `plugins/math/`（crate `uenv-math-env`）、`uenv-math-plugin` | 题目加载、`dataset=gsm8k` 路由、`backends/gsm8k/scoring` 判分 | 调度、租约、StreamReport、心跳 |
-| **Bridge** | `uenv-bridge/core/l1_mapping` | VeRL 样本 → L1 `payload`/`reward_config` 字段映射 | 环境内 step 语义 |
-| **VeRL** | 7142 rollout | 生成 `response_text` | UEnv 环境判分 |
+| **L1 Worker 平台** | `uenv-worker/src/episode/` | Episode 编排、`ModelClient` 调 LLM、`executor` reset/step、`RewardEngine` 采信插件 reward | GSM8K `####` 提取、dataset 判分规则 |
+| **L2 MathEnv 制品** | `plugins/math/`、`uenv-math-plugin` | 题目加载、`dataset=gsm8k` 路由、`backends/gsm8k/scoring` 判分 | 调度、租约、StreamReport |
+| **Bridge** | `uenv-bridge/core/src/core.rs` | VeRL envelope → L1 `payload` / `reward_config` 映射 | 环境内 step 语义 |
+| **VeRL** | 7142 AgentLoop | 提交 Episode、消费 `AgentLoopOutput` | UEnv 环境判分 |
 
-**判分权威（P-4，2026-06-11 冻结）**
-
-- **默认**：`math` 插件 `step.reward` 为唯一权威；Worker `RewardEngine.resolve_reward` 直接采信。
-- **例外**：仅当 `reward_config.scorer == "worker"` 时，平台做**通用**精确比对（用于无环境制品的 headless 单测）；**不含** GSM8K 等领域逻辑。
-
-```text
-reward 数据流（推荐路径）：
-  VeRL response_text → ModelClient（action）→ math plugin step → step.reward
-                                                          ↓
-                                              RewardEngine（透传）→ Trajectory
-```
+**判分权威（P-4，冻结）**：math 插件 `step.reward` 为唯一权威；`RewardEngine` 默认透传。
 
 ---
 
 ## 2. 分层调整清单
 
-### 2.1 VeRL / 7142 运行环境（P0 — 部署，非代码）
+### 2.1 VeRL / 7142 运行环境（P0 — 部署）
 
 | # | 调整项 | 说明 |
 |---|--------|------|
-| V-1 | **策略模型 + vLLM** | GRPO/评测需 VeRL 容器内 vLLM rollout；见 §4 LLM 说明 |
-| V-2 | **GSM8K 数据** | `train.parquet` / `test.parquet`；可用 `prepare_verl_gsm8k_sample.py` 裁剪样本 |
-| V-3 | **Python 依赖** | 7142 需 `grpcio` 等；`PYTHONPATH` 含 `uenv-bridge/src` |
-| V-4 | **adapter-core 远端地址** | `UENV_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088`（勿在 7142 再起 core） |
-| V-5 | **RewardManager 模式** | 全栈：`UENV_BRIDGE_CLIENT=rust_core`；仅验 Bridge 接线：`math_proxy` |
-| V-6 | **关闭 fake reward** | 勿用 `ADAPTER_CORE_REWARD_MODE=fixed`；需 Worker 真实返回（见 B-3） |
+| V-1 | **策略模型 + vLLM** | GRPO 训练容器内仍需 vLLM（AgentLoop 不替代训练侧引擎，但 rollout 生成交给 UEnv） |
+| V-2 | **GSM8K 数据** | `train.parquet` / `test.parquet`；`prepare_verl_gsm8k_sample.py` |
+| V-3 | **Python 依赖** | `grpcio`；`PYTHONPATH` 含 `uenv-bridge/src` |
+| V-4 | **adapter-core 远端** | `UENV_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088`；`UENV_ADAPTER_CORE_AUTO_START=0` |
+| V-5 | **AgentLoop 客户端** | `UENV_AGENT_LOOP_CLIENT=rust_core`（默认已改，勿用 `fake`） |
+| V-6 | **adapter-core backend** | `UENV_ADAPTER_CORE_BACKEND=server`（默认已改，勿用 `static_rollout`） |
+| V-7 | **AgentLoop 注册** | `actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent`；配置 `configs/uenv-agent-loop.yaml` |
+| V-8 | **容器 grpc** | VeRL 镜像内须 `grpcio>=1.80`（与 host 生成 stub 版本对齐）；脚本启动段已 `pip install` |
+| V-9 | **GPU 选择** | 7142 默认 `CUDA_VISIBLE_DEVICES_IN_CONTAINER=0` 可能 OOM；实机用 **GPU 4**（`nvidia-smi` 选空闲卡） |
+| V-10 | **response 长度** | `DATA_MAX_RESPONSE_LENGTH`（默认 32）；GSM8K 建议 **≥128**（对比跑 **256** 得 `reward=1`） |
 
-参考脚本：`uenv-bridge/scripts/run_verl_grpo_1step_with_bridge_reward.sh`
+参考脚本：`uenv-bridge/scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh`；对比：`/root/UEnv/run-single-gsm8k-compare-7142.sh`（7142 实机）
 
 ---
 
-### 2.2 Bridge / adapter-core（P0 — 阻塞全栈 GSM8K）
+### 2.2 Bridge / adapter-core（P0 — ✅ 2026-06-12 已落地）
 
-| # | 文件/模块 | 调整内容 |
-|---|-----------|----------|
-| B-1 | **新增** `uenv-bridge/core/src/l1_mapping.rs` | 文档已引用但仓库缺失；实现 VeRL payload → L1 `EpisodeRequest` |
-| B-2 | `l1_mapping` 字段映射 | `env_config.raw_prompt` / `extra_info.question` → Worker `payload.question` |
-| B-3 | rubric → rule_reward | `reward_config.rubric_config.ground_truth` → `{"type":"rule_reward","target":"<gt>"}` |
-| B-4 | dataset 字段 | `metadata.data_source` 含 gsm8k 时写 `payload.dataset="gsm8k"`（PROTOCOL 约定） |
-| B-5 | `core.rs` `sample_to_episode_request` | 调用 `l1_mapping`，勿仅传 `env_config` 裸 JSON |
-| B-6 | VeRL 预生成答案 | 若 `env_config.response_text` 存在，映射到 Worker 可读的 action 来源（见 W-2） |
+| # | 文件/模块 | 状态 | 说明 |
+|---|-----------|------|------|
+| B-1 | `core.rs` `sample_to_worker_payload` | ✅ | 内联实现（原规划 `l1_mapping.rs` 已合并入 `core.rs`） |
+| B-2 | `question` 映射 | ✅ | Core：`extra_info.question` → `raw_prompt` 回退；**2026-06-13** AgentLoop 构建时将 parquet **完整 user prompt**（含 `####` 指令）写入 `extra_info.question` |
+| B-3 | rubric → rule_reward | ✅ | `rubric_config.ground_truth` → `rule_reward.target` |
+| B-4 | `dataset` 规范化 | ✅ | `openai/gsm8k` 等 → `payload.dataset="gsm8k"` |
+| B-5 | `sample_to_episode_request` | ✅ | 调用上述映射，不再传裸 `env_config` |
+| B-6 | `response_text` | ✅ | `env_config.response_text` → payload 顶层（兼容后 rollout 判分路径） |
+| B-7 | 批量 trace | 待办 P1 | `correlation_id` / sample_index 透传（代码有，规模化待验） |
+| B-8 | 真实链路默认 | ✅ | 默认 `rust_core` + `server`；`static_rollout` 仅显式调试 |
 
-**当前 `core.rs` 行为（需改）**：
-
-```rust
-// 现状：proto.payload = env_config only；reward_config = rubric 原样
-payload: payload.get("env_config")...
-reward_config: payload.get("reward_config")...
-```
-
-**目标 Worker 侧 proto 字段**：
+**Worker 侧目标 proto 字段**（映射后）：
 
 ```json
-// payload（bytes）
-{"question": "<GSM8K 题目文本>", "dataset": "gsm8k", "response_text": "<VeRL rollout 解码文本>"}
+// payload
+{"question": "<GSM8K 题目>", "dataset": "gsm8k", "model_endpoint": "...", "model_name": "..."}
 
-// reward_config（bytes）
+// reward_config
 {"type": "rule_reward", "target": "<#### 后标准答案>"}
 ```
+
+单测：`execute_batch_maps_verl_math_payload_to_worker_contract`（`uenv-bridge/core`）。
 
 ---
 
 ### 2.3 Worker 运行时（P0）
 
-| # | 文件 | 调整内容 |
-|---|------|----------|
-| W-1 | `episode/model_client.rs` | ✅ **优先**使用 `payload.response_text`（VeRL 已 rollout）作为 action；仅无 response 时才调 LLM |
-| W-2 | `episode/model_client.rs` | ✅ 兼容 `rule_reward`：若仅有 target 且无 response，可 short-circuit（测试用） |
-| W-3 | `episode/reward_engine.rs` | ✅ **采信插件 `step.reward`**；仅 `scorer=worker` 时做通用 rule 比对（无 GSM8K 逻辑） |
-| W-4 | `episode/executor.rs` | ✅ `reset` 前写 `{uds}.episode.json` 传 `question`/`dataset`/`target`/`seed` |
-| W-5 | 7143 部署 env | `UENV_MATH_PLUGIN_BIN`、`UENV_PREWARM_ON_STARTUP=true`、Hub token（见 [secrets/README.md](../secrets/README.md)） |
+| # | 文件 | 状态 | 说明 |
+|---|------|------|------|
+| W-1 | `model_client.rs` | ✅ | 首步优先 `response_text`；有 LLM 配置时调 HTTP 生成 |
+| W-2 | `model_client.rs` | ✅ 2026-06-15 | **优先使用 Episode `model_endpoint` / `model_name` / `generation_config`**；API Key 仍来自 `uenv-worker-llm.env`；仅无 LLM 且无 question 时 `rule_reward` 短路 |
+| W-3 | `reward_engine.rs` | ✅ | 采信插件 `step.reward` |
+| W-4 | `executor.rs` / `payload.rs` | ✅ | reset 传题；`dataset` 二次规范化；`step.info.response_text` |
+| W-5 | 7143 部署 | ✅ 2026-06-13 | `UENV_MATH_PLUGIN_BIN`、`UENV_PREWARM_ON_STARTUP`、`UENV_HUB_TOKEN`；`plugins/math/run.sh` 须 **LF**（禁 CRLF） |
+| W-12 | Worker LLM `.env` | ✅ 2026-06-12 | 默认 **OpenRouter**；`config/uenv-worker-llm.env`；详见 [secrets/README.md §1.7](../secrets/README.md) |
+| W-13 | Worker LLM prompt | ✅ 2026-06-13 | `verl_agent_loop._worker_llm_question`：Worker OpenRouter 收到与 parquet `prompt` 一致的题干 |
 
-**VeRL 路径下 Worker 不应再调第二个 LLM**（见 §4）。
+**LLM 配置（7143，OpenRouter）**：
+
+```bash
+cp config/uenv-worker-llm.env.example config/uenv-worker-llm.env
+# 编辑 UENV_LLM_API_KEY（勿提交仓库）
+```
+
+| 变量 | 默认值 | 含义 |
+|------|--------|------|
+| `UENV_LLM_PROVIDER` | `openrouter` | LLM 提供商 |
+| `UENV_LLM_ENDPOINT` | `https://openrouter.ai/api/v1` | OpenRouter API |
+| `UENV_LLM_MODEL_NAME` | `qwen/qwen-2.5-7b-instruct`（模板默认）；实机可用 `qwen/qwen3-max` | 模型 slug；**非** `qwen3-max-thinking`（无独立 thinking 通道） |
+| `UENV_LLM_API_KEY` | — | **必填** |
+| `UENV_LLM_HTTP_REFERER` / `UENV_LLM_APP_TITLE` | 可选 | OpenRouter 归因头 |
+| `UENV_WORKER_LLM_ENV` | `config/uenv-worker-llm.env` | 覆盖 env 文件路径 |
 
 ---
 
-### 2.4 math 插件（P0 — 真实 benchmark 核心）
+### 2.4 math 插件（P0 — ✅）
 
-| # | 文件 | 调整内容 |
-|---|------|----------|
-| P-1 | `uenv-math-plugin.rs` | ✅ `reset` 从 `{uds}.episode.json` 读取本题 `question`（无配置时保留 fixture 默认题） |
-| P-2 | 按 `dataset` 路由 | ✅ `dataset=gsm8k` 走 GSM8K 判分逻辑 |
-| P-3 | `step` 判分 | ✅ `uenv-math-env::gsm8k::answers_match`（`####` 提取，对齐 VeRL `extract_solution`） |
-| P-4 | 与 Worker reward 分工 | ✅ **冻结**：插件 `step.reward` 为权威；`RewardEngine` 默认透传 |
-| P-5 | 结构 | ✅ `plugins/math/src/backends/gsm8k/`（crate `uenv-math-env`） |
-
-**历史 stub（已替换）**：`uenv-math-plugin` 不再写死固定题/答；题目经 Worker `episode/payload.rs` → `{uds}.episode.json` 注入环境。
+| # | 项 | 状态 |
+|---|-----|------|
+| P-1 | reset 读 `{uds}.episode.json` 注入 `question` | ✅ |
+| P-2 | `dataset=gsm8k` 路由 | ✅ |
+| P-3 | `answers_match`（`####` 提取） | ✅ |
+| P-4 | 插件 `step.reward` 权威 | ✅ 冻结 |
+| P-5 | `uenv-math-env` crate 结构 | ✅ |
+| P-6 | `step.info.response_text` | ✅ 2026-06-12 |
 
 ---
 
-### 2.5 Hub / Server / 部署（P1 — 不阻塞首轮 benchmark）
+### 2.5 Hub / Server / 部署（P1）
 
 | # | 调整项 | 说明 |
 |---|--------|------|
-| H-1 | Hub manifest | 已有 `math` seed；无需为 GSM8K 单独 env_type |
-| H-2 | 制品同步 P2-2 | Hub 下发插件包仍未实现；继续用 Worker 本地 `plugins/` + `UENV_MATH_PLUGIN_BIN` |
-| H-3 | `8.130.86.71` | `uenv-adapter-core` 监听 `8088`；Worker `server.endpoint` 指向此处 |
-| H-4 | `8.130.95.176` Hub | Worker `hub.enabled` + `UENV_HUB_TOKEN` 拉 manifest |
-| H-5 | Bridge serve 三联调 | P0-8：实机记录 adapter-core → Worker 全链路 GSM8K 样本 |
-
-配置参考：`config/uenv-server.deploy.yaml`、`config/uenv-worker.deploy-7143.yaml`
+| H-1～H-4 | Hub / Server 地址 | 见 `config/uenv-worker.deploy-7143.yaml` |
+| H-5 | AgentLoop 三联调实机记录 | ✅ 2026-06-13：7142→`8.130.86.71:8088`→7143；日志见 §5.4 |
+| H-6 | Hub 热路径拉制品 | 规划项，见 §8 |
 
 ---
 
-## 3. 推荐实施顺序
+## 3. 推荐实施顺序（2026-06-12 更新）
 
 ```text
-Phase A（最小可测 GSM8K acc，可暂不训 GRPO）
-  B-1～B-6  l1_mapping + core 接入
-  W-1       model_client 读 response_text
-  W-3       reward_engine 对 ground_truth 判分
-  → VeRL 单步 rollout + rust_core + Worker，对比 gsm8k ground_truth 算 acc
+Phase A（代码）— ✅ 已完成
+  B-1～B-6、W-1～W-4、W-12、P-1～P-6、默认真实链路
 
-Phase B（插件语义完整）
-  P-1～P-4  math 插件读题 + GSM8K 判分
-  W-4       reset 传题给插件
+Phase B（实机 smoke）— ✅ 2026-06-13 基本完成
+  7143：uenv-worker-llm.env + math 插件 + OpenRouter
+  71：adapter-core 拉起（未改代码）+ Worker 注册
+  7142：smoke + 单条样本；§5.1 尚差「≥2 道不同题」
 
-Phase C（训练闭环）
-  V-1～V-6  7142 完整 GRPO + 远端 core
-  H-5       三联调验收 + 记录 logs
+Phase C（Benchmark + GRPO）— 部分 ✅
+  单条 1-step GRPO 已跑通（§5.4）；≥100 样本 acc 仍待 §5.2
 
-Phase D～F（规模化真实训练）
-  见 §8.3：多 step → 多 Worker/多 Episode → Hub 热路径
+Phase D～F（规模化）
+  见 §8：多 Episode / 多 Worker / Hub 热路径
 ```
 
 ---
 
-## 4. LLM 配置说明（是否必须）
+## 4. LLM 配置说明
 
-### 4.1 结论摘要
+### 4.1 结论摘要（AgentLoop 路径）
 
-| 场景 | VeRL 侧 LLM（vLLM） | Worker 侧 LLM |
-|------|---------------------|---------------|
-| **VeRL GRPO 训练 / 带 rollout 的 GSM8K 评测** | **必须** | **不应需要**（改 W-1 后） |
-| **Bridge-only：`math_proxy`** | 必须（VeRL 仍要生成答案） | 不需要 |
-| **Bridge-only：`fixed` fake reward** | 必须（rollout 仍跑） | 不需要 |
-| **无 VeRL、grpcurl 直打 Worker** | 不需要 | **可能需要**（当前 `model_client` 缺 `response_text` 时会调 HTTP LLM） |
+| 场景 | VeRL 容器 vLLM | Worker 侧 LLM（`uenv-worker-llm.env`） |
+|------|----------------|----------------------------------------|
+| **AgentLoop 真实 GSM8K 全栈** | 训练侧需要；**rollout 由 Worker 调 OpenRouter** | **必须**（`UENV_LLM_API_KEY`） |
+| **grpcurl 直打 Worker（无 LLM）** | 不需要 | 不需要（`rule_reward` 短路） |
+| **Python 单测** | 不需要 | 不需要（注入 `RecordingEpisodeClient`） |
 
-### 4.2 VeRL 侧 — 必须配置 LLM
+### 4.2 VeRL 侧
 
-VeRL 的 GSM8K 流程是：
+- 容器内仍需策略模型与 vLLM 引擎（GRPO 训练、logprob 等）。
+- **Rollout completion 不在 VeRL 本地生成**：`UEnvAgentLoop.run()` 将样本交给 UEnv，从 `EpisodeResult` 取 `response_ids` / `reward_score`。
 
-1. 读入 prompt（GSM8K 题目）
-2. **策略模型通过 vLLM rollout 生成 completion**
-3. `UEnvBridgeRewardManager` 解码 `responses` token → `uenv_response_text`
-4. 再把样本交给 UEnv 环境 **打分**
+### 4.3 Worker 侧 — 必须配置 LLM（全栈 AgentLoop）
 
-因此只要走 **真实 VeRL 训练或评测**，就必须在 VeRL 容器/7142 上配置：
+1. AgentLoop 提交的 Episode **不含**预生成 `response_text`
+2. `ModelClient` 使用 `config/uenv-worker-llm.env` 调 **OpenRouter** `POST /chat/completions`
+3. 生成文本作为 action → math 插件 GSM8K 判分
+4. `step.info.response_text` 回传；AgentLoop 可 fallback 用 tokenizer 编码为 `response_ids`
 
-- 模型权重（如 `Qwen2.5-0.5B-Instruct`）
-- vLLM rollout（`actor_rollout_ref.rollout.name=vllm`）
-- GPU（`CUDA_VISIBLE_DEVICES`）
+**注意**：`UENV_ROLLOUT_MODEL_ENDPOINT` / `model_name` 由 Adapter 写入 Episode；Worker `ModelClient` **优先应用 Episode 配置**调 OpenRouter。`UENV_LLM_API_KEY` 仅在 Worker 本地 env，不进 Bridge。
 
-这与 UEnv Worker **无关**；UEnv 只负责对已生成答案判分。
+### 4.4 已移除的假链路
 
-### 4.3 Worker 侧 — 正常不应再配 LLM
+以下模式**不应**用于生产 GSM8K 评测（仅保留代码供显式单测注入）：
 
-设计意图（VeRL 集成）：
+| 模式 | 原用途 | 现状 |
+|------|--------|------|
+| `UENV_AGENT_LOOP_CLIENT=fake` | 本地假 rollout | 默认改为 `rust_core` |
+| `UENV_ADAPTER_CORE_BACKEND=static_rollout` | adapter-core 返回固定 token/reward | 默认改为 `server` |
+| `UENVBridgeRewardManager` / `math_proxy` | 不经 Worker 打分 | 已移除 |
+| `ADAPTER_CORE_REWARD_MODE=fixed` | 假 reward | 已废弃 |
 
-- **答案由 VeRL rollout 产生**，经 Bridge 写入 `env_config.response_text`
-- Worker 应 **直接拿该文本做 rule_reward 匹配**，不应再调 `model_endpoint/chat/completions`
+### 4.5 实机踩坑：`reward=0` 不等于链路失败（2026-06-13）
 
-Worker 侧 gap 已修复（W-1～W-4，2026-06-11）；**Bridge 侧** `core.rs` 仍可能只传裸 `env_config`（待 B-1～B-6 `l1_mapping`）→ 全栈 VeRL 路径需两端同时就绪。
-
-**W-1 已落地后，Worker/7143 测 GSM8K 不需要单独部署 LLM；全栈仍依赖 B-1～B-6 写入 `question`/`response_text`/`rule_reward`。**
-
-### 4.4 例外：纯 Worker 联调（不经 VeRL）
-
-若用 grpcurl / fixture 直调 Server→Worker，且 payload 里没有 `response_text`，则 `model_client` 会尝试 HTTP 调 LLM（需 `payload.model_endpoint` + `question`）。这不是 VeRL 测 GSM8K 的推荐路径。
+| 现象 | 原因 | 处置 |
+|------|------|------|
+| Worker `reward=0` 但 `dispatch_completed` | GSM8K `answers_match` 判错（业务语义） | 查 `target`、模型输出是否含 `#### <答案>` |
+| `response_length/clip_ratio=1.0` | **顶满** `data.max_response_length`（默认 32），非溢出 | 提高 `DATA_MAX_RESPONSE_LENGTH`（对比 **256**） |
+| 模型长推理但无 `#### 72` | ① token 太短；② 曾只传裸 `question` 无格式指令 | W-13 + `DATA_MAX_RESPONSE_LENGTH` |
+| `plugin math-1 not ready` | Windows 同步的 `run.sh` 带 CRLF | 7143 上 `sed -i 's/\r$//'` |
+| vLLM Engine core init failed | GPU0 仅剩 ~2GiB 空闲 | `CUDA_VISIBLE_DEVICES_IN_CONTAINER=4` |
+| `RustCoreEpisodeClient requires stub` | 容器 `grpcio` 1.76 与 stub 不兼容 | 容器内 `pip install grpcio>=1.80` |
 
 ---
 
 ## 5. 验收标准
 
-### 5.1 链路级（Phase A 完成）
+### 5.1 链路级（Phase B）
 
 - [ ] 输入 2 道不同 GSM8K 题，Worker 日志中 **不同** `question` / `target`
-- [ ] VeRL 故意答错一题 → `reward=0`；答对 → `reward=1`
-- [ ] `episode_results.jsonl` 中 acc 与手工核对 `ground_truth` 一致
-- [ ] 不再依赖 stub 固定题 `"If 3 books cost $12..."`
+- [x] 同一题配置不当 → `reward=0`；修正配置后 → `reward=1`（2026-06-13，Natalia / `target=72`）
+- [x] 使用 parquet 真实题干，**非** stub 默认题 `"If 3 books cost $12..."`
+- [x] AgentLoop → Worker → OpenRouter → math 插件全链路 `completed`（smoke + GRPO）
 
-### 5.2 Benchmark 级（Phase B+C 完成）
+### 5.2 Benchmark 级（Phase C）
 
-- [ ] `test.parquet` 全量或 ≥100 样本，acc 可复现（记录模型名、checkpoint、seed）
-- [ ] VeRL `critic/score/mean` 与 UEnv 返回 reward 均值一致（非 `fixed` 常数）
-- [ ] 1-step GRPO 能完成且 reward 来自 Worker 而非 `ADAPTER_CORE_FAKE_REWARD`
+- [ ] `test.parquet` 全量或 ≥100 样本，acc 可复现
+- [x] 单样本 `AgentLoopOutput.reward_score` 与 Worker 一致（对比跑均为 **1.0**，非固定常数 stub）
+- [x] 1-step GRPO 完成且 reward 来自 Worker math 插件（`critic/rewards/mean=1.0`）
 
-### 5.3 规模化级（Phase D～F 完成，见 §8）
+### 5.3 规模化级（Phase D～F，见 §8）
 
-- [ ] 单 Worker 多 step：`max_steps>1` 的 GSM8K Episode 完整轨迹可回放
-- [ ] 多 Worker：≥2 Worker 并行接单，Server 日志可见分发到不同 `worker_id`
-- [ ] 多 Episode 并发：单 Worker 并行 Episode 数达到 `max_concurrent` 且无 lease 冲突
-- [ ] Hub 热路径：spawn 阶段从 Hub 拉取插件/镜像，不依赖节点预置 `UENV_MATH_PLUGIN_BIN`
-- [ ] VeRL batch 并发：batch size > 1 时 reward/acc 与 Worker 侧一致
+- [ ] 多 Worker / 多 Episode 并发 / Hub 热路径 / batch 并发（与 2026-06-11 §8 相同，仍待 E2E）
+
+### 5.4 实机记录摘要（2026-06-13，A100）
+
+| 轮次 | 配置要点 | Worker reward | VeRL `critic/rewards/mean` | 日志（7142） |
+|------|----------|---------------|----------------------------|--------------|
+| smoke | `verify_pre_rollout_rust_core_loop.py` | 0.0（模型未按 `####` 答对） | — | — |
+| GRPO v1 | `max_response_length=32`，裸 `question` | **0.0** | **0.0** | `single-gsm8k-grpo-gpu4-v3.log` |
+| GRPO 对比 | `DATA_MAX_RESPONSE_LENGTH=256`，完整 prompt + `####` 指令，GPU 4 | **1.0** | **1.0** | `single-gsm8k-compare-256.log` |
+
+样本：GSM8K train 第 1 条（Natalia，`ground_truth=72`）。7143 episode 配置示例：
+
+```json
+{"dataset":"gsm8k","question":"... May? Let's think step by step and output the final answer after ####.","target":"72"}
+```
 
 ---
 
-## 6. 快速对照：改哪些文件
+## 6. 快速对照：关键文件
 
 | 优先级 | 路径 |
 |--------|------|
-| P0 | `uenv-bridge/core/src/l1_mapping.rs`（新建） |
-| P0 | `uenv-bridge/core/src/core.rs` |
-| P0 | `uenv-bridge/core/src/lib.rs` |
+| ~~P0~~ ✅ | `uenv-bridge/core/src/core.rs`（L1 映射） |
+| ~~P0~~ ✅ | `uenv-bridge/src/uenv/bridge/verl_agent_loop.py` |
+| ~~P0~~ ✅ | `uenv-bridge/src/uenv/bridge/agent_loop_clients.py` |
+| ~~P0~~ ✅ | `uenv-bridge/configs/uenv-agent-loop.yaml` |
 | ~~P0~~ ✅ | `uenv-worker/src/episode/model_client.rs` |
+| ~~P0~~ ✅ | `uenv-worker/src/llm.rs` + `config/uenv-worker-llm.env.example` |
 | ~~P0~~ ✅ | `uenv-worker/src/bin/uenv-math-plugin.rs` |
-| ~~P1~~ ✅ | `uenv-worker/src/episode/executor.rs` |
-| ~~P1~~ ✅ | `uenv-worker/src/episode/reward_engine.rs`（平台透传 / `scorer=worker` 通用 rule） |
-| ~~P1~~ ✅ | `uenv-worker/src/control_plane/client.rs`（W-6 load、W-7 resource） |
-| ~~P1~~ ✅ | `uenv-worker/src/grpc_server/worker_service.rs`（W-8 StreamReport） |
-| ~~P0~~ ✅ | `uenv-worker/src/episode/payload.rs`（L1 → 插件 reset 配置映射） |
-| ~~P0~~ ✅ | `plugins/math/src/backends/gsm8k/`（`uenv-math-env`，环境判分） |
-| P2 | `uenv-worker/src/hub/mod.rs`（H-6 热路径拉制品） |
-| P2 | `uenv-server/` 调度器（S-1～S-3 多 Worker/并发 Episode） |
-| 规划 | [260609-worker-full-chain-integration-summary.md §1.2](./260609-worker-full-chain-integration-summary.md) → §8 待优化清单 |
-| 部署 | `config/uenv-worker.deploy-7143.yaml`、`secrets/README.md` §1.6 |
-| 脚本 | `uenv-bridge/scripts/run_verl_grpo_1step_with_bridge_reward.sh`（endpoint + 去 fixed） |
+| 部署 | `config/uenv-worker.deploy-7143.yaml`、`config/uenv-worker-llm.env` |
+| 脚本 | `run_verl_grpo_1step_with_uenv_agent_loop.sh`、`verify_pre_rollout_rust_core_loop.py`、`run-single-gsm8k-compare-7142.sh`（实机） |
+| P2 | Hub 热路径、多 Worker 规模化（§8） |
+
+**已移除**：`verl.py`、`verl_reward_manager.py`、`run_verl_grpo_1step_with_bridge_reward.sh`（RewardManager 路径）。
 
 ---
 
@@ -278,153 +304,53 @@ python uenv-bridge/scripts/prepare_verl_gsm8k_sample.py \
   --output ./tmp/gsm8k_test.parquet \
   --n 100
 
-# 7142：全栈 reward（需 Phase A 代码落地后）
-export UENV_BRIDGE_CLIENT=rust_core
-export UENV_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088
-export UENV_ADAPTER_CORE_AUTO_START=0   # 使用远端 core，勿本地起
-
-# 7143 Worker 必配
+# 7143 Worker：LLM + 插件
+cp config/uenv-worker-llm.env.example config/uenv-worker-llm.env
+# 编辑 UENV_LLM_API_KEY（见 secrets/README.md §1.7）
 export UENV_MATH_PLUGIN_BIN=/path/to/uenv-math-plugin
 export UENV_PREWARM_ON_STARTUP=true
 export UENV_HUB_TOKEN=<from Hub>
+
+# 7142：AgentLoop 全栈
+export UENV_AGENT_LOOP_CLIENT=rust_core
+export UENV_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088
+export UENV_ADAPTER_CORE_AUTO_START=0
+export UENV_ADAPTER_CORE_BACKEND=server
+export CUDA_VISIBLE_DEVICES_IN_CONTAINER=4   # 按 nvidia-smi 选空闲 GPU
+
+# 预 rollout 链路验证（需已注册 Worker）
+PYTHONPATH=uenv-bridge/src python uenv-bridge/scripts/verify_pre_rollout_rust_core_loop.py
+
+# 1-step GRPO smoke（默认 max_response_length=32）
+uenv-bridge/scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
+
+# 1-step GRPO 对比跑（推荐 GSM8K 实机参数）
+export DATA_MAX_RESPONSE_LENGTH=256
+export SAMPLE_COUNT=1 TRAIN_BATCH_SIZE=1 TRAINING_STEPS=1
+bash /root/UEnv/run-single-gsm8k-compare-7142.sh
 ```
 
 ---
 
 ## 8. 规模化真实训练待补齐规划
 
-> **来源**：[260609-worker-full-chain-integration-summary.md §1.2](./260609-worker-full-chain-integration-summary.md)（全链路联调 Mock/Stub 逐项转化）  
-> **目标**：Hub 参与 Episode **热路径**；支持 **多 Worker、多环境实例、多 step、多 Episode** 并发的真实 GSM8K 训练/评测（非单 Worker 单步 stub）。  
-> **与 §2 关系**：§2 聚焦「首轮真实 GSM8K 判分」最小闭环；本节聚焦规模化与热路径制品/调度缺口。
+> 与 2026-06-11 版 §8 一致；代码骨架（W-6～W-9、Server `join_all`、Worker `Semaphore`）已具备，**实机 E2E 仍待验收**。  
+> GSM8K benchmark 本身为单步判分；`max_steps>1` 对 math 环境无多轮交互语义。
 
-### 8.1 Worker 层待优化（`uenv-worker`）
+### 8.1～8.3 摘要
 
-| # | 来源（§1.2） | 现状 | 待办 | 优先级 | 规模化关联 |
-|---|--------------|------|------|--------|------------|
-| W-1 | `ModelClient` | ~~`rule_reward` 捷径优先~~ | ✅ 优先 `response_text`；无 response 再 LLM/short-circuit | P0 | 多 Episode 并发时不重复调 LLM |
-| W-2 | `ModelClient` | ~~同上~~ | ✅ 与 W-1 合并落地 | P0 | 见 §2.3 |
-| W-3 | `RewardEngine` | ~~Worker 内嵌 GSM8K 判分~~ | ✅ 采信插件 reward；`scorer=worker` 仅通用精确比对 | P0 | 多 step 每步 reward 一致 |
-| W-4 | `uenv-math-plugin`（reset 传题） | ~~reset 不传 payload~~ | ✅ UDS 侧 `{uds}.episode.json` | P0 | 多环境实例各自加载不同题目 |
-| W-6 | 心跳 `load` | ~~恒为 `0`~~ | ✅ `MetricsExporter.active_episode_count()` | P1 | **多 Worker** 负载感知调度前提 |
-| W-7 | `RegisterWorker.resource` | ~~发送 `None`~~ | ✅ `detect_resource_spec()`（CPU 自动探测 + `UENV_WORKER_*` 覆盖） | P1 | Server 按资源筛选 Worker |
-| W-8 | `StreamReport` | ~~仅填 `phase`~~ | ✅ 逐步 `STEP_COMPLETE` + `report_type`/`correlation_id`/`worker_active_episodes` | P1 | **多 step** 流式进度；VeRL/Server 可观测 |
-| W-9 | Episode 步数 | ~~仅 `execute_single_round`~~ | ✅ `execute_episode`：`reset → (infer → step)*`，尊重 `max_steps`/`terminated` | P0 | **多 step** Agent 训练核心 |
-| W-10 | Podman 后端 | 7143 仅用 `process` | 验收 Podman 插件 spawn/teardown；Hub 镜像 digest 驱动容器 backend | P2 | **多环境实例** 隔离与扩缩 |
-| W-11 | `registry/worker_pool.rs` | 占位注释 | 实现或移除占位；若保留则接入实例池 metrics/注册（与 warmup_pool 职责对齐） | P2 | 多实例池可观测与调试 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| Phase D | 真实 GSM8K + 平台多步循环 | 代码 ✅；单条 AgentLoop+GRPO E2E ✅（2026-06-13）；批量待验 |
+| Phase E | 多 Worker / 多 Episode | 代码 ✅；E2E 待验 |
+| Phase F | Hub 热路径 | 待开发/验收 |
 
-**Worker 层验收勾选（规模化）**
+**Bridge 勾选更新（2026-06-12）**
 
-- [x] W-6：`WorkerHeartbeat.load` 随并发 Episode 变化，非恒 0（代码已落地，待实机复验）
-- [x] W-7：`RegisterWorker` 携带非空 `resource`（代码已落地，待实机复验）
-- [x] W-8：多 step Episode 产生 ≥2 条 `StreamReport`，且 `report_type` 非 UNSPECIFIED（代码已落地，待实机复验）
-- [x] W-9：同一 Episode `max_steps>1` 时 `trajectory.steps` 可 > 1（代码已落地，待实机复验）
-- [ ] W-10（可选）：Podman backend 跑通 math 插件一 Episode
+- [x] B-1～B-6：Bridge payload 含 `question` / `dataset=gsm8k` / `rule_reward.target`
+- [x] B-8：默认 `rust_core` + `server` backend
+- [ ] H-6、S-2、S-3、V-7：规模化实机（不变）
 
 ---
 
-### 8.2 其他模块层待优化（Bridge / Hub / Server / math 插件 / VeRL）
-
-#### 8.2.1 math 插件（`uenv-math-plugin` / `plugins/math`）
-
-| # | 来源（§1.2） | 现状 | 待办 | 优先级 | 规模化关联 |
-|---|--------------|------|------|--------|------------|
-| P-1 | `uenv-math-plugin` | ~~reset 写死固定题~~ | ✅ reset 从 `{uds}.episode.json` 读取 `question` | P0 | 每 Episode 不同 GSM8K 题 |
-| P-2 | 同上 | ~~不读 payload~~ | ✅ `dataset=gsm8k` 路由 | P0 | 真实 benchmark |
-| P-3 | 同上 | ~~stub 判分~~ | ✅ `plugins/math/.../gsm8k/scoring.rs` | P0 | 多 step 每步可判分 |
-| P-4 | 与 W-3 分工 | ~~双处判分风险~~ | ✅ 冻结：插件 `step.reward` 权威 | P0 | 避免多 step reward 漂移 |
-| P-5 | 结构 | ~~单 binary 内联~~ | ✅ `uenv-math-env` crate + `backends/gsm8k/` | P1 | 多 dataset 扩展 |
-
-#### 8.2.2 Bridge / adapter-core（`uenv-bridge`）
-
-| # | 来源（§1.2） | 现状 | 待办 | 优先级 | 规模化关联 |
-|---|--------------|------|------|--------|------------|
-| B-1～B-6 | `RewardEngine` / payload | 见 §2.2 | 落地 `l1_mapping`：`question` + `rule_reward` + `response_text` | P0 | 多 Episode 批量样本字段完整 |
-| B-7 | 规模化 | 单样本联调为主 | 批量 Episode 请求时保持 `correlation_id`/样本 id 透传至 Worker | P1 | **多 Episode** trace |
-| B-8 | adapter-core | 无独立 serve 模式文档化 | 明确 `rust_core` + 远端 Worker reward；禁止生产路径 `fixed` | P0 | 训练闭环 |
-
-#### 8.2.3 Hub（`uenv-hub`）— 热路径参与
-
-> **职责边界（math 环境与 Hub）**  
-> Hub 是 **环境元数据注册中心**（版本、manifest、`image.url/digest`、interface schema、resources），类比 Docker Hub 索引层；**不参与** Episode 调度，**不在** reset/step 热路径执行业务逻辑。  
-> `env_type=math` 仍是 L1 调度键；GSM8K 为 payload 内 `dataset=gsm8k`，**无需**在 Hub 单独注册第二个 env_type。
-
-**要迁移 / 补齐的（Phase F 及相关项）**
-
-| 项 | 说明 | 关联编号 |
-|----|------|----------|
-| **发布链路** | math 从「仓库手动 scp binary + `UENV_MATH_PLUGIN_BIN`」→ `uenv env build` 构建 OCI 镜像 → 推 registry → `uenv env publish` 在 Hub 登记 `math@x.y.z` | H-6、H-7 |
-| **Worker H-6** | spawn/acquire 前按 Hub manifest **拉制品**（OCI 镜像或 process 用 binary/tarball），本地 cache；不再硬依赖节点预置 `UENV_MATH_PLUGIN_BIN` | H-6、§5.3 |
-| **PodmanBackend** | 从占位实现到可跑通 math 容器：`image.digest` pull/run → 容器内 PluginService over UDS | W-10 |
-| **math 插件业务（P-1～P-4）** | reset 读题、GSM8K 判分、与 Worker 判分源冻结——属 **环境镜像 / 制品内代码**，与 Hub 服务代码库无关 | P-1～P-4 |
-
-**明确不需要迁移的**
-
-- 把 `uenv-math-plugin.rs` 挪进 `uenv-hub-server` 代码库（Hub 只存注册信息与制品索引，不托管运行时源码）
-- 让 Hub 在 Episode 里执行 reset/step（Hub **永远不进** step 热路径；Worker 经 UDS 调环境实例）
-
-**目标热路径（spawn 阶段，Hub 参与制品解析，不参与 step）**
-
-```text
-Episode → Worker WarmupPool.acquire(math)
-  → GET Hub .../math/versions/latest（或 pin 版本）
-  → 按 manifest.backend 拉制品并 spawn 实例
-       podman：pull image.url@digest → 跑容器（math 逻辑在镜像内）
-       process：拉 binary/包到 cache → exec entry（如 ./run.sh）
-  → PluginHost UDS：reset → step* → release
-```
-
-| # | 来源（§1.2） | 现状 | 待办 | 优先级 | 规模化关联 |
-|---|--------------|------|------|--------|------------|
-| H-2 | Hub 集成 | 仅启动时 HTTP 拉 manifest 元数据 | 见 H-6 扩展为热路径制品同步 | P1 | 脱离本地 `plugins/` 硬编码 |
-| H-6 | Hub 集成 | **不下载**镜像/插件包 | spawn/acquire 前从 Hub 拉取插件包或 OCI 镜像（digest 校验）；缓存到 Worker 本地 | P1 | **Hub 进入 Episode 热路径** |
-| H-7 | Hub 集成 | 版本仅在启动 merge | 每次 spawn 按 `env_type@version` 解析；Episode 可带版本 pin | P1 | 多环境类型/版本并存 |
-| H-8 | Hub 集成 | Hub 不参与 dispatch | Server/Worker 调度链路透传 Hub manifest 摘要（version、backend、resources） | P2 | 多 Worker 统一制品源 |
-
-#### 8.2.4 Server / 调度（`uenv-server` / adapter-core Scheduler）
-
-| # | 来源（§1.2 影响面） | 现状 | 待办 | 优先级 | 规模化关联 |
-|---|---------------------|------|------|--------|------------|
-| S-1 | 心跳 `load`（Worker 侧 W-6） | 调度不感知 Worker 负载 | 消费 `WorkerHeartbeat.load`，负载均衡/背压 | P1 | **多 Worker** |
-| S-2 | §1.3 单 Worker | 仅 1 条 `RegisterWorker` 验收 | 多 Worker 注册、按 `env_type`/资源筛选、`DispatchEpisode` 并行 | P1 | **多 Worker** |
-| S-3 | 单 step stub | 单 Episode 串行思维 | 并发下发多 Episode（尊重 Worker `max_concurrent` + lease） | P1 | **多 Episode** |
-| S-4 | `ResourceSpec`（W-7） | 注册资源为空 | 调度器匹配 `Episode.resource_spec` 与 Worker `resource` | P2 | 异构集群 |
-| S-5 | Hub 热路径（H-6～H-8） | Server 不 orchestrate 制品 | 可选：Server 下发 `env_version`/镜像 digest，Worker spawn 前向 Hub 解析 | P2 | Hub + Server 协同 |
-
-#### 8.2.5 VeRL / 7142 运行环境
-
-| # | 来源 | 现状 | 待办 | 优先级 | 规模化关联 |
-|---|------|------|------|--------|------------|
-| V-1～V-6 | 见 §2.1 | 部署项 | GRPO/评测 vLLM、GSM8K 数据、远端 core | P0 | 训练必需 |
-| V-7 | 规模化 | 1-step smoke 为主 | rollout batch 并发多 prompt → 多 Episode 并行经 Bridge 打分 | P1 | **多 Episode** 训练吞吐 |
-| V-8 | 多 step | 单轮 completion | 若 env 支持 multi-step：rollout 与 env step 语义对齐（或保持 1-step env + 单 completion 判分，文档冻结） | P1 | 与 W-9 设计对齐 |
-
-**其他模块层验收勾选（规模化）**
-
-- [x] P-1～P-3：代码已支持按题注入与 GSM8K 判分（待 Bridge B-1～B-6 + 实机 ≥2 题验收）
-- [ ] B-1～B-6：Bridge payload 含 `question`/`response_text`/`rule_reward.target`
-- [ ] H-6：新 Worker 节点无本地预置 `UENV_MATH_PLUGIN_BIN` 仍可通过 Hub 跑通 Episode
-- [ ] S-2：≥2 Worker 同时注册，Server 可将 Episode 分发到不同 Worker
-- [ ] S-3：同一 Worker `max_concurrent>1` 时并行 Episode 均完成且 lease 不冲突
-- [ ] V-7：VeRL batch size > 1 时 acc/reward 与逐条核对一致
-
----
-
-### 8.3 推荐实施顺序（在 §3 Phase A～C 之后）
-
-```text
-Phase D（真实 GSM8K + 多 step）
-  B-1～B-6, W-1, W-3, W-4, W-9, P-1～P-4
-  → 单 Worker 上多 step GSM8K Episode，trajectory.steps > 1
-
-Phase E（多 Episode / 多 Worker 并发）
-  W-6, W-7, S-1, S-2, S-3, B-7, V-7
-  → ≥2 Worker、Worker 内并行 ≥2 Episode，负载与 lease 正常
-
-Phase F（Hub 热路径 + 多实例制品）
-  H-6, H-7, H-8, W-10, S-5（可选）
-  → spawn 时 Hub 拉制品；多 Worker 共享 Hub 版本源；Podman 路径可选验收
-```
-
----
-
-*维护：全栈 GSM8K 代码落地后，请同步更新 [260530-full-stack-integration-gaps.md](./260530-full-stack-integration-gaps.md) 与 [更新日志.md](./更新日志.md)。*
+*维护：2026-06-13 单条全栈已验收；规模化/Benchmark 通过后请继续同步 [260530-full-stack-integration-gaps.md](./260530-full-stack-integration-gaps.md)、[260609-worker-full-chain-integration-summary.md](./260609-worker-full-chain-integration-summary.md) 与 [更新日志.md](./更新日志.md)。*

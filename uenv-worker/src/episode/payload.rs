@@ -21,7 +21,7 @@ pub fn build_reset_config(
         config["question"] = json!(q);
     }
     if let Some(ds) = payload_json.get("dataset").and_then(Value::as_str) {
-        config["dataset"] = json!(ds);
+        config["dataset"] = json!(normalize_dataset(ds));
     }
     if let Some(target) = reward_target(&reward_json) {
         config["target"] = json!(target);
@@ -30,6 +30,17 @@ pub fn build_reset_config(
         config["seed"] = json!(s);
     }
     Ok(serde_json::to_vec(&config)?)
+}
+
+fn normalize_dataset(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.eq_ignore_ascii_case("gsm8k") || trimmed.to_ascii_lowercase().contains("gsm8k") {
+        return "gsm8k".to_string();
+    }
+    trimmed.to_string()
 }
 
 pub fn reward_target(reward_json: &Value) -> Option<String> {

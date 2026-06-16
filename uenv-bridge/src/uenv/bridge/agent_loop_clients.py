@@ -11,7 +11,7 @@ from .protocol import EpisodeRequest, EpisodeResult, EpisodeSummary, StepRecord,
 
 @dataclass(slots=True)
 class AgentLoopClientConfig:
-    mode: str = "fake"
+    mode: str = "rust_core"
     endpoint: str = "127.0.0.1:50051"
     timeout_seconds: float = 300.0
     startup_timeout_seconds: float = 30.0
@@ -34,7 +34,7 @@ class AgentLoopClientConfig:
         fake_response_text: str | None = None,
     ) -> "AgentLoopClientConfig":
         return cls(
-            mode=mode or os.getenv("UENV_AGENT_LOOP_CLIENT", "fake"),
+            mode=mode or os.getenv("UENV_AGENT_LOOP_CLIENT", "rust_core"),
             endpoint=endpoint or os.getenv("UENV_ADAPTER_CORE_ENDPOINT", "127.0.0.1:50051"),
             timeout_seconds=float(timeout_seconds if timeout_seconds is not None else os.getenv("UENV_AGENT_LOOP_TIMEOUT_SECONDS", "300")),
             startup_timeout_seconds=float(

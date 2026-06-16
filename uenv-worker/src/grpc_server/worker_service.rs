@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Semaphore;
 use tokio::sync::Mutex;
@@ -15,6 +15,34 @@ use crate::proto::v1::{EpisodeResult, StreamReport};
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcService;
 use crate::proto::worker::v1::{DispatchEpisodeRequest, HealthCheckRequest, HealthCheckResponse};
 use crate::wal::WalWriter;
+
+const DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_EPISODE_TIMEOUT_SECS: u64 = 300;
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(default)
+}
+
+struct ActiveEpisodeGuard {
+    metrics: MetricsExporter,
+}
+
+impl Drop for ActiveEpisodeGuard {
+    fn drop(&mut self) {
+        self.metrics.dec_active();
+    }
+}
+
+async fn clear_active_lease(
+    active_leases: &Arc<Mutex<HashMap<(String, u32), String>>>,
+    key: &(String, u32),
+) {
+    active_leases.lock().await.remove(key);
+}
 
 #[derive(Clone, Copy)]
 pub enum DisconnectDispatchPolicy {
@@ -121,24 +149,92 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             }
         }
 
-        let permit = self
-            .semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| Status::resource_exhausted("max_concurrency_reached"))?;
+        let permit = match tokio::time::timeout(
+            Duration::from_secs(env_u64(
+                "UENV_WORKER_DISPATCH_ACQUIRE_TIMEOUT_SECS",
+                DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS,
+            )),
+            self.semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                clear_active_lease(&self.active_leases, &key).await;
+                return Err(Status::resource_exhausted("max_concurrency_reached"));
+            }
+            Err(_) => {
+                clear_active_lease(&self.active_leases, &key).await;
+                tracing::warn!(
+                    trace_id = %trace_id,
+                    episode_id = %episode.episode_id,
+                    worker_id = %worker_id,
+                    attempt_id = episode.attempt_id,
+                    phase = "dispatch_acquire_timeout",
+                    msg = "dispatch"
+                );
+                return Err(Status::resource_exhausted(
+                    "max_concurrency_acquire_timeout",
+                ));
+            }
+        };
+
         self.metrics.inc_active();
+        let _active_guard = ActiveEpisodeGuard {
+            metrics: self.metrics.clone(),
+        };
+        tracing::info!(
+            trace_id = %trace_id,
+            episode_id = %episode.episode_id,
+            worker_id = %worker_id,
+            attempt_id = episode.attempt_id,
+            phase = "dispatch_acquired",
+            msg = "dispatch"
+        );
+
         let active_episodes = self.metrics.active_episode_count() as u32;
         let exec_ctx = ExecuteContext {
             worker_id: worker_id.clone(),
             worker_capacity: self.max_concurrent,
             active_episodes,
         };
-        let exec = self
-            .executor
-            .execute_episode(&episode, &exec_ctx)
-            .await
-            .map_err(|err| Status::internal(format!("execute_episode_failed: {err}")))?;
+        let episode_timeout = Duration::from_secs(env_u64(
+            "UENV_WORKER_EPISODE_TIMEOUT_SECS",
+            DEFAULT_EPISODE_TIMEOUT_SECS,
+        ));
+        let exec = match tokio::time::timeout(
+            episode_timeout,
+            self.executor.execute_episode(&episode, &exec_ctx),
+        )
+        .await
+        {
+            Ok(Ok(exec)) => exec,
+            Ok(Err(err)) => {
+                clear_active_lease(&self.active_leases, &key).await;
+                tracing::warn!(
+                    trace_id = %trace_id,
+                    episode_id = %episode.episode_id,
+                    worker_id = %worker_id,
+                    attempt_id = episode.attempt_id,
+                    error = %err,
+                    phase = "dispatch_failed",
+                    msg = "dispatch"
+                );
+                return Err(Status::internal(format!("execute_episode_failed: {err}")));
+            }
+            Err(_) => {
+                clear_active_lease(&self.active_leases, &key).await;
+                tracing::warn!(
+                    trace_id = %trace_id,
+                    episode_id = %episode.episode_id,
+                    worker_id = %worker_id,
+                    attempt_id = episode.attempt_id,
+                    phase = "episode_timeout",
+                    msg = "dispatch"
+                );
+                return Err(Status::deadline_exceeded("episode_timeout"));
+            }
+        };
         self.metrics.observe_episode(
             exec.duration_ms,
             exec.env_step_duration_ms,
@@ -159,7 +255,7 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             phase = "dispatch_completed",
             msg = "dispatch"
         );
-        self.metrics.dec_active();
+        drop(_active_guard);
         drop(permit);
 
         let (tx, rx) = tokio::sync::mpsc::channel(exec.stream_reports.len().max(1));
@@ -310,7 +406,7 @@ mod tests {
         let wal = WalWriter::new(&wal_dir).expect("create wal");
         WorkerGrpcServiceImpl::new(
             control_plane,
-            EpisodeExecutor::new(host, pool.clone()),
+            EpisodeExecutor::new(host, pool.clone(), crate::llm::LlmConfig::default()),
             MetricsExporter::new(),
             pool,
             1,
