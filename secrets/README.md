@@ -1,6 +1,88 @@
 # A100 测试机联调指南
 
-本目录存放两台 A100 测试机的 SSH 私钥，以及四端联调的主机/端口/账号说明。**请勿将私钥或账号密码提交到公开仓库或分享给无关人员。**
+本目录存放两台 A100 测试机的 SSH 私钥，以及四端联调的主机/端口/账号/硬件说明。**请勿将私钥或账号密码提交到公开仓库或分享给无关人员。**
+
+---
+
+## 0. 机器硬件资源
+
+> **最后实机采集**：2026-06-16（SSH 登录各机执行 `nproc` / `free -h` / `df -h` / `nvidia-smi`）。占用率为采集时刻快照，随训练任务波动。
+
+### 0.1 总览
+
+| 机器 | 角色 | CPU | 内存 | 系统盘 | GPU |
+|------|------|-----|------|--------|-----|
+| **7142**（`10.10.20.142`） | VeRL / Python Adapter | 128 逻辑核 | **1 TiB** | **850 GB** | 8× A100-SXM4-80GB |
+| **7143**（`10.10.20.143`） | uenv-worker | 128 逻辑核 | **1 TiB** | **850 GB** | 8× A100-SXM4-80GB |
+| **`8.130.86.71`** | uenv-adapter-core + Server | **4 vCPU** | **16 GiB** | **99 GB** NVMe | 无 |
+| **`8.130.95.176`** | uenv-hub | **4 vCPU** | **16 GiB** | **99 GB** NVMe | 无 |
+
+### 0.2 A100 7142（Adapter / VeRL 训练侧）
+
+| 项 | 规格 |
+|----|------|
+| 公网 SSH | `219.147.100.43:7142` |
+| 内网 IP | `10.10.20.142` |
+| CPU | AMD EPYC 7742 × 2 Socket，**128 逻辑核**（`nproc=128`） |
+| 内存 | **1.0 TiB** 总量；Swap **39 GiB** |
+| 磁盘 | `/dev/sda4` **850 GB**（采集时已用约 **78%**，剩余约 **188 GB**） |
+| GPU | **8× NVIDIA A100-SXM4-80GB**（每卡 81920 MiB） |
+
+**实机注意**：7142 与 7143 为同一物理 A100 宿主机上的两台 VM，共用公网 IP `219.147.100.43`；`lscpu` / `nvidia-smi` 可见**整台宿主机**资源，实际可用 GPU/内存受宿主机调度与其他任务影响，**并非每台 VM 独占 128 核 + 8 卡**。VeRL 容器内 vLLM 默认占 GPU 0 易 OOM，联调建议 `CUDA_VISIBLE_DEVICES_IN_CONTAINER=4`（按 `nvidia-smi` 选空闲卡，见 §1.6）。
+
+### 0.3 A100 7143（Worker）
+
+| 项 | 规格 |
+|----|------|
+| 公网 SSH | `219.147.100.43:7143` |
+| 内网 IP | `10.10.20.143` |
+| CPU | 与 7142 相同（EPYC 7742，**128 逻辑核**） |
+| 内存 | **1.0 TiB** 总量；Swap **39 GiB** |
+| 磁盘 | `/dev/sda4` **850 GB**（采集时已用约 **66%**，剩余约 **294 GB**） |
+| GPU | **8× NVIDIA A100-SXM4-80GB** |
+
+**软件层资源配额**（`config/uenv-worker.deploy-7143.yaml`）：
+
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| `worker.max_concurrent` | 4 | 最多 4 个并发 Episode |
+| `pool.warmup_size` | 2 | math 预热池实例数 |
+| LLM 推理 | OpenRouter 云端 | AgentLoop 路径下 Worker **不占用本地 GPU** 做 completion |
+
+**Register 上报（可选 env 覆盖）**：`UENV_WORKER_GPU_COUNT=1`、`UENV_WORKER_GPU_TYPE=A100`；未设置时 `detect_resource_spec()` 默认内存 **8192 MB**、GPU **0**（仅影响 Register 字段，不影响物理资源）。
+
+### 0.4 阿里云 8.130.86.71（Server / adapter-core）
+
+| 项 | 规格 |
+|----|------|
+| CPU | **4 vCPU**（Intel Xeon 6982P-C，2 线程/核） |
+| 内存 | **16 GiB**（无 Swap） |
+| 磁盘 | `/dev/nvme0n1p3` **99 GB** NVMe（采集时已用约 **12%**，剩余约 **83 GB**） |
+| GPU | 无 |
+| 部署进程 | 仅 `uenv-adapter-core`（见 §1.4、§6.1） |
+
+### 0.5 阿里云 8.130.95.176（Hub）
+
+| 项 | 规格 |
+|----|------|
+| CPU | **4 vCPU**（与 Server 同规格） |
+| 内存 | **16 GiB**（无 Swap） |
+| 磁盘 | `/dev/nvme0n1p3` **99 GB** NVMe（采集时已用约 **7%**，剩余约 **88 GB**） |
+| GPU | 无 |
+| 内网 IP（同 VPC） | `192.168.0.133`（可选用 `http://192.168.0.133:8088`） |
+| 持久化 | SQLite `/root/uenv/uenv-hub/data/hub.db` |
+
+### 0.6 资源自检命令
+
+```bash
+# A100 7142 / 7143（私钥见 §2）
+ssh -i secrets/<key> -p 7142 root@219.147.100.43 'nproc; free -h; df -h /; nvidia-smi -L'
+ssh -i secrets/<key> -p 7143 root@219.147.100.43 'nproc; free -h; df -h /; nvidia-smi -L'
+
+# 阿里云 Server / Hub（密码见 §3.1）
+ssh root@8.130.86.71 'nproc; free -h; df -h /'
+ssh root@8.130.95.176 'nproc; free -h; df -h /'
+```
 
 ---
 

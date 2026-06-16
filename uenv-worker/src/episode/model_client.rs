@@ -8,6 +8,7 @@ use crate::llm::{chat_completions_url_for_endpoint, LlmConfig};
 #[derive(Clone)]
 pub struct ModelClient {
     llm: LlmConfig,
+    http: Client,
 }
 
 impl Default for ModelClient {
@@ -22,7 +23,10 @@ impl ModelClient {
     }
 
     pub fn with_config(llm: LlmConfig) -> Self {
-        Self { llm }
+        Self {
+            http: build_http_client(llm.http_timeout_secs),
+            llm,
+        }
     }
 
     pub async fn infer_action(
@@ -110,12 +114,10 @@ impl ModelClient {
         });
 
         let url = chat_completions_url_for_endpoint(&endpoint_base);
-        let client = Client::new();
-
-        let max_retries: usize = 30;
+        let max_retries = self.llm.max_retries.max(1);
         let mut last_err = String::new();
         for attempt in 0..max_retries {
-            let mut request = client.post(&url).json(&request_body.clone());
+            let mut request = self.http.post(&url).json(&request_body.clone());
             request = self.apply_llm_headers(request, &endpoint_base)?;
             match request.send().await {
                 Ok(resp) => {
@@ -171,6 +173,19 @@ impl ModelClient {
         }
         Ok(req)
     }
+}
+
+fn build_http_client(timeout_secs: u64) -> Client {
+    let connect_timeout = Duration::from_secs(timeout_secs.min(30).max(1));
+    let request_timeout = Duration::from_secs(timeout_secs.max(1));
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = %err, msg = "model client: failed to build timed HTTP client, using default");
+            Client::new()
+        })
 }
 
 fn resolve_endpoint_base(
