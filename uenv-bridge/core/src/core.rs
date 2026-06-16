@@ -185,37 +185,19 @@ fn sample_to_worker_payload(
         .or_else(|| json_string(env_cfg, "question"))
         .or_else(|| json_string(env_cfg, "raw_prompt"))
         .unwrap_or_default();
-    let dataset = normalize_dataset(
-        json_string(env_cfg, "dataset")
-            .or_else(|| json_string(env_cfg, "data_source"))
-            .or_else(|| json_string(metadata, "data_source"))
-            .unwrap_or_default()
-            .as_str(),
-    );
+    let dataset = json_string(env_cfg, "dataset")
+        .or_else(|| json_string(env_cfg, "data_source"))
+        .or_else(|| json_string(metadata, "data_source"))
+        .unwrap_or_default();
 
-    let mut worker_payload = json!({
+    json!({
         "request_id": sample.request_id,
         "question": question,
         "dataset": dataset,
         "model_endpoint": model_endpoint,
         "model_name": json_string(model_ep, "model_name").unwrap_or_else(|| "policy-model".to_string()),
         "generation_config": model_ep.get("generation_config").cloned().unwrap_or_else(|| json!({})),
-    });
-    if let Some(response_text) = json_string(env_cfg, "response_text") {
-        worker_payload["response_text"] = json!(response_text);
-    }
-    worker_payload
-}
-
-fn normalize_dataset(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if trimmed.eq_ignore_ascii_case("gsm8k") || trimmed.to_ascii_lowercase().contains("gsm8k") {
-        return "gsm8k".to_string();
-    }
-    trimmed.to_string()
+    })
 }
 
 fn sample_to_worker_reward_config(payload: &Value) -> Value {
@@ -524,7 +506,7 @@ mod tests {
             .expect("worker reward json");
 
         assert_eq!(worker_payload["question"], "How many clips?");
-        assert_eq!(worker_payload["dataset"], "gsm8k");
+        assert_eq!(worker_payload["dataset"], "openai/gsm8k");
         assert_eq!(worker_payload["model_endpoint"], "http://127.0.0.1:18080/v1");
         assert_eq!(worker_payload["model_name"], "mock-policy");
         assert_eq!(worker_reward["type"], "rule_reward");

@@ -9,15 +9,6 @@ from __future__ import annotations
 import os
 
 
-def _is_resource_tracker_process() -> bool:
-    try:
-        with open("/proc/self/cmdline", "rb") as file:
-            cmdline = file.read().decode("utf-8", errors="replace")
-    except OSError:
-        return False
-    return "multiprocessing.resource_tracker" in cmdline
-
-
 def _patch_resource_tracker_duplicate_unregister() -> None:
     """Tolerate duplicate shared-memory UNREGISTER messages in Python 3.12.
 
@@ -94,17 +85,3 @@ def _patch_resource_tracker_duplicate_unregister() -> None:
 
 if os.environ.get("UENV_PATCH_RESOURCE_TRACKER") == "1":
     _patch_resource_tracker_duplicate_unregister()
-
-if os.environ.get("UENV_PATCH_VERL_VLLM_SHUTDOWN") == "1" and not _is_resource_tracker_process():
-    from uenv.bridge.verl_shutdown_patch import apply_verl_vllm_shutdown_patch
-
-    apply_verl_vllm_shutdown_patch()
-
-if os.environ.get("UENV_AGENT_LOOP_BATCH") == "1" and not _is_resource_tracker_process():
-    try:
-        from uenv.bridge.verl_batch_agent_loop_patch import apply_verl_agent_loop_batch_patch
-
-        apply_verl_agent_loop_batch_patch()
-    except ModuleNotFoundError as exc:
-        if os.environ.get("UENV_AGENT_LOOP_BATCH_STRICT") == "1":
-            raise

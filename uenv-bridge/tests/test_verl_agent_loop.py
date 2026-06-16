@@ -116,6 +116,24 @@ class FakeServerManager:
         self.server_addresses = addresses
 
 
+class FakeRemoteMethod:
+    def __init__(self, value):
+        self.value = value
+
+    async def remote(self):
+        return self.value
+
+
+class FakeLoadBalancer:
+    def __init__(self, addresses):
+        self.get_all_servers = FakeRemoteMethod(addresses)
+
+
+class FakeLLMServerClient:
+    def __init__(self, addresses):
+        self._load_balancer = FakeLoadBalancer(addresses)
+
+
 class AttrDict(dict):
     def __getattr__(self, name):
         try:
@@ -461,6 +479,28 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(client.last_request.model_endpoint, "http://10.10.20.142:46541/v1")
         self.assertEqual(payload["model_endpoint"]["url"], "http://10.10.20.142:46541/v1")
         self.assertEqual(payload["model_endpoint"]["model_name"], "/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct")
+
+    def test_run_discovers_verl_llm_server_client_endpoint(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=client,
+            server_manager=FakeLLMServerClient(["10.0.2.100:38285"]),
+            default_model_endpoint="https://openrouter.ai/api/v1",
+        )
+
+        asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        payload = json.loads(client.last_request.payload.decode("utf-8"))
+        self.assertEqual(client.last_request.model_endpoint, "http://10.0.2.100:38285/v1")
+        self.assertEqual(payload["model_endpoint"]["url"], "http://10.0.2.100:38285/v1")
 
     def test_run_keeps_explicit_model_endpoint_override(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
