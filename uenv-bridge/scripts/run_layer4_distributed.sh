@@ -44,9 +44,31 @@ Common environment overrides:
   CONTAINER_LOG_ROOT            Container directory for run logs. Default: /uenv/uenv-bridge/temp/logs
 
 Example:
-  SERVER_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088 \
-  IMAGE=localhost/uenv-bridge-verl:layer4-build \
-  ./scripts/run_layer4_distributed_smoke.sh
+
+最小可运行配置：
+  TRAINING_STEPS=10 \
+  PPO_MINI_BATCH_SIZE=4 \
+  PPO_MICRO_BATCH_SIZE_PER_GPU=1 \
+  ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1 \
+  REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1 \
+  TRAIN_BATCH_SIZE=4 \
+  TEST_FREQ=-1 \
+  PODMAN_GPU_ARGS="nvidia.com/gpu=2,5,6,7" \
+  CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3 \
+  NGPUS_PER_NODE=4 \
+  ./scripts/run_layer4_distributed.sh
+
+  TRAINING_STEPS=10 \
+  PPO_MINI_BATCH_SIZE=4 \
+  PPO_MICRO_BATCH_SIZE_PER_GPU=1 \
+  ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1 \
+  REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1 \
+  TRAIN_BATCH_SIZE=4 \
+  TEST_FREQ=-1 \
+  PODMAN_GPU_ARGS="nvidia.com/gpu=2,5,6,7" \
+  CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3 \
+  NGPUS_PER_NODE=4 \
+  ./scripts/run_layer4_distributed.sh
 EOF
 }
 
@@ -81,6 +103,8 @@ DATA_SAMPLE_OFFSET=${DATA_SAMPLE_OFFSET:-0}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-64}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}
+ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-4}
+REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 ROLLOUT_N=${ROLLOUT_N:-5}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
@@ -93,11 +117,13 @@ INFER_BACKEND=${INFER_BACKEND:-vllm}
 # VeRL rollout/runtime 资源参数。
 ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
-ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.4}
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.9}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-"7"}
+PODMAN_GPU_ARGS=${PODMAN_GPU_ARGS:-nvidia.com/gpu=all}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-$((NGPUS_PER_NODE * 4))}
+RAY_NOSET_CUDA_VISIBLE_DEVICES=${RAY_NOSET_CUDA_VISIBLE_DEVICES:-$([ "${NGPUS_PER_NODE}" -gt 1 ] && printf 1 || printf 0)}
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
@@ -125,6 +151,42 @@ AGENT_LOOP_RESULT_RECORD_PATH=${AGENT_LOOP_RESULT_RECORD_PATH:-${CONTAINER_SERVI
 AGENT_LOOP_REQUEST_RECORD_PATH=${AGENT_LOOP_REQUEST_RECORD_PATH:-${CONTAINER_SERVICE_DIR}/agent-loop-requests.jsonl}
 
 mkdir -p "${DATA_DIR}" "${LOG_DIR}" "${SERVICE_DIR}"
+
+build_podman_gpu_args() {
+  local value="$1"
+  if [ -z "${value}" ]; then
+    printf '%s\n' "--device nvidia.com/gpu=all"
+    return 0
+  fi
+
+  case "${value}" in
+    --device*|--gpus*)
+      printf '%s\n' "${value}"
+      return 0
+      ;;
+    all|nvidia.com/gpu=all)
+      printf '%s\n' "--device nvidia.com/gpu=all"
+      return 0
+      ;;
+    nvidia.com/gpu=*)
+      value="${value#nvidia.com/gpu=}"
+      ;;
+  esac
+
+  local output=""
+  local old_ifs="${IFS}"
+  IFS=','
+  for gpu_id in ${value}; do
+    gpu_id="$(printf '%s' "${gpu_id}" | tr -d '[:space:]')"
+    if [ -n "${gpu_id}" ]; then
+      output="${output} --device nvidia.com/gpu=${gpu_id}"
+    fi
+  done
+  IFS="${old_ifs}"
+  printf '%s\n' "${output# }"
+}
+
+PODMAN_GPU_RUN_ARGS=$(build_podman_gpu_args "${PODMAN_GPU_ARGS}")
 
 split_host() {
   local addr="$1"
@@ -195,7 +257,7 @@ run_verl_training() {
   fi
   podman run --rm \
     ${PODMAN_NETWORK_ARGS} \
-    --device nvidia.com/gpu=all \
+    ${PODMAN_GPU_RUN_ARGS} \
     --shm-size=64g \
     --entrypoint bash \
     --pids-limit=65536 \
@@ -215,6 +277,7 @@ export VLLM_NO_USAGE_STATS=1
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export RAY_DEDUP_LOGS=0
+export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=${RAY_NOSET_CUDA_VISIBLE_DEVICES}
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
@@ -271,7 +334,7 @@ python3 -m verl.trainer.main_ppo \\
   actor_rollout_ref.rollout.agent.num_workers=${AGENT_NUM_WORKERS} \\
   actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent \\
   actor_rollout_ref.rollout.agent.agent_loop_config_path=/uenv/uenv-bridge/configs/uenv-agent-loop.yaml \\
-  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \\
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
   actor_rollout_ref.rollout.enforce_eager=True \\
   actor_rollout_ref.rollout.enable_chunked_prefill=False \\
   actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
@@ -279,7 +342,7 @@ python3 -m verl.trainer.main_ppo \\
   actor_rollout_ref.rollout.max_num_seqs=4 \\
   actor_rollout_ref.rollout.max_num_batched_tokens=512 \\
   actor_rollout_ref.rollout.calculate_log_probs=True \\
-  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \\
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
   actor_rollout_ref.ref.fsdp_config.param_offload=False \\
   actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \\
   actor_rollout_ref.ref.use_torch_compile=False \\
