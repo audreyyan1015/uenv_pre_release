@@ -80,6 +80,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             current_load: 0,  // 初始负载为 0
             resource: req.resource.clone(),
             draining: false,
+            last_report_at: None,
         };
 
         // 注册到调度器（内部会先删除同 ID 的旧记录，再插入新记录，实现幂等注册）
@@ -239,6 +240,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         // 只有非重复的结果才进行处理；重复结果直接返回 duplicate=true 告知 worker
         if !duplicate {
             if let Some(result) = req.result {
+                self.state.scheduler.write().touch_worker_report(&req.worker_id);
                 // 从 pending_results 中取出并删除对应条目（同时获得 channel 的发送端）
                 if let Some((_, pending)) = self
                     .state
@@ -294,7 +296,13 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 supported_env_types: w.supported_env_types,
                 load: w.current_load as i32,
                 max_load: w.capacity as i32,
-                status: if w.draining { "draining" } else { "ready" }.to_string(),
+                status: if w.draining {
+                    "draining"
+                } else if w.degraded {
+                    "degraded"
+                } else {
+                    "ready"
+                }.to_string(),
                 endpoint: w.endpoint,
             })
             .collect();

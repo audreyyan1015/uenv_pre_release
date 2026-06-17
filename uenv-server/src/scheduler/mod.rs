@@ -27,6 +27,8 @@ pub struct WorkerSnapshot {
     pub capacity: u32,
     pub current_load: u32,
     pub draining: bool,
+    pub last_report_at: Option<std::time::Instant>,
+    pub degraded: bool,
 }
 
 /// 轮询调度器。
@@ -59,8 +61,16 @@ impl RoundRobinScheduler {
                 capacity: w.capacity,
                 current_load: w.current_load,
                 draining: w.draining,
+                last_report_at: w.last_report_at,
+                degraded: is_worker_degraded(w),
             })
             .collect()
+    }
+
+    pub fn touch_worker_report(&mut self, worker_id: &str) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.last_report_at = Some(std::time::Instant::now());
+        }
     }
 
     /// 返回当前已注册的 worker 数量。
@@ -106,6 +116,11 @@ impl RoundRobinScheduler {
             if max_load > 0 {
                 w.capacity = max_load;
             }
+            // idle heartbeat（load=0）说明 Worker 健康且无 in-flight，
+            // 刷新 last_report_at 避免长时间空闲后再次调度被误判为 degraded
+            if load == 0 {
+                w.last_report_at = Some(std::time::Instant::now());
+            }
         }
     }
 }
@@ -117,6 +132,18 @@ impl RoundRobinScheduler {
 /// - 若 worker 未上报资源（resource 为 None），但请求有非零要求，则不匹配。
 /// - cpu_cores / memory_mb / gpu_count 为 0 表示该维度无要求。
 /// - gpu_type 为空字符串表示不限型号。
+const WORKER_DEGRADED_THRESHOLD_SECS: u64 = 5 * 60;
+
+fn is_worker_degraded(w: &WorkerInfo) -> bool {
+    if w.current_load == 0 {
+        return false;
+    }
+    match w.last_report_at {
+        None => false,
+        Some(t) => t.elapsed().as_secs() > WORKER_DEGRADED_THRESHOLD_SECS,
+    }
+}
+
 fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> bool {
     let Some(req) = req.as_ref() else { return true; };
     if req.cpu_cores == 0 && req.memory_mb == 0 && req.gpu_count == 0 && req.gpu_type.is_empty() {
@@ -162,6 +189,7 @@ impl Scheduler for RoundRobinScheduler {
             .iter()
             .filter(|w| {
                 !w.draining
+                    && !is_worker_degraded(w)
                     && w.supported_env_types.contains(&request.env_type)
                     && w.current_load < w.capacity
                     && resource_fits(&w.resource, &request.resource_spec)

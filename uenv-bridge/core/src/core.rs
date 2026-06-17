@@ -161,7 +161,10 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
         episode_id: sample.request_id,
         env_type: sample.env_type,
         payload: serde_json::to_vec(&worker_payload).unwrap_or_default(),
-        correlation_id: json_string(&payload, "correlation_id").unwrap_or_default(),
+        // 若上层未传 correlation_id，用 batch_id 填充，方便 Server 侧日志关联
+        correlation_id: json_string(&payload, "correlation_id")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| sample.batch_id.clone()),
         model_endpoint,
         max_steps: json_i32(episode_cfg, "max_steps").unwrap_or(0),
         seed: json_i32(episode_cfg, "seed"),

@@ -4,6 +4,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::Stream;
 use tonic::{Request, Response, Status};
@@ -18,6 +19,8 @@ type ResultStream = Pin<Box<dyn Stream<Item = Result<pb::SampleResult, Status>> 
 
 pub struct AdapterCoreServiceImpl<S> {
     core: Arc<AdapterCore<S>>,
+    pending_batches: Arc<AtomicUsize>,
+    max_pending_batches: usize,
 }
 
 impl<S> AdapterCoreServiceImpl<S>
@@ -25,8 +28,14 @@ where
     S: EpisodeService,
 {
     pub fn new(core: AdapterCore<S>) -> Self {
+        let max_pending = std::env::var("UENV_MAX_PENDING_BATCHES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64);
         Self {
             core: Arc::new(core),
+            pending_batches: Arc::new(AtomicUsize::new(0)),
+            max_pending_batches: max_pending,
         }
     }
 }
@@ -42,11 +51,21 @@ where
         &self,
         request: Request<pb::ExecuteBatchRequest>,
     ) -> Result<Response<pb::ExecuteBatchResponse>, Status> {
+        // 背压：pending batch 数超限时快速失败
+        let pending = self.pending_batches.fetch_add(1, Ordering::Relaxed) + 1;
+        let pending_guard = PendingBatchGuard(Arc::clone(&self.pending_batches));
+        if pending > self.max_pending_batches {
+            tracing::warn!(pending, max = self.max_pending_batches, "execute_batch_rejected_backpressure");
+            return Err(Status::resource_exhausted(format!(
+                "too many pending batches: {pending}/{}", self.max_pending_batches
+            )));
+        }
         let request = protocol::ExecuteBatchRequest::try_from(request.into_inner())?;
         info!(
             request_id = %request.request_id,
             batch_id = %request.batch_id,
             sample_count = request.samples.len(),
+            pending_batches = pending,
             "execute_batch_received"
         );
 
@@ -59,6 +78,7 @@ where
                 Status::internal(err.to_string())
             })?;
 
+        drop(pending_guard);
         info!(
             request_id = %response.request_id,
             batch_id = %response.batch_id,
@@ -72,6 +92,15 @@ where
         &self,
         request: Request<tonic::Streaming<pb::SampleEnvelope>>,
     ) -> Result<Response<Self::ExecuteBatchStreamStream>, Status> {
+        // 背压：pending batch 数超限时快速失败
+        let pending = self.pending_batches.fetch_add(1, Ordering::Relaxed) + 1;
+        let pending_guard = PendingBatchGuard(Arc::clone(&self.pending_batches));
+        if pending > self.max_pending_batches {
+            tracing::warn!(pending, max = self.max_pending_batches, "execute_batch_stream_rejected_backpressure");
+            return Err(Status::resource_exhausted(format!(
+                "too many pending batches: {pending}/{}", self.max_pending_batches
+            )));
+        }
         let core = Arc::clone(&self.core);
         let mut stream = request.into_inner();
 
@@ -103,6 +132,7 @@ where
                 Status::internal(err.to_string())
             })?;
 
+        drop(pending_guard);
         info!(
             batch_id = %batch_id,
             result_count = response.results.len(),
@@ -122,5 +152,13 @@ where
             ok: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
+    }
+}
+
+/// RAII guard: 构造时已计数，Drop 时自动递减 pending_batches。
+struct PendingBatchGuard(Arc<AtomicUsize>);
+impl Drop for PendingBatchGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }

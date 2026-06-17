@@ -94,10 +94,18 @@ impl UEnvEpisodeService {
                     attempt_id,
                     worker_id: assignment.worker_id.clone(),
                     started_at: Instant::now(),
+                    batch_id: req.correlation_id.clone(),
                 },
             );
             self.state.scheduler.write().increment_load(&assignment.worker_id);
 
+            tracing::info!(
+                episode_id = %episode_id,
+                batch_id = %req.correlation_id,
+                worker_id = %assignment.worker_id,
+                attempt_id = attempt_id,
+                "episode_dispatching"
+            );
             req.dispatch_lease_id = self.state.next_lease_id();
             req.scheduler_epoch = self.state.epoch();
             // lease 有效期取剩余时间，至少 1 秒
@@ -115,7 +123,10 @@ impl UEnvEpisodeService {
             });
 
             // clone req：dispatch 会消耗所有权，外层循环重试时还需要 req
-            let dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone()).await;
+            let dispatch_timeout = Duration::from_secs(
+                deadline.saturating_duration_since(Instant::now()).as_secs().saturating_add(60),
+            );
+            let dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone(), dispatch_timeout).await;
             self.state.scheduler.write().decrement_load(&assignment.worker_id);
             self.state.active_episodes.remove(&episode_id);
 
@@ -137,6 +148,12 @@ impl UEnvEpisodeService {
                     {
                         Ok(Ok(result)) => {
                             // 成功：广播并返回
+                            tracing::info!(
+                                episode_id = %episode_id,
+                                batch_id = %req.correlation_id,
+                                worker_id = %assignment.worker_id,
+                                "episode_completed"
+                            );
                             let _ = self.state.episode_broadcast.send(result.clone());
                             return Ok(result);
                         }
@@ -176,6 +193,20 @@ impl UEnvEpisodeService {
         &self,
         requests: Vec<EpisodeRequest>,
     ) -> Vec<anyhow::Result<EpisodeResult>> {
+        // 每次 batch 提交时顺带检查 active_episodes 中的老龄 episode 并打 warn
+        let stale_threshold = Duration::from_secs(600);  // 10 分钟未完成视为异常
+        for entry in self.state.active_episodes.iter() {
+            let ep = entry.value();
+            if ep.started_at.elapsed() > stale_threshold {
+                tracing::warn!(
+                    episode_id = %ep.episode_id,
+                    batch_id = %ep.batch_id,
+                    worker_id = %ep.worker_id,
+                    elapsed_secs = ep.started_at.elapsed().as_secs(),
+                    "episode_stale_warning"
+                );
+            }
+        }
         let state = Arc::clone(&self.state);
         let futures = requests.into_iter().map(|req| {
             let state = Arc::clone(&state);
@@ -229,22 +260,33 @@ impl UEnvEpisodeService {
     }
 }
 
-async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::Result<()> {
+async fn dispatch_to_worker(
+    endpoint: &str,
+    request: EpisodeRequest,
+    timeout: Duration,
+) -> anyhow::Result<()> {
     let mut client =
         WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
     let dispatch = DispatchEpisodeRequest {
         episode: Some(request),
     };
     let mut stream = client.dispatch_episode(dispatch).await?.into_inner();
-    while let Some(report) = stream.message().await? {
-        info!(
-            episode_id = %report.episode_id,
-            attempt_id = report.attempt_id,
-            phase = %report.phase,
-            current_step = report.current_step,
-            "stream_report"
-        );
-    }
+    let read_stream = async move {
+        while let Some(report) = stream.message().await? {
+            info!(
+                episode_id = %report.episode_id,
+                attempt_id = report.attempt_id,
+                phase = %report.phase,
+                current_step = report.current_step,
+                "stream_report"
+            );
+        }
+        Ok::<(), tonic::Status>(())
+    };
+    tokio::time::timeout(timeout, read_stream)
+        .await
+        .map_err(|_| anyhow::anyhow!("dispatch stream timeout after {:?}", timeout))?
+        .map_err(|e| anyhow::anyhow!("dispatch stream error: {e}"))?;
     Ok(())
 }
 
@@ -274,7 +316,13 @@ impl AdminService for AdminServiceImpl {
                 supported_env_types: w.supported_env_types,
                 load: w.current_load as i32,
                 max_load: w.capacity as i32,
-                status: if w.draining { "draining" } else { "ready" }.to_string(),
+                status: if w.draining {
+                    "draining"
+                } else if w.degraded {
+                    "degraded"
+                } else {
+                    "ready"
+                }.to_string(),
             })
             .collect();
         Ok(Response::new(ListWorkersResponse { workers }))

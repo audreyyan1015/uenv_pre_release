@@ -25,6 +25,8 @@ pub struct ActiveEpisode {
     pub attempt_id: u32,
     pub worker_id: String,
     pub started_at: Instant,
+    /// correlation_id 传入时通常等于 batch_id，用于跨层日志关联
+    pub batch_id: String,
 }
 
 pub struct PendingResult {

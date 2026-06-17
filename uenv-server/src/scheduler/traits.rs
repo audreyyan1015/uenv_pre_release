@@ -63,6 +63,9 @@ pub struct WorkerInfo {
     pub resource: Option<ResourceSpec>,
     /// 是否正在 drain：true 时不再接受新 episode，等待当前任务执行完毕
     pub draining: bool,
+    /// 上次成功上报 report_result 的时刻（None 表示从未上报）。
+    /// 用于检测 Worker 假活：load > 0 但长时间无上报时跳过调度。
+    pub last_report_at: Option<std::time::Instant>,
 }
 
 /// WorkerAssignment：调度结果，表示一个 episode 应该分发给哪个 worker。
