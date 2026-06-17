@@ -502,6 +502,38 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(client.last_request.model_endpoint, "http://10.0.2.100:38285/v1")
         self.assertEqual(payload["model_endpoint"]["url"], "http://10.0.2.100:38285/v1")
 
+    def test_run_uses_model_gateway_for_multiple_verl_runtime_endpoints(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=client,
+            server_manager=FakeServerManager(["10.10.20.142:40203", "10.10.20.142:39755"]),
+            model_gateway_enabled=True,
+            model_gateway_bind_host="127.0.0.1",
+            model_gateway_port=0,
+            model_gateway_public_url="http://10.10.20.142:18080/v1",
+        )
+        try:
+            asyncio.run(
+                loop.run(
+                    {},
+                    raw_prompt=[{"role": "user", "content": "2+2?"}],
+                    data_source="gsm8k",
+                    reward_model={"ground_truth": "4"},
+                )
+            )
+
+            payload = json.loads(client.last_request.payload.decode("utf-8"))
+            self.assertEqual(client.last_request.model_endpoint, "http://10.10.20.142:18080/v1")
+            self.assertEqual(payload["model_endpoint"]["url"], "http://10.10.20.142:18080/v1")
+            self.assertEqual(
+                payload["metadata"]["model_gateway_upstreams"],
+                ["http://10.10.20.142:40203/v1", "http://10.10.20.142:39755/v1"],
+            )
+            self.assertEqual(loop.model_gateway.upstreams, ["http://10.10.20.142:40203/v1", "http://10.10.20.142:39755/v1"])
+        finally:
+            loop.close()
+
     def test_run_keeps_explicit_model_endpoint_override(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
         loop = UEnvAgentLoop(

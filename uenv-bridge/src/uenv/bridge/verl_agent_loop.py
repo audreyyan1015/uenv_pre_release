@@ -11,6 +11,7 @@ from typing import Any
 
 from .agent_loop_clients import build_agent_loop_episode_client
 from .clients import EpisodeClient
+from .model_gateway import ModelGateway, ModelGatewayConfig, normalize_openai_endpoint
 from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec, request_to_jsonable
 from .utils import prompt_text, to_jsonable
 
@@ -148,6 +149,11 @@ class UEnvAgentLoopConfig:
     default_max_turns: int = 1
     seed_base: int = 42
     request_record_path: str = ""
+    model_gateway_enabled: bool = False
+    model_gateway_bind_host: str = "0.0.0.0"
+    model_gateway_port: int = 18080
+    model_gateway_public_url: str = ""
+    model_gateway_log_path: str = ""
 
 
 @register("uenv_agent")
@@ -180,6 +186,11 @@ class UEnvAgentLoop(AgentLoopBase):
         default_max_turns: int = 1,
         seed_base: int = 42,
         request_record_path: str = "",
+        model_gateway_enabled: bool | None = None,
+        model_gateway_bind_host: str = "0.0.0.0",
+        model_gateway_port: int | None = None,
+        model_gateway_public_url: str = "",
+        model_gateway_log_path: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -200,6 +211,21 @@ class UEnvAgentLoop(AgentLoopBase):
             default_max_turns=_int_value(default_max_turns, 1),
             seed_base=_int_value(seed_base, 42),
             request_record_path=_optional_string(request_record_path) or "",
+            model_gateway_enabled=_bool_value(model_gateway_enabled, False),
+            model_gateway_bind_host=_optional_string(model_gateway_bind_host) or "0.0.0.0",
+            model_gateway_port=_int_value(model_gateway_port, 18080),
+            model_gateway_public_url=_optional_string(model_gateway_public_url) or "",
+            model_gateway_log_path=_optional_string(model_gateway_log_path) or "",
+        )
+        self.model_gateway = ModelGateway(
+            ModelGatewayConfig(
+                enabled=self.config_for_uenv.model_gateway_enabled,
+                bind_host=self.config_for_uenv.model_gateway_bind_host,
+                port=self.config_for_uenv.model_gateway_port,
+                public_url=self.config_for_uenv.model_gateway_public_url,
+                request_timeout_seconds=self.config_for_uenv.timeout_seconds,
+                log_path=self.config_for_uenv.model_gateway_log_path,
+            )
         )
         self.client = client or build_agent_loop_episode_client(
             mode=self.config_for_uenv.client_mode,
@@ -211,6 +237,12 @@ class UEnvAgentLoop(AgentLoopBase):
             fake_reward=self.config_for_uenv.fake_reward,
             fake_response_text=self.config_for_uenv.fake_response_text,
         )
+
+    def close(self) -> None:
+        self.model_gateway.stop()
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
@@ -225,6 +257,7 @@ class UEnvAgentLoop(AgentLoopBase):
             sample_kwargs=kwargs,
             model_endpoint_override=runtime_model[0],
             model_name_override=runtime_model[1],
+            model_upstream_overrides=runtime_model[2],
         )
 
         metrics: dict[str, float] = {}
@@ -281,6 +314,7 @@ class UEnvAgentLoop(AgentLoopBase):
         sample_kwargs: dict[str, Any],
         model_endpoint_override: str | None = None,
         model_name_override: str | None = None,
+        model_upstream_overrides: list[str] | None = None,
     ) -> EpisodeRequest:
         request_id = str(uuid.uuid4())
         env_type = self._env_type(sample_kwargs)
@@ -306,6 +340,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "extra_info": self._jsonable(sample_kwargs.get("extra_info") or {}),
             "rollout_n": self._value_from_extra_info(sample_kwargs, "rollout_n", None),
             "global_steps": self._value_from_extra_info(sample_kwargs, "global_steps", None),
+            "model_gateway_upstreams": model_upstream_overrides or [],
             "required_result_fields": [
                 "response_ids",
                 "response_mask",
@@ -529,19 +564,30 @@ class UEnvAgentLoop(AgentLoopBase):
         self,
         sampling_params: dict[str, Any],
         sample_kwargs: dict[str, Any],
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, list[str]]:
         explicit_endpoint = (
             self._value_from_extra_info(sample_kwargs, "model_endpoint", None)
             or sampling_params.get("model_endpoint")
         )
         if explicit_endpoint:
-            return str(explicit_endpoint), self._model_name(sample_kwargs, sampling_params)
+            return normalize_openai_endpoint(str(explicit_endpoint)), self._model_name(sample_kwargs, sampling_params), []
 
+        endpoints = []
+        seen = set()
         for candidate in await self._runtime_model_endpoint_candidates():
             endpoint = self._normalize_openai_endpoint(candidate)
-            if endpoint:
-                return endpoint, self._runtime_model_name(sample_kwargs, sampling_params)
-        return None, None
+            if endpoint and endpoint not in seen:
+                seen.add(endpoint)
+                endpoints.append(endpoint)
+        if not endpoints:
+            return None, None, []
+        public_endpoint = self._model_gateway_endpoint(endpoints)
+        return public_endpoint, self._runtime_model_name(sample_kwargs, sampling_params), endpoints
+
+    def _model_gateway_endpoint(self, upstreams: list[str]) -> str:
+        if not self.config_for_uenv.model_gateway_enabled:
+            return upstreams[0]
+        return self.model_gateway.start(upstreams)
 
     def _runtime_model_name(
         self,
