@@ -36,7 +36,7 @@ Common environment overrides:
   ROLLOUT_TP                    Default: 1
   DATA_MAX_RESPONSE_LENGTH      Default: 1024
   UENV_AGENT_LOOP_BATCH         Batch episodes before Python -> Rust core RPC. Default: 1
-  UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size. Default: 1
+  UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
   UENV_MODEL_GATEWAY_ENABLED    Start adapter-side model gateway and send its URL to Worker. Default: 0
   UENV_MODEL_GATEWAY_PORT       Adapter-side model gateway port. Default: 18080
@@ -61,12 +61,10 @@ Example:
   NGPUS_PER_NODE=4 \
   ./scripts/run_layer4_distributed.sh
 
-加入模型网关：
+加入“中转站”后的最小配置：
   UENV_MODEL_GATEWAY_ENABLED=1 \
   UENV_MODEL_GATEWAY_PORT=18088 \
   UENV_MODEL_GATEWAY_PUBLIC_URL=http://10.10.20.142:18088/v1 \
-  ./scripts/run_layer4_distributed.sh
-
   TRAINING_STEPS=10 \
   PPO_MINI_BATCH_SIZE=4 \
   PPO_MICRO_BATCH_SIZE_PER_GPU=1 \
@@ -77,6 +75,18 @@ Example:
   PODMAN_GPU_ARGS="nvidia.com/gpu=2,5,6,7" \
   CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3 \
   NGPUS_PER_NODE=4 \
+  ./scripts/run_layer4_distributed.sh
+
+完整运行配置：
+  UENV_MODEL_GATEWAY_ENABLED=1 \
+  UENV_MODEL_GATEWAY_PORT=18088 \
+  UENV_MODEL_GATEWAY_PUBLIC_URL=http://10.10.20.142:18088/v1 \
+  TRAIN_BATCH_SIZE=32 \
+  PPO_MINI_BATCH_SIZE=32 \
+  TEST_FREQ=-1 \
+  PODMAN_GPU_ARGS="nvidia.com/gpu=all" \
+  CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3,4,5,6,7,8 \
+  NGPUS_PER_NODE=8 \
   ./scripts/run_layer4_distributed.sh
 EOF
 }
@@ -126,7 +136,7 @@ INFER_BACKEND=${INFER_BACKEND:-vllm}
 # VeRL rollout/runtime 资源参数。
 ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
-ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.9}
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.8}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-"7"}
 PODMAN_GPU_ARGS=${PODMAN_GPU_ARGS:-nvidia.com/gpu=all}
@@ -137,7 +147,7 @@ PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
 UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH:-1}
-UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-1}
+UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
 UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
 UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
 UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-1800}
@@ -269,6 +279,8 @@ run_verl_training() {
   else
     echo "Running GRPO with UEnv pre-rollout AgentLoop; log: ${LOG_FILE}"
   fi
+  echo "AgentLoop request records: ${SERVICE_DIR}/agent-loop-requests.jsonl"
+  echo "AgentLoop result records: ${SERVICE_DIR}/agent-loop-results.jsonl"
   podman run --rm \
     ${PODMAN_NETWORK_ARGS} \
     ${PODMAN_GPU_RUN_ARGS} \
@@ -386,6 +398,51 @@ python3 -m verl.trainer.main_ppo \\
   +ray_kwargs.ray_init.include_dashboard=False" 2>&1 | tee "${LOG_FILE}"
 }
 
+summarize_agent_loop_records() {
+  python3 - "${SERVICE_DIR}" <<'PY'
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+service_dir = Path(sys.argv[1])
+for filename in ("agent-loop-requests.jsonl", "agent-loop-results.jsonl", "model-gateway.jsonl"):
+    path = service_dir / filename
+    print(f"{filename}: {path}")
+    if not path.exists():
+        print("  missing")
+        continue
+
+    records = []
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+
+    phases = Counter(record.get("phase") for record in records)
+    batch_ids = Counter(record.get("batch_id") for record in records)
+    status_codes = Counter(record.get("status_code") for record in records if "status_code" in record)
+    upstreams = Counter(record.get("upstream_url") for record in records if "upstream_url" in record)
+    sample_indexes = [
+        record.get("sample_index")
+        for record in records
+        if isinstance(record.get("sample_index"), int)
+    ]
+    print(f"  lines: {len(records)}")
+    if phases:
+        print(f"  phases: {dict(phases)}")
+    if batch_ids:
+        print(f"  batch_ids: {dict(batch_ids)}")
+    if status_codes:
+        print(f"  status_codes: {dict(status_codes)}")
+    if upstreams:
+        print(f"  upstreams: {dict(upstreams)}")
+    if sample_indexes:
+        print(f"  sample_index_range: {min(sample_indexes)}..{max(sample_indexes)}")
+PY
+}
+
 wait_for_addr "server-side adapter core" "${SERVER_ADAPTER_CORE_ENDPOINT}" 20
 ensure_policy_model_exists
 
@@ -403,3 +460,4 @@ fi
 echo "Distributed Layer 4 smoke test completed."
 echo "VeRL log: ${LOG_FILE}"
 grep -E "Training Progress: 100%|critic/score/mean|critic/rewards/mean" "${LOG_FILE}" | tail -5 || true
+summarize_agent_loop_records
