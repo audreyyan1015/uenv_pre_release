@@ -13,10 +13,11 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::swe::artifact::{EpisodeArtifact, TestResults};
-use crate::swe::command_policy::CommandPolicyConfig;
+use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for;
 use crate::swe::harness::{build_test_command, ContainerRuntime, EpisodeOutcome};
+use crate::swe::image_cache::ImageCacheFactory;
 use crate::swe::resettable::PodmanResettableInstance;
 use crate::swe::spec::{build_reset_observation, ResetObservation, Workspace};
 
@@ -70,9 +71,16 @@ impl SweSession {
         let workspace = Workspace::from_instance_spec(&instance_spec, TESTBED);
         let observation = build_reset_observation(&workspace, &task_spec);
 
-        // 1) provision：docker/podman run -d <image> sleep infinity
+        // 0) M4：确保镜像本地可用（inspect 命中即跳过；miss 时按配置 pull）。
+        let image_state = ImageCacheFactory::from_env(runtime).ensure_image(&image)?;
+
+        // 1) provision：按 CommandPolicy 生成 run flags（cap_drop / network / 可选 seccomp，
+        //    M0-1 / M2-4），再 `run -d <flags> <image> sleep infinity`。
+        let seccomp = policy.resolve_seccomp_file();
+        let policy_mode = policy.mode;
+        let run_args = build_swe_run_args(&container, &image, policy_mode, Some(TESTBED), seccomp.as_deref());
         let run_out = Command::new(runtime.cli())
-            .args(["run", "-d", "--name", &container, &image, "sleep", "infinity"])
+            .args(&run_args)
             .output()
             .map_err(|e| format!("{} run spawn failed: {e}", runtime.cli()))?;
         if !run_out.status.success() {
@@ -106,6 +114,9 @@ impl SweSession {
             instance_id = %instance.instance_id,
             container = %session.container,
             image = %image,
+            image_state = ?image_state,
+            seccomp = %seccomp.as_deref().unwrap_or("default"),
+            network = %if policy_mode == CommandPolicy::FullShell { "bridge" } else { "none" },
             issue_chars = observation.issue_text.len(),
             msg = "swe_session_provisioned"
         );
@@ -203,6 +214,20 @@ impl SweSession {
     /// Agent 不接触/篡改测试文件（对齐官方 harness：model patch → test patch → run）。
     pub fn evaluate(&self) -> Result<EpisodeOutcome, DynErr> {
         let start = Instant::now();
+        // M1-3：可选 post-patch 依赖安装（实例 `install_cmd` 或全局 UENV_SWE_INSTALL_CMD）。
+        // 顺序对齐官方 harness：源码 patch → install → test patch → run。安装失败仅告警
+        // （不掩盖后续测试失败的真实根因）。
+        if let Some(cmd) = self.install_command() {
+            let r = self.exec_raw(&cmd)?;
+            if r.exit_code != 0 {
+                tracing::warn!(
+                    episode_id = %self.episode_id,
+                    instance_id = %self.instance.instance_id,
+                    exit_code = r.exit_code,
+                    msg = "swe_install_step_nonzero"
+                );
+            }
+        }
         // 评测前应用 test_patch。
         self.apply_patch(&self.instance.test_patch, "test")?;
 
@@ -237,6 +262,20 @@ impl SweSession {
         })
     }
 
+    /// post-patch 安装命令（M1-3）：实例 `install_cmd` 优先，否则全局
+    /// `UENV_SWE_INSTALL_CMD`；命中则包到 conda `testbed` + `cd /testbed`。
+    fn install_command(&self) -> Option<String> {
+        let raw = self
+            .instance
+            .install_cmd
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("UENV_SWE_INSTALL_CMD").ok().filter(|s| !s.trim().is_empty()))?;
+        Some(format!(
+            "source /opt/miniconda3/bin/activate testbed 2>/dev/null; cd {TESTBED} && {raw}"
+        ))
+    }
+
     fn cp_into(&self, local: &str, dest: &str) -> Result<(), DynErr> {
         let out = Command::new(self.runtime.cli())
             .args(["cp", local, &format!("{}:{}", self.container, dest)])
@@ -258,6 +297,45 @@ impl Drop for SweSession {
             .args(["rm", "-f", &self.container])
             .output();
     }
+}
+
+/// 构造 SWE 容器 `run` 的 argv（不含 cli 名），按 `CommandPolicy` 注入安全 flags。
+///
+/// 纯函数（无副作用），便于在无 docker/podman 环境单测 flag 映射（与 `PodmanBackend::
+/// build_run_args` 语义一致，但服务 SWE docker 运行时；seccomp 经 `seccomp_file` 显式传入）。
+/// - `RestrictedShell`：`--cap-drop=ALL --security-opt no-new-privileges --network=none`
+/// - `FullShell`：`--network=bridge`（对标 SWE-bench harness）
+pub fn build_swe_run_args(
+    container: &str,
+    image: &str,
+    mode: CommandPolicy,
+    workdir: Option<&str>,
+    seccomp_file: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), container.to_string()];
+    match mode {
+        CommandPolicy::RestrictedShell => {
+            args.push("--cap-drop=ALL".to_string());
+            args.push("--security-opt".to_string());
+            args.push("no-new-privileges".to_string());
+            args.push("--network=none".to_string());
+        }
+        CommandPolicy::FullShell => {
+            args.push("--network=bridge".to_string());
+        }
+    }
+    if let Some(file) = seccomp_file {
+        args.push("--security-opt".to_string());
+        args.push(format!("seccomp={file}"));
+    }
+    if let Some(w) = workdir {
+        args.push("-w".to_string());
+        args.push(w.to_string());
+    }
+    args.push(image.to_string());
+    args.push("sleep".to_string());
+    args.push("infinity".to_string());
+    args
 }
 
 fn host_tmp(label: &str) -> String {
@@ -289,5 +367,44 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restricted_run_args_drop_caps_and_isolate_network() {
+        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None);
+        assert_eq!(&a[..4], &["run", "-d", "--name", "c1"]);
+        assert!(a.contains(&"--cap-drop=ALL".to_string()));
+        assert!(a.contains(&"no-new-privileges".to_string()));
+        assert!(a.contains(&"--network=none".to_string()));
+        assert!(a.contains(&"-w".to_string()) && a.contains(&"/testbed".to_string()));
+        assert!(a.ends_with(&["img:latest".to_string(), "sleep".to_string(), "infinity".to_string()]));
+        // 未传 seccomp_file → 不注入 security-opt seccomp
+        assert!(!a.iter().any(|s| s.starts_with("seccomp=")));
+    }
+
+    #[test]
+    fn full_run_args_bridge_network_no_capdrop() {
+        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None);
+        assert!(a.contains(&"--network=bridge".to_string()));
+        assert!(!a.contains(&"--cap-drop=ALL".to_string()));
+        assert!(!a.contains(&"--network=none".to_string()));
+    }
+
+    #[test]
+    fn seccomp_file_injected_when_present() {
+        let a = build_swe_run_args(
+            "c3",
+            "img:latest",
+            CommandPolicy::FullShell,
+            None,
+            Some("/profiles/full.json"),
+        );
+        assert!(a.contains(&"--security-opt".to_string()));
+        assert!(a.contains(&"seccomp=/profiles/full.json".to_string()));
     }
 }

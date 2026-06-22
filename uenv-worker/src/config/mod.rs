@@ -29,6 +29,9 @@ pub struct WorkerConfig {
 pub struct SweSection {
     #[serde(default = "default_swe_variants")]
     pub variants: Vec<String>,
+    /// 启动预热的 instance_id 列表（M2-1 / M4-4：仅预热镜像缓存）。
+    #[serde(default)]
+    pub prewarm: Vec<String>,
 }
 
 fn default_swe_variants() -> Vec<String> {
@@ -39,6 +42,7 @@ impl Default for SweSection {
     fn default() -> Self {
         Self {
             variants: default_swe_variants(),
+            prewarm: Vec::new(),
         }
     }
 }
@@ -53,6 +57,9 @@ pub struct RuntimeGatewayConfig {
     /// 并发 session 上限。
     #[serde(default = "default_gateway_capacity")]
     pub capacity: u32,
+    /// 可选 `X-API-Key`（M5-5）：设置后所有非 health 路由强制校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 fn default_gateway_listen() -> String {
@@ -69,6 +76,7 @@ impl Default for RuntimeGatewayConfig {
             enabled: false,
             listen: default_gateway_listen(),
             capacity: default_gateway_capacity(),
+            api_key: None,
         }
     }
 }
@@ -347,6 +355,21 @@ impl WorkerConfig {
         if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_CAPACITY") {
             if let Ok(p) = v.parse::<u32>() {
                 self.runtime_gateway.capacity = p;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_API_KEY") {
+            if !v.trim().is_empty() {
+                self.runtime_gateway.api_key = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_PREWARM") {
+            let ids: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !ids.is_empty() {
+                self.swe.prewarm = ids;
             }
         }
         if let Ok(v) = std::env::var("UENV_SWE_VARIANTS") {

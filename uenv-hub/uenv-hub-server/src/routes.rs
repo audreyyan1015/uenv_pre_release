@@ -36,6 +36,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/envs/:env_type/versions/:version/yank", post(yank_version))
         .route("/envs/:env_type/resolve", get(resolve_version))
         .route("/search", get(search))
+        // SWE-bench instance catalog（M1-1 / M6-1）：worker 按变体拉取实例真值。
+        .route("/swe/:variant/instances", get(swe_instances))
         // templates
         .route("/templates", get(list_templates))
         .route("/templates/:name/archive", get(template_archive))
@@ -255,6 +257,47 @@ async fn search(
     // Search results are intentionally not cached (per design doc §8).
     let resp = state.store.search(&q).await?;
     Ok(Json(resp))
+}
+
+// ---------------------------------------------------------------------------
+// SWE-bench instance catalog (M1-1 / M6-1)
+// ---------------------------------------------------------------------------
+
+/// Serve the SWE-bench instance catalog for a benchmark variant.
+///
+/// Reads `${UENV_HUB_SWE_CATALOG_DIR:-config/swe}/<variant>.json` (the same flat
+/// `instance_id -> row` map the worker's `InstanceStore::from_json` expects) and
+/// returns it verbatim. Decouples the data plane (catalog files / object store)
+/// from the control plane (env registry DB); worker pulls here with optional token.
+async fn swe_instances(
+    State(_state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path(variant): Path<String>,
+) -> ApiResult<Response> {
+    let variant = variant.to_ascii_lowercase();
+    if !matches!(variant.as_str(), "verified" | "lite" | "pro") {
+        return Err(crate::errors::ApiError::not_found(format!(
+            "unknown swe benchmark variant `{variant}` (expected verified|lite|pro)"
+        )));
+    }
+    let dir = std::env::var("UENV_HUB_SWE_CATALOG_DIR").unwrap_or_else(|_| "config/swe".to_string());
+    let path = std::path::Path::new(&dir).join(format!("{variant}.json"));
+    let body = std::fs::read_to_string(&path).map_err(|_| {
+        crate::errors::ApiError::not_found(format!(
+            "swe catalog for variant `{variant}` not seeded (looked in {})",
+            path.display()
+        ))
+    })?;
+    // Validate it parses as JSON so we never serve a corrupt catalog.
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        crate::errors::ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            uenv_hub_types::ErrorCode::InternalError,
+            format!("swe catalog `{variant}` is not valid JSON: {e}"),
+        )
+    })?;
+    Ok(json_with_etag(&headers, &value))
 }
 
 // ---------------------------------------------------------------------------

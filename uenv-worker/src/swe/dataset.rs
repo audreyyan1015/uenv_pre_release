@@ -45,6 +45,10 @@ pub struct SweInstance {
     /// 显式测试命令（Pro `run_scripts` / 非 pytest runner）。
     #[serde(default)]
     pub test_cmd: Option<String>,
+    /// 可选 post-patch 依赖安装命令（M1-3）：评测前在 conda `testbed` + `/testbed` 下执行
+    /// （如 `pip install -e .`）。缺省不安装（依赖镜像已 setup）。
+    #[serde(default)]
+    pub install_cmd: Option<String>,
 }
 
 impl SweInstance {

@@ -45,7 +45,9 @@ pub struct WorkerRuntime {
     pub gateway_enabled: bool,
     pub gateway_listen: String,
     pub gateway_capacity: u32,
+    pub gateway_api_key: Option<String>,
     pub swe_variants: Vec<String>,
+    pub swe_prewarm: Vec<String>,
 }
 
 impl WorkerRuntime {
@@ -214,16 +216,38 @@ impl WorkerRuntime {
             .and_then(|v| crate::swe::harness::ContainerRuntime::parse(&v))
             .unwrap_or(crate::swe::harness::ContainerRuntime::Docker);
 
-        // L4 External Runtime Gateway（plan §5.3）：与 native DispatchEpisode 共享 L2 池/L1 Backend。
+        // L2 共享会话池（plan §5.2）：native DispatchEpisode 与 L4 Gateway 同源（M2-2）。
+        // 容量取 gateway 并发与 worker 并发上限的较大值，避免 native 路径被低 gateway 容量限流。
+        let swe_capacity = self.gateway_capacity.max(self.max_concurrent).max(1) as usize;
+        let swe_pool = Arc::new(
+            crate::swe::instance_pool::SweInstancePool::new(swe_store.clone(), swe_runtime, swe_capacity)
+                .with_metrics(metrics.clone()),
+        );
+
+        // M2-1 / M4-4：启动按 catalog 子集预热镜像（去冷拉延迟）。
+        if !self.swe_prewarm.is_empty() {
+            let pool = swe_pool.clone();
+            let ids = self.swe_prewarm.clone();
+            let (ok, fail) = tokio::task::spawn_blocking(move || pool.prewarm_images(&ids))
+                .await
+                .unwrap_or((0, 0));
+            tracing::info!(
+                trace_id = "runtime",
+                worker_id = "worker",
+                episode_id = "-",
+                prewarm_ok = ok,
+                prewarm_fail = fail,
+                msg = "swe_prewarm_completed"
+            );
+        }
+
+        // L4 External Runtime Gateway（plan §5.3）：与 native DispatchEpisode 共享上面的 L2 池。
         if self.gateway_enabled {
-            let pool = Arc::new(crate::swe::instance_pool::SweInstancePool::new(
-                swe_store.clone(),
-                swe_runtime,
-                self.gateway_capacity.max(1) as usize,
-            ));
+            let pool = swe_pool.clone();
             let listen = self.gateway_listen.clone();
+            let api_key = self.gateway_api_key.clone();
             tokio::spawn(async move {
-                if let Err(err) = crate::runtime_gateway::serve_gateway(pool, listen).await {
+                if let Err(err) = crate::runtime_gateway::serve_gateway(pool, listen, api_key).await {
                     tracing::error!(
                         trace_id = "runtime",
                         worker_id = "worker",
@@ -238,7 +262,8 @@ impl WorkerRuntime {
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
             EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone())
-                .with_swe_catalog(swe_store, swe_runtime),
+                .with_swe_catalog(swe_store, swe_runtime)
+                .with_swe_pool(swe_pool),
             metrics.clone(),
             warmup_pool,
             self.max_concurrent.max(1),

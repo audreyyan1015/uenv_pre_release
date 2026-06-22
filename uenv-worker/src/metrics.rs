@@ -19,6 +19,7 @@ pub struct MetricsExporter {
     pool_size_evicting: Arc<AtomicU64>,
     pool_size_destroyed: Arc<AtomicU64>,
     wal_pending_records: Arc<AtomicU64>,
+    swe_pool_size: Arc<AtomicU64>,
 }
 
 impl MetricsExporter {
@@ -94,7 +95,8 @@ uenv_instance_pool_size{{status=\"active\"}} {}\n\
 uenv_instance_pool_size{{status=\"idle\"}} {}\n\
 uenv_instance_pool_size{{status=\"cooling\"}} {}\n\
 uenv_instance_pool_size{{status=\"evicting\"}} {}\n\
-uenv_instance_pool_size{{status=\"destroyed\"}} {}\n",
+uenv_instance_pool_size{{status=\"destroyed\"}} {}\n\
+uenv_swe_instance_pool_size {}\n",
             self.episode_total.load(Ordering::Relaxed),
             self.episode_duration_ms_sum.load(Ordering::Relaxed),
             self.env_step_duration_ms_sum.load(Ordering::Relaxed),
@@ -111,10 +113,16 @@ uenv_instance_pool_size{{status=\"destroyed\"}} {}\n",
             self.pool_size_cooling.load(Ordering::Relaxed),
             self.pool_size_evicting.load(Ordering::Relaxed),
             self.pool_size_destroyed.load(Ordering::Relaxed),
+            self.swe_pool_size.load(Ordering::Relaxed),
         )
     }
 
     pub fn set_wal_pending_records(&self, pending: u64) {
         self.wal_pending_records.store(pending, Ordering::Relaxed);
+    }
+
+    /// SWE L2 会话池当前活跃 session 数（M2-5）。
+    pub fn set_swe_pool_size(&self, size: u64) {
+        self.swe_pool_size.store(size, Ordering::Relaxed);
     }
 }

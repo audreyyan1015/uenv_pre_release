@@ -13,6 +13,7 @@ use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReportType, StepRecord, St
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
 use crate::swe::harness::{run_instance, ContainerRuntime, RunOptions};
+use crate::swe::instance_pool::SweInstancePool;
 
 /// SWE-bench episode 的 env_type（DispatchEpisode 路由键）。
 pub const SWE_ENV_TYPE: &str = "swe";
@@ -26,6 +27,9 @@ pub struct EpisodeExecutor {
     /// SWE-bench 实例目录（Hub 下发或本地 fixtures）。
     swe_store: Arc<InstanceStore>,
     swe_runtime: ContainerRuntime,
+    /// L2 共享会话池（M2-2）：与 L4 Gateway 共用，native 路径经此 acquire/submit/release。
+    /// `None` 时回退一次性 `harness::run_instance`（无池环境，如部分单测）。
+    swe_pool: Option<Arc<SweInstancePool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +58,7 @@ impl EpisodeExecutor {
             reward_engine: RewardEngine::new(),
             swe_store: Arc::new(InstanceStore::default()),
             swe_runtime: ContainerRuntime::Docker,
+            swe_pool: None,
         }
     }
 
@@ -61,6 +66,12 @@ impl EpisodeExecutor {
     pub fn with_swe_catalog(mut self, store: Arc<InstanceStore>, runtime: ContainerRuntime) -> Self {
         self.swe_store = store;
         self.swe_runtime = runtime;
+        self
+    }
+
+    /// 注入与 Gateway 共享的 L2 会话池（M2-2）。
+    pub fn with_swe_pool(mut self, pool: Arc<SweInstancePool>) -> Self {
+        self.swe_pool = Some(pool);
         self
     }
 
@@ -321,19 +332,35 @@ impl EpisodeExecutor {
 
         let runtime = self.swe_runtime;
         let episode_id = episode.episode_id.clone();
-        let opts = RunOptions {
-            runtime,
-            use_gold_patch: use_gold,
-            keep_container: false,
-            policy: CommandPolicyConfig::default().with_mode(mode),
-        };
-        let outcome = tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+        let policy = CommandPolicyConfig::default().with_mode(mode);
+        // M2-2：优先经共享 L2 池（与 Gateway 同源）；无池时回退一次性 harness。
+        let outcome = if let Some(pool) = self.swe_pool.clone() {
+            let gold = if use_gold { Some(instance.patch.clone()) } else { None };
+            let id = instance_id.clone();
+            tokio::task::spawn_blocking(move || {
+                pool.run_episode(&id, variant, policy, gold.as_deref())
+            })
             .await
             .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
             .map_err(|err| {
                 log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
                 err
-            })?;
+            })?
+        } else {
+            let opts = RunOptions {
+                runtime,
+                use_gold_patch: use_gold,
+                keep_container: false,
+                policy,
+            };
+            tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+                .await
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
+                .map_err(|err| {
+                    log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
+                    err
+                })?
+        };
 
         let reward = outcome.reward;
         let mut info = std::collections::HashMap::new();

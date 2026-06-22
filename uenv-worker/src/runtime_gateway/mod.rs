@@ -16,9 +16,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ use crate::swe::variant::BenchmarkVariant;
 #[derive(Clone)]
 struct GatewayState {
     pool: Arc<SweInstancePool>,
+    /// 可选 `X-API-Key`（M5-5）：`Some` 时所有非 health 路由强制校验。
+    api_key: Option<String>,
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResp>)>;
@@ -44,23 +47,28 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorResp>) 
     (status, Json(ErrorResp { error: msg.to_string() }))
 }
 
-/// 构建 Gateway 路由（注入 L2 池）。
-pub fn router(pool: Arc<SweInstancePool>) -> Router {
-    Router::new()
-        .route("/runtime/v1/health", get(health))
+/// 构建 Gateway 路由（注入 L2 池 + 可选 API key）。health 公开，其余经 `X-API-Key` 校验。
+pub fn router(pool: Arc<SweInstancePool>, api_key: Option<String>) -> Router {
+    let state = GatewayState { pool, api_key };
+    let protected = Router::new()
         .route("/runtime/v1/sessions", post(create_session))
         .route("/runtime/v1/sessions/{id}/exec", post(exec))
         .route("/runtime/v1/sessions/{id}/read", post(read))
         .route("/runtime/v1/sessions/{id}/write", post(write))
         .route("/runtime/v1/sessions/{id}/submit", post(submit))
         .route("/runtime/v1/sessions/{id}", delete(destroy))
-        .with_state(GatewayState { pool })
+        .layer(axum::middleware::from_fn_with_state(state.clone(), require_api_key))
+        .with_state(state);
+    Router::new()
+        .route("/runtime/v1/health", get(health))
+        .merge(protected)
 }
 
 /// 绑定并提供 Gateway HTTP 服务（在 `serve` 中作为 task spawn）。
 pub async fn serve_gateway(
     pool: Arc<SweInstancePool>,
     listen: String,
+    api_key: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = listen.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -70,10 +78,29 @@ pub async fn serve_gateway(
         episode_id = "-",
         gateway_addr = %addr,
         catalog = pool.catalog_len(),
+        auth = %if api_key.is_some() { "x-api-key" } else { "none" },
         msg = "runtime_gateway_start"
     );
-    axum::serve(listener, router(pool)).await?;
+    axum::serve(listener, router(pool, api_key)).await?;
     Ok(())
+}
+
+/// `X-API-Key` 校验中间件（M5-5）：state 无 key 时放行；有 key 则强制匹配。
+async fn require_api_key(
+    State(st): State<GatewayState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ErrorResp>)> {
+    if let Some(expected) = &st.api_key {
+        let provided = req
+            .headers()
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok());
+        if provided != Some(expected.as_str()) {
+            return Err(err(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key"));
+        }
+    }
+    Ok(next.run(req).await)
 }
 
 async fn health() -> impl IntoResponse {
@@ -302,4 +329,80 @@ fn session_error(e: Box<dyn std::error::Error + Send + Sync>) -> (StatusCode, Js
         StatusCode::INTERNAL_SERVER_ERROR
     };
     err(status, msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::swe::dataset::InstanceStore;
+    use crate::swe::harness::ContainerRuntime;
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use tower::ServiceExt;
+
+    fn empty_pool() -> Arc<SweInstancePool> {
+        Arc::new(SweInstancePool::new(
+            Arc::new(InstanceStore::default()),
+            ContainerRuntime::Docker,
+            2,
+        ))
+    }
+
+    fn post_json(uri: &str, body: &str, api_key: Option<&str>) -> HttpRequest<Body> {
+        let mut b = HttpRequest::post(uri).header("content-type", "application/json");
+        if let Some(k) = api_key {
+            b = b.header("x-api-key", k);
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_is_public_and_ok() {
+        let app = router(empty_pool(), Some("secret".to_string()));
+        let resp = app
+            .oneshot(HttpRequest::get("/runtime/v1/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn create_unknown_instance_returns_404_without_docker() {
+        let app = router(empty_pool(), None);
+        let resp = app
+            .oneshot(post_json(
+                "/runtime/v1/sessions",
+                r#"{"instance_id":"does-not-exist"}"#,
+                None,
+            ))
+            .await
+            .unwrap();
+        // store 为空 → create_session 在查表阶段即返回 "not in catalog" → 404（不触达 docker）。
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_key_enforced_on_protected_routes() {
+        let app = router(empty_pool(), Some("secret".to_string()));
+        // 缺 key → 401
+        let resp = app
+            .clone()
+            .oneshot(post_json("/runtime/v1/sessions", r#"{"instance_id":"x"}"#, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // 错误 key → 401
+        let resp = app
+            .clone()
+            .oneshot(post_json("/runtime/v1/sessions", r#"{"instance_id":"x"}"#, Some("wrong")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // 正确 key → 放行至 handler（store 空 → 404，证明已过鉴权层）
+        let resp = app
+            .oneshot(post_json("/runtime/v1/sessions", r#"{"instance_id":"x"}"#, Some("secret")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
