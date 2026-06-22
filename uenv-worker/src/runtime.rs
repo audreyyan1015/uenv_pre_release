@@ -42,6 +42,10 @@ pub struct WorkerRuntime {
     pub hub_endpoint: Option<String>,
     pub hub_token: Option<String>,
     pub llm: LlmConfig,
+    pub gateway_enabled: bool,
+    pub gateway_listen: String,
+    pub gateway_capacity: u32,
+    pub swe_variants: Vec<String>,
 }
 
 impl WorkerRuntime {
@@ -197,12 +201,39 @@ impl WorkerRuntime {
 
         // SWE-bench 实例目录：优先 Hub 下发，失败回退本地 fixtures（与 env manifest 降级一致）。
         let swe_store = Arc::new(
-            load_swe_catalog(self.hub_enabled, hub_endpoint.as_deref(), hub_token.as_deref()).await,
+            load_swe_catalog(
+                self.hub_enabled,
+                hub_endpoint.as_deref(),
+                hub_token.as_deref(),
+                &self.swe_variants,
+            )
+            .await,
         );
         let swe_runtime = std::env::var("UENV_SWE_RUNTIME")
             .ok()
             .and_then(|v| crate::swe::harness::ContainerRuntime::parse(&v))
             .unwrap_or(crate::swe::harness::ContainerRuntime::Docker);
+
+        // L4 External Runtime Gateway（plan §5.3）：与 native DispatchEpisode 共享 L2 池/L1 Backend。
+        if self.gateway_enabled {
+            let pool = Arc::new(crate::swe::instance_pool::SweInstancePool::new(
+                swe_store.clone(),
+                swe_runtime,
+                self.gateway_capacity.max(1) as usize,
+            ));
+            let listen = self.gateway_listen.clone();
+            tokio::spawn(async move {
+                if let Err(err) = crate::runtime_gateway::serve_gateway(pool, listen).await {
+                    tracing::error!(
+                        trace_id = "runtime",
+                        worker_id = "worker",
+                        episode_id = "-",
+                        error = %err,
+                        msg = "runtime_gateway_error"
+                    );
+                }
+            });
+        }
 
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
@@ -236,73 +267,101 @@ fn allow_degraded_start() -> bool {
         .unwrap_or(false)
 }
 
-/// 加载 SWE-bench 实例目录：Hub 下发优先（`GET /api/v1/swe/instances`），失败回退本地文件。
+/// 加载 SWE-bench 实例目录（plan §5.4.3）：按 `swe.variants` 逐变体从 Hub 下发拉取
+/// （`GET /api/v1/swe/{variant}/instances`），失败回退本地文件；合并后做镜像命名空间校验。
 async fn load_swe_catalog(
     hub_enabled: bool,
     hub_endpoint: Option<&str>,
     hub_token: Option<&str>,
+    variants: &[String],
 ) -> crate::swe::dataset::InstanceStore {
     use crate::swe::dataset::InstanceStore;
     let local_path =
         std::env::var("UENV_SWE_INSTANCES").unwrap_or_else(|_| "fixtures/swe/swe_instances.json".to_string());
+    let variants: Vec<String> = if variants.is_empty() {
+        vec!["verified".to_string()]
+    } else {
+        variants.to_vec()
+    };
 
+    let mut merged = InstanceStore::default();
+    let mut hub_ok = false;
     if hub_enabled {
         if let Some(endpoint) = hub_endpoint {
-            match hub::pull_swe_catalog(endpoint, hub_token).await {
-                Ok(json) => match InstanceStore::from_json(&json) {
-                    Ok(store) => {
-                        tracing::info!(
+            for variant in &variants {
+                match hub::pull_swe_catalog(endpoint, hub_token, variant).await {
+                    Ok(json) => match InstanceStore::from_json(&json) {
+                        Ok(store) => {
+                            tracing::info!(
+                                trace_id = "runtime",
+                                worker_id = "worker",
+                                episode_id = "-",
+                                variant = %variant,
+                                count = store.len(),
+                                msg = "swe_catalog_pulled_from_hub"
+                            );
+                            merged.merge_from(store);
+                            hub_ok = true;
+                        }
+                        Err(err) => tracing::warn!(
                             trace_id = "runtime",
                             worker_id = "worker",
                             episode_id = "-",
-                            count = store.len(),
-                            msg = "swe_catalog_pulled_from_hub"
-                        );
-                        return store;
-                    }
+                            variant = %variant,
+                            error = %err,
+                            msg = "swe_catalog_hub_parse_failed"
+                        ),
+                    },
                     Err(err) => tracing::warn!(
                         trace_id = "runtime",
                         worker_id = "worker",
                         episode_id = "-",
+                        variant = %variant,
                         error = %err,
-                        msg = "swe_catalog_hub_parse_failed_using_local"
+                        msg = "swe_catalog_hub_pull_failed"
                     ),
-                },
-                Err(err) => tracing::warn!(
-                    trace_id = "runtime",
-                    worker_id = "worker",
-                    episode_id = "-",
-                    error = %err,
-                    msg = "swe_catalog_hub_pull_failed_using_local"
-                ),
+                }
             }
         }
     }
 
-    match InstanceStore::from_json_file(&local_path) {
-        Ok(store) => {
-            tracing::info!(
-                trace_id = "runtime",
-                worker_id = "worker",
-                episode_id = "-",
-                count = store.len(),
-                path = %local_path,
-                msg = "swe_catalog_loaded_local"
-            );
-            store
-        }
-        Err(err) => {
-            tracing::warn!(
+    if !hub_ok {
+        match InstanceStore::from_json_file(&local_path) {
+            Ok(store) => {
+                tracing::info!(
+                    trace_id = "runtime",
+                    worker_id = "worker",
+                    episode_id = "-",
+                    count = store.len(),
+                    path = %local_path,
+                    msg = "swe_catalog_loaded_local"
+                );
+                merged.merge_from(store);
+            }
+            Err(err) => tracing::warn!(
                 trace_id = "runtime",
                 worker_id = "worker",
                 episode_id = "-",
                 error = %err,
                 path = %local_path,
                 msg = "swe_catalog_unavailable_empty"
-            );
-            InstanceStore::default()
+            ),
         }
     }
+
+    // plan §6.2 启动校验：变体与镜像命名空间一致性（Pro 不得占用 sweb.eval.*）。
+    let violations = merged.image_namespace_violations();
+    if !violations.is_empty() {
+        tracing::warn!(
+            trace_id = "runtime",
+            worker_id = "worker",
+            episode_id = "-",
+            count = violations.len(),
+            sample = %violations.iter().take(5).cloned().collect::<Vec<_>>().join(","),
+            msg = "swe_catalog_image_namespace_violation"
+        );
+    }
+    merged
 }
 
 async fn spawn_observability_server(

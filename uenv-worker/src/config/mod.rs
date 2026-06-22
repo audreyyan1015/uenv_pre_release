@@ -18,6 +18,59 @@ pub struct WorkerConfig {
     pub hub: HubConfig,
     #[serde(default)]
     pub llm: LlmConfigSection,
+    #[serde(default)]
+    pub runtime_gateway: RuntimeGatewayConfig,
+    #[serde(default)]
+    pub swe: SweSection,
+}
+
+/// SWE 变体加载（plan §5.4.3）：M1–M4 默认 `["verified"]`，M6 可加 `"pro"`。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SweSection {
+    #[serde(default = "default_swe_variants")]
+    pub variants: Vec<String>,
+}
+
+fn default_swe_variants() -> Vec<String> {
+    vec!["verified".to_string()]
+}
+
+impl Default for SweSection {
+    fn default() -> Self {
+        Self {
+            variants: default_swe_variants(),
+        }
+    }
+}
+
+/// External Runtime Gateway（plan §5.3）：默认关闭，离线/OpenHands 联调时开启。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct RuntimeGatewayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_gateway_listen")]
+    pub listen: String,
+    /// 并发 session 上限。
+    #[serde(default = "default_gateway_capacity")]
+    pub capacity: u32,
+}
+
+fn default_gateway_listen() -> String {
+    "0.0.0.0:28999".to_string()
+}
+
+fn default_gateway_capacity() -> u32 {
+    8
+}
+
+impl Default for RuntimeGatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_gateway_listen(),
+            capacity: default_gateway_capacity(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -152,6 +205,8 @@ impl Default for WorkerConfig {
             observability: ObservabilityConfig::default(),
             hub: HubConfig::default(),
             llm: LlmConfigSection::default(),
+            runtime_gateway: RuntimeGatewayConfig::default(),
+            swe: SweSection::default(),
         }
     }
 }
@@ -281,6 +336,28 @@ impl WorkerConfig {
         }
         if let Ok(v) = std::env::var("UENV_WORKER_LLM_ENV") {
             self.llm.env_file = v;
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_LISTEN") {
+            self.runtime_gateway.listen = v;
+            self.runtime_gateway.enabled = true;
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_ENABLED") {
+            self.runtime_gateway.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_CAPACITY") {
+            if let Ok(p) = v.parse::<u32>() {
+                self.runtime_gateway.capacity = p;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_VARIANTS") {
+            let variants: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !variants.is_empty() {
+                self.swe.variants = variants;
+            }
         }
     }
 }

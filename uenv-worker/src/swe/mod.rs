@@ -9,22 +9,34 @@
 //! - [`hub_config`]：Hub `default_config` 平级解析（`instance_specs` + `task_specs`）。
 //! - [`resettable`]：`ResettableInstance` 池抽象（容器 → 快照演进）。
 //! - [`artifact`]：`EpisodeArtifact` 统一产物（M2+）。
+//! - [`session`]：`SweSession` 会话原语（provision/exec/write/read/apply/evaluate）。
+//! - [`instance_pool`]：`SweInstancePool` L2 会话池（Gateway 与 native 共享）。
+//! - [`grader`]：`Grader` trait（`swebench`；M6 `swebench_pro`）。
+//! - [`variant`]：`BenchmarkVariant`（verified / lite / pro）。
 
 pub mod artifact;
 pub mod command_policy;
 pub mod dataset;
+pub mod grader;
 pub mod harness;
 pub mod hub_config;
+pub mod instance_pool;
 pub mod resettable;
+pub mod session;
 pub mod spec;
+pub mod variant;
 
 pub use artifact::{EpisodeArtifact, TestResults};
 pub use command_policy::{CommandPolicy, CommandPolicyConfig};
 pub use dataset::{image_ref, InstanceStore, SweInstance};
+pub use grader::{grader_for, GradeResult, Grader, SwebenchGrader, SwebenchProGrader};
 pub use harness::{run_instance, ContainerRuntime, EpisodeOutcome, RunOptions};
 pub use hub_config::SweDefaultConfig;
+pub use instance_pool::SweInstancePool;
 pub use resettable::{PodmanResettableInstance, ResettableInstance};
+pub use session::{ExecResult, SweSession};
 pub use spec::{
     build_reset_observation, AttachmentRef, EvaluationSpec, InstanceSpec, IssueRef,
     ResetObservation, TaskSpec, Workspace,
 };
+pub use variant::BenchmarkVariant;

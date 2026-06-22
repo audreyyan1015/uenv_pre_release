@@ -65,6 +65,10 @@ async fn main() {
                 hub_endpoint: cfg.hub.endpoint.clone(),
                 hub_token: cfg.hub.token.clone(),
                 llm,
+                gateway_enabled: cfg.runtime_gateway.enabled,
+                gateway_listen: cfg.runtime_gateway.listen.clone(),
+                gateway_capacity: cfg.runtime_gateway.capacity,
+                swe_variants: cfg.swe.variants.clone(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

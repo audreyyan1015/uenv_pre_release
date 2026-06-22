@@ -284,6 +284,17 @@ impl EpisodeExecutor {
             .get("use_gold_patch")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // plan §6.1 payload：command_mode（Full/RestrictedShell）+ benchmark_variant。
+        let mode = payload
+            .get("command_mode")
+            .and_then(|v| v.as_str())
+            .and_then(crate::swe::CommandPolicy::parse)
+            .unwrap_or(crate::swe::CommandPolicy::FullShell);
+        let variant = payload
+            .get("benchmark_variant")
+            .and_then(|v| v.as_str())
+            .and_then(crate::swe::BenchmarkVariant::parse)
+            .unwrap_or_default();
 
         let instance = self
             .swe_store
@@ -302,6 +313,8 @@ impl EpisodeExecutor {
             worker_id = %ctx.worker_id,
             instance_id = %instance_id,
             use_gold_patch = use_gold,
+            benchmark_variant = %variant.as_str(),
+            command_mode = ?mode,
             phase = "swe_dispatch",
             msg = "episode_phase"
         );
@@ -312,7 +325,7 @@ impl EpisodeExecutor {
             runtime,
             use_gold_patch: use_gold,
             keep_container: false,
-            policy: CommandPolicyConfig::default(),
+            policy: CommandPolicyConfig::default().with_mode(mode),
         };
         let outcome = tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
             .await
@@ -327,6 +340,7 @@ impl EpisodeExecutor {
         info.insert("instance_id".to_string(), instance_id.clone());
         info.insert("resolved".to_string(), outcome.resolved.to_string());
         info.insert("use_gold_patch".to_string(), use_gold.to_string());
+        info.insert("benchmark_variant".to_string(), variant.as_str().to_string());
         if let Some(tr) = &outcome.artifact.test_results {
             let passed = tr.per_test.iter().filter(|(_, ok)| *ok).count();
             info.insert("tests_passed".to_string(), passed.to_string());
