@@ -21,6 +21,7 @@ secrets/*
 !/scripts/connect-remote.sh
 !/scripts/gen-worker-proto.sh
 !/scripts/export_swe_instances.py
+!/scripts/swe_gateway_demo.py
 /logs
 /Docs/scripts
 /tmp
@@ -32,6 +33,8 @@ secrets/*
 
 # SWE-bench数据集 parquet 原始文件（较大，可用 export 脚本重新生成）
 /fixtures/swe/*.parquet
-# SWE 工具/测试脚本目前在测
+# 联调临时合并目录（verified+pro，可再生，勿入库）
+/fixtures/swe/swe_instances_with_pro.json
+# SWE 本地/离线联调运行产物
 /swe-wal/
 swe-worker.log

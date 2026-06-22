@@ -13,6 +13,7 @@ pub mod pool;
 pub mod proto;
 pub mod registry;
 pub mod runtime;
+pub mod runtime_gateway;
 pub mod state;
 pub mod swe;
 pub mod wal;

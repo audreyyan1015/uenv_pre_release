@@ -1,0 +1,42 @@
+{
+  "_comment": "SWE-bench Pro Hub env default_config seed (plan §6.2). Hub env name: swe-pro. Published at GET /api/v1/swe/pro/instances. image_cache_key MUST NOT share the swebench/sweb.eval.* namespace used by Verified. Replace placeholder values with real SWE-bench Pro public rows / run_scripts before publishing.",
+  "benchmark_variant": "pro",
+  "instance_specs": {
+    "swe-pro__example-go-1": {
+      "instance_id": "swe-pro__example-go-1",
+      "benchmark_variant": "pro",
+      "repo_url": "https://github.com/example-org/example-go",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "task_ref": "task_swe-pro__example-go-1",
+      "evaluation_spec": {
+        "test_cmd": "go test ./... -run 'TestFix' -v",
+        "grader": "swebench_pro"
+      },
+      "dataset": "SWE-bench_Pro/public",
+      "image_cache_key": "registry.example.com/swe-pro/example-org_example-go:swe-pro__example-go-1"
+    },
+    "swe-pro__example-ts-1": {
+      "instance_id": "swe-pro__example-ts-1",
+      "benchmark_variant": "pro",
+      "repo_url": "https://github.com/example-org/example-ts",
+      "base_commit": "1111111111111111111111111111111111111111",
+      "task_ref": "task_swe-pro__example-ts-1",
+      "evaluation_spec": {
+        "test_cmd": "npx jest --ci --reporters=default",
+        "grader": "swebench_pro"
+      },
+      "dataset": "SWE-bench_Pro/public",
+      "image_cache_key": "registry.example.com/swe-pro/example-org_example-ts:swe-pro__example-ts-1"
+    }
+  },
+  "task_specs": {
+    "task_swe-pro__example-go-1": {
+      "task_id": "task_swe-pro__example-go-1",
+      "issue_text": "<problem_statement from SWE-bench Pro dataset for swe-pro__example-go-1>"
+    },
+    "task_swe-pro__example-ts-1": {
+      "task_id": "task_swe-pro__example-ts-1",
+      "issue_text": "<problem_statement from SWE-bench Pro dataset for swe-pro__example-ts-1>"
+    }
+  }
+}

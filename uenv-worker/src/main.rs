@@ -65,6 +65,14 @@ async fn main() {
                 hub_endpoint: cfg.hub.endpoint.clone(),
                 hub_token: cfg.hub.token.clone(),
                 llm,
+                gateway_enabled: cfg.runtime_gateway.enabled,
+                gateway_listen: cfg.runtime_gateway.listen.clone(),
+                gateway_capacity: cfg.runtime_gateway.capacity,
+                gateway_api_key: cfg.runtime_gateway.api_key.clone(),
+                swe_variants: cfg.swe.variants.clone(),
+                swe_prewarm: cfg.swe.prewarm.clone(),
+                swe_warm_tag: cfg.swe.warm_tag,
+                swe_seccomp_dir: cfg.swe.seccomp_profile_dir.clone(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");
@@ -170,7 +178,9 @@ async fn run_swe(
         runtime,
         use_gold_patch: args.gold,
         keep_container: args.keep,
-        policy: CommandPolicyConfig::default(),
+        // SWE-bench 对标默认 FullShell（bridge network，对齐官方 harness 与 gRPC 路径）；
+        // RestrictedShell 为 RL/runtime 默认，不用于 harness 评测。
+        policy: CommandPolicyConfig::default().with_mode(uenv_worker::swe::CommandPolicy::FullShell),
     };
 
     // 容器编排为阻塞调用，放到 blocking 线程。

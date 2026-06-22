@@ -13,6 +13,7 @@ use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReportType, StepRecord, St
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
 use crate::swe::harness::{run_instance, ContainerRuntime, RunOptions};
+use crate::swe::instance_pool::SweInstancePool;
 
 /// SWE-bench episode 的 env_type（DispatchEpisode 路由键）。
 pub const SWE_ENV_TYPE: &str = "swe";
@@ -26,6 +27,9 @@ pub struct EpisodeExecutor {
     /// SWE-bench 实例目录（Hub 下发或本地 fixtures）。
     swe_store: Arc<InstanceStore>,
     swe_runtime: ContainerRuntime,
+    /// L2 共享会话池（M2-2）：与 L4 Gateway 共用，native 路径经此 acquire/submit/release。
+    /// `None` 时回退一次性 `harness::run_instance`（无池环境，如部分单测）。
+    swe_pool: Option<Arc<SweInstancePool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +58,7 @@ impl EpisodeExecutor {
             reward_engine: RewardEngine::new(),
             swe_store: Arc::new(InstanceStore::default()),
             swe_runtime: ContainerRuntime::Docker,
+            swe_pool: None,
         }
     }
 
@@ -61,6 +66,12 @@ impl EpisodeExecutor {
     pub fn with_swe_catalog(mut self, store: Arc<InstanceStore>, runtime: ContainerRuntime) -> Self {
         self.swe_store = store;
         self.swe_runtime = runtime;
+        self
+    }
+
+    /// 注入与 Gateway 共享的 L2 会话池（M2-2）。
+    pub fn with_swe_pool(mut self, pool: Arc<SweInstancePool>) -> Self {
+        self.swe_pool = Some(pool);
         self
     }
 
@@ -284,6 +295,17 @@ impl EpisodeExecutor {
             .get("use_gold_patch")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // plan §6.1 payload：command_mode（Full/RestrictedShell）+ benchmark_variant。
+        let mode = payload
+            .get("command_mode")
+            .and_then(|v| v.as_str())
+            .and_then(crate::swe::CommandPolicy::parse)
+            .unwrap_or(crate::swe::CommandPolicy::FullShell);
+        let variant = payload
+            .get("benchmark_variant")
+            .and_then(|v| v.as_str())
+            .and_then(crate::swe::BenchmarkVariant::parse)
+            .unwrap_or_default();
 
         let instance = self
             .swe_store
@@ -302,35 +324,75 @@ impl EpisodeExecutor {
             worker_id = %ctx.worker_id,
             instance_id = %instance_id,
             use_gold_patch = use_gold,
+            benchmark_variant = %variant.as_str(),
+            command_mode = ?mode,
             phase = "swe_dispatch",
             msg = "episode_phase"
         );
 
         let runtime = self.swe_runtime;
         let episode_id = episode.episode_id.clone();
-        let opts = RunOptions {
-            runtime,
-            use_gold_patch: use_gold,
-            keep_container: false,
-            policy: CommandPolicyConfig::default(),
-        };
-        let outcome = tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+        let policy = CommandPolicyConfig::default().with_mode(mode);
+        // M2-2：优先经共享 L2 池（与 Gateway 同源）；无池时回退一次性 harness。
+        let outcome = if let Some(pool) = self.swe_pool.clone() {
+            let gold = if use_gold { Some(instance.patch.clone()) } else { None };
+            let id = instance_id.clone();
+            tokio::task::spawn_blocking(move || {
+                pool.run_episode(&id, variant, policy, gold.as_deref())
+            })
             .await
             .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
             .map_err(|err| {
                 log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
                 err
-            })?;
+            })?
+        } else {
+            let opts = RunOptions {
+                runtime,
+                use_gold_patch: use_gold,
+                keep_container: false,
+                policy,
+            };
+            tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+                .await
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
+                .map_err(|err| {
+                    log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
+                    err
+                })?
+        };
 
         let reward = outcome.reward;
+        // M2-3：落盘 EpisodeArtifact（git_diff / 测试结果 / reward）作为可消费轨迹产物。
+        // 仅当 UENV_SWE_ARTIFACT_DIR 配置时启用；写失败仅告警，不阻断 episode。
+        let mut artifact_uri: Option<String> = None;
+        if let Some(store) = crate::swe::artifact_store::ArtifactStore::from_env() {
+            match store.persist(&outcome.artifact) {
+                Ok(uri) => artifact_uri = Some(uri),
+                Err(err) => tracing::warn!(
+                    trace_id = %trace_id,
+                    episode_id = %episode.episode_id,
+                    instance_id = %instance_id,
+                    error = %err,
+                    msg = "swe_artifact_persist_failed"
+                ),
+            }
+        }
         let mut info = std::collections::HashMap::new();
         info.insert("instance_id".to_string(), instance_id.clone());
         info.insert("resolved".to_string(), outcome.resolved.to_string());
         info.insert("use_gold_patch".to_string(), use_gold.to_string());
+        info.insert("benchmark_variant".to_string(), variant.as_str().to_string());
         if let Some(tr) = &outcome.artifact.test_results {
             let passed = tr.per_test.iter().filter(|(_, ok)| *ok).count();
             info.insert("tests_passed".to_string(), passed.to_string());
             info.insert("tests_total".to_string(), tr.per_test.len().to_string());
+        }
+        if let Some(diff) = &outcome.artifact.git_diff {
+            info.insert("git_diff_bytes".to_string(), diff.len().to_string());
+        }
+        if let Some(uri) = &artifact_uri {
+            info.insert("artifact_uri".to_string(), uri.clone());
         }
 
         let step = StepRecord {

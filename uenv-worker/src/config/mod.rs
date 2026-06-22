@@ -18,6 +18,77 @@ pub struct WorkerConfig {
     pub hub: HubConfig,
     #[serde(default)]
     pub llm: LlmConfigSection,
+    #[serde(default)]
+    pub runtime_gateway: RuntimeGatewayConfig,
+    #[serde(default)]
+    pub swe: SweSection,
+}
+
+/// SWE 变体加载（plan §5.4.3）：M1–M4 默认 `["verified"]`，M6 可加 `"pro"`。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SweSection {
+    #[serde(default = "default_swe_variants")]
+    pub variants: Vec<String>,
+    /// 启动预热的 instance_id 列表（M2-1 / M4-4：仅预热镜像缓存）。
+    #[serde(default)]
+    pub prewarm: Vec<String>,
+    /// 预热时是否给镜像打 `cache/swe-<id>:warm` 本地 tag（M0-3 / M4-3）。
+    #[serde(default)]
+    pub warm_tag: bool,
+    /// seccomp profile 目录（host 路径，M2-4）：`Some` 时池内所有容器按 command_mode
+    /// 注入 `--security-opt seccomp=<dir>/<mode>.json`。默认 `None`（不强制，避免破坏
+    /// SWE-bench 对宽 syscall 的依赖；运维确认 profile 兼容后再开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile_dir: Option<String>,
+}
+
+fn default_swe_variants() -> Vec<String> {
+    vec!["verified".to_string()]
+}
+
+impl Default for SweSection {
+    fn default() -> Self {
+        Self {
+            variants: default_swe_variants(),
+            prewarm: Vec::new(),
+            warm_tag: false,
+            seccomp_profile_dir: None,
+        }
+    }
+}
+
+/// External Runtime Gateway（plan §5.3）：默认关闭，离线/OpenHands 联调时开启。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct RuntimeGatewayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_gateway_listen")]
+    pub listen: String,
+    /// 并发 session 上限。
+    #[serde(default = "default_gateway_capacity")]
+    pub capacity: u32,
+    /// 可选 `X-API-Key`（M5-5）：设置后所有非 health 路由强制校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+fn default_gateway_listen() -> String {
+    "0.0.0.0:28999".to_string()
+}
+
+fn default_gateway_capacity() -> u32 {
+    8
+}
+
+impl Default for RuntimeGatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_gateway_listen(),
+            capacity: default_gateway_capacity(),
+            api_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -152,6 +223,8 @@ impl Default for WorkerConfig {
             observability: ObservabilityConfig::default(),
             hub: HubConfig::default(),
             llm: LlmConfigSection::default(),
+            runtime_gateway: RuntimeGatewayConfig::default(),
+            swe: SweSection::default(),
         }
     }
 }
@@ -281,6 +354,51 @@ impl WorkerConfig {
         }
         if let Ok(v) = std::env::var("UENV_WORKER_LLM_ENV") {
             self.llm.env_file = v;
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_LISTEN") {
+            self.runtime_gateway.listen = v;
+            self.runtime_gateway.enabled = true;
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_ENABLED") {
+            self.runtime_gateway.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_CAPACITY") {
+            if let Ok(p) = v.parse::<u32>() {
+                self.runtime_gateway.capacity = p;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_API_KEY") {
+            if !v.trim().is_empty() {
+                self.runtime_gateway.api_key = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_PREWARM") {
+            let ids: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !ids.is_empty() {
+                self.swe.prewarm = ids;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_VARIANTS") {
+            let variants: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !variants.is_empty() {
+                self.swe.variants = variants;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_WARM_TAG") {
+            self.swe.warm_tag = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_SECCOMP_DIR") {
+            if !v.trim().is_empty() {
+                self.swe.seccomp_profile_dir = Some(v);
+            }
         }
     }
 }

@@ -167,6 +167,40 @@ async fn unknown_dependency_is_rejected() {
 }
 
 #[tokio::test]
+async fn swe_instance_catalog_served_by_variant() {
+    // Seed a temp catalog dir and point the handler at it (M1-1 / M6-1).
+    let dir = tempfile::tempdir().unwrap();
+    let verified = r#"{"astropy__astropy-7166":{"instance_id":"astropy__astropy-7166","repo":"astropy/astropy","base_commit":"deadbeef","FAIL_TO_PASS":["t::a"],"PASS_TO_PASS":[]}}"#;
+    std::fs::write(dir.path().join("verified.json"), verified).unwrap();
+    // SAFETY: single-threaded test setup before the server handles requests.
+    unsafe { std::env::set_var("UENV_HUB_SWE_CATALOG_DIR", dir.path()) };
+
+    let (addr, _tmp) = spawn_server().await;
+    let base = format!("http://{addr}");
+
+    let ok = reqwest::get(format!("{base}/api/v1/swe/verified/instances"))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::OK);
+    let body = ok.text().await.unwrap();
+    assert!(body.contains("astropy__astropy-7166"));
+
+    // Unknown variant → 404.
+    let bad = reqwest::get(format!("{base}/api/v1/swe/bogus/instances"))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // Not-seeded but valid variant → 404.
+    let missing = reqwest::get(format!("{base}/api/v1/swe/pro/instances"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    unsafe { std::env::remove_var("UENV_HUB_SWE_CATALOG_DIR") };
+}
+
+#[tokio::test]
 async fn invalid_version_is_rejected() {
     let (addr, _tmp) = spawn_server().await;
     let client = HttpClient::new(format!("http://{addr}"), None);
