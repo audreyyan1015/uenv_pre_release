@@ -5,6 +5,7 @@
 //! MVP：按需 provision（无预热）；容量上限保护资源。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -13,6 +14,7 @@ use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
 use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
 use crate::swe::image_cache::ImageCacheFactory;
+use crate::swe::resettable::ResettableSession;
 use crate::swe::session::{ExecResult, SweSession};
 use crate::swe::spec::ResetObservation;
 use crate::swe::variant::BenchmarkVariant;
@@ -27,6 +29,8 @@ pub struct SweInstancePool {
     sessions: Mutex<HashMap<String, Arc<SweSession>>>,
     seq: AtomicU64,
     metrics: Option<MetricsExporter>,
+    /// seccomp profile 目录（M2-4）：`Some` 时所有 session provision 注入 `--security-opt seccomp`。
+    seccomp_dir: Option<PathBuf>,
 }
 
 impl SweInstancePool {
@@ -38,6 +42,7 @@ impl SweInstancePool {
             sessions: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(1),
             metrics: None,
+            seccomp_dir: None,
         }
     }
 
@@ -45,6 +50,20 @@ impl SweInstancePool {
     pub fn with_metrics(mut self, metrics: MetricsExporter) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    /// 设置 seccomp profile 目录（M2-4）：池内所有 session 按 `command_mode` 选 profile 注入。
+    pub fn with_seccomp_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.seccomp_dir = dir;
+        self
+    }
+
+    /// 把池级 seccomp 目录叠加到来访 policy（call-site 仅决定 mode/超时，安全 profile 由池统一）。
+    fn apply_seccomp(&self, policy: CommandPolicyConfig) -> CommandPolicyConfig {
+        match &self.seccomp_dir {
+            Some(dir) => policy.with_seccomp_dir(Some(dir.clone())),
+            None => policy,
+        }
     }
 
     fn publish_size(&self, count: usize) {
@@ -87,6 +106,8 @@ impl SweInstancePool {
             .ok_or_else(|| format!("swe instance_id `{instance_id}` not in catalog (size={})", self.store.len()))?
             .clone();
 
+        // M2-4：叠加池级 seccomp profile 目录（call-site 仅决定 mode）。
+        let policy = self.apply_seccomp(policy);
         let session_id = format!("sess-{}-{}", sanitize(instance_id), self.seq.fetch_add(1, Ordering::SeqCst));
         let (session, observation) =
             SweSession::provision(&instance, &session_id, self.runtime, policy, false)?;
@@ -129,8 +150,9 @@ impl SweInstancePool {
     /// 预热（M2-1 / M4-4）：批量确保给定实例镜像本地可用（warm 镜像缓存，去除冷拉延迟）。
     ///
     /// MVP 仅预热**镜像**（真正的冷启动瓶颈），不长期占用空闲容器（容器复用待 M3 快照）。
-    /// 返回 `(present_or_pulled, failed)` 计数。
-    pub fn prewarm_images(&self, instance_ids: &[String]) -> (usize, usize) {
+    /// `warm_tag=true` 时（M0-3 / M4-3）额外给镜像打 `cache/swe-<id>:warm` 本地 tag，作为
+    /// `SandboxSpec.optional_image_cache` 语义的产物。返回 `(present_or_pulled, failed)` 计数。
+    pub fn prewarm_images(&self, instance_ids: &[String], warm_tag: bool) -> (usize, usize) {
         let factory = ImageCacheFactory::from_env(self.runtime);
         let mut ok = 0usize;
         let mut fail = 0usize;
@@ -139,10 +161,28 @@ impl SweInstancePool {
                 fail += 1;
                 continue;
             };
-            match factory.ensure_image(&inst.image_ref()) {
+            let image = inst.image_ref();
+            match factory.ensure_image(&image) {
                 Ok(state) => {
                     ok += 1;
-                    tracing::info!(instance_id = %id, image_state = ?state, msg = "swe_prewarm_image_ready");
+                    // M4-3：可选 warm tag 写回（失败仅告警，不影响镜像就绪计数）。
+                    if warm_tag {
+                        match factory.warm_tag_image(&image, id) {
+                            Ok(tag) => tracing::info!(
+                                instance_id = %id,
+                                image_state = ?state,
+                                warm_tag = %tag,
+                                msg = "swe_prewarm_image_ready"
+                            ),
+                            Err(err) => tracing::warn!(
+                                instance_id = %id,
+                                error = %err,
+                                msg = "swe_prewarm_warm_tag_failed"
+                            ),
+                        }
+                    } else {
+                        tracing::info!(instance_id = %id, image_state = ?state, msg = "swe_prewarm_image_ready");
+                    }
                 }
                 Err(err) => {
                     fail += 1;
@@ -188,6 +228,34 @@ impl SweInstancePool {
         };
         self.publish_size(count);
         Ok(removed)
+    }
+
+    /// 回收复用（M0-2）：经 `ResettableInstance` 语义把 session 沙箱重置回 base_commit，
+    /// **保留容器**供下一 episode 复用（避免重复 provision 的冷启动）。不改变池计数。
+    pub fn recycle(&self, session_id: &str) -> Result<(), DynErr> {
+        self.get(session_id)?.reset_to_base()
+    }
+
+    /// 预热空闲会话（M2-1）：为同一 instance 预创建 `n` 个已 reset 的待命 session，
+    /// 直到容量上限；返回成功创建的 session_id 列表。容器复用场景（同实例多 attempt）减少冷启动。
+    ///
+    /// 注意：SWE 每实例镜像各异，跨实例的容器无法复用；故此为**同实例多并发/多 attempt**的
+    /// 预热手段，与 `prewarm_images`（跨实例镜像层预热）互补。
+    pub fn prewarm_sessions(
+        &self,
+        instance_id: &str,
+        n: usize,
+        policy: CommandPolicyConfig,
+    ) -> Result<Vec<String>, DynErr> {
+        let mut ids = Vec::new();
+        for _ in 0..n {
+            match self.create_session(instance_id, BenchmarkVariant::default(), policy.clone()) {
+                Ok((sid, _obs)) => ids.push(sid),
+                Err(e) if e.to_string().contains("at capacity") => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(ids)
     }
 }
 

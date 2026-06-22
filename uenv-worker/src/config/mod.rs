@@ -32,6 +32,14 @@ pub struct SweSection {
     /// 启动预热的 instance_id 列表（M2-1 / M4-4：仅预热镜像缓存）。
     #[serde(default)]
     pub prewarm: Vec<String>,
+    /// 预热时是否给镜像打 `cache/swe-<id>:warm` 本地 tag（M0-3 / M4-3）。
+    #[serde(default)]
+    pub warm_tag: bool,
+    /// seccomp profile 目录（host 路径，M2-4）：`Some` 时池内所有容器按 command_mode
+    /// 注入 `--security-opt seccomp=<dir>/<mode>.json`。默认 `None`（不强制，避免破坏
+    /// SWE-bench 对宽 syscall 的依赖；运维确认 profile 兼容后再开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile_dir: Option<String>,
 }
 
 fn default_swe_variants() -> Vec<String> {
@@ -43,6 +51,8 @@ impl Default for SweSection {
         Self {
             variants: default_swe_variants(),
             prewarm: Vec::new(),
+            warm_tag: false,
+            seccomp_profile_dir: None,
         }
     }
 }
@@ -380,6 +390,14 @@ impl WorkerConfig {
                 .collect();
             if !variants.is_empty() {
                 self.swe.variants = variants;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_WARM_TAG") {
+            self.swe.warm_tag = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_SECCOMP_DIR") {
+            if !v.trim().is_empty() {
+                self.swe.seccomp_profile_dir = Some(v);
             }
         }
     }

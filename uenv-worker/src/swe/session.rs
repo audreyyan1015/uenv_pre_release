@@ -15,8 +15,8 @@ use std::time::Instant;
 use crate::swe::artifact::{EpisodeArtifact, TestResults};
 use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::dataset::SweInstance;
-use crate::swe::grader::grader_for;
-use crate::swe::harness::{build_test_command, ContainerRuntime, EpisodeOutcome};
+use crate::swe::grader::grader_for_spec;
+use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
 use crate::swe::image_cache::ImageCacheFactory;
 use crate::swe::resettable::PodmanResettableInstance;
 use crate::swe::spec::{build_reset_observation, ResetObservation, Workspace};
@@ -231,11 +231,16 @@ impl SweSession {
         // 评测前应用 test_patch。
         self.apply_patch(&self.instance.test_patch, "test")?;
 
-        let test_cmd = build_test_command(&self.instance.fail_to_pass, &self.instance.pass_to_pass);
+        // M1-2 / M1-4：按 repo@version 规格（或实例显式 test_cmd）构造 runner。
+        let test_cmd = self.instance.resolved_test_command(TESTBED);
         let test_run = self.exec_raw(&test_cmd)?;
         let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
 
-        let grader = grader_for(self.instance.to_instance_spec().evaluation_spec.grader.as_deref());
+        // grader 随 grader 名 + 仓库 log_parser（pytest / Django）分流。
+        let grader = grader_for_spec(
+            self.instance.to_instance_spec().evaluation_spec.grader.as_deref(),
+            self.instance.log_parser(),
+        );
         let graded = grader.grade(&combined, &self.instance.fail_to_pass, &self.instance.pass_to_pass);
 
         let diff = self
@@ -262,14 +267,12 @@ impl SweSession {
         })
     }
 
-    /// post-patch 安装命令（M1-3）：实例 `install_cmd` 优先，否则全局
-    /// `UENV_SWE_INSTALL_CMD`；命中则包到 conda `testbed` + `cd /testbed`。
+    /// post-patch 安装命令（M1-3 / M1-2）：实例 `install_cmd` > `repo@version` 规格 install
+    /// > 全局 `UENV_SWE_INSTALL_CMD`；命中则包到 conda `testbed` + `cd /testbed`。
     fn install_command(&self) -> Option<String> {
         let raw = self
             .instance
-            .install_cmd
-            .clone()
-            .filter(|s| !s.trim().is_empty())
+            .resolved_install_command()
             .or_else(|| std::env::var("UENV_SWE_INSTALL_CMD").ok().filter(|s| !s.trim().is_empty()))?;
         Some(format!(
             "source /opt/miniconda3/bin/activate testbed 2>/dev/null; cd {TESTBED} && {raw}"
@@ -284,6 +287,32 @@ impl SweSession {
         if !out.status.success() {
             return Err(format!("{} cp failed: {}", self.runtime.cli(), String::from_utf8_lossy(&out.stderr)).into());
         }
+        Ok(())
+    }
+}
+
+impl crate::swe::resettable::ResettableSession for SweSession {
+    fn session_id(&self) -> &str {
+        &self.episode_id
+    }
+
+    /// 重置沙箱回 base_commit（保留已编译产物），供池 `recycle` 复用（M0-2）。
+    fn reset_to_base(&self) -> Result<(), DynErr> {
+        let reset_script =
+            PodmanResettableInstance::reset_script_keep_built(TESTBED, &self.instance.base_commit);
+        let r = self.exec_raw(&reset_script)?;
+        if r.exit_code != 0 {
+            return Err(format!(
+                "recycle reset failed (code {}): {}\n{}",
+                r.exit_code, r.stdout, r.stderr
+            )
+            .into());
+        }
+        tracing::info!(
+            session_id = %self.episode_id,
+            instance_id = %self.instance.instance_id,
+            msg = "swe_session_recycled"
+        );
         Ok(())
     }
 }

@@ -22,6 +22,17 @@ pub trait ResettableInstance: Send {
     fn destroy(&self) -> Result<(), BackendError>;
 }
 
+/// 会话级可重置抽象（plan §5.2 / gap M0-2）。
+///
+/// `SweInstancePool` 据此实现 `1 session = lease 1 ResettableInstance` 的 acquire → use →
+/// reset → reuse/release 生命周期：`reset_to_base` 把沙箱恢复到 base_commit（保留已编译
+/// 产物）以便复用，无需重新 provision。由 [`crate::swe::session::SweSession`] 实现。
+pub trait ResettableSession: Send + Sync {
+    fn session_id(&self) -> &str;
+    /// 重置沙箱回 base_commit（`git reset --hard` + `git clean -fd`），供下一 episode 复用。
+    fn reset_to_base(&self) -> Result<(), BackendError>;
+}
+
 /// 容器后端实例（M0–M2）。
 pub struct PodmanResettableInstance {
     handle: BackendHandle,

@@ -2,8 +2,9 @@
 
 # SWE\-bench 环境镜像 → Worker 拉起 → 运行评测 联调报告
 
-> **文档版本**：v1.6  
+> **文档版本**：v1.6.1  
 > **创建时间**：2026\-06\-22  
+> **v1.6.1 变更**：在 v1.6 基础上补齐可离线落地的剩余缺口：① **M1-2/M1-4** 新增 `swe/repo_specs.rs`（官方 `MAP_REPO_VERSION_TO_SPECS` 可扩展子集 + 通用兜底）+ **Django 专属 runner**（`./tests/runtests.py`）+ `parse_django_report` + `grader_for_spec` 按 `log_parser` 分流，`SweInstance::resolved_test_command/resolved_install_command` 接入 `session.evaluate`；② **M2-3** 新增 `swe/artifact_store.rs`（`EpisodeArtifact` 落盘 `UENV_SWE_ARTIFACT_DIR`）+ executor 写回 `artifact_uri`/`git_diff_bytes`；③ **M0-3/M4-3** `prewarm_images(.., warm_tag)` 接入 `warm_tag_image`；④ **M2-4** `SweInstancePool::with_seccomp_dir` 统一注入 seccomp（默认关，`swe.seccomp_profile_dir`/`UENV_SWE_SECCOMP_DIR`）；⑤ **M0-2** 新增 `ResettableSession`（`SweSession::reset_to_base`）+ 池 `recycle`；⑥ **M2-1** 池 `prewarm_sessions`（同实例空闲会话预热）；⑦ **§3.3** 新增 `tests/swe_docker_integration.rs`（`#[ignore]`，docker CI `--ignored`）。worker 库单测 **90 passed**（v1.6 为 81）；`swe_mvp_closure` 4/4；docker IT 正确 ignored。详见 §12。  
 > **v1.6 变更**：补齐 **M0–M4 代码缺口**并联调：① **M4 `ImageCacheFactory`**（provision 前 inspect→pull→可选 warm tag，离线命中即跳过）；② **M0-1/M2-4** SWE provision 按 `CommandPolicy` 注入 run flags（cap_drop/network/可选 seccomp）；③ **M2-2** native `DispatchEpisode` 与 L4 Gateway **收敛到同一 `SweInstancePool`**（`run_episode` acquire→gold→submit→release）；④ **M2-1/M2-5** 镜像预热 + `uenv_swe_instance_pool_size` 指标；⑤ **M5-5** 网关服务端 `X-API-Key` 鉴权 + **M5-1** 网关 Rust 集成测试；⑥ **M1-1/M6-1** uenv-hub `GET /api/v1/swe/{variant}/instances` 只读 catalog 端点 + seed + e2e；⑦ **M1-3** evaluate 前可选 install 步骤。新增证据 11、§9 缺口补齐矩阵；worker 库单测 **81 passed**、hub e2e `swe_instance_catalog` 通过。  
 > **v1.1 变更**：接通 **M5 外部运行时网关**（L4 `runtime_gateway` HTTP）、`SweSession` 会话原语 + `SweInstancePool` L2 池、`Grader` trait + `SwebenchGrader`、`BenchmarkVariant` 枚举。  
 > **v1.0**：核心链路"实例镜像 → Worker 容器 → 运行评测"端到端跑通（CLI `swe-run` + gRPC `DispatchEpisode`），Verified 8/10 gold `reward=1.0` + 负向对照。  
@@ -560,4 +561,65 @@ M5/M6 全部落地：L4 网关、OpenHands `UEnvRuntime` 客户端、`plugins/sw
 |`uenv-hub/.../tests/e2e.rs`|**新增** `swe_instance_catalog_served_by_variant` e2e|
 |`config/swe/{verified,pro}.json`|**新增** Hub catalog seed|
 |`scripts/swe_gateway_demo.py`|**更新** `--api-key` 支持（网关鉴权联调）|
+
+---
+
+## 12\. v1.6.1 证据：A 组纯离线缺口闭合
+
+> 目标：把缺口分析 §5 中 **P1 纯代码、可离线落地** 的剩余项做完并单测；不依赖 docker/egress 的部分均纳入 `cargo test`，依赖 docker 的以 `#[ignore]` 备好 CI 入口。
+
+### 12.1 M1-2 / M1-4：官方 repo specs 表 + 专属 runner
+
+- 新增 `swe/repo_specs.rs`：移植官方 `MAP_REPO_VERSION_TO_SPECS` **可扩展子集**（django/scikit-learn/matplotlib/xarray/sympy/astropy/pytest/sphinx/pylint/flask/requests/seaborn 等），未登记仓库回退通用 pytest（保持既有行为）。
+- `TestRunner`：`Pytest`（默认）/ `Django`（`./tests/runtests.py --settings=test_sqlite`）/ `SympyBinTest`（`bin/test`）。`LogParser`：`Pytest` / `Django`。
+- `SweInstance::{repo_spec, resolved_test_command, resolved_install_command, log_parser}`：**实例显式 `test_cmd`/`install_cmd` > repo@version 规格 > 通用兜底/env**；`session.evaluate` 已改用之，并经 `grader_for_spec(grader_name, log_parser)` 按口径分流（pytest / Django）。
+- 单测：`repo_specs`（5 例）+ `grader::django_grader_parses_runner_output`。
+- **数据面边界（诚实）**：离线无 egress，`install` 仍无法真正 `pip install`（需镜像预置或私有源）；本项闭合的是**命令编排**而非联网安装。
+
+### 12.2 M2-3：EpisodeArtifact 落盘
+
+- 新增 `swe/artifact_store.rs`：`ArtifactStore`（`UENV_SWE_ARTIFACT_DIR` 启用）把 `EpisodeArtifact`（git_diff / per-test / reward）落盘为 `<episode>__<instance>.json`，路径写回 `artifact_uri`；executor SWE 路径接入，StreamReport `info` 增 `git_diff_bytes`/`artifact_uri`。写失败仅告警、不阻断 episode。单测 3 例。
+
+### 12.3 M0-3 / M4-3：warm tag 写回
+
+- `prewarm_images(ids, warm_tag)`：`warm_tag=true`（`swe.warm_tag` / `UENV_SWE_WARM_TAG`）时对已就绪镜像调 `warm_tag_image` → `cache/swe-<id>:warm`，作为 `optional_image_cache` 语义产物（失败仅告警）。
+
+### 12.4 M2-4：seccomp 统一注入（默认关）
+
+- `SweInstancePool::with_seccomp_dir(dir)`：池级 seccomp 目录叠加到来访 policy；provision 按 `command_mode` 选 `restricted.json`/`full.json` 注入 `--security-opt seccomp=<file>`。`swe.seccomp_profile_dir` / `UENV_SWE_SECCOMP_DIR` 开启；默认 `None`（避免破坏 SWE 宽 syscall 依赖）。
+
+### 12.5 M0-2 / M2-1：ResettableSession + 空闲会话预热
+
+- 新增 `ResettableSession` trait（`SweSession::reset_to_base` = `git reset --hard base_commit` + `git clean -fd`，保留已编译产物）+ 池 `recycle(session_id)`：形式化 acquire→reset→reuse 语义。
+- 池 `prewarm_sessions(instance_id, n, policy)`：同实例多 attempt 的空闲会话预热（到容量上限），与跨实例 `prewarm_images` 互补。
+
+### 12.6 §3.3：Docker 集成测试入 CI
+
+- 新增 `tests/swe_docker_integration.rs::gold_patch_reaches_reward_one_via_shared_pool`：经共享池 `run_episode` 实跑 gold→断言 `reward=1.0` + 池无悬挂 session。默认 `#[ignore]`，docker CI 以 `cargo test -- --ignored` 运行（可配 `UENV_SWE_IT_INSTANCE`/`UENV_SWE_IT_INSTANCES`/`UENV_SWE_RUNTIME`）。
+
+### 12.7 验证汇总
+
+| 项 | 结果 |
+|---|---|
+| worker 库单测 | **90 passed**（v1.6 为 81；本轮 +9） |
+| `swe_mvp_closure` | 4/4 通过 |
+| `swe_docker_integration` | 1 ignored（docker CI 专用） |
+| 编译 / lint | `cargo build` clean，编辑文件无 lint |
+| `m5_episode_executor` / `m4_plugin_host_process` | 既有环境失败（math 插件 binary 未起），**与本轮无关**——已 `git stash` 验证去掉本轮改动后同样失败 |
+
+### v1.6.1 新增/变更交付物
+
+|文件|说明|
+|---|---|
+|`uenv-worker/src/swe/repo_specs.rs`|**新增** 官方 specs 子集表 + `TestRunner`/`LogParser` + 命令构造 + 单测|
+|`uenv-worker/src/swe/artifact_store.rs`|**新增** `EpisodeArtifact` 落盘 + 单测|
+|`uenv-worker/src/swe/grader.rs`|**更新** `SwebenchGrader(LogParser)` + `parse_django_report` + `grader_for_spec`|
+|`uenv-worker/src/swe/dataset.rs`|**更新** `repo_spec`/`resolved_test_command`/`resolved_install_command`/`log_parser`|
+|`uenv-worker/src/swe/session.rs`|**更新** evaluate 用 resolved 命令 + 分流 grader；`ResettableSession` impl|
+|`uenv-worker/src/swe/resettable.rs`|**更新** 新增 `ResettableSession` trait|
+|`uenv-worker/src/swe/instance_pool.rs`|**更新** `with_seccomp_dir`/`recycle`/`prewarm_sessions` + `prewarm_images(warm_tag)`|
+|`uenv-worker/src/episode/executor.rs`|**更新** SWE 路径 artifact 落盘 + StreamReport 字段|
+|`uenv-worker/src/{runtime,config,main}.rs`|**更新** `swe.warm_tag`/`swe.seccomp_profile_dir` 配置 + env override + 池注入|
+|`uenv-worker/tests/swe_docker_integration.rs`|**新增** docker 集成测试（`#[ignore]`）|
+|`config/uenv-worker.swe-local.yaml`|**更新** 注释新增 `prewarm`/`warm_tag`/`seccomp_profile_dir` 选项|
 

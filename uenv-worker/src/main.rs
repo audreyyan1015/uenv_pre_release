@@ -71,6 +71,8 @@ async fn main() {
                 gateway_api_key: cfg.runtime_gateway.api_key.clone(),
                 swe_variants: cfg.swe.variants.clone(),
                 swe_prewarm: cfg.swe.prewarm.clone(),
+                swe_warm_tag: cfg.swe.warm_tag,
+                swe_seccomp_dir: cfg.swe.seccomp_profile_dir.clone(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");

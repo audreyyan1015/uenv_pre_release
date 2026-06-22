@@ -48,6 +48,8 @@ pub struct WorkerRuntime {
     pub gateway_api_key: Option<String>,
     pub swe_variants: Vec<String>,
     pub swe_prewarm: Vec<String>,
+    pub swe_warm_tag: bool,
+    pub swe_seccomp_dir: Option<String>,
 }
 
 impl WorkerRuntime {
@@ -219,16 +221,20 @@ impl WorkerRuntime {
         // L2 共享会话池（plan §5.2）：native DispatchEpisode 与 L4 Gateway 同源（M2-2）。
         // 容量取 gateway 并发与 worker 并发上限的较大值，避免 native 路径被低 gateway 容量限流。
         let swe_capacity = self.gateway_capacity.max(self.max_concurrent).max(1) as usize;
+        // M2-4：池级 seccomp profile 目录（默认 None，配置后按 command_mode 注入）。
+        let swe_seccomp_dir = self.swe_seccomp_dir.as_ref().map(PathBuf::from);
         let swe_pool = Arc::new(
             crate::swe::instance_pool::SweInstancePool::new(swe_store.clone(), swe_runtime, swe_capacity)
-                .with_metrics(metrics.clone()),
+                .with_metrics(metrics.clone())
+                .with_seccomp_dir(swe_seccomp_dir),
         );
 
-        // M2-1 / M4-4：启动按 catalog 子集预热镜像（去冷拉延迟）。
+        // M2-1 / M4-4：启动按 catalog 子集预热镜像（去冷拉延迟）；M0-3/M4-3 可选 warm tag 写回。
         if !self.swe_prewarm.is_empty() {
             let pool = swe_pool.clone();
             let ids = self.swe_prewarm.clone();
-            let (ok, fail) = tokio::task::spawn_blocking(move || pool.prewarm_images(&ids))
+            let warm_tag = self.swe_warm_tag;
+            let (ok, fail) = tokio::task::spawn_blocking(move || pool.prewarm_images(&ids, warm_tag))
                 .await
                 .unwrap_or((0, 0));
             tracing::info!(

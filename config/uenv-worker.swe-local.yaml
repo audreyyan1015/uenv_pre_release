@@ -30,6 +30,9 @@ hub:
   enabled: false                    # 置 true 且配 endpoint 可改为 Hub 下发实例目录
 swe:
   variants: ["verified"]            # M6: 加 "pro" 则同时 pull Pro catalog（GET /api/v1/swe/pro/instances）
+  # prewarm: ["sympy__sympy-20590"] # M2-1/M4-4: 启动按 instance_id 预热镜像缓存
+  # warm_tag: false                 # M0-3/M4-3: 预热时给镜像打 cache/swe-<id>:warm 本地 tag
+  # seccomp_profile_dir: "sandbox_profiles"  # M2-4: 启用容器 seccomp（按 command_mode 选 restricted/full.json）
 runtime_gateway:
   enabled: true                     # L4 外部运行时网关（OpenHands Remote Runtime 接入）
   listen: "0.0.0.0:38999"           # HTTP session API（plan §5.3，避开生产 28999）

@@ -363,6 +363,21 @@ impl EpisodeExecutor {
         };
 
         let reward = outcome.reward;
+        // M2-3：落盘 EpisodeArtifact（git_diff / 测试结果 / reward）作为可消费轨迹产物。
+        // 仅当 UENV_SWE_ARTIFACT_DIR 配置时启用；写失败仅告警，不阻断 episode。
+        let mut artifact_uri: Option<String> = None;
+        if let Some(store) = crate::swe::artifact_store::ArtifactStore::from_env() {
+            match store.persist(&outcome.artifact) {
+                Ok(uri) => artifact_uri = Some(uri),
+                Err(err) => tracing::warn!(
+                    trace_id = %trace_id,
+                    episode_id = %episode.episode_id,
+                    instance_id = %instance_id,
+                    error = %err,
+                    msg = "swe_artifact_persist_failed"
+                ),
+            }
+        }
         let mut info = std::collections::HashMap::new();
         info.insert("instance_id".to_string(), instance_id.clone());
         info.insert("resolved".to_string(), outcome.resolved.to_string());
@@ -372,6 +387,12 @@ impl EpisodeExecutor {
             let passed = tr.per_test.iter().filter(|(_, ok)| *ok).count();
             info.insert("tests_passed".to_string(), passed.to_string());
             info.insert("tests_total".to_string(), tr.per_test.len().to_string());
+        }
+        if let Some(diff) = &outcome.artifact.git_diff {
+            info.insert("git_diff_bytes".to_string(), diff.len().to_string());
+        }
+        if let Some(uri) = &artifact_uri {
+            info.insert("artifact_uri".to_string(), uri.clone());
         }
 
         let step = StepRecord {

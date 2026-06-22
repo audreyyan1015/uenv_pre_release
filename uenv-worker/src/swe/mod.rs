@@ -15,6 +15,7 @@
 //! - [`variant`]：`BenchmarkVariant`（verified / lite / pro）。
 
 pub mod artifact;
+pub mod artifact_store;
 pub mod command_policy;
 pub mod dataset;
 pub mod grader;
@@ -22,20 +23,23 @@ pub mod harness;
 pub mod hub_config;
 pub mod image_cache;
 pub mod instance_pool;
+pub mod repo_specs;
 pub mod resettable;
 pub mod session;
 pub mod spec;
 pub mod variant;
 
 pub use artifact::{EpisodeArtifact, TestResults};
+pub use artifact_store::ArtifactStore;
 pub use command_policy::{CommandPolicy, CommandPolicyConfig};
 pub use dataset::{image_ref, InstanceStore, SweInstance};
-pub use grader::{grader_for, GradeResult, Grader, SwebenchGrader, SwebenchProGrader};
+pub use grader::{grader_for, grader_for_spec, GradeResult, Grader, SwebenchGrader, SwebenchProGrader};
 pub use harness::{run_instance, ContainerRuntime, EpisodeOutcome, RunOptions};
 pub use hub_config::SweDefaultConfig;
 pub use image_cache::{ImageCacheFactory, ImageState};
 pub use instance_pool::SweInstancePool;
-pub use resettable::{PodmanResettableInstance, ResettableInstance};
+pub use repo_specs::{spec_for, LogParser, RepoSpec, TestRunner};
+pub use resettable::{PodmanResettableInstance, ResettableInstance, ResettableSession};
 pub use session::{ExecResult, SweSession};
 pub use spec::{
     build_reset_observation, AttachmentRef, EvaluationSpec, InstanceSpec, IssueRef,

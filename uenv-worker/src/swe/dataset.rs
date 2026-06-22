@@ -8,11 +8,15 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::swe::repo_specs::{spec_for, LogParser, RepoSpec, DEFAULT_SPEC};
 use crate::swe::spec::{EvaluationSpec, InstanceSpec, TaskSpec};
 use crate::swe::variant::BenchmarkVariant;
 
 /// 官方 Verified 评测镜像前缀（plan §6.2：Pro 禁止共用此命名空间）。
 pub const VERIFIED_IMAGE_PREFIX: &str = "swebench/sweb.eval.";
+
+/// 标准 conda 环境激活前缀（SWE-bench 镜像内 `testbed` env）。
+pub const CONDA_ACTIVATE: &str = "source /opt/miniconda3/bin/activate testbed 2>/dev/null";
 
 /// 单个 SWE-bench 实例的数据集行（含评测真值）。
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +76,36 @@ impl SweInstance {
     /// 该变体的 grader 名（verified/lite=swebench，pro=swebench_pro）。
     pub fn grader_name(&self) -> &'static str {
         self.variant().default_grader()
+    }
+
+    /// 该实例 `repo@version` 的执行规格（M1-2）：命中官方子集表则用之，否则通用 pytest 兜底。
+    pub fn repo_spec(&self) -> RepoSpec {
+        spec_for(&self.repo, &self.version).unwrap_or(DEFAULT_SPEC)
+    }
+
+    /// 测试输出日志解析口径（M1-4）：随 `repo@version` 规格（pytest / Django）。
+    pub fn log_parser(&self) -> LogParser {
+        self.repo_spec().log_parser
+    }
+
+    /// 解析最终测试命令（M1-4）：实例显式 `test_cmd` 优先（按原样执行，适配 Pro / 非 pytest
+    /// 整套 runner），否则按 `repo@version` 规格拼接节点 id。
+    pub fn resolved_test_command(&self, testbed: &str) -> String {
+        if let Some(cmd) = self.test_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
+            return format!("{CONDA_ACTIVATE}; cd {testbed} && {cmd}");
+        }
+        self.repo_spec()
+            .build_test_command(CONDA_ACTIVATE, testbed, &self.fail_to_pass, &self.pass_to_pass)
+    }
+
+    /// 解析 post-patch 安装命令原文（M1-3 / M1-2）：实例显式 `install_cmd` 优先，
+    /// 否则 `repo@version` 规格的 install（如 scikit-learn 的 `pip install -e .`）。
+    /// 返回 `None` 表示镜像已 setup、无需再装。
+    pub fn resolved_install_command(&self) -> Option<String> {
+        if let Some(c) = self.install_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Some(c.clone());
+        }
+        self.repo_spec().install.map(|s| s.to_string())
     }
 
     /// 镜像命名空间是否与变体一致（plan §6.2 启动校验）：
