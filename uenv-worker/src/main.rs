@@ -77,5 +77,121 @@ async fn main() {
         Commands::Health => {
             println!("ok");
         }
+        Commands::SweRun(args) => {
+            if let Err(err) = run_swe(args).await {
+                eprintln!("swe-run failed: {err}");
+                std::process::exit(1);
+            }
+        }
+        Commands::SweDispatch(args) => {
+            if let Err(err) = dispatch_swe(args).await {
+                eprintln!("swe-dispatch failed: {err}");
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+async fn dispatch_swe(
+    args: uenv_worker::cli::SweDispatchArgs,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use uenv_worker::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
+    use uenv_worker::proto::worker::v1::DispatchEpisodeRequest;
+    use uenv_worker::proto::v1::EpisodeRequest;
+
+    let payload = serde_json::json!({
+        "instance_id": args.instance,
+        "use_gold_patch": args.gold,
+    });
+    let episode = EpisodeRequest {
+        episode_id: args.episode_id.clone(),
+        attempt_id: 1,
+        env_type: "swe".to_string(),
+        payload: serde_json::to_vec(&payload)?,
+        max_steps: 1,
+        model_endpoint: String::new(),
+        correlation_id: format!("swe-dispatch-{}", args.instance),
+        dispatch_lease_id: "swe-local-lease".to_string(),
+        ..Default::default()
+    };
+
+    let url = format!("http://{}", args.endpoint);
+    println!("dispatching env_type=swe instance={} gold={} -> {url}", args.instance, args.gold);
+    let mut client = WorkerGrpcServiceClient::connect(url).await?;
+    let mut stream = client
+        .dispatch_episode(DispatchEpisodeRequest { episode: Some(episode) })
+        .await?
+        .into_inner();
+
+    let mut final_reward = None;
+    while let Some(report) = stream.message().await? {
+        println!(
+            "  [stream] phase={} step={}/{} reward={}",
+            report.phase, report.current_step, report.total_steps, report.current_reward
+        );
+        if let Some(step) = &report.last_step {
+            let mut keys: Vec<_> = step.info.keys().cloned().collect();
+            keys.sort();
+            for k in keys {
+                println!("           info.{k} = {}", step.info[&k]);
+            }
+        }
+        final_reward = Some(report.current_reward);
+    }
+    match final_reward {
+        Some(r) => println!("==== DispatchEpisode 完成：reward = {r} ===="),
+        None => println!("==== DispatchEpisode 无 stream（可能已完成/去重）===="),
+    }
+    Ok(())
+}
+
+async fn run_swe(
+    args: uenv_worker::cli::SweRunArgs,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use uenv_worker::swe::{InstanceStore, RunOptions};
+    use uenv_worker::swe::command_policy::CommandPolicyConfig;
+    use uenv_worker::swe::harness::ContainerRuntime;
+
+    let store = InstanceStore::from_json_file(&args.instances_file)?;
+    let Some(instance_id) = args.instance.clone() else {
+        println!("available instances ({}):", store.len());
+        for id in store.ids() {
+            println!("  {id}");
+        }
+        return Ok(());
+    };
+    let instance = store
+        .get(&instance_id)
+        .ok_or_else(|| format!("instance_id `{instance_id}` not found in {}", args.instances_file))?;
+    let runtime = ContainerRuntime::parse(&args.runtime)
+        .ok_or_else(|| format!("invalid runtime `{}` (docker|podman)", args.runtime))?;
+
+    let opts = RunOptions {
+        runtime,
+        use_gold_patch: args.gold,
+        keep_container: args.keep,
+        policy: CommandPolicyConfig::default(),
+    };
+
+    // 容器编排为阻塞调用，放到 blocking 线程。
+    let instance = instance.clone();
+    let episode_id = args.episode_id.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        uenv_worker::swe::run_instance(&instance, &episode_id, &opts)
+    })
+    .await??;
+
+    println!("==== SWE-bench episode result ====");
+    println!("instance_id : {}", outcome.instance_id);
+    println!("use_gold    : {}", args.gold);
+    println!("resolved    : {}", outcome.resolved);
+    println!("reward      : {}", outcome.reward);
+    println!("duration_ms : {}", outcome.duration_ms);
+    if let Some(tr) = &outcome.artifact.test_results {
+        println!("tests:");
+        for (id, ok) in &tr.per_test {
+            println!("  [{}] {id}", if *ok { "PASS" } else { "FAIL" });
+        }
+    }
+    Ok(())
 }

@@ -1,0 +1,35 @@
+{
+  "_comment": "RestrictedShell seccomp profile — MVP stub (plan §4.3, M2 实装). 默认拒绝, 仅放行最小 syscall 白名单; 网络相关 (connect/socket) 由 --network=none 与本 profile 共同收敛. 长期目标: 与 AppArmor/SELinux profile 协同, 取代 deny_patterns 黑名单.",
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+    },
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": ["SCMP_ARCH_ARM"]
+    }
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "read", "write", "open", "openat", "close", "stat", "fstat", "lstat",
+        "lseek", "mmap", "mprotect", "munmap", "brk", "rt_sigaction",
+        "rt_sigprocmask", "rt_sigreturn", "ioctl", "access", "pipe", "pipe2",
+        "select", "poll", "ppoll", "pselect6", "dup", "dup2", "dup3",
+        "execve", "execveat", "exit", "exit_group", "wait4", "waitid",
+        "clone", "clone3", "fork", "vfork", "fcntl", "getcwd", "chdir",
+        "fchdir", "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat", "rename",
+        "renameat", "renameat2", "readlink", "readlinkat", "getdents",
+        "getdents64", "getpid", "getppid", "getuid", "geteuid", "getgid",
+        "getegid", "set_tid_address", "set_robust_list", "futex", "nanosleep",
+        "clock_gettime", "clock_nanosleep", "gettimeofday", "uname", "arch_prctl",
+        "prlimit64", "getrandom", "sysinfo", "umask", "fchmod", "fchmodat",
+        "chmod", "fchown", "fchownat", "newfstatat", "statx", "epoll_create1",
+        "epoll_ctl", "epoll_wait", "epoll_pwait", "eventfd2", "memfd_create"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}

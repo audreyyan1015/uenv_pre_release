@@ -53,6 +53,31 @@ pub async fn sync_env_types_from_hub(
     results
 }
 
+/// 从 Hub 拉取 SWE-bench 实例目录（plan §1.2 / §6 「Hub 下发 instance_specs/task_specs」）。
+///
+/// 约定端点：`GET {hub}/api/v1/swe/instances`，返回与本地 `swe_instances.json` 同构的
+/// `{ instance_id: {repo, base_commit, patch, test_patch, FAIL_TO_PASS, PASS_TO_PASS, ...} }`。
+/// 失败时调用方应回退本地目录（与 env manifest 的降级策略一致）。
+pub async fn pull_swe_catalog(
+    hub_endpoint: &str,
+    hub_token: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let base = hub_endpoint.trim().trim_end_matches('/');
+    let url = format!("{base}/api/v1/swe/instances");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let mut request = client.get(&url);
+    if let Some(token) = hub_token.filter(|t| !t.is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    if !response.status().is_success() {
+        return Err(format!("hub GET {url} returned {}", response.status()).into());
+    }
+    Ok(response.text().await?)
+}
+
 pub async fn pull_full_manifest(
     hub_endpoint: &str,
     env_type: &str,

@@ -14,4 +14,5 @@ pub mod proto;
 pub mod registry;
 pub mod runtime;
 pub mod state;
+pub mod swe;
 pub mod wal;
