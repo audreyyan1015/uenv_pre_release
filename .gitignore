@@ -21,3 +21,8 @@ secrets/*
 /logs
 /Docs/scripts
 /tmp
+
+# stress_test: 生成的 gRPC Python 代码、复制的 proto 源文件、运行时日志
+/uenv-server/stress_test/uenv/
+/uenv-server/stress_test/proto/
+/uenv-server/stress_test/logs/

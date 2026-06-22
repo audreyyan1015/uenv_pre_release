@@ -50,7 +50,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let state = create_default_state();
+    let config_path = std::env::var("UENV_CONFIG_PATH")
+        .unwrap_or_else(|_| "config/server.yaml".to_string());
+    let config = uenv_server::ServerConfig::load_or_default(&config_path);
+    tracing::info!(config_path = %config_path, "server_config_loaded");
+    let state = uenv_server::create_state_with_config(&config);
+
+    // admin HTTP: start before serving gRPC so it's available immediately
+    if config.admin_http_port > 0 {
+        let admin_state = Arc::clone(&state);
+        let admin_port = config.admin_http_port;
+        tokio::spawn(uenv_server::admin_http::serve(admin_state, admin_port));
+        tracing::info!(port = admin_port, "admin_http_spawned");
+    }
 
     let core = AdapterCore::new(UEnvEpisodeService::new(Arc::clone(&state)));
     let adapter_service = AdapterCoreServiceImpl::new(core);
