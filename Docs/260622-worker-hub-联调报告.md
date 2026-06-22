@@ -33,7 +33,7 @@
 - **M6 `SwebenchProGrader`**：多 runner 日志解析（pytest / `go test` / TAP），`grader_for("swebench_pro")` 已分流；Pro 实例经 `to_instance_spec()` 自动选用。单测覆盖。
 - **M6 Pro catalog / 命名空间校验 / seed**：Hub pull 端点按变体分桶（`/api/v1/swe/{verified,pro}/instances`）、`config/swe-pro-default-config.json` seed、启动镜像命名空间校验（Pro 禁占 `sweb.eval.*`）、`swe.variants` 配置。远端实测 Pro 目录加载 + 变体路由（见 §3 证据 10；离线无 Pro registry 镜像，故止于 image-pull 边界）。
 
-> 注：OpenHands 上游本仓 clone 为**新版 `app_server`/`agent_server`/SDK 架构**（已无经典 `openhands.runtime.base.Runtime` 与 `evaluation/benchmarks/swe_bench`）。故 `UEnvRuntime` 采用 **duck-typing** 适配（读 `.command/.path/.content`），不硬绑定某一 OpenHands 版本；接 LLM 的完整 agent-loop 需 OpenHands + 模型在线，超出 7143 离线范围。
+> **依赖方向（已确认）**：OpenHands 客户端是**独立重写，零依赖 OpenHands 仓库**（不 `import openhands`）。这是对 plan §5.3.3「实现/子类化 OpenHands 经典 `Runtime` + 用 `benchmarks/swe_bench` 驱动」的**有意偏差**。原因：本仓 clone（`openhands-ai`）是**新版 `app_server`/`agent_server`/SDK 架构**，已无经典 `openhands.runtime.base.Runtime`、无 `openhands.events.observation`、无 `evaluation/benchmarks/swe_bench`（新版改用 runtime-api 协议 `/start`、`/sessions`、`/list`、`/pause`…）。故 `UEnvRuntime` 用 **duck-typing**（读 `.command/.path/.content`，返回 OpenHands 同名字段的 dict）对接 UEnv 网关契约，不绑定任何 OpenHands 版本。若后续要落 plan 字面的"真依赖"：pin 一个含经典 `Runtime` + `benchmarks/swe_bench` 的 OpenHands release，加一层子类 shim 委托到 `UEnvGatewayClient` 即可（网关契约不变）。接 LLM 的完整 agent-loop 需 OpenHands + 模型在线，超出 7143 离线范围。
 
 **达成情况**：
 

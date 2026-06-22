@@ -9,14 +9,18 @@ used by ``evaluation/benchmarks/swe_bench``) centres on:
 
 This adapter implements those entry points by **duck-typing** the action objects
 (reading ``.command`` / ``.path`` / ``.content``) and forwarding to a
-``UEnvSession``. Duck-typing avoids pinning UEnv to a single OpenHands release —
-the same adapter works whether OpenHands ships ``Observation`` dataclasses or
-plain dicts. If OpenHands observation types are importable we return those;
-otherwise we return lightweight dicts with the same field names.
+``UEnvSession``. **It has zero dependency on the OpenHands package** (we never
+``import openhands``): actions are read by attribute/key and observations are
+returned as OpenHands-shaped plain dicts (same field names). Duck-typing avoids
+pinning UEnv to any OpenHands release.
 
-It deliberately does **not** subclass OpenHands' ``Runtime`` (which requires a
-full sandbox/plugin stack); instead it is the minimal object an OpenHands
-``swe_bench`` driver needs to send actions to UEnv. See ``run_swebench.py``.
+Decoupling decision (confirmed): this is an **independent rewrite**, not a
+subclass of OpenHands' ``Runtime``. This deviates from plan §5.3.3 (which assumed
+implementing/subclassing the classic OpenHands ``Runtime`` and driving via
+``evaluation/benchmarks/swe_bench``). Reason: the vendored OpenHands (``openhands-ai``)
+is the new ``app_server``/SDK architecture and ships **no** classic
+``openhands.runtime.base.Runtime``, **no** ``openhands.events.observation``, and
+**no** ``benchmarks/swe_bench``. See README "Design notes".
 """
 
 from __future__ import annotations
@@ -125,36 +129,27 @@ class UEnvRuntime:
         self.close()
 
 
-# ── observation factories: prefer real OpenHands types if available ──
+# ── observation factories ────────────────────────────────────────────
+# Decoupling decision (confirmed): this integration does NOT depend on the
+# OpenHands package. Observations are plain OpenHands-shaped dicts (same field
+# names as `CmdOutputObservation` / `FileReadObservation` / `FileWriteObservation`)
+# so a real OpenHands driver can consume them, but we never `import openhands`.
+# This deviates from plan §5.3.3 (which assumed subclassing OpenHands' classic
+# `Runtime`); see README "Design notes" for why (the vendored OpenHands is the
+# new app_server/SDK architecture with no classic Runtime / benchmarks/swe_bench).
 def _make_cmd_observation(command: str, stdout: str, stderr: str, exit_code: int):
-    try:
-        from openhands.events.observation import CmdOutputObservation  # type: ignore
-
-        content = stdout if exit_code == 0 else (stdout + stderr)
-        return CmdOutputObservation(content=content, command=command, exit_code=exit_code)
-    except Exception:
-        return {
-            "observation": "run",
-            "command": command,
-            "content": stdout,
-            "stderr": stderr,
-            "exit_code": exit_code,
-        }
+    return {
+        "observation": "run",
+        "command": command,
+        "content": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+    }
 
 
 def _make_file_read_observation(path: str, content: str):
-    try:
-        from openhands.events.observation import FileReadObservation  # type: ignore
-
-        return FileReadObservation(path=path, content=content)
-    except Exception:
-        return {"observation": "read", "path": path, "content": content}
+    return {"observation": "read", "path": path, "content": content}
 
 
 def _make_file_write_observation(path: str, ok: bool):
-    try:
-        from openhands.events.observation import FileWriteObservation  # type: ignore
-
-        return FileWriteObservation(path=path, content="")
-    except Exception:
-        return {"observation": "write", "path": path, "ok": ok}
+    return {"observation": "write", "path": path, "ok": ok}

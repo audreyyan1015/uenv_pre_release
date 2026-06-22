@@ -21,24 +21,45 @@ OpenHands agent  ──actions──▶  UEnvRuntime  ──HTTP──▶  Worke
 | `run_swebench.py` | End-to-end driver: connect → apply edits as OpenHands actions → `submit`. |
 | `tests/test_client_smoke.py` | Offline adapter unit tests + opt-in live gateway check. |
 
-## Design notes / version compatibility
+## Design notes / decoupling decision (vs plan §5.3.3)
 
-This repo vendors the **new** OpenHands (`app_server` + `agent_server` + SDK)
-architecture, which no longer ships the classic `openhands.runtime.base.Runtime`
-ABC or `evaluation/benchmarks/swe_bench`. To stay decoupled from any single
-OpenHands release, `UEnvRuntime`:
+**Decision (confirmed): this integration is an independent rewrite and has ZERO
+dependency on the OpenHands package — we never `import openhands`.**
 
-- **duck-types** action objects (reads `.command` / `.path` / `.content`), so it
-  accepts both classic action dataclasses and plain dicts;
-- returns real `openhands.events.observation.*` objects **if importable**, else
-  equivalent dicts;
-- does **not** subclass OpenHands' `Runtime` (which pulls in a full sandbox /
-  plugin stack). It is the minimal object a `swe_bench` driver sends actions to.
+This is a deliberate deviation from plan §5.3.3, which assumed `UEnvRuntime` would
+**implement/subclass OpenHands' classic `Runtime`** (`run`/`read`/`write`/`copy`)
+and drive evaluation via OpenHands `evaluation/benchmarks/swe_bench` (pinning the
+OpenHands swebench branch, plan Q6).
 
-The `UEnvGatewayClient` is fully standalone and is the artifact validated against
-a live Worker gateway offline. Wiring a real OpenHands LLM agent loop additionally
-requires OpenHands + model access (online) and is out of scope for the offline
-Worker host.
+Reason: the vendored OpenHands (`openhands-ai`) is the **new
+`app_server`/`agent_server`/SDK architecture**, which ships **none** of the pieces
+the plan targets:
+
+- no `openhands/runtime/base.py` (classic `Runtime` ABC),
+- no `openhands/events/observation*`,
+- no `evaluation/benchmarks/swe_bench` driver.
+
+(The new architecture instead exposes a *runtime-api* protocol — `/start`,
+`/sessions/{id}`, `/list`, `/pause` … — in `app_server/sandbox/remote_sandbox_service.py`.)
+
+So `UEnvRuntime`:
+
+- **duck-types** action objects (reads `.command` / `.path` / `.content`), accepting
+  classic action dataclasses or plain dicts, without binding to any OpenHands release;
+- returns **OpenHands-shaped plain dicts** (same field names as
+  `CmdOutputObservation` / `FileReadObservation` / `FileWriteObservation`); it does
+  **not** import or construct real OpenHands observation types;
+- does **not** subclass OpenHands' `Runtime`.
+
+The `UEnvGatewayClient` is fully standalone and is the artifact validated against a
+live Worker gateway offline (gold→reward=1.0 / no-gold→0). Wiring a real OpenHands
+LLM agent loop additionally requires OpenHands + model access (online) and is out of
+scope for the offline Worker host.
+
+**If a true OpenHands dependency is later required** (plan §5.3.3 literal), pin an
+OpenHands release that still ships the classic `Runtime` + `benchmarks/swe_bench`,
+then add a thin subclass shim that delegates to `UEnvGatewayClient` — the gateway
+contract here is unchanged.
 
 ## Quick start
 
