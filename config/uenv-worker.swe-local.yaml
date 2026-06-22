@@ -1,0 +1,30 @@
+# SWE-bench 本地/离线联调配置（无需 Server）。
+# 配合 UENV_WORKER_ALLOW_DEGRADED_START=1 启动：register 失败降级继续，仅本机 gRPC 派发。
+server:
+  endpoint: "127.0.0.1:50051"      # 占位；degraded start 下 register 失败可继续
+worker:
+  id: "swe-local"
+  listen: "0.0.0.0:38888"          # gRPC 业务（避开生产 28888）
+  max_concurrent: 4
+scheduler:
+  mode: "remote"
+env:
+  types: ["swe"]
+  backend: "process"
+  plugin_dir: "./plugins"
+pool:
+  warmup_size: 0                   # SWE 不经预热池
+  prewarm_on_startup: false
+  max_idle_time: 300
+  cool_timeout: 60
+  max_episode_count: 1000
+logging:
+  level: "INFO"
+  file: "./swe-worker.log"
+wal:
+  dir: "./swe-wal"
+observability:
+  metrics_listen: "0.0.0.0:38777"  # health/metrics（避开生产 28777）
+  health_listen: "0.0.0.0:38777"
+hub:
+  enabled: false                    # 置 true 且配 endpoint 可改为 Hub 下发实例目录

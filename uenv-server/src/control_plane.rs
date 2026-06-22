@@ -20,6 +20,7 @@
 //     |                          |                   客户端收到结果|
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -77,6 +78,24 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 1
             },
             current_load: 0,  // 初始负载为 0
+            resource: req.resource.clone(),
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),  // 从注册时刻起算5min超时，防止 None 导致永不降级
+            last_heartbeat_at: Some(std::time::Instant::now()),  // 注册即视为一次心跳，30s 内需发真实心跳续期
+        };
+
+        // 动态队列：注册前先取旧容量（重注册时计算 delta）
+        let old_capacity = if self.state.queue_dynamic {
+            self.state
+                .scheduler
+                .read()
+                .list_workers()
+                .into_iter()
+                .find(|w| w.worker_id == worker_id)
+                .map(|w| w.capacity)
+                .unwrap_or(0) as usize
+        } else {
+            0
         };
 
         // 注册到调度器（内部会先删除同 ID 的旧记录，再插入新记录，实现幂等注册）
@@ -86,6 +105,28 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             endpoint = %req.endpoint,
             "control_plane_register"
         );
+
+        // 动态队列：按 delta 增减 semaphore permits
+        if self.state.queue_dynamic {
+            let new_capacity = req.max_concurrent.max(1) as usize;
+            if let Some(ref sem) = self.state.episode_semaphore {
+                if new_capacity > old_capacity {
+                    let added = new_capacity - old_capacity;
+                    sem.add_permits(added);
+                    info!(worker_id = %worker_id, added_permits = added,
+                          total_permits = sem.available_permits(), "queue_permits_added");
+                } else if old_capacity > new_capacity {
+                    // 减少：后台 acquire + forget（不阻塞注册流程）
+                    let reduce = (old_capacity - new_capacity) as u32;
+                    let sem = Arc::clone(sem);
+                    tokio::spawn(async move {
+                        if let Ok(permit) = sem.acquire_many(reduce).await {
+                            permit.forget();
+                        }
+                    });
+                }
+            }
+        }
 
         // 返回注册结果，包含服务器确认的 worker_id 和当前服务器 epoch
         Ok(Response::new(RegisterWorkerResponse {
@@ -104,8 +145,9 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
     ///
     /// worker 定期（默认每 5 秒）发送心跳，包含自身当前的负载信息。
     /// 服务器收到心跳后：
-    ///   1. 更新调度器中该 worker 的负载记录（使 worker 的真实负载反映到调度决策中）
-    ///   2. 回复确认，告知 worker 下次心跳的建议间隔时间
+    ///   1. 计算心跳单程延迟（server 收到时间 - worker 发送时间）并记录日志
+    ///   2. 更新调度器中该 worker 的负载记录（使 worker 的真实负载反映到调度决策中）
+    ///   3. 回复确认，告知 worker 下次心跳的建议间隔时间
     ///
     /// 实现方式：把实际的流处理逻辑放到后台 tokio task 中，
     /// 函数本身立即返回，不阻塞 gRPC 框架的调度线程。
@@ -128,6 +170,14 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             while let Some(next) = stream.next().await {
                 match next {
                     Ok(heartbeat) => {
+                        // 计算心跳单程延迟：server 收到时间 - worker 发送时间。
+                        // 要求两端时钟大致同步；偏差过大时 lag_ms 可能为负，用 max(0) 截断。
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        let lag_ms = (now_ms - heartbeat.timestamp_ms).max(0);
+
                         // 用心跳中的负载数据更新调度器里该 worker 的状态。
                         // max(0)：proto 中 load/max_load 是有符号 i32，
                         // 确保不会把负数转成 u32（负数转 u32 会溢出成超大值）。
@@ -137,12 +187,20 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                             heartbeat.max_load.max(0) as u32,
                         );
 
+                        info!(
+                            worker_id = %heartbeat.worker_id,
+                            load = heartbeat.load,
+                            max_load = heartbeat.max_load,
+                            lag_ms = lag_ms,
+                            "heartbeat_received"
+                        );
+
                         // 构造心跳响应，通知 worker 服务器一切正常
                         let resp = HeartbeatResponse {
                             ok: true,
                             drain: None,  // None 表示不要求 worker 停止接受新任务
                             server_epoch: state.epoch(),
-                            next_heartbeat_interval_ms: 5000,  // 建议 5 秒后发送下一次心跳
+                            next_heartbeat_interval_ms: state.heartbeat_interval_ms as i32,
                         };
 
                         // 把响应发入 channel；如果发送失败说明 gRPC 连接已关闭，退出循环
@@ -176,6 +234,22 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
     ) -> Result<Response<ReportResultResponse>, Status> {
         let req = request.into_inner();
 
+        // epoch 校验：server_epoch 非零时必须与当前 epoch 匹配。
+        // 不匹配说明结果来自旧的 server 实例（server 已重启），应拒绝，避免把过期结果
+        // 路由到新 server 实例上等待中的 episode（两者的 pending_results 不互通）。
+        if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
+            warn!(
+                worker_id = %req.worker_id,
+                report_epoch = req.server_epoch,
+                current_epoch = self.state.epoch(),
+                "report_result_stale_epoch_rejected"
+            );
+            return Ok(Response::new(ReportResultResponse {
+                ack: false,
+                duplicate: false,
+            }));
+        }
+
         // 幂等性检查：把 idempotency_key 插入已处理集合。
         // HashSet::insert 返回 true 表示插入成功（key 是新的），false 表示已存在（重复请求）。
         // 取反后：duplicate=true 表示这是重复上报，应跳过处理。
@@ -203,6 +277,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         // 只有非重复的结果才进行处理；重复结果直接返回 duplicate=true 告知 worker
         if !duplicate {
             if let Some(result) = req.result {
+                self.state.scheduler.write().touch_worker_report(&req.worker_id);
                 // 从 pending_results 中取出并删除对应条目（同时获得 channel 的发送端）
                 if let Some((_, pending)) = self
                     .state
@@ -214,6 +289,14 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                     let _ = pending.tx.send(result);
                 }
             }
+        }
+
+        // 结果已处理完毕，从幂等集合中删除该 key，避免长期运行内存无限增长。
+        // 此时重复上报的窗口已关闭：pending_results 已移除，channel 已关闭，
+        // 即使 worker 再次重发同一 key，也只会拿到空的 pending_results 而无副作用。
+        {
+            let mut seen = self.state.seen_idempotency.lock();
+            seen.remove(&req.idempotency_key);
         }
 
         Ok(Response::new(ReportResultResponse {
@@ -250,7 +333,13 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 supported_env_types: w.supported_env_types,
                 load: w.current_load as i32,
                 max_load: w.capacity as i32,
-                status: "ready".to_string(),
+                status: if w.draining {
+                    "draining"
+                } else if w.degraded {
+                    "degraded"
+                } else {
+                    "ready"
+                }.to_string(),
                 endpoint: w.endpoint,
             })
             .collect();

@@ -1,0 +1,29 @@
+port: 50051
+
+scheduler:
+  strategy: round_robin
+  # Worker 有活跃 load 但超过此秒数无 episode 完成，标记为 degraded，停止分配新任务
+  worker_degraded_threshold_secs: 400
+  # 无可用 Worker 时调度循环的重试等待间隔（毫秒）
+  schedule_retry_interval_ms: 500
+  # Server 建议 Worker 使用的心跳间隔（毫秒）
+  heartbeat_interval_ms: 5000
+  # Worker 超过此秒数无心跳视为连接断开（建议为 heartbeat_interval_ms*6/1000）
+  heartbeat_timeout_secs: 30
+
+episode:
+  # 客户端未在 EpisodeRequest.timeout_seconds 中指定超时时，使用此默认值（秒）
+  default_timeout_secs: 300
+  # episode 超过此秒数未完成时打印 warn 日志（秒，建议约为 default_timeout_secs 的一半）
+  stale_warning_secs: 150
+  # 单个 episode 最多重试次数，超过后返回 failed
+  max_attempts: 3
+  # episode 完成广播 channel 的容量，按最大 Worker 数 x 32 估算
+  broadcast_capacity: 1024
+
+pool:
+  max_idle: 16
+  warmup_enabled: true
+  warmup_env_types:
+    - math
+    - code

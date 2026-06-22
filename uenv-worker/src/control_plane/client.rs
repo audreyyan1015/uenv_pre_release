@@ -155,27 +155,34 @@ impl SchedulerControlPlaneClient {
         tokio::spawn(async move {
             let mut interval_ms: u64 = 5_000;
             loop {
-                if let Err(err) = this.heartbeat_once(interval_ms).await {
-                    this.connected.store(false, Ordering::Relaxed);
-                    tracing::warn!(error = %err, msg = "heartbeat_failed");
-                } else {
-                    this.connected.store(true, Ordering::Relaxed);
+                match this.heartbeat_once().await {
+                    Err(err) => {
+                        this.connected.store(false, Ordering::Relaxed);
+                        tracing::warn!(error = %err, msg = "heartbeat_failed");
+                    }
+                    Ok(next) => {
+                        this.connected.store(true, Ordering::Relaxed);
+                        // 使用服务器建议的间隔，最低 500ms
+                        if let Some(v) = next {
+                            interval_ms = v.max(500);
+                        }
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                if let Some(v) = this.latest_interval_ms().await {
-                    interval_ms = v.max(500);
-                }
             }
         });
     }
 
-    async fn heartbeat_once(
-        &self,
-        interval_ms: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// 发送一次心跳，返回服务器建议的下次间隔（毫秒）；无响应时返回 None。
+    ///
+    /// 如果回包的 server_epoch 与本地记录不同，说明 server 已重启，
+    /// 立即触发 re-register（重新将自己注册到新 server 实例）。
+    /// re-register 失败时向上传播错误，由 spawn_heartbeat_loop 捕获后重试。
+    async fn heartbeat_once(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let (tx, rx) = mpsc::channel(4);
         let identity = self.identity.read().await.clone();
+        let prev_epoch = identity.server_epoch;
         tx.send(HeartbeatRequest {
             worker_id: identity.worker_id,
             load: self.metrics.active_episode_count() as i32,
@@ -184,7 +191,7 @@ impl SchedulerControlPlaneClient {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64,
-            server_epoch: identity.server_epoch,
+            server_epoch: prev_epoch,
         })
         .await?;
         drop(tx);
@@ -193,24 +200,38 @@ impl SchedulerControlPlaneClient {
             .await?
             .into_inner();
         if let Some(resp) = stream.message().await? {
-            let mut identity = self.identity.write().await;
-            identity.server_epoch = resp.server_epoch;
-            tracing::info!(
-                trace_id = "control_plane",
-                episode_id = "-",
-                worker_id = %identity.worker_id,
-                server_epoch = identity.server_epoch,
-                msg = "heartbeat"
-            );
-            if resp.next_heartbeat_interval_ms > 0 {
-                let _ = interval_ms;
+            let new_epoch = resp.server_epoch;
+            {
+                let mut identity = self.identity.write().await;
+                identity.server_epoch = new_epoch;
+                tracing::info!(
+                    trace_id = "control_plane",
+                    episode_id = "-",
+                    worker_id = %identity.worker_id,
+                    server_epoch = new_epoch,
+                    msg = "heartbeat"
+                );
             }
+            // epoch 发生变化说明 server 重启了，需要重新注册。
+            // prev_epoch == 0 是初始状态（尚未完成第一次注册），不算 server 重启。
+            if prev_epoch != 0 && new_epoch != 0 && prev_epoch != new_epoch {
+                tracing::warn!(
+                    trace_id = "control_plane",
+                    episode_id = "-",
+                    prev_epoch,
+                    new_epoch,
+                    msg = "server_epoch_changed_reregistering"
+                );
+                self.register().await?;
+            }
+            let next = if resp.next_heartbeat_interval_ms > 0 {
+                Some(resp.next_heartbeat_interval_ms as u64)
+            } else {
+                None
+            };
+            return Ok(next);
         }
-        Ok(())
-    }
-
-    async fn latest_interval_ms(&self) -> Option<u64> {
-        Some(5_000)
+        Ok(None)
     }
 
     pub async fn report_result_once(

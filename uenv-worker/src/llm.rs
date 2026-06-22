@@ -1,5 +1,7 @@
 const DEFAULT_OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL: &str = "qwen/qwen-2.5-7b-instruct";
+pub const DEFAULT_LLM_HTTP_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_LLM_MAX_RETRIES: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -11,6 +13,8 @@ pub struct LlmConfig {
     pub app_title: String,
     pub max_tokens: i64,
     pub temperature: f64,
+    pub http_timeout_secs: u64,
+    pub max_retries: usize,
 }
 
 impl Default for LlmConfig {
@@ -24,6 +28,8 @@ impl Default for LlmConfig {
             app_title: "UEnv".to_string(),
             max_tokens: 512,
             temperature: 1.0,
+            http_timeout_secs: DEFAULT_LLM_HTTP_TIMEOUT_SECS,
+            max_retries: DEFAULT_LLM_MAX_RETRIES,
         }
     }
 }
@@ -65,6 +71,18 @@ impl LlmConfig {
         if let Ok(v) = std::env::var("UENV_LLM_TEMPERATURE") {
             if let Ok(parsed) = v.parse::<f64>() {
                 cfg.temperature = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_LLM_HTTP_TIMEOUT_SECS") {
+            if let Ok(parsed) = v.parse::<u64>() {
+                if parsed > 0 {
+                    cfg.http_timeout_secs = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_LLM_MAX_RETRIES") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                cfg.max_retries = parsed;
             }
         }
         cfg

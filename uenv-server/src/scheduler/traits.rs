@@ -13,7 +13,7 @@
 //   例如，把 RoundRobinScheduler 换成 LeastLoadScheduler，
 //   只需要新类型实现同一个 Scheduler trait 即可。
 
-use crate::proto::v1::EpisodeRequest;
+use crate::proto::v1::{EpisodeRequest, ResourceSpec};
 
 /// Scheduler trait：调度器的抽象接口。
 /// 所有调度算法（RoundRobin、LeastLoad 等）都需要实现这个 trait。
@@ -59,6 +59,16 @@ pub struct WorkerInfo {
     /// 该 worker 当前正在执行的 episode 数（当前负载）
     /// current_load >= capacity 时，该 worker 不会被分配新 episode
     pub current_load: u32,
+    /// Worker 机器实际拥有的资源规格（注册时由 worker 上报，None 表示未上报）
+    pub resource: Option<ResourceSpec>,
+    /// 是否正在 drain：true 时不再接受新 episode，等待当前任务执行完毕
+    pub draining: bool,
+    /// 上次成功上报 report_result 的时刻（None 表示从未上报）。
+    /// 用于检测 Worker 假活：load > 0 但长时间无上报时跳过调度。
+    pub last_report_at: Option<std::time::Instant>,
+    /// 上次收到心跳包的时刻（注册时初始化为 Some(now)）。
+    /// 超过 heartbeat_timeout_secs 无心跳则认为连接断开。
+    pub last_heartbeat_at: Option<std::time::Instant>,
 }
 
 /// WorkerAssignment：调度结果，表示一个 episode 应该分发给哪个 worker。

@@ -15,7 +15,7 @@ use traits::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::proto::v1::EpisodeRequest;
+use crate::proto::v1::{EpisodeRequest, ResourceSpec};
 
 /// WorkerSnapshot：list_workers 方法返回的 worker 信息快照。
 /// 字段与 traits::WorkerInfo 相同，但作为独立类型使用，
@@ -26,6 +26,10 @@ pub struct WorkerSnapshot {
     pub supported_env_types: Vec<String>,
     pub capacity: u32,
     pub current_load: u32,
+    pub draining: bool,
+    pub last_report_at: Option<std::time::Instant>,
+    pub last_heartbeat_at: Option<std::time::Instant>,
+    pub degraded: bool,
 }
 
 /// 轮询调度器。
@@ -36,14 +40,20 @@ pub struct RoundRobinScheduler {
     /// 用当前计数器值对候选 worker 数量取模，即可确定本次选哪个。
     /// AtomicUsize 是原子整数，多线程并发调度时无需加锁即可安全地自增。
     counter: AtomicUsize,
+    /// Worker degraded 判定阈值（秒），来自 server.yaml
+    degraded_threshold_secs: u64,
+    /// 心跳超时阈值（秒），来自 server.yaml
+    heartbeat_timeout_secs: u64,
 }
 
 impl RoundRobinScheduler {
-    /// 创建一个空的轮询调度器，初始没有任何 worker，计数器从 0 开始。
-    pub fn new() -> Self {
+    /// 创建一个空的轮询调度器。degraded_threshold_secs 来自 server.yaml。
+    pub fn new(degraded_threshold_secs: u64, heartbeat_timeout_secs: u64) -> Self {
         Self {
             workers: Vec::new(),
             counter: AtomicUsize::new(0),
+            degraded_threshold_secs,
+            heartbeat_timeout_secs,
         }
     }
 
@@ -57,8 +67,18 @@ impl RoundRobinScheduler {
                 supported_env_types: w.supported_env_types.clone(),
                 capacity: w.capacity,
                 current_load: w.current_load,
+                draining: w.draining,
+                last_report_at: w.last_report_at,
+                last_heartbeat_at: w.last_heartbeat_at,
+                degraded: is_worker_degraded(w, self.degraded_threshold_secs, self.heartbeat_timeout_secs),
             })
             .collect()
+    }
+
+    pub fn touch_worker_report(&mut self, worker_id: &str) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.last_report_at = Some(std::time::Instant::now());
+        }
     }
 
     /// 返回当前已注册的 worker 数量。
@@ -85,6 +105,15 @@ impl RoundRobinScheduler {
         }
     }
 
+    /// 将指定 worker 标记为 draining 状态，使其不再参与新的调度。
+    /// draining 之后仍保留在列表中，正在执行的 episode 可以正常完成。
+    /// 实际注销（从列表移除）由调用方在 grace period 结束后执行。
+    pub fn set_worker_draining(&mut self, worker_id: &str) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.draining = true;
+        }
+    }
+
     /// 根据心跳数据更新指定 worker 的负载和容量。
     /// 心跳由 worker 主动上报，反映 worker 自己观察到的实际负载情况，
     /// 比服务器侧的计数更准确（例如 worker 重启后负载归零）。
@@ -95,8 +124,51 @@ impl RoundRobinScheduler {
             if max_load > 0 {
                 w.capacity = max_load;
             }
+            // 每次心跳都刷新 last_heartbeat_at，用于检测连接是否断开
+            w.last_heartbeat_at = Some(std::time::Instant::now());
+            // idle heartbeat（load=0）说明 Worker 健康且无 in-flight，
+            // 刷新 last_report_at 避免长时间空闲后再次调度被误判为 degraded
+            if load == 0 {
+                w.last_report_at = Some(std::time::Instant::now());
+            }
         }
     }
+}
+
+/// 资源匹配检查：worker 实际资源是否满足 episode 请求的最低要求。
+///
+/// 规则：
+/// - 若请求未指定 resource_spec（None）或所有字段均为 0，则无限制，直接通过。
+/// - 若 worker 未上报资源（resource 为 None），但请求有非零要求，则不匹配。
+/// - cpu_cores / memory_mb / gpu_count 为 0 表示该维度无要求。
+/// - gpu_type 为空字符串表示不限型号。
+fn is_worker_degraded(w: &WorkerInfo, threshold_secs: u64, heartbeat_timeout_secs: u64) -> bool {
+    // 维度1：心跳超时 → 连接断开，无论 load 多少都降级
+    if let Some(t) = w.last_heartbeat_at {
+        if t.elapsed().as_secs() > heartbeat_timeout_secs {
+            return true;
+        }
+    }
+    // 维度2：业务假活 → 有 load 但长时间无 episode 完成
+    if w.current_load == 0 {
+        return false;
+    }
+    match w.last_report_at {
+        None => false,
+        Some(t) => t.elapsed().as_secs() > threshold_secs,
+    }
+}
+
+fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> bool {
+    let Some(req) = req.as_ref() else { return true; };
+    if req.cpu_cores == 0 && req.memory_mb == 0 && req.gpu_count == 0 && req.gpu_type.is_empty() {
+        return true;
+    }
+    let Some(w) = worker.as_ref() else { return false; };
+    (req.cpu_cores == 0 || w.cpu_cores >= req.cpu_cores)
+        && (req.memory_mb == 0 || w.memory_mb >= req.memory_mb)
+        && (req.gpu_count == 0 || w.gpu_count >= req.gpu_count)
+        && (req.gpu_type.is_empty() || w.gpu_type == req.gpu_type)
 }
 
 impl Scheduler for RoundRobinScheduler {
@@ -105,6 +177,7 @@ impl Scheduler for RoundRobinScheduler {
     fn register_worker(&mut self, info: WorkerInfo) {
         tracing::info!(worker_id = %info.worker_id, endpoint = %info.endpoint, "worker registered");
         // retain：保留所有 worker_id 不等于新 worker 的元素（即删除同 ID 的旧记录）
+        // 重新注册时，draining 状态由新 info 决定（注册的 worker 默认 draining=false）
         self.workers.retain(|w| w.worker_id != info.worker_id);
         self.workers.push(info);
     }
@@ -126,12 +199,17 @@ impl Scheduler for RoundRobinScheduler {
         // 过滤出满足条件的候选 worker：
         //   条件 1：worker 的 supported_env_types 列表包含请求的 env_type
         //   条件 2：worker 当前负载 < 容量上限（还有空余）
+        let threshold = self.degraded_threshold_secs;
+        let hb_timeout = self.heartbeat_timeout_secs;
         let candidates: Vec<_> = self
             .workers
             .iter()
             .filter(|w| {
-                w.supported_env_types.contains(&request.env_type)
+                !w.draining
+                    && !is_worker_degraded(w, threshold, hb_timeout)
+                    && w.supported_env_types.contains(&request.env_type)
                     && w.current_load < w.capacity
+                    && resource_fits(&w.resource, &request.resource_spec)
             })
             .collect();
 

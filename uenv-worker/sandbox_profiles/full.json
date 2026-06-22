@@ -1,0 +1,23 @@
+{
+  "_comment": "FullShell seccomp profile — SWE-bench harness 对标 (plan §4.3). 宽松默认放行, 仅拒绝少量高危 syscall; 网络放行 (--network=bridge). 与 RestrictedShell 的差异在于能力更宽, 但仍是容器隔离边界, 非宿主.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+    },
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": ["SCMP_ARCH_ARM"]
+    }
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "mount", "umount2", "reboot", "swapon", "swapoff", "kexec_load",
+        "init_module", "finit_module", "delete_module", "pivot_root"
+      ],
+      "action": "SCMP_ACT_ERRNO"
+    }
+  ]
+}

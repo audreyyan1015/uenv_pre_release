@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -9,6 +10,12 @@ use crate::episode::reward_engine::RewardEngine;
 use crate::plugin::host::PluginHost;
 use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReportType, StepRecord, StreamReport, Trajectory};
+use crate::swe::command_policy::CommandPolicyConfig;
+use crate::swe::dataset::InstanceStore;
+use crate::swe::harness::{run_instance, ContainerRuntime, RunOptions};
+
+/// SWE-bench episode 的 env_type（DispatchEpisode 路由键）。
+pub const SWE_ENV_TYPE: &str = "swe";
 
 #[derive(Clone)]
 pub struct EpisodeExecutor {
@@ -16,6 +23,9 @@ pub struct EpisodeExecutor {
     plugin_host: PluginHost,
     model_client: ModelClient,
     reward_engine: RewardEngine,
+    /// SWE-bench 实例目录（Hub 下发或本地 fixtures）。
+    swe_store: Arc<InstanceStore>,
+    swe_runtime: ContainerRuntime,
 }
 
 #[derive(Clone, Debug)]
@@ -42,7 +52,16 @@ impl EpisodeExecutor {
             plugin_host,
             model_client: ModelClient::with_config(llm),
             reward_engine: RewardEngine::new(),
+            swe_store: Arc::new(InstanceStore::default()),
+            swe_runtime: ContainerRuntime::Docker,
         }
+    }
+
+    /// 注入 SWE-bench 实例目录与容器运行时（运行时从 Hub/本地加载）。
+    pub fn with_swe_catalog(mut self, store: Arc<InstanceStore>, runtime: ContainerRuntime) -> Self {
+        self.swe_store = store;
+        self.swe_runtime = runtime;
+        self
     }
 
     pub async fn execute_single_round(
@@ -58,6 +77,11 @@ impl EpisodeExecutor {
         episode: &EpisodeRequest,
         ctx: &ExecuteContext,
     ) -> Result<ExecuteOutput, Box<dyn std::error::Error + Send + Sync>> {
+        // SWE-bench 路由：从 Hub 实例镜像拉起容器跑评测，不经 plugin/LLM step 循环。
+        if episode.env_type == SWE_ENV_TYPE {
+            return self.execute_swe_episode(episode, ctx).await;
+        }
+
         let start = Instant::now();
         let trace_id = episode.correlation_id.clone();
         let max_steps = episode.max_steps.max(1);
@@ -231,6 +255,152 @@ impl EpisodeExecutor {
             env_step_duration_ms,
             model_callback_duration_ms,
             warmup_hit: lease.warmup_hit,
+        })
+    }
+}
+
+impl EpisodeExecutor {
+    /// SWE-bench episode：解析 payload `{instance_id, use_gold_patch}` → 从实例镜像
+    /// provision 容器 → reset → 应用 patch → 跑测试 → reward，封装为 `EpisodeResult`。
+    async fn execute_swe_episode(
+        &self,
+        episode: &EpisodeRequest,
+        ctx: &ExecuteContext,
+    ) -> Result<ExecuteOutput, Box<dyn std::error::Error + Send + Sync>> {
+        let start = Instant::now();
+        let trace_id = episode.correlation_id.clone();
+        let payload: serde_json::Value = if episode.payload.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_slice(&episode.payload)
+                .map_err(|err| Box::<dyn std::error::Error + Send + Sync>::from(format!("invalid swe payload: {err}")))?
+        };
+        let instance_id = payload
+            .get("instance_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from("swe payload missing instance_id"))?
+            .to_string();
+        let use_gold = payload
+            .get("use_gold_patch")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let instance = self
+            .swe_store
+            .get(&instance_id)
+            .ok_or_else(|| {
+                Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                    "swe instance_id `{instance_id}` not in catalog (size={})",
+                    self.swe_store.len()
+                ))
+            })?
+            .clone();
+
+        tracing::info!(
+            trace_id = %trace_id,
+            episode_id = %episode.episode_id,
+            worker_id = %ctx.worker_id,
+            instance_id = %instance_id,
+            use_gold_patch = use_gold,
+            phase = "swe_dispatch",
+            msg = "episode_phase"
+        );
+
+        let runtime = self.swe_runtime;
+        let episode_id = episode.episode_id.clone();
+        let opts = RunOptions {
+            runtime,
+            use_gold_patch: use_gold,
+            keep_container: false,
+            policy: CommandPolicyConfig::default(),
+        };
+        let outcome = tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+            .await
+            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
+            .map_err(|err| {
+                log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
+                err
+            })?;
+
+        let reward = outcome.reward;
+        let mut info = std::collections::HashMap::new();
+        info.insert("instance_id".to_string(), instance_id.clone());
+        info.insert("resolved".to_string(), outcome.resolved.to_string());
+        info.insert("use_gold_patch".to_string(), use_gold.to_string());
+        if let Some(tr) = &outcome.artifact.test_results {
+            let passed = tr.per_test.iter().filter(|(_, ok)| *ok).count();
+            info.insert("tests_passed".to_string(), passed.to_string());
+            info.insert("tests_total".to_string(), tr.per_test.len().to_string());
+        }
+
+        let step = StepRecord {
+            step_index: 1,
+            observation: Vec::new(),
+            action: if use_gold { b"gold_patch".to_vec() } else { Vec::new() },
+            reward,
+            terminated: true,
+            truncated: false,
+            info,
+            duration_ms: outcome.duration_ms as i64,
+        };
+        let trajectory = Trajectory {
+            steps: vec![step.clone()],
+            total_reward: reward,
+            total_steps: 1,
+        };
+        let checksum = checksum_trajectory(&trajectory)?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let result = EpisodeResult {
+            episode_id: episode.episode_id.clone(),
+            attempt_id: episode.attempt_id,
+            status: "completed".to_string(),
+            trajectory: Some(trajectory),
+            summary: Some(crate::proto::v1::episode_result::Summary {
+                total_reward: reward,
+                total_steps: 1,
+                total_duration_ms: duration_ms as i64,
+                terminate_reason: "swe_evaluated".to_string(),
+            }),
+            error_code: None,
+            error_message: String::new(),
+            trajectory_checksum: checksum,
+            integrity_verified: true,
+        };
+        let stream = StreamReport {
+            episode_id: episode.episode_id.clone(),
+            attempt_id: episode.attempt_id,
+            current_step: 1,
+            total_steps: 1,
+            current_reward: reward,
+            phase: "episode_complete".to_string(),
+            last_step: Some(step),
+            report_type: ReportType::Progress as i32,
+            step_latency_ms: outcome.duration_ms as i64,
+            model_latency_ms: 0,
+            worker_active_episodes: ctx.active_episodes as i32,
+            worker_capacity: ctx.worker_capacity as i32,
+            correlation_id: episode.correlation_id.clone(),
+            worker_id: ctx.worker_id.clone(),
+            ..Default::default()
+        };
+        tracing::info!(
+            trace_id = %trace_id,
+            episode_id = %episode.episode_id,
+            worker_id = %ctx.worker_id,
+            instance_id = %instance_id,
+            reward = reward,
+            resolved = outcome.resolved,
+            phase = "swe_complete",
+            msg = "episode_phase"
+        );
+        Ok(ExecuteOutput {
+            stream_reports: vec![stream],
+            result,
+            reward,
+            duration_ms,
+            env_step_duration_ms: outcome.duration_ms,
+            model_callback_duration_ms: 0,
+            warmup_hit: false,
         })
     }
 }
