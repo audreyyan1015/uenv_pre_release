@@ -177,14 +177,37 @@ impl WorkerRuntime {
             detect_resource_spec(),
             metrics.clone(),
         ));
-        control_plane.register().await?;
+        if let Err(err) = control_plane.register().await {
+            if allow_degraded_start() {
+                tracing::warn!(
+                    trace_id = "runtime",
+                    worker_id = "worker",
+                    episode_id = "-",
+                    error = %err,
+                    msg = "register_failed_degraded_start_continue"
+                );
+            } else {
+                return Err(err);
+            }
+        }
         control_plane.spawn_heartbeat_loop();
         let wal = WalWriter::new(&self.wal_dir)?;
         metrics.set_wal_pending_records(wal.pending_count());
         control_plane.spawn_replay_loop(wal.clone(), metrics.clone());
+
+        // SWE-bench 实例目录：优先 Hub 下发，失败回退本地 fixtures（与 env manifest 降级一致）。
+        let swe_store = Arc::new(
+            load_swe_catalog(self.hub_enabled, hub_endpoint.as_deref(), hub_token.as_deref()).await,
+        );
+        let swe_runtime = std::env::var("UENV_SWE_RUNTIME")
+            .ok()
+            .and_then(|v| crate::swe::harness::ContainerRuntime::parse(&v))
+            .unwrap_or(crate::swe::harness::ContainerRuntime::Docker);
+
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
-            EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone()),
+            EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone())
+                .with_swe_catalog(swe_store, swe_runtime),
             metrics.clone(),
             warmup_pool,
             self.max_concurrent.max(1),
@@ -204,6 +227,81 @@ impl WorkerRuntime {
             msg = "worker_stop"
         );
         Ok(())
+    }
+}
+
+fn allow_degraded_start() -> bool {
+    std::env::var("UENV_WORKER_ALLOW_DEGRADED_START")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// 加载 SWE-bench 实例目录：Hub 下发优先（`GET /api/v1/swe/instances`），失败回退本地文件。
+async fn load_swe_catalog(
+    hub_enabled: bool,
+    hub_endpoint: Option<&str>,
+    hub_token: Option<&str>,
+) -> crate::swe::dataset::InstanceStore {
+    use crate::swe::dataset::InstanceStore;
+    let local_path =
+        std::env::var("UENV_SWE_INSTANCES").unwrap_or_else(|_| "fixtures/swe/swe_instances.json".to_string());
+
+    if hub_enabled {
+        if let Some(endpoint) = hub_endpoint {
+            match hub::pull_swe_catalog(endpoint, hub_token).await {
+                Ok(json) => match InstanceStore::from_json(&json) {
+                    Ok(store) => {
+                        tracing::info!(
+                            trace_id = "runtime",
+                            worker_id = "worker",
+                            episode_id = "-",
+                            count = store.len(),
+                            msg = "swe_catalog_pulled_from_hub"
+                        );
+                        return store;
+                    }
+                    Err(err) => tracing::warn!(
+                        trace_id = "runtime",
+                        worker_id = "worker",
+                        episode_id = "-",
+                        error = %err,
+                        msg = "swe_catalog_hub_parse_failed_using_local"
+                    ),
+                },
+                Err(err) => tracing::warn!(
+                    trace_id = "runtime",
+                    worker_id = "worker",
+                    episode_id = "-",
+                    error = %err,
+                    msg = "swe_catalog_hub_pull_failed_using_local"
+                ),
+            }
+        }
+    }
+
+    match InstanceStore::from_json_file(&local_path) {
+        Ok(store) => {
+            tracing::info!(
+                trace_id = "runtime",
+                worker_id = "worker",
+                episode_id = "-",
+                count = store.len(),
+                path = %local_path,
+                msg = "swe_catalog_loaded_local"
+            );
+            store
+        }
+        Err(err) => {
+            tracing::warn!(
+                trace_id = "runtime",
+                worker_id = "worker",
+                episode_id = "-",
+                error = %err,
+                path = %local_path,
+                msg = "swe_catalog_unavailable_empty"
+            );
+            InstanceStore::default()
+        }
     }
 }
 

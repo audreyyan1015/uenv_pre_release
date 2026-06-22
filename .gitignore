@@ -1,4 +1,3 @@
-
 **/target/
 **/src/gen/
 *.rs.bk
@@ -17,12 +16,22 @@ Thumbs.db
 /uenv-server/target
 secrets/*
 !secrets/README.md
-/scripts
+# scripts 默认忽略，显式保留几个常用脚本
+/scripts/*
+!/scripts/connect-remote.sh
+!/scripts/gen-worker-proto.sh
+!/scripts/export_swe_instances.py
 /logs
 /Docs/scripts
 /tmp
 
-# stress_test: 生成的 gRPC Python 代码、复制的 proto 源文件、运行时日志
+# stress_test: 生成的 gRPC Python 框、临时的 proto 源文件及临时日志
 /uenv-server/stress_test/uenv/
 /uenv-server/stress_test/proto/
 /uenv-server/stress_test/logs/
+
+# SWE-bench数据集 parquet 原始文件（较大，可用 export 脚本重新生成）
+/fixtures/swe/*.parquet
+# SWE 工具/测试脚本目前在测
+/swe-wal/
+swe-worker.log
