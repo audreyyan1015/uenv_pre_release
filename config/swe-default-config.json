@@ -1,0 +1,50 @@
+{
+  "_comment": "SWE-bench Hub default_config seed (plan v1.4 §6.1). 冻结: instance_specs + task_specs 平级分离, 禁止在 instance_specs[*] 内嵌 task. 同 repo+commit 可对应多 task (见 sympy 两条). base_commit / issue_text 占位, 由 SWE-bench dataset 回填.",
+
+  "default_command_policy": {
+    "mode": "RestrictedShell",
+    "timeout_sec": 120,
+    "max_output_bytes": 65536,
+    "deny_patterns": ["curl", "wget", "ssh"]
+  },
+
+  "instance_specs": {
+    "sympy__sympy-20590": {
+      "instance_id": "sympy__sympy-20590",
+      "repo_url": "https://github.com/sympy/sympy",
+      "base_commit": "<from SWE-bench dataset>",
+      "task_ref": "task_sympy_20590",
+      "setup_script": "pip install -e .",
+      "evaluation_spec": {
+        "test_cmd": "pytest -q",
+        "grader": "swebench"
+      },
+      "dataset": "princeton-nlp/SWE-bench_Lite"
+    },
+    "sympy__sympy-20800": {
+      "instance_id": "sympy__sympy-20800",
+      "repo_url": "https://github.com/sympy/sympy",
+      "base_commit": "<same or different commit>",
+      "task_ref": "task_sympy_20800",
+      "setup_script": "pip install -e .",
+      "evaluation_spec": {
+        "test_cmd": "pytest -q",
+        "grader": "swebench"
+      },
+      "dataset": "princeton-nlp/SWE-bench_Lite"
+    }
+  },
+
+  "task_specs": {
+    "task_sympy_20590": {
+      "task_id": "task_sympy_20590",
+      "issue_id": "20590",
+      "issue_text": "<problem_statement from dataset>"
+    },
+    "task_sympy_20800": {
+      "task_id": "task_sympy_20800",
+      "issue_id": "20800",
+      "issue_text": "<another problem_statement>"
+    }
+  }
+}
