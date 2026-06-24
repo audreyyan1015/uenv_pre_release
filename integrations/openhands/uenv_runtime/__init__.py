@@ -17,9 +17,15 @@ Gateway** (L4, HTTP). Two layers:
 from .client import GatewayError, UEnvGatewayClient, UEnvSession
 from .runtime import UEnvRuntime
 
+try:
+    from .workspace import UEnvWorkspace
+except ImportError:
+    UEnvWorkspace = None  # type: ignore
+
 __all__ = [
     "UEnvGatewayClient",
     "UEnvSession",
     "GatewayError",
     "UEnvRuntime",
+    "UEnvWorkspace",
 ]

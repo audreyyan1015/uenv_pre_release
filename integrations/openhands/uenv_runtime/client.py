@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -51,6 +52,7 @@ class SubmitResult:
     tests_passed: int
     tests_total: int
     per_test: list = field(default_factory=list)
+    trajectory_ref: Optional[dict] = None
 
 
 class UEnvGatewayClient:
@@ -77,7 +79,12 @@ class UEnvGatewayClient:
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")
             raise GatewayError(e.code, detail) from None
-        return json.loads(raw) if raw.strip() else {}
+        if not raw.strip():
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {"raw": raw}
 
     # ── lifecycle ────────────────────────────────────────────────────
     def health(self) -> bool:
@@ -144,7 +151,26 @@ class UEnvGatewayClient:
             tests_passed=int(r.get("tests_passed", 0)),
             tests_total=int(r.get("tests_total", 0)),
             per_test=r.get("per_test", []),
+            trajectory_ref=r.get("trajectory_ref"),
         )
+
+    def get_trajectory(self, trajectory_id: str) -> dict:
+        return self._request("GET", f"/runtime/v1/trajectories/{trajectory_id}")
+
+    def list_trajectories(
+        self,
+        instance_id: Optional[str] = None,
+        since_ms: Optional[int] = None,
+        limit: int = 50,
+    ) -> list:
+        params = []
+        if instance_id:
+            params.append(f"instance_id={urllib.parse.quote(instance_id)}")
+        if since_ms is not None:
+            params.append(f"since_ms={since_ms}")
+        params.append(f"limit={limit}")
+        qs = "?" + "&".join(params) if params else ""
+        return self._request("GET", f"/runtime/v1/trajectories{qs}")
 
     def destroy(self, session_id: str) -> bool:
         r = self._request("DELETE", f"/runtime/v1/sessions/{session_id}")

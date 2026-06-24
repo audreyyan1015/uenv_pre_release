@@ -175,13 +175,14 @@ impl WorkerRuntime {
 
         let scheduler_mode: SchedulerMode = self.scheduler_mode.parse()?;
         let metrics = MetricsExporter::new();
+        let worker_id = self.worker_id.clone();
         let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
             scheduler_mode,
             self.server_endpoint.clone(),
             register_endpoint,
             self.supported_env_types.clone(),
             self.max_concurrent,
-            self.worker_id,
+            worker_id.clone(),
             detect_resource_spec(),
             metrics.clone(),
         ));
@@ -226,7 +227,11 @@ impl WorkerRuntime {
         let swe_pool = Arc::new(
             crate::swe::instance_pool::SweInstancePool::new(swe_store.clone(), swe_runtime, swe_capacity)
                 .with_metrics(metrics.clone())
-                .with_seccomp_dir(swe_seccomp_dir),
+                .with_seccomp_dir(swe_seccomp_dir)
+                .with_trajectory_meta(
+                    worker_id,
+                    gateway_public_url(&self.gateway_listen),
+                ),
         );
 
         // M2-1 / M4-4：启动按 catalog 子集预热镜像（去冷拉延迟）；M0-3/M4-3 可选 warm tag 写回。
@@ -296,6 +301,26 @@ fn allow_degraded_start() -> bool {
     std::env::var("UENV_WORKER_ALLOW_DEGRADED_START")
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
+}
+
+/// Gateway 对外 URL（轨迹 ref 中的 fetch 基址）。
+fn gateway_public_url(listen: &str) -> String {
+    if let Ok(url) = std::env::var("UENV_SWE_GATEWAY_PUBLIC_URL") {
+        let t = url.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    if let Some(port) = listen.rsplit(':').next() {
+        if listen.starts_with("0.0.0.0:") {
+            return format!("http://127.0.0.1:{port}");
+        }
+    }
+    if listen.starts_with("http://") || listen.starts_with("https://") {
+        listen.to_string()
+    } else {
+        format!("http://{listen}")
+    }
 }
 
 /// 加载 SWE-bench 实例目录（plan §5.4.3）：按 `swe.variants` 逐变体从 Hub 下发拉取
@@ -391,6 +416,34 @@ async fn load_swe_catalog(
                 path = %local_path,
                 msg = "swe_catalog_unavailable_empty"
             ),
+        }
+    }
+
+    // 可选：合并额外本地 catalog（联调/烟雾实例，不覆盖 Hub 同 id）。
+    if let Ok(extra_path) = std::env::var("UENV_SWE_EXTRA_CATALOG") {
+        let extra_path = extra_path.trim();
+        if !extra_path.is_empty() {
+            match InstanceStore::from_json_file(extra_path) {
+                Ok(store) => {
+                    tracing::info!(
+                        trace_id = "runtime",
+                        worker_id = "worker",
+                        episode_id = "-",
+                        count = store.len(),
+                        path = %extra_path,
+                        msg = "swe_catalog_merged_extra"
+                    );
+                    merged.merge_from(store);
+                }
+                Err(err) => tracing::warn!(
+                    trace_id = "runtime",
+                    worker_id = "worker",
+                    episode_id = "-",
+                    error = %err,
+                    path = %extra_path,
+                    msg = "swe_catalog_extra_load_failed"
+                ),
+            }
         }
     }
 

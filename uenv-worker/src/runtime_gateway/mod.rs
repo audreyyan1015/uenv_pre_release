@@ -16,7 +16,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::instance_pool::SweInstancePool;
 use crate::swe::spec::ResetObservation;
+use crate::swe::trajectory::TrajectoryRef;
 use crate::swe::variant::BenchmarkVariant;
 
 #[derive(Clone)]
@@ -57,6 +58,8 @@ pub fn router(pool: Arc<SweInstancePool>, api_key: Option<String>) -> Router {
         .route("/runtime/v1/sessions/{id}/write", post(write))
         .route("/runtime/v1/sessions/{id}/submit", post(submit))
         .route("/runtime/v1/sessions/{id}", delete(destroy))
+        .route("/runtime/v1/trajectories/{id}", get(get_trajectory))
+        .route("/runtime/v1/trajectories", get(list_trajectories))
         .layer(axum::middleware::from_fn_with_state(state.clone(), require_api_key))
         .with_state(state);
     Router::new()
@@ -262,6 +265,8 @@ struct SubmitResp {
     tests_passed: usize,
     tests_total: usize,
     per_test: Vec<TestEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trajectory_ref: Option<TrajectoryRef>,
 }
 
 #[derive(Serialize)]
@@ -275,11 +280,12 @@ async fn submit(
     Path(id): Path<String>,
 ) -> ApiResult<SubmitResp> {
     let pool = st.pool.clone();
-    let outcome = tokio::task::spawn_blocking(move || pool.submit(&id))
+    let submit = tokio::task::spawn_blocking(move || pool.submit(&id))
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
         .map_err(session_error)?;
 
+    let outcome = submit.outcome;
     let per_test: Vec<TestEntry> = outcome
         .artifact
         .test_results
@@ -300,7 +306,49 @@ async fn submit(
         tests_passed,
         tests_total,
         per_test,
+        trajectory_ref: submit.trajectory_ref,
     }))
+}
+
+#[derive(Deserialize)]
+struct ListTrajectoriesQuery {
+    instance_id: Option<String>,
+    since_ms: Option<u64>,
+    #[serde(default = "default_list_limit")]
+    limit: usize,
+}
+
+fn default_list_limit() -> usize {
+    50
+}
+
+async fn get_trajectory(
+    State(st): State<GatewayState>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let pool = st.pool.clone();
+    let bundle = tokio::task::spawn_blocking(move || pool.get_trajectory(&id))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+        .map_err(trajectory_error)?;
+    Ok(Json(serde_json::to_value(bundle).unwrap_or(serde_json::json!({}))))
+}
+
+async fn list_trajectories(
+    State(st): State<GatewayState>,
+    Query(q): Query<ListTrajectoriesQuery>,
+) -> ApiResult<Vec<TrajectoryRef>> {
+    let pool = st.pool.clone();
+    let instance_id = q.instance_id.clone();
+    let since_ms = q.since_ms;
+    let limit = q.limit;
+    let refs = tokio::task::spawn_blocking(move || {
+        pool.list_trajectories(instance_id.as_deref(), since_ms, limit)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+    .map_err(trajectory_error)?;
+    Ok(Json(refs))
 }
 
 // ─── delete ──────────────────────────────────────────────────────────
@@ -319,6 +367,16 @@ async fn destroy(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
         .map_err(session_error)?;
     Ok(Json(DeleteResp { released }))
+}
+
+fn trajectory_error(e: Box<dyn std::error::Error + Send + Sync>) -> (StatusCode, Json<ErrorResp>) {
+    let msg = e.to_string();
+    let status = if msg.contains("not found") || msg.contains("not configured") {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    err(status, msg)
 }
 
 fn session_error(e: Box<dyn std::error::Error + Send + Sync>) -> (StatusCode, Json<ErrorResp>) {

@@ -28,6 +28,9 @@ secrets/*
 !/scripts/seed-hub-pro-catalog.sh
 !/scripts/deploy-pro-python-openhands-7143.sh
 !/scripts/pull-pro-image-7143.sh
+!/scripts/deploy-openhands-7142.sh
+!/scripts/run-openhands-pro-7142.sh
+!/scripts/gen-openhands-llm-config.py
 !/scripts/swe_gateway_demo.py
 /logs
 /Docs/scripts

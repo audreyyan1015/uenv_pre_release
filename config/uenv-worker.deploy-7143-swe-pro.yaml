@@ -4,7 +4,7 @@ server:
   endpoint: "8.130.86.71:8088"
 
 worker:
-  id: "auto"
+  id: "worker-7143-pro"
   listen: "0.0.0.0:28888"
   advertise_endpoint: "219.147.100.43:28888"
   max_concurrent: 4

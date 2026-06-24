@@ -3,7 +3,9 @@ use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
 
-use crate::llm::{chat_completions_url_for_endpoint, LlmConfig};
+use crate::llm::{
+    chat_completions_url_for_endpoint, parse_payload_model_endpoint, LlmConfig,
+};
 
 #[derive(Clone)]
 pub struct ModelClient {
@@ -34,7 +36,6 @@ impl ModelClient {
         payload: &[u8],
         reward_config: &[u8],
         step_index: u32,
-        episode_model_endpoint: &str,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let payload_json: Value = if payload.is_empty() {
             Value::Null
@@ -51,8 +52,7 @@ impl ModelClient {
             }
         }
 
-        let endpoint_base =
-            resolve_endpoint_base(&payload_json, episode_model_endpoint, &self.llm);
+        let (endpoint_base, model_name) = resolve_llm_target(&payload_json, &self.llm);
         let llm_ready = LlmConfig::llm_call_ready(&endpoint_base, &self.llm);
         let question = payload_json
             .get("question")
@@ -77,18 +77,16 @@ impl ModelClient {
         if !llm_ready {
             if LlmConfig::endpoint_requires_api_key(&endpoint_base) {
                 return Err(
-                    "model client: OpenRouter requires UENV_LLM_API_KEY in config/uenv-worker-llm.env"
+                    "model client: UENV_LLM_API_KEY is required for HTTPS LLM endpoint (config/uenv-worker-llm.env)"
                         .into(),
                 );
             }
             return Err(
-                "model client: no model endpoint in episode payload and UENV_LLM_ENDPOINT is unset"
+                "model client: default LLM is not configured (set UENV_LLM_ENDPOINT in config/uenv-worker-llm.env)"
                     .into(),
             );
         }
         let question = question.ok_or("model client: payload missing question")?;
-
-        let model_name = resolve_model_name(&payload_json, &self.llm);
 
         let gen_cfg = payload_json
             .get("generation_config")
@@ -118,7 +116,7 @@ impl ModelClient {
         let mut last_err = String::new();
         for attempt in 0..max_retries {
             let mut request = self.http.post(&url).json(&request_body.clone());
-            request = self.apply_llm_headers(request, &endpoint_base)?;
+            request = self.apply_llm_headers(request)?;
             match request.send().await {
                 Ok(resp) => {
                     let status = resp.status();
@@ -150,26 +148,16 @@ impl ModelClient {
     fn apply_llm_headers(
         &self,
         request: reqwest::RequestBuilder,
-        endpoint_base: &str,
     ) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
-        let mut req = request;
-        if !self.llm.api_key.trim().is_empty() {
-            let auth = format!("Bearer {}", self.llm.api_key.trim());
-            req = req.header(
-                AUTHORIZATION,
-                HeaderValue::from_str(&auth)
-                    .map_err(|err| format!("model client: invalid Authorization header: {err}"))?,
-            );
+        if self.llm.api_key.trim().is_empty() {
+            return Ok(request);
         }
-        if endpoint_base.contains("openrouter.ai") {
-            if !self.llm.http_referer.trim().is_empty() {
-                req = req.header("HTTP-Referer", self.llm.http_referer.trim());
-            }
-            if !self.llm.app_title.trim().is_empty() {
-                req = req.header("X-Title", self.llm.app_title.trim());
-            }
-        }
-        Ok(req)
+        let auth = format!("Bearer {}", self.llm.api_key.trim());
+        Ok(request.header(
+            AUTHORIZATION,
+            HeaderValue::from_str(&auth)
+                .map_err(|err| format!("model client: invalid Authorization header: {err}"))?,
+        ))
     }
 }
 
@@ -186,43 +174,23 @@ fn build_http_client(timeout_secs: u64) -> Client {
         })
 }
 
-fn resolve_endpoint_base(
-    payload: &Value,
-    episode_model_endpoint: &str,
-    llm: &LlmConfig,
-) -> String {
-    if let Some(endpoint) = payload
-        .get("model_endpoint")
-        .and_then(|value| match value {
-            Value::String(text) => Some(text.as_str()),
-            Value::Object(map) => map.get("url").and_then(Value::as_str),
-            _ => None,
-        })
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return endpoint.to_string();
+fn resolve_llm_target(payload: &Value, llm: &LlmConfig) -> (String, String) {
+    if let Some(endpoint) = parse_payload_model_endpoint(payload) {
+        let model_name = payload
+            .get("model_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| llm.model_name.clone());
+        return (endpoint, model_name);
     }
-    let episode_endpoint = episode_model_endpoint.trim();
-    if !episode_endpoint.is_empty() {
-        return episode_endpoint.to_string();
-    }
-    llm.endpoint.trim().to_string()
-}
-
-fn resolve_model_name(payload: &Value, llm: &LlmConfig) -> String {
-    payload
-        .get("model_name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| llm.model_name.clone())
+    (llm.endpoint.trim().to_string(), llm.model_name.clone())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_endpoint_base, resolve_model_name, ModelClient};
+    use super::{resolve_llm_target, ModelClient};
     use crate::llm::LlmConfig;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -230,61 +198,64 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
-    fn prefers_payload_model_endpoint_over_episode_and_local() {
+    fn uses_valid_payload_model_endpoint_override() {
         let llm = LlmConfig {
-            endpoint: "http://local-vllm:8000/v1".to_string(),
+            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            model_name: "default-model".to_string(),
             ..LlmConfig::default()
         };
-        let payload = json!({"model_endpoint": "https://openrouter.ai/api/v1"});
+        let payload = json!({
+            "model_endpoint": "http://127.0.0.1:8000/v1",
+            "model_name": "override-model"
+        });
         assert_eq!(
-            resolve_endpoint_base(&payload, "http://episode-vllm:8000/v1", &llm),
-            "https://openrouter.ai/api/v1"
+            resolve_llm_target(&payload, &llm),
+            (
+                "http://127.0.0.1:8000/v1".to_string(),
+                "override-model".to_string()
+            )
         );
     }
 
     #[test]
-    fn falls_back_to_episode_model_endpoint() {
+    fn falls_back_to_default_when_payload_endpoint_invalid() {
         let llm = LlmConfig {
-            endpoint: "http://local-vllm:8000/v1".to_string(),
+            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            model_name: "deepseek-v4-flash".to_string(),
             ..LlmConfig::default()
         };
         assert_eq!(
-            resolve_endpoint_base(&json!({}), "https://openrouter.ai/api/v1", &llm),
-            "https://openrouter.ai/api/v1"
+            resolve_llm_target(&json!({"model_endpoint": ""}), &llm),
+            (
+                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+                "deepseek-v4-flash".to_string()
+            )
+        );
+        assert_eq!(
+            resolve_llm_target(&json!({"model_endpoint": "not-a-url"}), &llm),
+            (
+                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+                "deepseek-v4-flash".to_string()
+            )
         );
     }
 
     #[test]
-    fn prefers_payload_model_name_over_local() {
+    fn override_endpoint_without_model_name_uses_default_model() {
         let llm = LlmConfig {
-            model_name: "local-model".to_string(),
+            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            model_name: "deepseek-v4-flash".to_string(),
             ..LlmConfig::default()
         };
         assert_eq!(
-            resolve_model_name(&json!({"model_name": "qwen/qwen3-max"}), &llm),
-            "qwen/qwen3-max"
-        );
-    }
-
-    #[test]
-    fn vllm_endpoint_ready_without_api_key() {
-        let llm = LlmConfig::default();
-        assert!(LlmConfig::llm_call_ready(
-            "http://10.10.20.142:8004/v1",
-            &llm
-        ));
-    }
-
-    #[test]
-    fn accepts_payload_model_endpoint_object() {
-        let llm = LlmConfig {
-            endpoint: "http://local-vllm:8000/v1".to_string(),
-            ..LlmConfig::default()
-        };
-        let payload = json!({"model_endpoint": {"url": "http://runtime-vllm:9000/v1"}});
-        assert_eq!(
-            resolve_endpoint_base(&payload, "http://episode-vllm:8000/v1", &llm),
-            "http://runtime-vllm:9000/v1"
+            resolve_llm_target(
+                &json!({"model_endpoint": "http://127.0.0.1:8000/v1"}),
+                &llm
+            ),
+            (
+                "http://127.0.0.1:8000/v1".to_string(),
+                "deepseek-v4-flash".to_string()
+            )
         );
     }
 
@@ -297,7 +268,6 @@ mod tests {
                 payload.as_bytes(),
                 br#"{"type":"rule_reward","target":"20"}"#,
                 1,
-                "",
             )
             .await
             .expect("infer");
@@ -312,7 +282,6 @@ mod tests {
                 br#"{}"#,
                 br#"{"type":"rule_reward","target":"20"}"#,
                 1,
-                "",
             )
             .await
             .expect("infer");
@@ -320,35 +289,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openrouter_requires_api_key_before_http_call() {
-        let client = ModelClient::with_config(LlmConfig::default());
-        let result = client
-            .infer_action(
-                br#"{"question":"q","model_endpoint":"https://openrouter.ai/api/v1"}"#,
-                br#"{"type":"rule_reward","target":"20"}"#,
-                1,
-                "",
-            )
-            .await;
-        let err = result.expect_err("should fail without api key");
-        assert!(err.to_string().contains("UENV_LLM_API_KEY"));
-    }
-
-    #[tokio::test]
-    async fn openrouter_calls_remote_api_with_api_key() {
+    async fn https_default_requires_api_key_before_http_call() {
         let client = ModelClient::with_config(LlmConfig {
-            api_key: "sk-test".to_string(),
+            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            model_name: "deepseek-v4-flash".to_string(),
             ..LlmConfig::default()
         });
         let result = client
             .infer_action(
-                br#"{"question":"q","model_endpoint":"https://openrouter.ai/api/v1","model_name":"qwen/qwen3-max"}"#,
+                br#"{"question":"q"}"#,
                 br#"{"type":"rule_reward","target":"20"}"#,
                 1,
-                "",
             )
             .await;
-        assert!(result.is_err());
+        let err = result.expect_err("should fail without api key");
+        assert!(err.to_string().contains("UENV_LLM_API_KEY"));
     }
 
     #[tokio::test]
@@ -383,7 +338,7 @@ mod tests {
             addr
         );
         let action = client
-            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"x"}"#, 1, "")
+            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"x"}"#, 1)
             .await
             .expect("infer");
 
@@ -393,7 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uses_payload_model_endpoint_override() {
+    async fn uses_default_config_when_payload_has_no_valid_override() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let captured = Arc::new(Mutex::new(String::new()));
@@ -414,20 +369,21 @@ mod tests {
             stream.write_all(response.as_bytes()).await.expect("write");
         });
 
-        let client = ModelClient::new();
-        let payload = format!(
-            r#"{{"question":"2+2?","model_endpoint":"http://{}/v1","model_name":"payload-model","generation_config":{{"max_new_tokens":16}}}}"#,
-            addr
-        );
+        let client = ModelClient::with_config(LlmConfig {
+            endpoint: format!("http://{}/v1", addr),
+            model_name: "default-model".to_string(),
+            ..LlmConfig::default()
+        });
+        let payload = r#"{"question":"2+2?","model_endpoint":"","generation_config":{"max_new_tokens":16}}"#;
         let action = client
-            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"4"}"#, 1, "")
+            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"4"}"#, 1)
             .await
             .expect("infer");
 
         assert_eq!(action, b"#### 4");
         let request = captured.lock().expect("lock").clone();
         assert!(request.starts_with("POST /v1/chat/completions "));
-        assert!(request.contains(r#""model":"payload-model""#));
+        assert!(request.contains(r#""model":"default-model""#));
         assert!(request.contains(r#""max_tokens":16"#));
     }
 }

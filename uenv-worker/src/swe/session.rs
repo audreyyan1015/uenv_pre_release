@@ -10,9 +10,11 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::swe::artifact::{EpisodeArtifact, TestResults};
+use crate::swe::trajectory::{now_ms, StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore};
 use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for_spec;
@@ -35,6 +37,13 @@ pub struct ExecResult {
     pub truncated: bool,
 }
 
+/// Gateway submit 结果：评测 outcome + 可选轨迹索引。
+#[derive(Debug, Clone)]
+pub struct SubmitOutcome {
+    pub outcome: EpisodeOutcome,
+    pub trajectory_ref: Option<crate::swe::trajectory::TrajectoryRef>,
+}
+
 /// 单个 SWE 沙箱会话：持有容器句柄 + 实例真值 + 命令策略。
 ///
 /// 方法均 `&self`（容器操作不改 Rust 侧状态），可安全置于 `Arc` 由 Gateway 并发复用。
@@ -45,6 +54,9 @@ pub struct SweSession {
     episode_id: String,
     policy: CommandPolicyConfig,
     keep: bool,
+    trace: Mutex<Vec<StepTrace>>,
+    worker_id: String,
+    gateway_base_url: String,
 }
 
 impl SweSession {
@@ -58,7 +70,10 @@ impl SweSession {
         runtime: ContainerRuntime,
         policy: CommandPolicyConfig,
         keep: bool,
+        worker_id: &str,
+        gateway_base_url: &str,
     ) -> Result<(Self, ResetObservation), DynErr> {
+        let provision_start = Instant::now();
         let image = instance.image_ref();
         let container = format!(
             "uenv-swe-{}-{}-{}",
@@ -111,6 +126,9 @@ impl SweSession {
             episode_id: episode_id.to_string(),
             policy,
             keep,
+            trace: Mutex::new(Vec::new()),
+            worker_id: worker_id.to_string(),
+            gateway_base_url: gateway_base_url.to_string(),
         };
 
         // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified 在 /testbed）。
@@ -121,6 +139,8 @@ impl SweSession {
             return Err(format!("reset failed (code {}): {}\n{}", r.exit_code, r.stdout, r.stderr).into());
         }
         session.run_pro_setup_at_provision()?;
+
+        session.record_provision_reset(&observation.issue_text, provision_start.elapsed().as_millis() as u64);
 
         tracing::info!(
             episode_id = %session.episode_id,
@@ -147,15 +167,42 @@ impl SweSession {
 
     /// 容器内 `bash -lc` 执行（统一入口，plan §1.4）。带 deny_patterns 辅助检查 + 输出截断。
     pub fn exec(&self, command: &str) -> Result<ExecResult, DynErr> {
+        let step_start = Instant::now();
         if let Some(p) = self.policy.first_denied(command) {
-            return Ok(ExecResult {
+            let result = ExecResult {
                 stdout: String::new(),
                 stderr: format!("command rejected by policy (deny_pattern: {p})"),
                 exit_code: 126,
                 truncated: false,
-            });
+            };
+            self.push_step(
+                StepAction::Exec {
+                    command: command.to_string(),
+                },
+                StepObservation {
+                    stderr: result.stderr.clone(),
+                    exit_code: Some(result.exit_code),
+                    ..Default::default()
+                },
+                step_start.elapsed().as_millis() as u64,
+            );
+            return Ok(result);
         }
-        self.exec_raw(command)
+        let result = self.exec_raw(command)?;
+        self.push_step(
+            StepAction::Exec {
+                command: command.to_string(),
+            },
+            StepObservation {
+                stdout: result.stdout.clone(),
+                stderr: result.stderr.clone(),
+                exit_code: Some(result.exit_code),
+                truncated: result.truncated,
+                ..Default::default()
+            },
+            step_start.elapsed().as_millis() as u64,
+        );
+        Ok(result)
     }
 
     /// 不过策略的内部执行（reset / apply_patch / evaluate 内部用）。
@@ -176,6 +223,7 @@ impl SweSession {
 
     /// 写文件到容器（经临时文件 `cp`，二进制安全）。
     pub fn write_file(&self, path: &str, content: &str) -> Result<(), DynErr> {
+        let step_start = Instant::now();
         let tmp = host_tmp("write");
         {
             let mut f = std::fs::File::create(&tmp)?;
@@ -183,15 +231,69 @@ impl SweSession {
         }
         let res = self.cp_into(&tmp, path);
         let _ = std::fs::remove_file(&tmp);
+        match &res {
+            Ok(()) => {
+                self.push_step(
+                    StepAction::Write {
+                        path: path.to_string(),
+                        content: content.to_string(),
+                    },
+                    StepObservation {
+                        write_ok: Some(true),
+                        ..Default::default()
+                    },
+                    step_start.elapsed().as_millis() as u64,
+                );
+            }
+            Err(err) => {
+                self.push_step(
+                    StepAction::Write {
+                        path: path.to_string(),
+                        content: content.to_string(),
+                    },
+                    StepObservation {
+                        write_ok: Some(false),
+                        stderr: err.to_string(),
+                        ..Default::default()
+                    },
+                    step_start.elapsed().as_millis() as u64,
+                );
+            }
+        }
         res
     }
 
     /// 读容器内文件（`cat`）。
     pub fn read_file(&self, path: &str) -> Result<String, DynErr> {
+        let step_start = Instant::now();
         let r = self.exec_raw(&format!("cat {}", single_quote(path)))?;
         if r.exit_code != 0 {
+            self.push_step(
+                StepAction::Read {
+                    path: path.to_string(),
+                },
+                StepObservation {
+                    stderr: r.stderr.clone(),
+                    exit_code: Some(r.exit_code),
+                    truncated: r.truncated,
+                    ..Default::default()
+                },
+                step_start.elapsed().as_millis() as u64,
+            );
             return Err(format!("read {path} failed (code {}): {}", r.exit_code, r.stderr).into());
         }
+        self.push_step(
+            StepAction::Read {
+                path: path.to_string(),
+            },
+            StepObservation {
+                read_content: Some(r.stdout.clone()),
+                exit_code: Some(0),
+                truncated: r.truncated,
+                ..Default::default()
+            },
+            step_start.elapsed().as_millis() as u64,
+        );
         Ok(r.stdout)
     }
 
@@ -222,6 +324,56 @@ impl SweSession {
             .into());
         }
         Ok(())
+    }
+
+    /// 封存逐步轨迹并落盘（Gateway submit 路径）。
+    pub fn seal_trajectory(
+        &self,
+        outcome: &EpisodeOutcome,
+        store: &TrajectoryStore,
+    ) -> Result<crate::swe::trajectory::TrajectoryRef, DynErr> {
+        let steps = self
+            .trace
+            .lock()
+            .map_err(|_| "trace lock poisoned")?
+            .clone();
+        let trajectory_id = TrajectoryStore::next_trajectory_id(&self.worker_id);
+        let sealed_at_ms = now_ms();
+        let bundle = TrajectoryBundle {
+            trajectory_id: trajectory_id.clone(),
+            session_id: self.episode_id.clone(),
+            instance_id: self.instance.instance_id.clone(),
+            benchmark_variant: self.instance.variant().as_str().to_string(),
+            worker_id: self.worker_id.clone(),
+            gateway_base_url: self.gateway_base_url.clone(),
+            steps,
+            artifact: outcome.artifact.clone(),
+            sealed_at_ms,
+        };
+        store.seal(bundle, outcome.resolved, outcome.reward)
+    }
+
+    fn push_step(&self, action: StepAction, observation: StepObservation, duration_ms: u64) {
+        if let Ok(mut trace) = self.trace.lock() {
+            let step_index = trace.len() as u32;
+            trace.push(StepTrace {
+                step_index,
+                action,
+                observation,
+                timestamp_ms: now_ms(),
+                duration_ms,
+            });
+        }
+    }
+
+    fn record_provision_reset(&self, issue_text: &str, duration_ms: u64) {
+        self.push_step(
+            StepAction::ProvisionReset {
+                issue_text: issue_text.to_string(),
+            },
+            StepObservation::default(),
+            duration_ms,
+        );
     }
 
     /// episode_end 评测：应用 test_patch → 跑 FAIL/PASS_TO_PASS → grader 评分 → EpisodeArtifact。
