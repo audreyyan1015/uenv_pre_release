@@ -104,16 +104,19 @@ impl LlmConfig {
     }
 
     pub fn endpoint_requires_api_key(endpoint: &str) -> bool {
+        let endpoint = endpoint.trim().to_ascii_lowercase();
         endpoint.contains("openrouter.ai")
+            || endpoint.contains("dashscope.aliyuncs.com")
+            || endpoint.starts_with("https://")
     }
 
-    pub fn llm_call_ready(endpoint: &str, _llm: &Self) -> bool {
+    pub fn llm_call_ready(endpoint: &str, llm: &Self) -> bool {
         let endpoint = endpoint.trim();
         if endpoint.is_empty() {
             return false;
         }
         if Self::endpoint_requires_api_key(endpoint) {
-            return !_llm.api_key.trim().is_empty();
+            return !llm.api_key.trim().is_empty();
         }
         true
     }
@@ -145,5 +148,17 @@ mod tests {
             cfg.chat_completions_url(),
             "https://openrouter.ai/api/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn dashscope_requires_api_key() {
+        assert!(LlmConfig::endpoint_requires_api_key(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ));
+        let llm = LlmConfig::default();
+        assert!(!LlmConfig::llm_call_ready(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            &llm
+        ));
     }
 }

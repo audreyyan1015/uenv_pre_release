@@ -193,6 +193,12 @@ impl SweInstancePool {
         (ok, fail)
     }
 
+    /// 批量预热目录内全部实例镜像（M4 Lite 编排入口）：等价于对 catalog 全量 `prewarm_images`。
+    pub fn prewarm_catalog(&self, warm_tag: bool) -> (usize, usize) {
+        let ids = self.store.instance_ids();
+        self.prewarm_images(&ids, warm_tag)
+    }
+
     fn get(&self, session_id: &str) -> Result<Arc<SweSession>, DynErr> {
         self.sessions
             .lock()

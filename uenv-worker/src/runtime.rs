@@ -316,7 +316,6 @@ async fn load_swe_catalog(
     };
 
     let mut merged = InstanceStore::default();
-    let mut hub_ok = false;
     if hub_enabled {
         if let Some(endpoint) = hub_endpoint {
             for variant in &variants {
@@ -332,7 +331,6 @@ async fn load_swe_catalog(
                                 msg = "swe_catalog_pulled_from_hub"
                             );
                             merged.merge_from(store);
-                            hub_ok = true;
                         }
                         Err(err) => tracing::warn!(
                             trace_id = "runtime",
@@ -343,20 +341,36 @@ async fn load_swe_catalog(
                             msg = "swe_catalog_hub_parse_failed"
                         ),
                     },
-                    Err(err) => tracing::warn!(
-                        trace_id = "runtime",
-                        worker_id = "worker",
-                        episode_id = "-",
-                        variant = %variant,
-                        error = %err,
-                        msg = "swe_catalog_hub_pull_failed"
-                    ),
+                    Err(err) => {
+                        tracing::warn!(
+                            trace_id = "runtime",
+                            worker_id = "worker",
+                            episode_id = "-",
+                            variant = %variant,
+                            error = %err,
+                            msg = "swe_catalog_hub_pull_failed"
+                        );
+                        // 变体级本地回退（Hub 未 seed pro 时仍可用 config/swe/{variant}.json）。
+                        let variant_path = format!("config/swe/{variant}.json");
+                        if let Ok(store) = InstanceStore::from_json_file(&variant_path) {
+                            tracing::info!(
+                                trace_id = "runtime",
+                                worker_id = "worker",
+                                episode_id = "-",
+                                variant = %variant,
+                                count = store.len(),
+                                path = %variant_path,
+                                msg = "swe_catalog_loaded_local_variant"
+                            );
+                            merged.merge_from(store);
+                        }
+                    }
                 }
             }
         }
     }
 
-    if !hub_ok {
+    if merged.is_empty() {
         match InstanceStore::from_json_file(&local_path) {
             Ok(store) => {
                 tracing::info!(

@@ -23,6 +23,7 @@ pub mod harness;
 pub mod hub_config;
 pub mod image_cache;
 pub mod instance_pool;
+pub mod pro_eval;
 pub mod repo_specs;
 pub mod resettable;
 pub mod session;
@@ -39,7 +40,7 @@ pub use hub_config::SweDefaultConfig;
 pub use image_cache::{ImageCacheFactory, ImageState};
 pub use instance_pool::SweInstancePool;
 pub use repo_specs::{spec_for, LogParser, RepoSpec, TestRunner};
-pub use resettable::{PodmanResettableInstance, ResettableInstance, ResettableSession};
+pub use resettable::{PodmanResettableInstance, ResettableInstance, ResettableSession, SnapshotResettableInstance};
 pub use session::{ExecResult, SweSession};
 pub use spec::{
     build_reset_observation, AttachmentRef, EvaluationSpec, InstanceSpec, IssueRef,

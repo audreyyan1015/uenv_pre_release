@@ -153,9 +153,7 @@ impl ModelClient {
         endpoint_base: &str,
     ) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
         let mut req = request;
-        if !self.llm.api_key.trim().is_empty()
-            && LlmConfig::endpoint_requires_api_key(endpoint_base)
-        {
+        if !self.llm.api_key.trim().is_empty() {
             let auth = format!("Bearer {}", self.llm.api_key.trim());
             req = req.header(
                 AUTHORIZATION,
@@ -163,7 +161,7 @@ impl ModelClient {
                     .map_err(|err| format!("model client: invalid Authorization header: {err}"))?,
             );
         }
-        if LlmConfig::endpoint_requires_api_key(endpoint_base) {
+        if endpoint_base.contains("openrouter.ai") {
             if !self.llm.http_referer.trim().is_empty() {
                 req = req.header("HTTP-Referer", self.llm.http_referer.trim());
             }
@@ -351,6 +349,47 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn sends_bearer_when_api_key_set() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_for_task = captured.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0; 8192];
+            let n = stream.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+            *captured_for_task.lock().expect("lock") = request;
+            let body = b"{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let client = ModelClient::with_config(LlmConfig {
+            api_key: "sk-test".to_string(),
+            model_name: "deepseek-v4-flash".to_string(),
+            ..LlmConfig::default()
+        });
+        let payload = format!(
+            r#"{{"question":"ping","model_endpoint":"http://{}/v1","model_name":"deepseek-v4-flash"}}"#,
+            addr
+        );
+        let action = client
+            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"x"}"#, 1, "")
+            .await
+            .expect("infer");
+
+        assert_eq!(action, b"ok");
+        let request = captured.lock().expect("lock").clone().to_ascii_lowercase();
+        assert!(request.contains("authorization: bearer sk-test"));
     }
 
     #[tokio::test]

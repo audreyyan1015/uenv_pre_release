@@ -49,6 +49,7 @@ def main() -> int:
     ap.add_argument("--instances", default="fixtures/swe/swe_instances.json")
     ap.add_argument("--benchmark-variant", default="verified")
     ap.add_argument("--command-mode", default="FullShell")
+    ap.add_argument("--api-key", default=None, help="X-API-Key when gateway auth enabled")
     ap.add_argument("--gold", dest="gold", action="store_true", default=True)
     ap.add_argument("--no-gold", dest="gold", action="store_false")
     args = ap.parse_args()
@@ -59,12 +60,14 @@ def main() -> int:
         print(f"instance {args.instance} not in {args.instances}", file=sys.stderr)
         return 1
     gold_patch = catalog[args.instance].get("patch", "")
+    workspace = "/app" if args.benchmark_variant.lower() == "pro" else "/testbed"
 
     with UEnvRuntime(
         gateway_url=args.gateway,
         instance_id=args.instance,
         benchmark_variant=args.benchmark_variant,
         command_mode=args.command_mode,
+        api_key=args.api_key,
     ) as rt:
         print(f"[connect] session={rt.session.session_id} variant={rt.session.benchmark_variant}")
         print(f"[prompt ] issue_text[:160]={rt.task_instruction[:160]!r}")
@@ -76,7 +79,7 @@ def main() -> int:
             # Agent step 2: apply it (CmdRunAction -> Runtime.run)
             robs = rt.run_action(
                 CmdRunAction(
-                    command="cd /testbed && (git apply -v /tmp/agent.patch "
+                    command=f"cd {workspace} && (git apply -v /tmp/agent.patch "
                     "|| patch --batch --fuzz=5 -p1 < /tmp/agent.patch)"
                 )
             )

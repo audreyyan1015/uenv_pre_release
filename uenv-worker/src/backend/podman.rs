@@ -133,14 +133,87 @@ impl SandboxProvisioner for PodmanBackend {
         Ok(())
     }
 
-    fn snapshot(&self, _handle: &BackendHandle) -> Result<SnapshotId, BackendError> {
-        // M3+：SnapshotResettableInstance / Backend::restore。
-        Err("PodmanBackend::snapshot not implemented until M3".into())
+    fn snapshot(&self, handle: &BackendHandle) -> Result<SnapshotId, BackendError> {
+        let target = handle
+            .container_id
+            .as_deref()
+            .unwrap_or(handle.id.as_str());
+        let image = snapshot_image_name(handle);
+        let args = commit_args(target, &image);
+        let output = Command::new("podman")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("failed to spawn podman commit: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "podman commit failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        Ok(SnapshotId(image))
     }
 
-    fn restore(&self, _snapshot: &SnapshotId) -> Result<BackendHandle, BackendError> {
-        Err("PodmanBackend::restore not implemented until M3".into())
+    fn restore(&self, snapshot: &SnapshotId) -> Result<BackendHandle, BackendError> {
+        let container_name = format!("uenv-restored-{}", restore_suffix());
+        let args = restore_run_args(&container_name, &snapshot.0);
+        let output = Command::new("podman")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("failed to spawn podman run (restore): {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "podman run (restore) failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(BackendHandle {
+            id: container_name,
+            kind: BackendKind::Podman,
+            container_id: Some(container_id),
+        })
     }
+}
+
+/// 快照镜像名：`uenv-snap-<handle-id>-<suffix>`。
+pub fn snapshot_image_name(handle: &BackendHandle) -> String {
+    let id: String = handle
+        .id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    format!("uenv-snap-{id}-{}", restore_suffix())
+}
+
+/// `podman commit <container> <image>` argv（纯函数，便于单测）。
+pub fn commit_args(container: &str, image: &str) -> Vec<String> {
+    vec![
+        "commit".to_string(),
+        container.to_string(),
+        image.to_string(),
+    ]
+}
+
+/// 从快照镜像拉起常驻容器：`run -d --name <name> <image> sleep infinity`。
+pub fn restore_run_args(container_name: &str, snapshot_image: &str) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        container_name.to_string(),
+        snapshot_image.to_string(),
+        "sleep".to_string(),
+        "infinity".to_string(),
+    ]
+}
+
+fn restore_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -164,7 +237,7 @@ mod tests {
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--cap-drop=ALL".to_string()));
         assert!(args.contains(&"--network=none".to_string()));
-        assert!(args.contains(&"seccomp=/profiles/restricted.json".to_string()));
+        assert!(args.iter().any(|a| a.contains("seccomp=") && a.contains("restricted.json")));
         assert!(args.contains(&"no-new-privileges".to_string()));
         // bash -lc 包装常驻入口
         assert!(args.contains(&"-lc".to_string()));
@@ -175,7 +248,7 @@ mod tests {
     fn full_shell_allows_bridge_network() {
         let args = PodmanBackend::build_run_args(&spec(CommandPolicy::FullShell));
         assert!(args.contains(&"--network=bridge".to_string()));
-        assert!(args.contains(&"seccomp=/profiles/full.json".to_string()));
+        assert!(args.iter().any(|a| a.contains("seccomp=") && a.contains("full.json")));
         assert!(!args.contains(&"--cap-drop=ALL".to_string()));
         assert!(!args.contains(&"--network=none".to_string()));
     }
@@ -205,5 +278,23 @@ mod tests {
         let args = PodmanBackend::build_run_args(&s);
         assert!(args.contains(&"cache/swe-20590:warm".to_string()));
         assert!(!args.contains(&"swebench/base:latest".to_string()));
+    }
+
+    #[test]
+    fn commit_and_restore_args() {
+        let handle = BackendHandle {
+            id: "swe-1".to_string(),
+            kind: BackendKind::Podman,
+            container_id: Some("ctr-abc".to_string()),
+        };
+        assert_eq!(
+            commit_args("ctr-abc", "uenv-snap-swe-1"),
+            vec!["commit", "ctr-abc", "uenv-snap-swe-1"]
+        );
+        assert_eq!(
+            restore_run_args("restored-1", "uenv-snap-swe-1"),
+            vec!["run", "-d", "--name", "restored-1", "uenv-snap-swe-1", "sleep", "infinity"]
+        );
+        assert!(snapshot_image_name(&handle).starts_with("uenv-snap-swe-1-"));
     }
 }
