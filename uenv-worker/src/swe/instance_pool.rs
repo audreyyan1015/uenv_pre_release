@@ -17,7 +17,8 @@ use crate::swe::image_cache::ImageCacheFactory;
 use crate::swe::resettable::ResettableSession;
 use crate::swe::session::{ExecResult, SubmitOutcome, SweSession};
 use crate::swe::spec::ResetObservation;
-use crate::swe::trajectory::{TrajectoryRef, TrajectoryStore};
+use crate::swe::trajectory::{TrajectoryBundle, TrajectoryRef, TrajectoryStore};
+use crate::swe::trajectory_upload::TrajectoryUploader;
 use crate::swe::variant::BenchmarkVariant;
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
@@ -34,6 +35,8 @@ pub struct SweInstancePool {
     seccomp_dir: Option<PathBuf>,
     worker_id: String,
     gateway_base_url: String,
+    /// v2.2 轨迹上传旁路（None=未启用，走本地真值过渡态）。
+    uploader: Option<TrajectoryUploader>,
 }
 
 impl SweInstancePool {
@@ -48,6 +51,7 @@ impl SweInstancePool {
             seccomp_dir: None,
             worker_id: "worker".to_string(),
             gateway_base_url: "http://127.0.0.1:28999".to_string(),
+            uploader: TrajectoryUploader::from_env(),
         }
     }
 
@@ -246,7 +250,16 @@ impl SweInstancePool {
         let outcome = session.evaluate()?;
         let trajectory_ref = if let Some(store) = TrajectoryStore::from_env() {
             match session.seal_trajectory(&outcome, &store) {
-                Ok(r) => Some(r),
+                Ok(mut r) => {
+                    // v2.2：seal 成功后登记上传（失败不阻断 reward）。
+                    if let Some(up) = &self.uploader {
+                        up.enqueue(&r.trajectory_id);
+                        r.upload_status = uenv_common::UploadStatus::Pending;
+                        r.storage_url = Some(up.endpoint().to_string());
+                        r.storage_kind = Some("server".to_string());
+                    }
+                    Some(r)
+                }
                 Err(err) => {
                     tracing::warn!(
                         session_id = %session_id,
@@ -267,6 +280,44 @@ impl SweInstancePool {
             outcome,
             trajectory_ref,
         })
+    }
+
+    /// v2.2：把 run_id 注入已建会话（gateway 从 X-UEnv-Run-Id 头读取）。
+    pub fn set_session_run_id(&self, session_id: &str, run_id: &str) {
+        if run_id.is_empty() {
+            return;
+        }
+        if let Ok(guard) = self.sessions.lock() {
+            if let Some(sess) = guard.get(session_id) {
+                sess.set_run_id(run_id);
+            }
+        }
+    }
+
+    /// native 路径：seal 一条 bundle 并上传（best-effort）。返回 ref（含 trajectory_id / storage_url）。
+    /// 与 gateway 路径的 submit() 上传逻辑一致，但用于无 session 的一次性 episode。
+    pub fn seal_and_upload(
+        &self,
+        bundle: TrajectoryBundle,
+        resolved: bool,
+        reward: f64,
+    ) -> Option<TrajectoryRef> {
+        let store = TrajectoryStore::from_env()?;
+        match store.seal(bundle, resolved, reward) {
+            Ok(mut r) => {
+                if let Some(up) = &self.uploader {
+                    up.enqueue(&r.trajectory_id);
+                    r.upload_status = uenv_common::UploadStatus::Pending;
+                    r.storage_url = Some(up.endpoint().to_string());
+                    r.storage_kind = Some("server".to_string());
+                }
+                Some(r)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, msg = "native_trajectory_seal_failed");
+                None
+            }
+        }
     }
 
     pub fn get_trajectory(&self, trajectory_id: &str) -> Result<crate::swe::trajectory::TrajectoryBundle, DynErr> {

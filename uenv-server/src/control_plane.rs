@@ -278,6 +278,28 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         if !duplicate {
             if let Some(result) = req.result {
                 self.state.scheduler.write().touch_worker_report(&req.worker_id);
+                // v2.2：ack 后持久化 episode_results（native 路径控制面摘要 + trajectory_id 关联）。
+                if let Some(store) = self.state.trajectory_store.get() {
+                    let summary = result.summary.as_ref();
+                    let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
+                    let row = crate::trajectory::EpisodeResultRow {
+                        episode_id: result.episode_id.clone(),
+                        attempt_id: result.attempt_id,
+                        worker_id: req.worker_id.clone(),
+                        status: result.status.clone(),
+                        total_reward: summary.map(|s| s.total_reward),
+                        total_steps: summary.map(|s| s.total_steps as i64),
+                        trajectory_id: opt(&result.trajectory_id),
+                        trajectory_storage_url: opt(&result.trajectory_storage_url),
+                        result_checksum: req.idempotency_key.clone(),
+                    };
+                    let store = store.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = store.upsert_episode_result(&row) {
+                            warn!(error = %e, "episode_results_upsert_failed");
+                        }
+                    });
+                }
                 // 从 pending_results 中取出并删除对应条目（同时获得 channel 的发送端）
                 if let Some((_, pending)) = self
                     .state

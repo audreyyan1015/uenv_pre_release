@@ -56,6 +56,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(config_path = %config_path, "server_config_loaded");
     let state = uenv_server::create_state_with_config(&config);
 
+    // 轨迹聚合存储 HTTP（:8077，v2.2）：按环境变量启用。同一 store 同时供 HTTP 与 episode_results。
+    {
+        let trj_cfg = uenv_server::trajectory::TrajectoryConfig::from_env();
+        if trj_cfg.enabled {
+            if let Some(trj_store) = uenv_server::trajectory::open_shared(&trj_cfg) {
+                let _ = state.trajectory_store.set(trj_store.clone());
+                tracing::info!(listen = %trj_cfg.http_listen, "trajectory_server_spawning");
+                tokio::spawn(uenv_server::trajectory::serve_with(trj_store, trj_cfg));
+            }
+        }
+    }
+
     // admin HTTP: start before serving gRPC so it's available immediately
     if config.admin_http_port > 0 {
         let admin_state = Arc::clone(&state);

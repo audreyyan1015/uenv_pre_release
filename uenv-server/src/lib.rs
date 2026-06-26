@@ -5,6 +5,7 @@ pub mod proto;
 pub mod scheduler;
 pub mod service;
 pub mod state;
+pub mod trajectory;
 
 use std::sync::Arc;
 use parking_lot::RwLock;

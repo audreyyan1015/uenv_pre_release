@@ -250,6 +250,7 @@ impl EpisodeExecutor {
             error_message: String::new(),
             trajectory_checksum: checksum,
             integrity_verified: true,
+            ..Default::default()
         };
 
         if let Some(last) = stream_reports.last_mut() {
@@ -395,6 +396,43 @@ impl EpisodeExecutor {
             info.insert("artifact_uri".to_string(), uri.clone());
         }
 
+        // v2.2 native 路径上传：组 bundle → seal → 上传 Server（best-effort，失败不影响 result）。
+        let mut trajectory_id = String::new();
+        let mut trajectory_storage_url = String::new();
+        if let Some(pool) = self.swe_pool.clone() {
+            let run_id = if !episode.correlation_id.is_empty() {
+                episode.correlation_id.clone()
+            } else {
+                format!("run-native-{}", episode.episode_id)
+            };
+            let corr = (!episode.correlation_id.is_empty()).then(|| episode.correlation_id.clone());
+            let bundle = crate::swe::trajectory::TrajectoryBundle {
+                trajectory_id: crate::swe::trajectory::TrajectoryStore::next_trajectory_id(&ctx.worker_id),
+                run_id,
+                batch_id: corr.clone(),
+                correlation_id: corr,
+                episode_id: Some(episode.episode_id.clone()),
+                session_id: episode.episode_id.clone(),
+                instance_id: instance_id.clone(),
+                benchmark_variant: variant.as_str().to_string(),
+                worker_id: ctx.worker_id.clone(),
+                gateway_base_url: String::new(),
+                steps: Vec::new(),
+                artifact: outcome.artifact.clone(),
+                reward: outcome.reward,
+                resolved: outcome.resolved,
+                sealed_at_ms: crate::swe::trajectory::now_ms(),
+            };
+            let resolved = outcome.resolved;
+            let reward_v = outcome.reward;
+            if let Ok(Some(r)) =
+                tokio::task::spawn_blocking(move || pool.seal_and_upload(bundle, resolved, reward_v)).await
+            {
+                trajectory_id = r.trajectory_id;
+                trajectory_storage_url = r.storage_url.unwrap_or_default();
+            }
+        }
+
         let step = StepRecord {
             step_index: 1,
             observation: Vec::new(),
@@ -427,6 +465,8 @@ impl EpisodeExecutor {
             error_message: String::new(),
             trajectory_checksum: checksum,
             integrity_verified: true,
+            trajectory_id,
+            trajectory_storage_url,
         };
         let stream = StreamReport {
             episode_id: episode.episode_id.clone(),

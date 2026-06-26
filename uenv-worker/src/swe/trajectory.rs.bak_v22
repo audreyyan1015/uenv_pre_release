@@ -1,8 +1,7 @@
-//! Gateway 逐步轨迹落盘与查询（plan §1.7 + 260625 冻结方案 v2.2）。
+//! Gateway 逐步轨迹落盘与查询（plan §1.7 + 260625 冻结方案）。
 //!
-//! 本地存储仍为真值的"过渡态"（trajectory_upload.enabled=false）：
-//! `index/by-id/{id}.json` + `bodies/{id}.json`。
-//! v2.2 在此基础上加"上传旁路"：bundle 增 run_id 等字段，由 trajectory_upload 上传 Server。
+//! 真值在 Worker 本机：`index/by-id/{id}.json` + `bodies/{id}.json`。
+//! 与 Episode WAL / Server 无关。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::swe::artifact::EpisodeArtifact;
-
-// 契约类型来自 uenv-common，便于 worker / server 共用同一份定义。
-pub use uenv_common::{TrajectoryRef, UploadStatus};
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
@@ -56,21 +52,9 @@ pub struct StepTrace {
 }
 
 /// 完整 episode 轨迹 bundle。
-///
-/// v2.2 新增聚合字段（run_id 等）与索引字段（reward/resolved），
-/// 这样 Server 收到 bundle JSON 后用 `uenv_common::TrajectoryHeader` 即可抠出全部索引列。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrajectoryBundle {
     pub trajectory_id: String,
-    /// 一次评测作业 ID（driver 生成；gateway 路径由 X-UEnv-Run-Id 注入，native 路径可空）。
-    #[serde(default)]
-    pub run_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batch_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub correlation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub episode_id: Option<String>,
     pub session_id: String,
     pub instance_id: String,
     pub benchmark_variant: String,
@@ -78,35 +62,38 @@ pub struct TrajectoryBundle {
     pub gateway_base_url: String,
     pub steps: Vec<StepTrace>,
     pub artifact: EpisodeArtifact,
-    /// 索引用：评测得分（seal 时写入，便于 Server 直接入库）。
-    #[serde(default)]
+    pub sealed_at_ms: u64,
+}
+
+/// 轻量索引 / submit 响应。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrajectoryRef {
+    pub trajectory_id: String,
+    pub worker_id: String,
+    pub gateway_base_url: String,
+    pub instance_id: String,
+    pub benchmark_variant: String,
+    pub session_id: String,
+    pub step_count: u32,
     pub reward: f64,
-    /// 索引用：是否解决（seal 时写入）。
-    #[serde(default)]
     pub resolved: bool,
     pub sealed_at_ms: u64,
 }
 
-/// 从 bundle 构造轻量 ref。
-///
-/// `TrajectoryRef` 定义在 uenv-common，受孤儿规则限制不能在本 crate 给它加 inherent 方法，
-/// 故以自由函数提供。
-pub fn ref_from_bundle(bundle: &TrajectoryBundle, resolved: bool, reward: f64) -> TrajectoryRef {
-    TrajectoryRef {
-        trajectory_id: bundle.trajectory_id.clone(),
-        worker_id: bundle.worker_id.clone(),
-        gateway_base_url: bundle.gateway_base_url.clone(),
-        instance_id: bundle.instance_id.clone(),
-        benchmark_variant: bundle.benchmark_variant.clone(),
-        session_id: bundle.session_id.clone(),
-        run_id: bundle.run_id.clone(),
-        storage_url: None,
-        storage_kind: Some("worker".to_string()),
-        step_count: bundle.steps.len() as u32,
-        reward,
-        resolved,
-        sealed_at_ms: bundle.sealed_at_ms,
-        upload_status: UploadStatus::Pending,
+impl TrajectoryRef {
+    pub fn from_bundle(bundle: &TrajectoryBundle, resolved: bool, reward: f64) -> Self {
+        Self {
+            trajectory_id: bundle.trajectory_id.clone(),
+            worker_id: bundle.worker_id.clone(),
+            gateway_base_url: bundle.gateway_base_url.clone(),
+            instance_id: bundle.instance_id.clone(),
+            benchmark_variant: bundle.benchmark_variant.clone(),
+            session_id: bundle.session_id.clone(),
+            step_count: bundle.steps.len() as u32,
+            reward,
+            resolved,
+            sealed_at_ms: bundle.sealed_at_ms,
+        }
     }
 }
 
@@ -153,24 +140,20 @@ impl TrajectoryStore {
     }
 
     /// 落盘 bundle + 索引，返回 TrajectoryRef。
-    /// reward/resolved 同时写入 bundle 正文，确保上传后 Server 能从 body 解析索引列。
     pub fn seal(
         &self,
-        mut bundle: TrajectoryBundle,
+        bundle: TrajectoryBundle,
         resolved: bool,
         reward: f64,
     ) -> Result<TrajectoryRef, DynErr> {
         std::fs::create_dir_all(self.index_dir())?;
         std::fs::create_dir_all(self.dir.join("bodies"))?;
 
-        bundle.reward = reward;
-        bundle.resolved = resolved;
-
         let trajectory_id = bundle.trajectory_id.clone();
         let body_path = self.body_path(&trajectory_id);
         std::fs::write(&body_path, serde_json::to_string_pretty(&bundle)?)?;
 
-        let ref_entry = ref_from_bundle(&bundle, resolved, reward);
+        let ref_entry = TrajectoryRef::from_bundle(&bundle, resolved, reward);
         let index_path = self.index_path(&trajectory_id);
         std::fs::write(&index_path, serde_json::to_string_pretty(&ref_entry)?)?;
 
@@ -267,10 +250,6 @@ mod tests {
         let tid = TrajectoryStore::next_trajectory_id("w1");
         let bundle = TrajectoryBundle {
             trajectory_id: tid.clone(),
-            run_id: "run-test-1".into(),
-            batch_id: None,
-            correlation_id: None,
-            episode_id: None,
             session_id: "sess-1".into(),
             instance_id: "inst-a".into(),
             benchmark_variant: "pro".into(),
@@ -292,19 +271,13 @@ mod tests {
             artifact: EpisodeArtifact::new("sess-1", "inst-a")
                 .with_reward(1.0)
                 .with_test_results(TestResults::from_per_test("raw", vec![("t".into(), true)])),
-            reward: 0.0,
-            resolved: false,
             sealed_at_ms: 100,
         };
         let ref_entry = store.seal(bundle.clone(), true, 1.0).expect("seal");
         assert_eq!(ref_entry.step_count, 1);
-        assert_eq!(ref_entry.reward, 1.0);
-        assert!(ref_entry.resolved);
 
         let back = store.get(&tid).expect("get");
         assert_eq!(back.steps.len(), 1);
-        assert_eq!(back.reward, 1.0);
-        assert!(back.resolved);
 
         let listed = store.list(Some("inst-a"), None, 10).expect("list");
         assert_eq!(listed.len(), 1);

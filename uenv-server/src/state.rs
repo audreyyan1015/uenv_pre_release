@@ -27,6 +27,8 @@ pub struct ServerState {
     pub episode_semaphore: Option<Arc<Semaphore>>,
     /// 是否启用动态队列（permit 数跟随 worker 容量变化）。
     pub queue_dynamic: bool,
+    /// v2.2：轨迹/episode_results 存储（bridge main 启用时注入；None=未启用持久化）。
+    pub trajectory_store: std::sync::OnceLock<Arc<crate::trajectory::TrajectoryStore>>,
 }
 
 pub struct ActiveEpisode {
@@ -78,6 +80,7 @@ impl ServerState {
                 None
             },
             queue_dynamic: config.episode.queue_dynamic,
+            trajectory_store: std::sync::OnceLock::new(),
         }
     }
 
