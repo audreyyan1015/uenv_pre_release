@@ -193,14 +193,26 @@ fn sample_to_worker_payload(
         .or_else(|| json_string(metadata, "data_source"))
         .unwrap_or_default();
 
-    json!({
+    let mut worker_payload = json!({
         "request_id": sample.request_id,
         "question": question,
         "dataset": dataset,
         "model_endpoint": model_endpoint,
         "model_name": json_string(model_ep, "model_name").unwrap_or_else(|| "policy-model".to_string()),
         "generation_config": model_ep.get("generation_config").cloned().unwrap_or_else(|| json!({})),
-    })
+    });
+    // SWE native: forward instance fields from env_config so the worker can locate the
+    // image and grade (the generic mapping above only carries question/dataset).
+    if sample.env_type == "swe" {
+        if let Some(obj) = worker_payload.as_object_mut() {
+            for key in ["instance_id", "benchmark_variant", "use_gold_patch", "command_mode"] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+    }
+    worker_payload
 }
 
 fn sample_to_worker_reward_config(payload: &Value) -> Value {

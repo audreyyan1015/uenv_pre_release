@@ -334,19 +334,26 @@ impl EpisodeExecutor {
         let episode_id = episode.episode_id.clone();
         let policy = CommandPolicyConfig::default().with_mode(mode);
         // M2-2：优先经共享 L2 池（与 Gateway 同源）；无池时回退一次性 harness。
-        let outcome = if let Some(pool) = self.swe_pool.clone() {
+        // v2.2：native run_id（correlation_id 优先，否则 run-native-{episode_id}）。
+        let native_run_id = if !episode.correlation_id.is_empty() {
+            episode.correlation_id.clone()
+        } else {
+            format!("run-native-{}", episode.episode_id)
+        };
+        let (outcome, pool_trajectory_ref) = if let Some(pool) = self.swe_pool.clone() {
             let gold = if use_gold { Some(instance.patch.clone()) } else { None };
             let id = instance_id.clone();
-            tokio::task::spawn_blocking(move || {
-                pool.run_episode(&id, variant, policy, gold.as_deref())
+            let rid = native_run_id.clone();
+            let submit = tokio::task::spawn_blocking(move || {
+                pool.run_episode(&id, variant, policy, gold.as_deref(), &rid)
             })
             .await
             .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
             .map_err(|err| {
                 log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
                 err
-            })?
-            .outcome
+            })?;
+            (submit.outcome, submit.trajectory_ref)
         } else {
             let opts = RunOptions {
                 runtime,
@@ -354,13 +361,14 @@ impl EpisodeExecutor {
                 keep_container: false,
                 policy,
             };
-            tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+            let oc = tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
                 .await
                 .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
                 .map_err(|err| {
                     log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
                     err
-                })?
+                })?;
+            (oc, None)
         };
 
         let reward = outcome.reward;
@@ -396,42 +404,12 @@ impl EpisodeExecutor {
             info.insert("artifact_uri".to_string(), uri.clone());
         }
 
-        // v2.2 native 路径上传：组 bundle → seal → 上传 Server（best-effort，失败不影响 result）。
-        let mut trajectory_id = String::new();
-        let mut trajectory_storage_url = String::new();
-        if let Some(pool) = self.swe_pool.clone() {
-            let run_id = if !episode.correlation_id.is_empty() {
-                episode.correlation_id.clone()
-            } else {
-                format!("run-native-{}", episode.episode_id)
-            };
-            let corr = (!episode.correlation_id.is_empty()).then(|| episode.correlation_id.clone());
-            let bundle = crate::swe::trajectory::TrajectoryBundle {
-                trajectory_id: crate::swe::trajectory::TrajectoryStore::next_trajectory_id(&ctx.worker_id),
-                run_id,
-                batch_id: corr.clone(),
-                correlation_id: corr,
-                episode_id: Some(episode.episode_id.clone()),
-                session_id: episode.episode_id.clone(),
-                instance_id: instance_id.clone(),
-                benchmark_variant: variant.as_str().to_string(),
-                worker_id: ctx.worker_id.clone(),
-                gateway_base_url: String::new(),
-                steps: Vec::new(),
-                artifact: outcome.artifact.clone(),
-                reward: outcome.reward,
-                resolved: outcome.resolved,
-                sealed_at_ms: crate::swe::trajectory::now_ms(),
-            };
-            let resolved = outcome.resolved;
-            let reward_v = outcome.reward;
-            if let Ok(Some(r)) =
-                tokio::task::spawn_blocking(move || pool.seal_and_upload(bundle, resolved, reward_v)).await
-            {
-                trajectory_id = r.trajectory_id;
-                trajectory_storage_url = r.storage_url.unwrap_or_default();
-            }
-        }
+        // v2.2 native 路径：复用 pool 在 submit 时已 seal+上传 的轨迹（含真实 steps + artifact），
+        // 不再另造一条空 steps 的 bundle 重复上传（去重）。run_id 已在 run_episode 注入会话。
+        let (trajectory_id, trajectory_storage_url) = match pool_trajectory_ref {
+            Some(r) => (r.trajectory_id, r.storage_url.unwrap_or_default()),
+            None => (String::new(), String::new()),
+        };
 
         let step = StepRecord {
             step_index: 1,

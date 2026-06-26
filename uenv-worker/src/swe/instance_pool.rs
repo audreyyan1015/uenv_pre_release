@@ -17,7 +17,7 @@ use crate::swe::image_cache::ImageCacheFactory;
 use crate::swe::resettable::ResettableSession;
 use crate::swe::session::{ExecResult, SubmitOutcome, SweSession};
 use crate::swe::spec::ResetObservation;
-use crate::swe::trajectory::{TrajectoryBundle, TrajectoryRef, TrajectoryStore};
+use crate::swe::trajectory::{TrajectoryRef, TrajectoryStore};
 use crate::swe::trajectory_upload::TrajectoryUploader;
 use crate::swe::variant::BenchmarkVariant;
 
@@ -159,8 +159,11 @@ impl SweInstancePool {
         variant: BenchmarkVariant,
         policy: CommandPolicyConfig,
         gold_patch: Option<&str>,
+        run_id: &str,
     ) -> Result<SubmitOutcome, DynErr> {
         let (session_id, _obs) = self.create_session(instance_id, variant, policy)?;
+        // v2.2：native 路径注入 run_id（correlation_id），使 submit seal 的轨迹带正确 run_id。
+        self.set_session_run_id(&session_id, run_id);
         let result = (|| {
             if let Some(p) = gold_patch {
                 self.apply_patch(&session_id, p, "gold")?;
@@ -290,32 +293,6 @@ impl SweInstancePool {
         if let Ok(guard) = self.sessions.lock() {
             if let Some(sess) = guard.get(session_id) {
                 sess.set_run_id(run_id);
-            }
-        }
-    }
-
-    /// native 路径：seal 一条 bundle 并上传（best-effort）。返回 ref（含 trajectory_id / storage_url）。
-    /// 与 gateway 路径的 submit() 上传逻辑一致，但用于无 session 的一次性 episode。
-    pub fn seal_and_upload(
-        &self,
-        bundle: TrajectoryBundle,
-        resolved: bool,
-        reward: f64,
-    ) -> Option<TrajectoryRef> {
-        let store = TrajectoryStore::from_env()?;
-        match store.seal(bundle, resolved, reward) {
-            Ok(mut r) => {
-                if let Some(up) = &self.uploader {
-                    up.enqueue(&r.trajectory_id);
-                    r.upload_status = uenv_common::UploadStatus::Pending;
-                    r.storage_url = Some(up.endpoint().to_string());
-                    r.storage_kind = Some("server".to_string());
-                }
-                Some(r)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, msg = "native_trajectory_seal_failed");
-                None
             }
         }
     }
