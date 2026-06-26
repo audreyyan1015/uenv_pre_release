@@ -1,8 +1,10 @@
 # UEnv 代码改动总结：轨迹聚合存储 v2.2
 
-> 对比范围：最新提交 `12faf9fe`（"0626"，作者 uenv-dev，2026-06-26 21:09）vs 上一次提交 `06669d69`（合并 worker-pool 分支）
-> 工作目录：服务器 `8.130.86.71:/home/uenv`，分支 `bridge-alignment`，工作区干净（无未提交改动）
-> 改动规模：26 个文件，+3211 行 / −37 行
+> 工作目录：服务器 `8.130.86.71:/home/uenv`，分支 `bridge-alignment`
+>
+> 本文档分两部分：
+> - **第一部分（功能主体）**：提交 `12faf9fe`（"0626"，作者 uenv-dev，2026-06-26）vs 上一次提交 `06669d69`。改动规模 26 个文件，+3211 / −37。
+> - **第二部分（后续修复与验证）**：在功能主体之上的 3 个后续提交 `49b2e0d8` → `5447c5e8`(本文档) → `e2697bba`，修了 3 个 bug 并完成真实环境端到端验证。详见文末「后续修复与端到端验证」。
 
 ---
 
@@ -61,11 +63,11 @@
 |------|------|
 | `uenv-worker/src/swe/trajectory_upload.rs`（新增，283 行） | **上传器全部实现**：spool 队列、后台 drainer、gzip、重试 |
 | `uenv-worker/src/swe/trajectory.rs` | `TrajectoryBundle` 增加 run_id 等聚合字段和 reward/resolved；`TrajectoryRef` 改为复用 common；seal 时把 reward 写进 body |
-| `uenv-worker/src/swe/instance_pool.rs` | 持有 `uploader`，seal 后入队上传；新增 `seal_and_upload`（native 路径）和 `set_session_run_id` |
+| `uenv-worker/src/swe/instance_pool.rs` | 持有 `uploader`，seal 后入队上传；新增 `set_session_run_id`；曾新增 `seal_and_upload`（native 路径），**后在去重提交 `e2697bba` 中移除**（见第二部分） |
 | `uenv-worker/src/swe/session.rs` | session 增加 run_id 字段与 `set_run_id`；seal 时填充聚合字段 |
 | `uenv-worker/src/swe/mod.rs` | 注册 `trajectory_upload` 模块并导出 |
 | `uenv-worker/src/runtime_gateway/mod.rs` | `create_session` 读取 `X-UEnv-Run-Id` 头并绑定到 session |
-| `uenv-worker/src/episode/executor.rs` | native 路径 episode 结束时构造 bundle、seal 并上传，回填 `trajectory_id`/`storage_url` |
+| `uenv-worker/src/episode/executor.rs` | native 路径回填 `trajectory_id`/`storage_url`（**去重提交 `e2697bba` 后改为复用 pool 已 seal 的轨迹，不再单独构造空 bundle 上传**，见第二部分） |
 | `uenv-worker/src/config/mod.rs` | 新增 `TrajectoryUploadConfig`，支持 YAML 配置并导出为环境变量（env > yaml） |
 | `uenv-worker/src/wal/mod.rs` | 测试结构体补 `..Default::default()`（适配 proto 新字段） |
 | `uenv-worker/tests/trajectory_upload_e2e.rs`（新增，212 行） | 端到端测试：worker seal→上传→server 落库→GET 回读校验 |
@@ -86,3 +88,38 @@
 2. **可靠性优先**：server 写盘"先 blob 后 DB"、SQLite WAL、幂等去重 + 409 冲突检测，配套压测脚本验证零丢失。
 3. **配置双通道**：YAML 适合静态部署，环境变量适合临时覆盖（如不把真实 token 写进 yaml），env 优先。
 4. **两条上传路径统一**：gateway（多步 session）和 native（单步 episode）共用同一套 seal + 上传逻辑。
+
+---
+
+# 第二部分：后续修复与端到端验证
+
+功能主体（`12faf9fe`）合入后，又做了 3 个提交修 bug 并做真实环境验证。
+
+## 提交 `49b2e0d8` — 防止两类轨迹静默丢失
+
+代码审查中发现两个会导致轨迹"悄悄丢失"的 bug，已修复并加回归测试：
+
+1. **gateway 路径 run_id 为空 → 被 server 400 拒收 → 重试耗尽永久丢失**。
+   - 根因：server 强制校验 `run_id` 非空，但 gateway 若没收到 `X-UEnv-Run-Id` 头，seal 出的 run_id 为空。
+   - 修复：`session.rs` seal 时若 run_id 为空，兜底合成 `run-gw-{episode_id}`（对齐 native 路径）。
+2. **重复上传不修复已丢失的 body**。
+   - 根因：server `insert` 幂等判断只比 sha256，不看 `body_present`；body 丢失后重传同内容只回 Duplicate、不重写正本 → worker 删本地副本 → 正本永久丢。
+   - 修复：`trajectory.rs` 的 Duplicate 分支若 `body_present=0` 就用本次内容重新落盘并置回 1，加测试 `duplicate_restores_lost_body`。
+
+## 提交 `e2697bba` — 打通 native 路径 SWE episode + 轨迹去重
+
+1. **bridge core 转发 SWE 字段（native 路径根因修复）**：`uenv-bridge/core/src/core.rs` 的 `sample_to_worker_payload` 此前只转发 `question`/`dataset`，**丢掉了 `instance_id`/`benchmark_variant`** → native SWE episode 必然因"missing instance_id"失败（这是 native 路径一直没能端到端跑通的根因）。修复：`env_type=="swe"` 时从 `env_config` 转发 `instance_id`/`benchmark_variant`/`use_gold_patch`/`command_mode`。
+2. **native 轨迹去重**：此前一条 native episode 会上传**两条**轨迹（`run_episode` 内部 pool 自己 seal 一条真实 steps 的 + executor 又 `seal_and_upload` 一条空 steps 的）。修复：`run_episode` 新增 `run_id` 参数注入会话，executor 直接复用 pool 已 seal+上传 的轨迹（含真实 steps），删除冗余的 `seal_and_upload`。
+
+涉及文件：`uenv-bridge/core/src/core.rs`、`uenv-worker/src/swe/instance_pool.rs`、`uenv-worker/src/episode/executor.rs`（+39 / −72）。
+
+## 真实环境端到端验证（server 86.71 + worker 143）
+
+两条路径都用**真实 docker 容器**（SWE-bench Verified 镜像，instance `scikit-learn__scikit-learn-14141`，gold patch）跑通，老 worker 进程全程未受影响：
+
+| 路径 | 入口 | 结果 |
+|------|------|------|
+| **gateway** | 外部 Agent HTTP → worker 网关 | tests 3/3 PASS，reward=1.0，轨迹 acked 入库；`run_id` 走兜底 `run-gw-*`（验证了 `49b2e0d8` 修复 #1） |
+| **native** | VeRL gRPC `ExecuteBatch` → server 调度 → worker dispatch | reward=1.0；**单条**轨迹（验证去重），`run_id=correlation_id`，`episode_results` 表正确关联 trajectory_id（验证 native 两个 server 侧写入） |
+
+> 注：native 测试时 dispatch server 放在 143 localhost（隔离老 worker——它认 `86.71:8088`，调度按 `env_type=swe` 选 worker、无法按 worker_id 指定，放公网会被老 worker 抢 episode）。轨迹存储跨机上传到 86.71 的能力已在 gateway 测试中验证。
