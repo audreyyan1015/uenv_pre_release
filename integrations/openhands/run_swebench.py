@@ -49,8 +49,11 @@ def main() -> int:
     ap.add_argument("--instances", default="fixtures/swe/swe_instances.json")
     ap.add_argument("--benchmark-variant", default="verified")
     ap.add_argument("--command-mode", default="FullShell")
+    ap.add_argument("--api-key", default=None, help="X-API-Key when gateway auth enabled")
     ap.add_argument("--gold", dest="gold", action="store_true", default=True)
     ap.add_argument("--no-gold", dest="gold", action="store_false")
+    ap.add_argument("--save-ref", default=None, help="Write TrajectoryRef JSON after submit")
+    ap.add_argument("--fetch-trajectory", action="store_true", help="GET full bundle using ref")
     args = ap.parse_args()
 
     with open(args.instances) as f:
@@ -59,12 +62,14 @@ def main() -> int:
         print(f"instance {args.instance} not in {args.instances}", file=sys.stderr)
         return 1
     gold_patch = catalog[args.instance].get("patch", "")
+    workspace = "/app" if args.benchmark_variant.lower() == "pro" else "/testbed"
 
     with UEnvRuntime(
         gateway_url=args.gateway,
         instance_id=args.instance,
         benchmark_variant=args.benchmark_variant,
         command_mode=args.command_mode,
+        api_key=args.api_key,
     ) as rt:
         print(f"[connect] session={rt.session.session_id} variant={rt.session.benchmark_variant}")
         print(f"[prompt ] issue_text[:160]={rt.task_instruction[:160]!r}")
@@ -76,7 +81,7 @@ def main() -> int:
             # Agent step 2: apply it (CmdRunAction -> Runtime.run)
             robs = rt.run_action(
                 CmdRunAction(
-                    command="cd /testbed && (git apply -v /tmp/agent.patch "
+                    command=f"cd {workspace} && (git apply -v /tmp/agent.patch "
                     "|| patch --batch --fuzz=5 -p1 < /tmp/agent.patch)"
                 )
             )
@@ -90,6 +95,20 @@ def main() -> int:
             f"[submit ] resolved={result.resolved} reward={result.reward} "
             f"tests={result.tests_passed}/{result.tests_total}"
         )
+        if result.trajectory_ref:
+            print(f"[trace  ] trajectory_id={result.trajectory_ref.get('trajectory_id')}")
+            if args.save_ref:
+                with open(args.save_ref, "w", encoding="utf-8") as sf:
+                    json.dump(result.trajectory_ref, sf, indent=2)
+                    sf.write("\n")
+                print(f"[trace  ] saved ref -> {args.save_ref}")
+            if args.fetch_trajectory and result.trajectory_ref.get("trajectory_id"):
+                bundle = rt._client.get_trajectory(result.trajectory_ref["trajectory_id"])
+                out = args.save_ref.rsplit(".", 1)[0] + "_bundle.json" if args.save_ref else "trajectory_bundle.json"
+                with open(out, "w", encoding="utf-8") as bf:
+                    json.dump(bundle, bf, indent=2)
+                    bf.write("\n")
+                print(f"[trace  ] saved bundle -> {out} steps={len(bundle.get('steps', []))}")
         for t in result.per_test:
             print(f"          [{'PASS' if t['passed'] else 'FAIL'}] {t['node_id']}")
 

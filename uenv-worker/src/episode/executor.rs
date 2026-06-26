@@ -141,7 +141,6 @@ impl EpisodeExecutor {
                     &episode.payload,
                     &episode.reward_config,
                     step_index as u32,
-                    &episode.model_endpoint,
                 )
                 .await
                 .map_err(|err| {
@@ -346,6 +345,7 @@ impl EpisodeExecutor {
                 log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
                 err
             })?
+            .outcome
         } else {
             let opts = RunOptions {
                 runtime,

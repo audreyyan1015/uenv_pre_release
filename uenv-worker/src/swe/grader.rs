@@ -112,13 +112,27 @@ impl Grader for SwebenchProGrader {
 
     fn grade(&self, output: &str, fail_to_pass: &[String], pass_to_pass: &[String]) -> GradeResult {
         let report = parse_multi_runner_report(output);
-        let all_pass =
-            |ids: &[String]| ids.iter().all(|id| report.get(id).copied().unwrap_or(false));
+        // Mocha 汇总行：`292 passing (7s)` / `1 failing` — 0 failing 时全部记 pass
+        if let Some((passing, failing)) = parse_mocha_summary(output) {
+            let expected = fail_to_pass.len() + pass_to_pass.len();
+            if failing == 0 && passing >= expected.max(fail_to_pass.len()) {
+                let all_ids: Vec<_> = fail_to_pass.iter().chain(pass_to_pass.iter()).cloned().collect();
+                return GradeResult {
+                    resolved: true,
+                    reward: 1.0,
+                    per_test: all_ids.iter().map(|id| (id.clone(), true)).collect(),
+                };
+            }
+        }
+        let all_pass = |ids: &[String]| {
+            ids.iter()
+                .all(|id| pro_test_passed(&report, id))
+        };
         let resolved = all_pass(fail_to_pass) && all_pass(pass_to_pass);
         let per_test = fail_to_pass
             .iter()
             .chain(pass_to_pass.iter())
-            .map(|id| (id.clone(), report.get(id).copied().unwrap_or(false)))
+            .map(|id| (id.clone(), pro_test_passed(&report, id)))
             .collect();
         GradeResult {
             resolved,
@@ -128,11 +142,10 @@ impl Grader for SwebenchProGrader {
     }
 }
 
-/// 多 runner 解析：pytest（`::`）/ `go test`（`--- PASS: Test`）/ jest|node（`✓`/`✗`、`ok`/`not ok`）。
-///
-/// 以 test 名 token 相等或被某 PASS 行包含来判定通过；保守口径：仅明确 PASS 记 true。
+/// 多 runner 解析：pytest（`::`）/ `go test` / Mocha Pro reporter / TAP。
 pub fn parse_multi_runner_report(output: &str) -> std::collections::HashMap<String, bool> {
-    let mut map = parse_pytest_report(output); // pytest 行优先（含 `::` nodeid）
+    let mut map = parse_pytest_report(output);
+    parse_mocha_pro_lines(output, &mut map);
     for line in output.lines() {
         let l = line.trim();
         // go test：`--- PASS: TestFoo (0.01s)` / `--- FAIL: TestBar`
@@ -157,6 +170,101 @@ pub fn parse_multi_runner_report(output: &str) -> std::collections::HashMap<Stri
         }
     }
     map
+}
+
+/// SWE-bench Pro Mocha 自定义 reporter：`✓ test/file.js | Suite …::describe it title`
+/// 或失败行 `N) test/file.js | …`。
+fn parse_mocha_pro_lines(output: &str, map: &mut std::collections::HashMap<String, bool>) {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.contains(" | ") {
+            continue;
+        }
+        let passed = if trimmed.starts_with('✓')
+            || trimmed.starts_with('✔')
+            || trimmed.contains(" passing ")
+        {
+            Some(true)
+        } else if trimmed.starts_with('✗')
+            || trimmed.starts_with('✖')
+            || trimmed.contains(" failing ")
+            || is_mocha_numbered_failure(trimmed)
+        {
+            Some(false)
+        } else {
+            None
+        };
+        let Some(passed) = passed else { continue };
+        // 键：去掉 leading ✓/✔/序号后的整行，或 `file | …` 段
+        let key = strip_mocha_prefix(trimmed);
+        if !key.is_empty() {
+            map.insert(key.to_string(), passed);
+        }
+    }
+}
+
+fn is_mocha_numbered_failure(line: &str) -> bool {
+    let rest = line.trim_start();
+    let Some(digit_end) = rest.find(|c: char| !c.is_ascii_digit()) else {
+        return false;
+    };
+    rest[digit_end..].starts_with(')')
+}
+
+fn strip_mocha_prefix(line: &str) -> &str {
+    let s = line.trim();
+    if let Some(rest) = s.strip_prefix('✓').or_else(|| s.strip_prefix('✔')) {
+        return rest.trim();
+    }
+    if let Some(rest) = s.strip_prefix('✗').or_else(|| s.strip_prefix('✖')) {
+        return rest.trim();
+    }
+    if is_mocha_numbered_failure(s) {
+        if let Some(idx) = s.find(')') {
+            return s[idx + 1..].trim();
+        }
+    }
+    s
+}
+
+/// 解析 Mocha 汇总：`292 passing (7s)` / `1 failing`（无 failing 行视为 0）。
+fn parse_mocha_summary(output: &str) -> Option<(usize, usize)> {
+    let mut passing = None;
+    let mut failing = None;
+    for line in output.lines() {
+        let l = line.trim();
+        if l.ends_with("passing") || l.contains(" passing (") {
+            if let Some(n) = l.split_whitespace().next().and_then(|s| s.parse().ok()) {
+                passing = Some(n);
+            }
+        }
+        if l.ends_with("failing") {
+            if let Some(n) = l.split_whitespace().next().and_then(|s| s.parse().ok()) {
+                failing = Some(n);
+            }
+        }
+    }
+    passing.map(|p| (p, failing.unwrap_or(0)))
+}
+
+/// 按 Pro 节点 id 在已解析 map 中查找（精确 → 后缀 → 子串包含）。
+pub fn pro_test_passed(report: &std::collections::HashMap<String, bool>, test_id: &str) -> bool {
+    if let Some(&v) = report.get(test_id) {
+        return v;
+    }
+    // 后缀：`…::describe it title` 与 reporter 行末一致
+    if let Some(suffix) = test_id.rsplit("::").next() {
+        for (k, &v) in report {
+            if k.ends_with(suffix) || k.contains(test_id) || test_id.contains(k) {
+                return v;
+            }
+        }
+    }
+    report
+        .iter()
+        .find(|(k, _)| k.contains(test_id) || test_id.contains(k.as_str()))
+        .map(|(_, &v)| v)
+        .unwrap_or(false)
 }
 
 /// 按 `evaluation_spec.grader` 选择评分器（plan §5.4.3）；Verified/Lite 默认 pytest 口径。
@@ -239,5 +347,40 @@ mod tests {
         let g = SwebenchProGrader;
         let r = g.grade(out, &["a.py::test_x".into()], &["widget renders".into()]);
         assert!(r.resolved);
+    }
+
+    #[test]
+    fn pro_grader_parses_mocha_pro_reporter() {
+        let out = concat!(
+            "✓ test/database.js | Test database test/database/keys.js::Key methods should return multiple keys and null if key doesn't exist\n",
+            "✓ test/user/emails.js | email confirmation (library methods) canSendValidation should return true if it has been long enough to re-send confirmation\n",
+        );
+        let g = SwebenchProGrader;
+        let f2p = vec![
+            "test/database.js | Test database test/database/keys.js::Key methods should return multiple keys and null if key doesn't exist".into(),
+            "test/user/emails.js | email confirmation (library methods) canSendValidation should return true if it has been long enough to re-send confirmation".into(),
+        ];
+        let r = g.grade(out, &f2p, &[]);
+        assert!(r.resolved, "per_test={:?}", r.per_test);
+        assert_eq!(r.reward, 1.0);
+    }
+
+    #[test]
+    fn pro_grader_mocha_failure_line() {
+        let out = "1) test/foo.js | Suite name should fail\n  1 failing\n";
+        let g = SwebenchProGrader;
+        let r = g.grade(out, &["test/foo.js | Suite name should fail".into()], &[]);
+        assert!(!r.resolved);
+    }
+
+    #[test]
+    fn pro_grader_mocha_summary_zero_failing() {
+        let out = "  300 passing (8s)\n";
+        let g = SwebenchProGrader;
+        let f2p = vec!["test/a.js | suite test".into()];
+        let p2p: Vec<String> = (0..289).map(|i| format!("test/p{i}.js | case {i}")).collect();
+        let r = g.grade(out, &f2p, &p2p);
+        assert!(r.resolved, "expected summary shortcut, per_test len={}", r.per_test.len());
+        assert_eq!(r.reward, 1.0);
     }
 }

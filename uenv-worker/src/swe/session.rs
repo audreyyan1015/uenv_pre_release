@@ -10,14 +10,17 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::swe::artifact::{EpisodeArtifact, TestResults};
+use crate::swe::trajectory::{now_ms, StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore};
 use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for_spec;
 use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
-use crate::swe::image_cache::ImageCacheFactory;
+use crate::swe::image_cache::{ImageCacheFactory, resolve_provision_image};
+use crate::swe::pro_eval::try_external_pro_grade;
 use crate::swe::resettable::PodmanResettableInstance;
 use crate::swe::spec::{build_reset_observation, ResetObservation, Workspace};
 
@@ -34,6 +37,13 @@ pub struct ExecResult {
     pub truncated: bool,
 }
 
+/// Gateway submit 结果：评测 outcome + 可选轨迹索引。
+#[derive(Debug, Clone)]
+pub struct SubmitOutcome {
+    pub outcome: EpisodeOutcome,
+    pub trajectory_ref: Option<crate::swe::trajectory::TrajectoryRef>,
+}
+
 /// 单个 SWE 沙箱会话：持有容器句柄 + 实例真值 + 命令策略。
 ///
 /// 方法均 `&self`（容器操作不改 Rust 侧状态），可安全置于 `Arc` 由 Gateway 并发复用。
@@ -44,6 +54,9 @@ pub struct SweSession {
     episode_id: String,
     policy: CommandPolicyConfig,
     keep: bool,
+    trace: Mutex<Vec<StepTrace>>,
+    worker_id: String,
+    gateway_base_url: String,
 }
 
 impl SweSession {
@@ -57,7 +70,10 @@ impl SweSession {
         runtime: ContainerRuntime,
         policy: CommandPolicyConfig,
         keep: bool,
+        worker_id: &str,
+        gateway_base_url: &str,
     ) -> Result<(Self, ResetObservation), DynErr> {
+        let provision_start = Instant::now();
         let image = instance.image_ref();
         let container = format!(
             "uenv-swe-{}-{}-{}",
@@ -68,17 +84,28 @@ impl SweSession {
 
         let instance_spec = instance.to_instance_spec();
         let task_spec = instance.to_task_spec();
-        let workspace = Workspace::from_instance_spec(&instance_spec, TESTBED);
+        let workspace = Workspace::from_instance_spec(&instance_spec, instance.workspace_dir());
         let observation = build_reset_observation(&workspace, &task_spec);
+        let ws = instance.workspace_dir();
+        let is_pro = instance.variant() == crate::swe::variant::BenchmarkVariant::Pro;
 
         // 0) M4：确保镜像本地可用（inspect 命中即跳过；miss 时按配置 pull）。
-        let image_state = ImageCacheFactory::from_env(runtime).ensure_image(&image)?;
+        let factory = ImageCacheFactory::from_env(runtime);
+        let image_state = factory.ensure_image(&image)?;
+        let provision_image = resolve_provision_image(&factory, &image, &instance.instance_id);
 
         // 1) provision：按 CommandPolicy 生成 run flags（cap_drop / network / 可选 seccomp，
         //    M0-1 / M2-4），再 `run -d <flags> <image> sleep infinity`。
         let seccomp = policy.resolve_seccomp_file();
         let policy_mode = policy.mode;
-        let run_args = build_swe_run_args(&container, &image, policy_mode, Some(TESTBED), seccomp.as_deref());
+        let run_args = build_swe_run_args(
+            &container,
+            &provision_image,
+            policy_mode,
+            Some(ws),
+            seccomp.as_deref(),
+            is_pro,
+        );
         let run_out = Command::new(runtime.cli())
             .args(&run_args)
             .output()
@@ -99,21 +126,28 @@ impl SweSession {
             episode_id: episode_id.to_string(),
             policy,
             keep,
+            trace: Mutex::new(Vec::new()),
+            worker_id: worker_id.to_string(),
+            gateway_base_url: gateway_base_url.to_string(),
         };
 
-        // 2) reset：净化沙箱到 base_commit（git clean -fd，不带 -x 以保留已编译扩展）。
+        // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified 在 /testbed）。
         let reset_script =
-            PodmanResettableInstance::reset_script_keep_built(TESTBED, &instance.base_commit);
+            PodmanResettableInstance::reset_script_keep_built(ws, &instance.base_commit);
         let r = session.exec_raw(&reset_script)?; // 失败时 session 析构 → 清理容器
         if r.exit_code != 0 {
             return Err(format!("reset failed (code {}): {}\n{}", r.exit_code, r.stdout, r.stderr).into());
         }
+        session.run_pro_setup_at_provision()?;
+
+        session.record_provision_reset(&observation.issue_text, provision_start.elapsed().as_millis() as u64);
 
         tracing::info!(
             episode_id = %session.episode_id,
             instance_id = %instance.instance_id,
             container = %session.container,
             image = %image,
+            provision_image = %provision_image,
             image_state = ?image_state,
             seccomp = %seccomp.as_deref().unwrap_or("default"),
             network = %if policy_mode == CommandPolicy::FullShell { "bridge" } else { "none" },
@@ -133,15 +167,42 @@ impl SweSession {
 
     /// 容器内 `bash -lc` 执行（统一入口，plan §1.4）。带 deny_patterns 辅助检查 + 输出截断。
     pub fn exec(&self, command: &str) -> Result<ExecResult, DynErr> {
+        let step_start = Instant::now();
         if let Some(p) = self.policy.first_denied(command) {
-            return Ok(ExecResult {
+            let result = ExecResult {
                 stdout: String::new(),
                 stderr: format!("command rejected by policy (deny_pattern: {p})"),
                 exit_code: 126,
                 truncated: false,
-            });
+            };
+            self.push_step(
+                StepAction::Exec {
+                    command: command.to_string(),
+                },
+                StepObservation {
+                    stderr: result.stderr.clone(),
+                    exit_code: Some(result.exit_code),
+                    ..Default::default()
+                },
+                step_start.elapsed().as_millis() as u64,
+            );
+            return Ok(result);
         }
-        self.exec_raw(command)
+        let result = self.exec_raw(command)?;
+        self.push_step(
+            StepAction::Exec {
+                command: command.to_string(),
+            },
+            StepObservation {
+                stdout: result.stdout.clone(),
+                stderr: result.stderr.clone(),
+                exit_code: Some(result.exit_code),
+                truncated: result.truncated,
+                ..Default::default()
+            },
+            step_start.elapsed().as_millis() as u64,
+        );
+        Ok(result)
     }
 
     /// 不过策略的内部执行（reset / apply_patch / evaluate 内部用）。
@@ -162,6 +223,7 @@ impl SweSession {
 
     /// 写文件到容器（经临时文件 `cp`，二进制安全）。
     pub fn write_file(&self, path: &str, content: &str) -> Result<(), DynErr> {
+        let step_start = Instant::now();
         let tmp = host_tmp("write");
         {
             let mut f = std::fs::File::create(&tmp)?;
@@ -169,15 +231,69 @@ impl SweSession {
         }
         let res = self.cp_into(&tmp, path);
         let _ = std::fs::remove_file(&tmp);
+        match &res {
+            Ok(()) => {
+                self.push_step(
+                    StepAction::Write {
+                        path: path.to_string(),
+                        content: content.to_string(),
+                    },
+                    StepObservation {
+                        write_ok: Some(true),
+                        ..Default::default()
+                    },
+                    step_start.elapsed().as_millis() as u64,
+                );
+            }
+            Err(err) => {
+                self.push_step(
+                    StepAction::Write {
+                        path: path.to_string(),
+                        content: content.to_string(),
+                    },
+                    StepObservation {
+                        write_ok: Some(false),
+                        stderr: err.to_string(),
+                        ..Default::default()
+                    },
+                    step_start.elapsed().as_millis() as u64,
+                );
+            }
+        }
         res
     }
 
     /// 读容器内文件（`cat`）。
     pub fn read_file(&self, path: &str) -> Result<String, DynErr> {
+        let step_start = Instant::now();
         let r = self.exec_raw(&format!("cat {}", single_quote(path)))?;
         if r.exit_code != 0 {
+            self.push_step(
+                StepAction::Read {
+                    path: path.to_string(),
+                },
+                StepObservation {
+                    stderr: r.stderr.clone(),
+                    exit_code: Some(r.exit_code),
+                    truncated: r.truncated,
+                    ..Default::default()
+                },
+                step_start.elapsed().as_millis() as u64,
+            );
             return Err(format!("read {path} failed (code {}): {}", r.exit_code, r.stderr).into());
         }
+        self.push_step(
+            StepAction::Read {
+                path: path.to_string(),
+            },
+            StepObservation {
+                read_content: Some(r.stdout.clone()),
+                exit_code: Some(0),
+                truncated: r.truncated,
+                ..Default::default()
+            },
+            step_start.elapsed().as_millis() as u64,
+        );
         Ok(r.stdout)
     }
 
@@ -195,8 +311,10 @@ impl SweSession {
         let cp = self.cp_into(&tmp, &dest);
         let _ = std::fs::remove_file(&tmp);
         cp?;
-        let script =
-            format!("cd {TESTBED} && (git apply -v {dest} || patch --batch --fuzz=5 -p1 < {dest})");
+        let ws = self.instance.workspace_dir();
+        let script = format!(
+            "cd {ws} && (git apply -v {dest} || (patch --batch --forward --fuzz=5 -p1 < {dest}; ec=$?; [ $ec -eq 0 -o $ec -eq 1 ]))"
+        );
         let r = self.exec_raw(&script)?;
         if r.exit_code != 0 {
             return Err(format!(
@@ -206,6 +324,56 @@ impl SweSession {
             .into());
         }
         Ok(())
+    }
+
+    /// 封存逐步轨迹并落盘（Gateway submit 路径）。
+    pub fn seal_trajectory(
+        &self,
+        outcome: &EpisodeOutcome,
+        store: &TrajectoryStore,
+    ) -> Result<crate::swe::trajectory::TrajectoryRef, DynErr> {
+        let steps = self
+            .trace
+            .lock()
+            .map_err(|_| "trace lock poisoned")?
+            .clone();
+        let trajectory_id = TrajectoryStore::next_trajectory_id(&self.worker_id);
+        let sealed_at_ms = now_ms();
+        let bundle = TrajectoryBundle {
+            trajectory_id: trajectory_id.clone(),
+            session_id: self.episode_id.clone(),
+            instance_id: self.instance.instance_id.clone(),
+            benchmark_variant: self.instance.variant().as_str().to_string(),
+            worker_id: self.worker_id.clone(),
+            gateway_base_url: self.gateway_base_url.clone(),
+            steps,
+            artifact: outcome.artifact.clone(),
+            sealed_at_ms,
+        };
+        store.seal(bundle, outcome.resolved, outcome.reward)
+    }
+
+    fn push_step(&self, action: StepAction, observation: StepObservation, duration_ms: u64) {
+        if let Ok(mut trace) = self.trace.lock() {
+            let step_index = trace.len() as u32;
+            trace.push(StepTrace {
+                step_index,
+                action,
+                observation,
+                timestamp_ms: now_ms(),
+                duration_ms,
+            });
+        }
+    }
+
+    fn record_provision_reset(&self, issue_text: &str, duration_ms: u64) {
+        self.push_step(
+            StepAction::ProvisionReset {
+                issue_text: issue_text.to_string(),
+            },
+            StepObservation::default(),
+            duration_ms,
+        );
     }
 
     /// episode_end 评测：应用 test_patch → 跑 FAIL/PASS_TO_PASS → grader 评分 → EpisodeArtifact。
@@ -228,23 +396,48 @@ impl SweSession {
                 );
             }
         }
-        // 评测前应用 test_patch。
+        // 评测前应用 test_patch（Pro 的 setup 已在 provision 完成，避免 wipe agent patch）。
         self.apply_patch(&self.instance.test_patch, "test")?;
+        if let Some(pre) = self.instance.resolved_pre_test_command() {
+            let r = self.exec_raw(&pre)?;
+            if r.exit_code != 0 {
+                tracing::warn!(
+                    episode_id = %self.episode_id,
+                    instance_id = %self.instance.instance_id,
+                    exit_code = r.exit_code,
+                    msg = "swe_pro_pre_test_nonzero"
+                );
+            }
+        }
 
         // M1-2 / M1-4：按 repo@version 规格（或实例显式 test_cmd）构造 runner。
         let test_cmd = self.instance.resolved_test_command(TESTBED);
         let test_run = self.exec_raw(&test_cmd)?;
         let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
 
-        // grader 随 grader 名 + 仓库 log_parser（pytest / Django）分流。
-        let grader = grader_for_spec(
-            self.instance.to_instance_spec().evaluation_spec.grader.as_deref(),
-            self.instance.log_parser(),
-        );
-        let graded = grader.grade(&combined, &self.instance.fail_to_pass, &self.instance.pass_to_pass);
+        // M6-4：Pro 变体且配置 `UENV_SWE_PRO_EVAL_CMD` 时，外部子进程权威评分。
+        let is_pro = self.instance.grader_name() == "swebench_pro";
+        let log_parser = self.instance.log_parser();
+        let graded = if is_pro {
+            if let Some(ext) = try_external_pro_grade(
+                &self.instance.instance_id,
+                &combined,
+                &self.instance.fail_to_pass,
+                &self.instance.pass_to_pass,
+            )? {
+                ext
+            } else {
+                grader_for_spec(Some("swebench_pro"), log_parser)
+                    .grade(&combined, &self.instance.fail_to_pass, &self.instance.pass_to_pass)
+            }
+        } else {
+            grader_for_spec(None, log_parser)
+                .grade(&combined, &self.instance.fail_to_pass, &self.instance.pass_to_pass)
+        };
 
+        let ws = self.instance.workspace_dir();
         let diff = self
-            .exec_raw(&format!("cd {TESTBED} && git diff"))
+            .exec_raw(&format!("cd {ws} && git diff"))
             .map(|r| r.stdout)
             .unwrap_or_default();
 
@@ -265,6 +458,21 @@ impl SweSession {
             artifact,
             duration_ms: start.elapsed().as_millis() as u64,
         })
+    }
+
+    /// Pro：`before_repo_set_cmd` 在 provision/recycle 时执行（checkout 测试文件基线）。
+    fn run_pro_setup_at_provision(&self) -> Result<(), DynErr> {
+        if let Some(setup) = self.instance.resolved_setup_command() {
+            let r = self.exec_raw(&setup)?;
+            if r.exit_code != 0 {
+                return Err(format!(
+                    "pro setup failed (code {}): {}\n{}",
+                    r.exit_code, r.stdout, r.stderr
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     /// post-patch 安装命令（M1-3 / M1-2）：实例 `install_cmd` > `repo@version` 规格 install
@@ -299,7 +507,7 @@ impl crate::swe::resettable::ResettableSession for SweSession {
     /// 重置沙箱回 base_commit（保留已编译产物），供池 `recycle` 复用（M0-2）。
     fn reset_to_base(&self) -> Result<(), DynErr> {
         let reset_script =
-            PodmanResettableInstance::reset_script_keep_built(TESTBED, &self.instance.base_commit);
+            PodmanResettableInstance::reset_script_keep_built(self.instance.workspace_dir(), &self.instance.base_commit);
         let r = self.exec_raw(&reset_script)?;
         if r.exit_code != 0 {
             return Err(format!(
@@ -308,6 +516,7 @@ impl crate::swe::resettable::ResettableSession for SweSession {
             )
             .into());
         }
+        self.run_pro_setup_at_provision()?;
         tracing::info!(
             session_id = %self.episode_id,
             instance_id = %self.instance.instance_id,
@@ -340,6 +549,7 @@ pub fn build_swe_run_args(
     mode: CommandPolicy,
     workdir: Option<&str>,
     seccomp_file: Option<&str>,
+    pro_image: bool,
 ) -> Vec<String> {
     let mut args = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), container.to_string()];
     match mode {
@@ -361,9 +571,19 @@ pub fn build_swe_run_args(
         args.push("-w".to_string());
         args.push(w.to_string());
     }
+    // Pro 镜像 ENTRYPOINT=/bin/bash，不能 `image sleep infinity`（会立刻 exit 126）。
+    if pro_image {
+        args.push("--entrypoint".to_string());
+        args.push("tail".to_string());
+    }
     args.push(image.to_string());
-    args.push("sleep".to_string());
-    args.push("infinity".to_string());
+    if pro_image {
+        args.push("-f".to_string());
+        args.push("/dev/null".to_string());
+    } else {
+        args.push("sleep".to_string());
+        args.push("infinity".to_string());
+    }
     args
 }
 
@@ -405,7 +625,7 @@ mod tests {
 
     #[test]
     fn restricted_run_args_drop_caps_and_isolate_network() {
-        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None);
+        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None, false);
         assert_eq!(&a[..4], &["run", "-d", "--name", "c1"]);
         assert!(a.contains(&"--cap-drop=ALL".to_string()));
         assert!(a.contains(&"no-new-privileges".to_string()));
@@ -418,7 +638,7 @@ mod tests {
 
     #[test]
     fn full_run_args_bridge_network_no_capdrop() {
-        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None);
+        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None, false);
         assert!(a.contains(&"--network=bridge".to_string()));
         assert!(!a.contains(&"--cap-drop=ALL".to_string()));
         assert!(!a.contains(&"--network=none".to_string()));
@@ -432,6 +652,7 @@ mod tests {
             CommandPolicy::FullShell,
             None,
             Some("/profiles/full.json"),
+            false,
         );
         assert!(a.contains(&"--security-opt".to_string()));
         assert!(a.contains(&"seccomp=/profiles/full.json".to_string()));
