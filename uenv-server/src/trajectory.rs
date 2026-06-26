@@ -236,19 +236,34 @@ impl TrajectoryStore {
         let conn = self.conn.lock().map_err(|_| "conn lock poisoned")?;
 
         // 1) 幂等检查（写盘前）：已存在则按 sha 判定 duplicate / conflict，不动已存在 body。
-        let existing: Option<String> = conn
+        let existing: Option<(String, i64)> = conn
             .query_row(
-                "SELECT body_sha256 FROM trajectories WHERE trajectory_id=?1",
+                "SELECT body_sha256, body_present FROM trajectories WHERE trajectory_id=?1",
                 params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some(old_sha) = existing {
-            return Ok(if old_sha == sha {
-                InsertOutcome::Duplicate
-            } else {
-                InsertOutcome::Conflict
-            });
+        if let Some((old_sha, present)) = existing {
+            if old_sha != sha {
+                return Ok(InsertOutcome::Conflict);
+            }
+            // duplicate (same id + same content); if the canonical body was previously
+            // lost (body_present=0), use this upload to restore it instead of silently
+            // leaving the trajectory un-fetchable.
+            if present == 0 {
+                let tmp = self.data_dir.join("tmp").join(format!("{id}.json.partial"));
+                {
+                    let mut f = std::fs::File::create(&tmp)?;
+                    f.write_all(body)?;
+                    f.sync_all()?;
+                }
+                std::fs::rename(&tmp, self.body_abs(&id))?;
+                conn.execute(
+                    "UPDATE trajectories SET body_present=1 WHERE trajectory_id=?1",
+                    params![id],
+                )?;
+            }
+            return Ok(InsertOutcome::Duplicate);
         }
 
         // 2) blob 优先：tmp → fsync → atomic rename。
@@ -948,6 +963,30 @@ mod tests {
         let listed = store.list(&q).unwrap();
         assert_eq!(listed.len(), 1);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_restores_lost_body() {
+        let dir = std::env::temp_dir().join(format!("uenv-srv-trj-heal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = TrajectoryStore::open(&test_cfg(&dir)).unwrap();
+        let body = sample_bundle("trj-h");
+        let header: TrajectoryHeader = serde_json::from_slice(&body).unwrap();
+        let sha = sha256_hex(&body);
+        assert_eq!(store.insert(&header, &body, &sha).unwrap(), InsertOutcome::Acked);
+        // simulate a lost canonical body
+        std::fs::remove_file(store.body_abs("trj-h")).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE trajectories SET body_present=0 WHERE trajectory_id='trj-h'", [])
+                .unwrap();
+        }
+        assert!(store.get_body("trj-h").unwrap().is_none());
+        // re-uploading the same content is a duplicate AND must restore the body
+        assert_eq!(store.insert(&header, &body, &sha).unwrap(), InsertOutcome::Duplicate);
+        assert!(store.head("trj-h").unwrap());
+        assert!(store.get_body("trj-h").unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

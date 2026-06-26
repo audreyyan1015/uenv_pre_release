@@ -353,7 +353,16 @@ impl SweSession {
             trajectory_id: trajectory_id.clone(),
             // v2.2 聚合字段：run_id 由 gateway 在 Stage B 注入（X-UEnv-Run-Id）；
             // native 路径下 episode_id 取会话 episode_id，run_id 暂空。
-            run_id: self.run_id.lock().ok().map(|g| g.clone()).unwrap_or_default(),
+            run_id: {
+                let rid = self.run_id.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                if rid.trim().is_empty() {
+                    // v2.2 fallback: gateway did not inject X-UEnv-Run-Id; synthesize a
+                    // non-empty run_id so the server does not reject the upload with 400.
+                    format!("run-gw-{}", self.episode_id)
+                } else {
+                    rid
+                }
+            },
             batch_id: None,
             correlation_id: None,
             episode_id: Some(self.episode_id.clone()),
