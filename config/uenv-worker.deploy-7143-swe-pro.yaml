@@ -1,5 +1,6 @@
 # UEnv Worker — A100 7143 SWE-bench Pro 联调（Hub 元数据 + Gateway + 单实例）
-# 公网：gRPC 28888 / health 28777 / Gateway 28099 -> 本机 28999
+# 公网：gRPC 28888 / health 28777 / Runtime Gateway 28097（208.77 OpenHands 等外网调用）
+# 注：28099 公网口当前映射 llm-relay，勿用于 Runtime Gateway
 server:
   endpoint: "8.130.86.71:8088"
 
@@ -50,6 +51,6 @@ swe:
 
 runtime_gateway:
   enabled: true
-  listen: "0.0.0.0:28999"
+  listen: "0.0.0.0:28097"
   capacity: 1
   api_key: "swe-pro-secret"

@@ -3,8 +3,7 @@
 > **文档版本**：v2.2（最终版）  
 > **日期**：2026-06-25  
 > **状态**：**方案冻结**，待实施  
-> **取代**：`260625-swe-pro-trajectory-capture-architecture-discussion.md` 中「Worker 本地真值 / Server 不参与」的存储层决策  
-> **关联**：`260625-openhands-official-integration-plan.md`、`260624-swe-bench-pro-7143-联调报告.md`、`260618-swe-bench-env-hub-worker-plan.md`、`secrets/README.md`
+> **关联**：`260627-swe-openhands-integration-plan.md`、`260627-swe-openhands-acceptance-report.md`、`260618-swe-bench-env-hub-worker-plan.md`、`secrets/README.md`
 
 ---
 

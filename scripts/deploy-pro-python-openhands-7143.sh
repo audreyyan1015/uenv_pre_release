@@ -61,7 +61,7 @@ curl -s http://127.0.0.1:28777/health; echo
 
 echo "== OpenHands Python Pro gold =="
 python3 integrations/openhands/run_swebench.py \
-  --gateway 127.0.0.1:28999 --api-key swe-pro-secret \
+  --gateway 127.0.0.1:28097 --api-key swe-pro-secret \
   --instance "$PRO_INSTANCE_ID" \
   --instances config/swe/pro.json \
   --benchmark-variant pro --gold

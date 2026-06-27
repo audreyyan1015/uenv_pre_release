@@ -17,21 +17,30 @@ Thumbs.db
 /uenv-server/target
 secrets/*
 !secrets/README.md
-# scripts 默认忽略，但显式保留本任务交付脚本
+# scripts 默认忽略，显式保留运维交付脚本
 /scripts/*
 !/scripts/connect-remote.sh
 !/scripts/gen-worker-proto.sh
+!/scripts/proto-gen.sh
+!/scripts/gen-gsm8k-fixture.sh
+!/scripts/gen-math-fixture.sh
 !/scripts/export_swe_instances.py
 !/scripts/export_swe_pro_instances.py
-!/scripts/deploy-swe-pro-7143.sh
-!/scripts/remote-deploy-pro-7143.sh
 !/scripts/seed-hub-pro-catalog.sh
 !/scripts/deploy-pro-python-openhands-7143.sh
 !/scripts/pull-pro-image-7143.sh
-!/scripts/deploy-openhands-7142.sh
-!/scripts/run-openhands-pro-7142.sh
+!/scripts/deploy-openhands-20877.sh
+!/scripts/run-openhands-pro-20877.sh
+!/scripts/restart-worker-gateway-28097-7143.sh
 !/scripts/gen-openhands-llm-config.py
 !/scripts/swe_gateway_demo.py
+!/scripts/deploy-uenv-llm-7142.sh
+!/scripts/stop-uenv-llm-7142.sh
+!/scripts/uenv-llm-gateway.py
+!/scripts/openhands/
+!/scripts/openhands/**
+!/scripts/uenv-llm-gateway/
+!/scripts/uenv-llm-gateway/**
 /logs
 /Docs/scripts
 /tmp
