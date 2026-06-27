@@ -2,7 +2,7 @@
 
 > **文档版本**：v1.3  
 > **日期**：2026-06-25  
-> **变更摘要**：v1.0 初版联调；v1.1 NodeBB gold 1.0 + 评测顺序/fix；v1.2 Python qutebrowser gold 1.0 + 镜像多源 pull；**v1.3 轨迹捕获 + OpenHands 官方 SDK（7142→7143 Gateway）实机验收**。  
+> **变更摘要**：v1.0 初版联调；v1.1 NodeBB gold 1.0 + 评测顺序/fix；v1.2 Python qutebrowser gold 1.0 + 镜像多源 pull；**v1.3 轨迹捕获 + OpenHands 官方 SDK（7142→7143 Gateway）实机验收 + §3.9 实机测试结果汇总**。  
 > **机器**：A100 **7143**（Worker/Gateway）+ **7142**（OpenHands Agent）+ Hub（`8.130.95.176:8088`）  
 > **依据**：`secrets/README.md`（四端拓扑）、`260618-swe-bench-env-hub-worker-plan.md`（M5/M6 Pro 规划）、`260625-openhands-official-integration-plan.md`
 
@@ -186,14 +186,46 @@ bash /root/UEnv/scripts/run-openhands-pro-7142.sh gold
 MAX_ITERATIONS=30 bash /root/UEnv/scripts/run-openhands-pro-7142.sh llm
 ```
 
-| 模式 | reward | tests | trajectory_id | 产物目录（7142） |
-|------|--------|-------|---------------|------------------|
-| **gold** | **1.0** | 56/56 | `trj-worker-7143-pro-1782324281766-00003` | `/var/log/uenv/openhands-runs/pro-official-gold-20260625-020425/` |
-| **llm**（deepseek-v4-flash，15 iter） | 0.0 | 52/56 | `trj-worker-7143-pro-1782324511090-00004` | `/var/log/uenv/openhands-runs/pro-official-llm-20260625-020613/` |
+**实测结果**：见 **§3.9.3**。详见：`260625-openhands-official-integration-plan.md`、`260625-openhands-7142-acceptance.md`。
 
-**LLM 摘要**：官方多轮 AgentLoop（terminal/file_editor/finish）已跑通；工具经 Gateway 在 **7143 容器 `/app`** 执行。15 步内 Agent 主要在 `/home` 搜索、未改源码 → 4 条 F2P 仍失败（`hide_qt_warning` 未迁移），属 **Agent 探索策略/迭代预算** 问题，非 Gateway/grader 回归。
+### 3.9 实机测试结果汇总
 
-详见：`260625-openhands-official-integration-plan.md`、`260625-openhands-7142-acceptance.md`。
+**测试实例（Python Pro smoke）**：`instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c`  
+**测试实例（JS Pro）**：`instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan`
+
+#### 3.9.1 NodeBB / JS（7143 duck-type，v1.1）
+
+| 模式 | reward | tests | 说明 |
+|------|--------|-------|------|
+| gold | **1.0** | 291/291 | `run_swebench.py --gold`；Redis `pre_test_cmd` + Mocha grader |
+
+#### 3.9.2 qutebrowser / Python（7143 duck-type + 轨迹，v1.3）
+
+| 模式 | 驱动 | reward | tests | trajectory_id | 说明 |
+|------|------|--------|-------|---------------|------|
+| gold | `run_swebench.py --gold` | **1.0** | 56/56 | — | 既有 Gateway + grader 通路 |
+| gold + 轨迹 | `run_pro_agent.py --mode gold` | **1.0** | 56/56 | `trj-worker-7143-pro-1782321085352-00001` | step 级轨迹落盘 + `GET /trajectories/{id}` |
+| llm（单轮） | `run_pro_agent.py --mode llm` | 0.0 | 52/56 | （同 session） | LLM 幻觉 patch（`tests/test_log.py` 不存在）、apply `exit_code=2`；**非 Gateway/grader 问题** |
+
+**本机拉回产物（7143 验收）**：`%TEMP%\uenv-pro-acceptance-20260625-011052\`（含 `gold/`、`llm/` 子目录：`trajectory_bundle.json`、`submit_result.json`、`run.log` 等）。
+
+#### 3.9.3 qutebrowser / Python（7142 OpenHands 官方 SDK，v1.3）
+
+**部署**：7142 OpenHands **Software Agent SDK v1.27.0**；Gateway 内网 `http://10.10.20.143:28999`；驱动 `run_swebenchpro_official.py`。
+
+| 模式 | reward | tests | 说明 |
+|------|--------|-------|------|
+| **gold** | **1.0** | 56/56 | 官方驱动 + Gateway 通路验证 |
+| **llm**（deepseek-v4-flash，15 iter） | 0.0 | 52/56 | 官方多轮 AgentLoop 已跑通 |
+
+**LLM 行为**：OpenHands SDK 多轮 tool use 正常（`terminal` / `file_editor` / `finish` 经 Gateway 在 **7143 容器 `/app`** 执行，非 7142 本地）；Agent 在 15 步内主要在 `/home` 搜索，**未改源码** → 4 条 F2P 仍失败（`hide_qt_warning` 未迁移），与 §3.9.2 单轮 LLM 失败模式一致，**非 Gateway/grader 回归**。
+
+| 模式 | trajectory_id | 产物目录（7142） |
+|------|---------------|------------------|
+| gold | `trj-worker-7143-pro-1782324281766-00003` | `/var/log/uenv/openhands-runs/pro-official-gold-20260625-020425/` |
+| llm | `trj-worker-7143-pro-1782324511090-00004` | `/var/log/uenv/openhands-runs/pro-official-llm-20260625-020613/` |
+
+**7143 轨迹正文**（Worker 本机）：`GET http://10.10.20.143:28999/runtime/v1/trajectories/{trajectory_id}`（Header `X-API-Key: swe-pro-secret`）。
 
 ---
 
@@ -458,7 +490,7 @@ failed to resolve reference … docker.1ms.run … 429 Too Many Requests
 
 ### 6.5 OpenHands 官方 LLM 效果
 
-7142 官方 SDK + deepseek-v4-flash（15 iter）：**reward=0，52/56** — Agent 未产出有效 patch，4 条 F2P 失败原因与 v1.3 前单轮 LLM 一致（源码未改 `hide_qt_warning`）。Gateway / grader / gold 路径未回归。
+7142 官方 SDK + deepseek-v4-flash（15 iter）：**reward=0，52/56** — 详见 **§3.9.3**；Agent 未产出有效 patch，4 条 F2P 失败原因与 §3.9.2 单轮 LLM 一致（源码未改 `hide_qt_warning`）。Gateway / grader / gold 路径未回归。
 
 **后续**：提高 `MAX_ITERATIONS`、优化 prompt（明确要求 `ls /app`）、或换更强模型。
 
