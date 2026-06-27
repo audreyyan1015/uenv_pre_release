@@ -66,6 +66,9 @@ pub struct WorkerInfo {
     /// 上次成功上报 report_result 的时刻（None 表示从未上报）。
     /// 用于检测 Worker 假活：load > 0 但长时间无上报时跳过调度。
     pub last_report_at: Option<std::time::Instant>,
+    /// 上次收到心跳包的时刻（注册时初始化为 Some(now)）。
+    /// 超过 heartbeat_timeout_secs 无心跳则认为连接断开。
+    pub last_heartbeat_at: Option<std::time::Instant>,
 }
 
 /// WorkerAssignment：调度结果，表示一个 episode 应该分发给哪个 worker。

@@ -11,6 +11,7 @@ from typing import Any
 
 from .agent_loop_clients import build_agent_loop_episode_client
 from .clients import EpisodeClient
+from .model_gateway import ModelGateway, ModelGatewayConfig, normalize_openai_endpoint
 from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec, request_to_jsonable
 from .utils import prompt_text, to_jsonable
 
@@ -142,12 +143,21 @@ class UEnvAgentLoopConfig:
     fake_reward: float = 1.0
     fake_response_text: str = ""
     default_env_type: str = "math"
-    default_model_endpoint: str = "http://uenv-rollout.default.svc:8000/v1"
-    default_model_name: str = "policy-model"
+    default_model_endpoint: str = "https://openrouter.ai/api/v1"
+    default_model_name: str = "qwen/qwen-2.5-7b-instruct"
     default_max_steps: int = 10
     default_max_turns: int = 1
     seed_base: int = 42
     request_record_path: str = ""
+    result_record_path: str = ""
+    batch_size: int = 0
+    batch_retry_attempts: int = 3
+    batch_retry_delay_seconds: float = 5.0
+    model_gateway_enabled: bool = False
+    model_gateway_bind_host: str = "0.0.0.0"
+    model_gateway_port: int = 18080
+    model_gateway_public_url: str = ""
+    model_gateway_log_path: str = ""
 
 
 @register("uenv_agent")
@@ -174,12 +184,21 @@ class UEnvAgentLoop(AgentLoopBase):
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
         default_env_type: str = "math",
-        default_model_endpoint: str = "http://uenv-rollout.default.svc:8000/v1",
-        default_model_name: str = "policy-model",
+        default_model_endpoint: str = "https://openrouter.ai/api/v1",
+        default_model_name: str = "qwen/qwen-2.5-7b-instruct",
         default_max_steps: int = 10,
         default_max_turns: int = 1,
         seed_base: int = 42,
         request_record_path: str = "",
+        result_record_path: str = "",
+        batch_size: int | None = None,
+        batch_retry_attempts: int | None = None,
+        batch_retry_delay_seconds: float | None = None,
+        model_gateway_enabled: bool | None = None,
+        model_gateway_bind_host: str = "0.0.0.0",
+        model_gateway_port: int | None = None,
+        model_gateway_public_url: str = "",
+        model_gateway_log_path: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -200,6 +219,25 @@ class UEnvAgentLoop(AgentLoopBase):
             default_max_turns=_int_value(default_max_turns, 1),
             seed_base=_int_value(seed_base, 42),
             request_record_path=_optional_string(request_record_path) or "",
+            result_record_path=_optional_string(result_record_path) or "",
+            batch_size=max(0, _int_value(batch_size, 0)),
+            batch_retry_attempts=max(1, _int_value(batch_retry_attempts, 3)),
+            batch_retry_delay_seconds=max(0.0, _float_value(batch_retry_delay_seconds, 5.0)),
+            model_gateway_enabled=_bool_value(model_gateway_enabled, False),
+            model_gateway_bind_host=_optional_string(model_gateway_bind_host) or "0.0.0.0",
+            model_gateway_port=_int_value(model_gateway_port, 18080),
+            model_gateway_public_url=_optional_string(model_gateway_public_url) or "",
+            model_gateway_log_path=_optional_string(model_gateway_log_path) or "",
+        )
+        self.model_gateway = ModelGateway(
+            ModelGatewayConfig(
+                enabled=self.config_for_uenv.model_gateway_enabled,
+                bind_host=self.config_for_uenv.model_gateway_bind_host,
+                port=self.config_for_uenv.model_gateway_port,
+                public_url=self.config_for_uenv.model_gateway_public_url,
+                request_timeout_seconds=self.config_for_uenv.timeout_seconds,
+                log_path=self.config_for_uenv.model_gateway_log_path,
+            )
         )
         self.client = client or build_agent_loop_episode_client(
             mode=self.config_for_uenv.client_mode,
@@ -211,6 +249,12 @@ class UEnvAgentLoop(AgentLoopBase):
             fake_reward=self.config_for_uenv.fake_reward,
             fake_response_text=self.config_for_uenv.fake_response_text,
         )
+
+    def close(self) -> None:
+        self.model_gateway.stop()
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            close()
 
     @rollout_trace_op
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
@@ -225,12 +269,14 @@ class UEnvAgentLoop(AgentLoopBase):
             sample_kwargs=kwargs,
             model_endpoint_override=runtime_model[0],
             model_name_override=runtime_model[1],
+            model_upstream_overrides=runtime_model[2],
         )
 
         metrics: dict[str, float] = {}
         with simple_timer("generate_sequences", metrics):
             self._record_episode_requests([request], phase="submit_single")
             result = await asyncio.to_thread(self.client.submit_episode, request)
+            self._record_episode_results([result], [request], phase="result_single")
 
         if result.status not in {"completed", "recorded"}:
             raise RuntimeError(
@@ -272,6 +318,149 @@ class UEnvAgentLoop(AgentLoopBase):
             },
         )
 
+    async def run_batch(
+        self,
+        sampling_params_by_sample: list[dict[str, Any]],
+        sample_kwargs_by_sample: list[dict[str, Any]],
+        *,
+        batch_id: str,
+    ) -> list[AgentLoopOutput]:
+        requests = await self._build_batch_requests(sampling_params_by_sample, sample_kwargs_by_sample, batch_id=batch_id)
+        outputs: list[AgentLoopOutput] = []
+        for chunk in self._request_chunks(requests):
+            chunk_results = await self._submit_episode_chunk_with_retry(chunk)
+            outputs.extend([self._output_from_result(request, result) for request, result in zip(chunk, chunk_results, strict=True)])
+        return outputs
+
+    async def _build_batch_requests(
+        self,
+        sampling_params_by_sample: list[dict[str, Any]],
+        sample_kwargs_by_sample: list[dict[str, Any]],
+        *,
+        batch_id: str,
+    ) -> list[EpisodeRequest]:
+        runtime_model = await self._runtime_model_endpoint(
+            sampling_params_by_sample[0] if sampling_params_by_sample else {},
+            sample_kwargs_by_sample[0] if sample_kwargs_by_sample else {},
+        )
+        requests = []
+        for sample_index, (sampling_params, sample_kwargs) in enumerate(
+            zip(sampling_params_by_sample, sample_kwargs_by_sample, strict=True)
+        ):
+            sample_kwargs = self._sample_kwargs_with_batch_index(sample_kwargs, batch_id=batch_id, sample_index=sample_index)
+            messages = self._messages_from_raw_prompt(sample_kwargs.get("raw_prompt"))
+            prompt_ids = await self._prompt_ids(messages)
+            requests.append(
+                self.build_episode_request(
+                    sampling_params=sampling_params,
+                    prompt_ids=prompt_ids,
+                    raw_prompt=sample_kwargs.get("raw_prompt"),
+                    sample_kwargs=sample_kwargs,
+                    model_endpoint_override=runtime_model[0],
+                    model_name_override=runtime_model[1],
+                    model_upstream_overrides=runtime_model[2],
+                )
+            )
+        return requests
+
+    def _sample_kwargs_with_batch_index(self, sample_kwargs: dict[str, Any], *, batch_id: str, sample_index: int) -> dict[str, Any]:
+        output = dict(sample_kwargs)
+        extra_info = self._python_value(output.get("extra_info") or {})
+        extra_info = dict(extra_info) if isinstance(extra_info, dict) else {}
+        extra_info["batch_id"] = batch_id
+        extra_info["sample_index"] = sample_index
+        output["extra_info"] = extra_info
+        return output
+
+    async def _submit_episode_chunk_with_retry(self, requests: list[EpisodeRequest]) -> list[EpisodeResult]:
+        results = await self._submit_episode_chunk(requests)
+        if not self._should_split_retry(requests, results):
+            self._raise_if_failed(results)
+            return results
+        if len(requests) == 1:
+            self._raise_if_failed(results)
+            return results
+
+        await asyncio.sleep(self.config_for_uenv.batch_retry_delay_seconds)
+        midpoint = max(1, len(requests) // 2)
+        left = await self._submit_episode_chunk_with_retry(requests[:midpoint])
+        right = await self._submit_episode_chunk_with_retry(requests[midpoint:])
+        return left + right
+
+    async def _submit_episode_chunk(self, requests: list[EpisodeRequest]) -> list[EpisodeResult]:
+        self._record_episode_requests(requests, phase="submit_batch")
+        results = await asyncio.to_thread(lambda: list(self.client.submit_episode_stream(requests)))
+        self._record_episode_results(results, requests, phase="result_batch")
+        if len(results) != len(requests):
+            raise RuntimeError(f"UEnv pre-rollout batch returned {len(results)} results for {len(requests)} requests")
+        return results
+
+    def _should_split_retry(self, requests: list[EpisodeRequest], results: list[EpisodeResult]) -> bool:
+        if len(requests) <= 1 or len(results) != len(requests):
+            return False
+        for result in results:
+            text = f"{result.status} {result.error_message}".lower()
+            if result.status not in {"completed", "recorded"} and any(token in text for token in ("capacity", "no worker", "busy")):
+                return True
+        return False
+
+    def _raise_if_failed(self, results: list[EpisodeResult]) -> None:
+        for result in results:
+            if result.status not in {"completed", "recorded"}:
+                raise RuntimeError(
+                    f"UEnv pre-rollout episode failed: request_id={result.request_id} "
+                    f"status={result.status} error={result.error_message}"
+                )
+
+    def _request_chunks(self, requests: list[EpisodeRequest]) -> list[list[EpisodeRequest]]:
+        if self.config_for_uenv.batch_size <= 0:
+            return [requests]
+        chunk_size = max(1, self.config_for_uenv.batch_size)
+        return [requests[index : index + chunk_size] for index in range(0, len(requests), chunk_size)]
+
+    def _output_from_result(self, request: EpisodeRequest, result: EpisodeResult) -> AgentLoopOutput:
+        if result.status not in {"completed", "recorded"}:
+            raise RuntimeError(
+                f"UEnv pre-rollout episode failed: request_id={result.request_id} "
+                f"status={result.status} error={result.error_message}"
+            )
+
+        response_ids = self._response_ids_from_result(result)
+        max_response_length = self._rollout_response_length()
+        response_ids = response_ids[:max_response_length] if max_response_length else response_ids
+        if not response_ids:
+            response_ids = [self._pad_token_id()]
+        response_mask = self._response_mask_from_result(result, len(response_ids))
+        response_mask = response_mask[: len(response_ids)]
+        if len(response_mask) < len(response_ids):
+            response_mask.extend([1] * (len(response_ids) - len(response_mask)))
+        prompt_ids = self._payload_prompt_ids(request)
+        return AgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=response_ids,
+            response_mask=response_mask,
+            reward_score=float(result.summary.total_reward),
+            num_turns=max(result.trajectory.total_steps + 1, 2),
+            metrics=AgentLoopMetrics(generate_sequences=0.0, tool_calls=0.0, compute_score=0.0, num_preempted=-1),
+            extra_fields={
+                "uenv_request_id": result.request_id,
+                "uenv_status": result.status,
+                "uenv_termination_reason": result.summary.terminate_reason or result.status,
+                "uenv_trajectory": self._trajectory_to_jsonable(result),
+                "turn_scores": [],
+                "tool_rewards": [],
+            },
+        )
+
+    def _payload_prompt_ids(self, request: EpisodeRequest) -> list[int]:
+        payload = self._payload_dict(request)
+        episode_config = payload.get("episode_config") if isinstance(payload.get("episode_config"), dict) else {}
+        initial_observation = (
+            episode_config.get("initial_observation") if isinstance(episode_config.get("initial_observation"), dict) else {}
+        )
+        prompt_ids = initial_observation.get("prompt_ids") if isinstance(initial_observation, dict) else []
+        return [int(item) for item in prompt_ids] if isinstance(prompt_ids, list) else []
+
     def build_episode_request(
         self,
         *,
@@ -281,6 +470,7 @@ class UEnvAgentLoop(AgentLoopBase):
         sample_kwargs: dict[str, Any],
         model_endpoint_override: str | None = None,
         model_name_override: str | None = None,
+        model_upstream_overrides: list[str] | None = None,
     ) -> EpisodeRequest:
         request_id = str(uuid.uuid4())
         env_type = self._env_type(sample_kwargs)
@@ -306,6 +496,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "extra_info": self._jsonable(sample_kwargs.get("extra_info") or {}),
             "rollout_n": self._value_from_extra_info(sample_kwargs, "rollout_n", None),
             "global_steps": self._value_from_extra_info(sample_kwargs, "global_steps", None),
+            "model_gateway_upstreams": model_upstream_overrides or [],
             "required_result_fields": [
                 "response_ids",
                 "response_mask",
@@ -405,12 +596,67 @@ class UEnvAgentLoop(AgentLoopBase):
                 }
                 file.write(json.dumps(to_jsonable(record), ensure_ascii=False, separators=(",", ":")) + "\n")
 
+    def _record_episode_results(self, results: list[EpisodeResult], requests: list[EpisodeRequest], *, phase: str) -> None:
+        if not self.config_for_uenv.result_record_path:
+            return
+
+        request_by_id = {request.request_id: request for request in requests}
+        path = Path(self.config_for_uenv.result_record_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as file:
+            for result in results:
+                request = request_by_id.get(result.request_id)
+                request_payload = self._payload_dict(request) if request is not None else {}
+                metadata = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
+                model_endpoint = (
+                    request_payload.get("model_endpoint") if isinstance(request_payload.get("model_endpoint"), dict) else {}
+                )
+                response_ids = self._response_ids_from_result(result)
+                max_response_length = self._rollout_response_length()
+                verl_response_ids = response_ids[:max_response_length] if max_response_length else response_ids
+                if not verl_response_ids:
+                    verl_response_ids = [self._pad_token_id()]
+                verl_response_mask = self._response_mask_from_result(result, len(verl_response_ids))
+                verl_response_mask = verl_response_mask[: len(verl_response_ids)]
+                if len(verl_response_mask) < len(verl_response_ids):
+                    verl_response_mask.extend([1] * (len(verl_response_ids) - len(verl_response_mask)))
+                record = {
+                    "ts": time.time(),
+                    "phase": phase,
+                    "request_id": result.request_id,
+                    "status": result.status,
+                    "error_code": result.error_code,
+                    "error_message": result.error_message,
+                    "batch_id": metadata.get("batch_id"),
+                    "sample_index": metadata.get("sample_index"),
+                    "request_model_endpoint": model_endpoint.get("url"),
+                    "request_model_name": model_endpoint.get("model_name"),
+                    "reward": result.summary.total_reward,
+                    "total_steps": result.summary.total_steps,
+                    "terminate_reason": result.summary.terminate_reason,
+                    "response_text": self._response_text_from_result(result),
+                    "response_ids": response_ids,
+                    "verl_response_ids": verl_response_ids,
+                    "verl_response_mask": verl_response_mask,
+                    "trajectory": self._trajectory_to_jsonable(result),
+                }
+                file.write(json.dumps(to_jsonable(record), ensure_ascii=False, separators=(",", ":")) + "\n")
+
     def _payload_dict(self, request: EpisodeRequest) -> dict[str, Any]:
         try:
             value = json.loads(request.payload.decode("utf-8", errors="replace"))
         except Exception:
             return {}
         return value if isinstance(value, dict) else {}
+
+    def _response_text_from_result(self, result: EpisodeResult) -> str:
+        for step in reversed(result.trajectory.steps):
+            text = step.info.get("response_text")
+            if text:
+                return text
+            if step.action:
+                return step.action.decode("utf-8", errors="replace")
+        return ""
 
     async def _prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
         prompt_ids = await self.apply_chat_template(messages)
@@ -529,19 +775,30 @@ class UEnvAgentLoop(AgentLoopBase):
         self,
         sampling_params: dict[str, Any],
         sample_kwargs: dict[str, Any],
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, list[str]]:
         explicit_endpoint = (
             self._value_from_extra_info(sample_kwargs, "model_endpoint", None)
             or sampling_params.get("model_endpoint")
         )
         if explicit_endpoint:
-            return str(explicit_endpoint), self._model_name(sample_kwargs, sampling_params)
+            return normalize_openai_endpoint(str(explicit_endpoint)), self._model_name(sample_kwargs, sampling_params), []
 
+        endpoints = []
+        seen = set()
         for candidate in await self._runtime_model_endpoint_candidates():
             endpoint = self._normalize_openai_endpoint(candidate)
-            if endpoint:
-                return endpoint, self._runtime_model_name(sample_kwargs, sampling_params)
-        return None, None
+            if endpoint and endpoint not in seen:
+                seen.add(endpoint)
+                endpoints.append(endpoint)
+        if not endpoints:
+            return None, None, []
+        public_endpoint = self._model_gateway_endpoint(endpoints)
+        return public_endpoint, self._runtime_model_name(sample_kwargs, sampling_params), endpoints
+
+    def _model_gateway_endpoint(self, upstreams: list[str]) -> str:
+        if not self.config_for_uenv.model_gateway_enabled:
+            return upstreams[0]
+        return self.model_gateway.start(upstreams)
 
     def _runtime_model_name(
         self,

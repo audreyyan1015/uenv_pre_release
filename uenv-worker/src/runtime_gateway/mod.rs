@@ -131,8 +131,15 @@ struct CreateResp {
 
 async fn create_session(
     State(st): State<GatewayState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CreateReq>,
 ) -> ApiResult<CreateResp> {
+    // v2.2：一次评测作业 ID 由 driver 经 X-UEnv-Run-Id 头注入。
+    let run_id = headers
+        .get("x-uenv-run-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let variant = match &req.benchmark_variant {
         Some(v) => BenchmarkVariant::parse(v)
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("invalid benchmark_variant `{v}`")))?,
@@ -154,13 +161,16 @@ async fn create_session(
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
 
     match result {
-        Ok((session_id, observation)) => Ok(Json(CreateResp {
+        Ok((session_id, observation)) => {
+            st.pool.set_session_run_id(&session_id, &run_id);
+            Ok(Json(CreateResp {
             session_id,
             instance_id: req.instance_id,
             benchmark_variant: variant.as_str().to_string(),
             command_mode: format!("{mode:?}"),
             observation,
-        })),
+        }))
+        }
         Err(e) => {
             let msg = e.to_string();
             let status = if msg.contains("not in catalog") {

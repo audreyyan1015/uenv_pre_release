@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""
+uenv-ctl  —  inspect a running uenv-adapter-core instance
+
+Usage:
+  uenv-ctl [--host HOST] status          # server + worker summary (default)
+  uenv-ctl [--host HOST] workers         # per-worker episode detail
+  uenv-ctl [--host HOST] watch [--interval N]  # auto-refresh (default 2s)
+
+Examples:
+  uenv-ctl status
+  uenv-ctl --host 8.130.86.71:50052 workers
+  uenv-ctl watch --interval 1
+"""
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+def fetch(host: str) -> dict:
+    url = f"http://{host}/status"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return json.loads(r.read())
+    except urllib.error.URLError as e:
+        print(f"Error: cannot reach {url}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def fmt_secs(v) -> str:
+    if v is None:
+        return "  -"
+    v = int(v)
+    if v >= 9999:
+        return "  -"
+    if v < 60:
+        return f"{v:3d}s"
+    if v < 3600:
+        return f"{v//60:2d}m{v%60:02d}s"
+    return f"{v//3600:2d}h{(v%3600)//60:02d}m"
+
+
+def status_line(status: str) -> str:
+    colors = {"ready": "\033[32m", "draining": "\033[33m", "degraded": "\033[31m"}
+    reset = "\033[0m"
+    c = colors.get(status, "")
+    return f"{c}{status:<10}{reset}"
+
+
+# ─── commands ─────────────────────────────────────────────────────────────────
+
+def cmd_status(args):
+    d = fetch(args.host)
+
+    permits = d.get("queue_permits", -1)
+    queue_str = f"queue_permits={permits}" if permits >= 0 else "no queue limit"
+    active   = d["active_episodes"]
+    capacity = d.get("total_capacity", "?")
+    print(f"epoch={d['server_epoch']}  workers={d['worker_count']}  "
+          f"episodes={active}/{capacity}  pending={d['pending_results']}  {queue_str}")
+    print()
+
+    workers = d.get("workers", [])
+    if not workers:
+        print("No workers registered.")
+        return
+
+    # header
+    id_w = 36
+    hdr = (f"{'WORKER_ID':<{id_w}}  {'STATUS':<10}  {'LOAD/CAP':>8}  "
+           f"{'HB':>6}  {'REPORT':>7}  EPISODES")
+    print(hdr)
+    print("─" * len(hdr))
+
+    # sort: degraded first, then by worker_id
+    def sort_key(w):
+        order = {"degraded": 0, "draining": 1, "ready": 2}
+        return (order.get(w["status"], 9), w["worker_id"])
+
+    for w in sorted(workers, key=sort_key):
+        wid      = w["worker_id"]
+        eps      = w.get("episodes", [])
+        load_cap = f"{w['load']}/{w['capacity']}"
+        hb       = fmt_secs(w.get("last_heartbeat_secs"))
+        report   = fmt_secs(w.get("last_report_secs"))
+        ep_count = f"{len(eps)} ep" if eps else "-"
+
+        print(f"{wid:<{id_w}}  {status_line(w['status'])}  {load_cap:>8}  "
+              f"{hb:>6}  {report:>7}  {ep_count}")
+
+        # show up to 3 longest-running episodes per worker
+        for ep in eps[:3]:
+            eid     = ep["episode_id"][:20]
+            bid     = (ep.get("batch_id") or "")[:14]
+            elapsed = fmt_secs(ep.get("elapsed_secs"))
+            print(f"  {'':36}    ep={eid}  batch={bid}  {elapsed}")
+        if len(eps) > 3:
+            print(f"  {'':36}    … +{len(eps)-3} more")
+
+
+def cmd_workers(args):
+    """Verbose per-worker view with full episode list."""
+    d = fetch(args.host)
+    workers = d.get("workers", [])
+    if not workers:
+        print("No workers registered.")
+        return
+
+    for w in sorted(workers, key=lambda x: x["worker_id"]):
+        eps  = w.get("episodes", [])
+        hb   = fmt_secs(w.get("last_heartbeat_secs"))
+        rep  = fmt_secs(w.get("last_report_secs"))
+        stat = w["status"].upper()
+        print(f"[{stat}] {w['worker_id']}  ({w['endpoint']})  "
+              f"load={w['load']}/{w['capacity']}  hb={hb}  report={rep}")
+        if eps:
+            for ep in eps:
+                elapsed = fmt_secs(ep.get("elapsed_secs"))
+                print(f"  episode={ep['episode_id']}  "
+                      f"batch={ep.get('batch_id','')}  "
+                      f"attempt={ep['attempt_id']}  elapsed={elapsed}")
+        else:
+            print("  (no active episodes)")
+        print()
+
+
+def cmd_watch(args):
+    """Clear-screen auto-refresh."""
+    while True:
+        # ANSI clear screen + move to top-left
+        print("\033[2J\033[H", end="", flush=True)
+        ts = time.strftime("%H:%M:%S")
+        print(f"uenv-ctl watch  [{ts}]  host={args.host}  "
+              f"(Ctrl+C to quit)\n")
+        try:
+            cmd_status(args)
+        except SystemExit:
+            pass
+        time.sleep(args.interval)
+
+
+# ─── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(
+        description="uenv-ctl: inspect a running uenv-adapter-core",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument(
+        "--host",
+        default=os.environ.get("UENV_ADMIN_HOST", "localhost:50052"),
+        help="admin HTTP host:port (env: UENV_ADMIN_HOST, default: localhost:50052)",
+    )
+    sub = p.add_subparsers(dest="cmd")
+    sub.add_parser("status",  help="server + worker summary (default)")
+    sub.add_parser("workers", help="per-worker episode detail")
+    w = sub.add_parser("watch", help="auto-refresh status")
+    w.add_argument("--interval", type=float, default=2.0,
+                   metavar="SECS", help="refresh interval in seconds (default 2)")
+
+    args = p.parse_args()
+    if not args.cmd:
+        args.cmd = "status"
+
+    dispatch = {"status": cmd_status, "workers": cmd_workers, "watch": cmd_watch}
+    dispatch[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

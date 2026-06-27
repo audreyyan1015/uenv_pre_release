@@ -85,3 +85,13 @@ def _patch_resource_tracker_duplicate_unregister() -> None:
 
 if os.environ.get("UENV_PATCH_RESOURCE_TRACKER") == "1":
     _patch_resource_tracker_duplicate_unregister()
+
+
+def _patch_verl_agent_loop_batch() -> None:
+    from uenv.bridge.verl_batch_agent_loop_patch import apply_verl_agent_loop_batch_patch
+
+    apply_verl_agent_loop_batch_patch()
+
+
+if os.environ.get("UENV_AGENT_LOOP_BATCH", "0").strip().lower() in {"1", "true", "yes", "on"}:
+    _patch_verl_agent_loop_batch()

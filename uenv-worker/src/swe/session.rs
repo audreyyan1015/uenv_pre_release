@@ -57,6 +57,8 @@ pub struct SweSession {
     trace: Mutex<Vec<StepTrace>>,
     worker_id: String,
     gateway_base_url: String,
+    /// v2.2：一次评测作业 ID，gateway create_session 后可注入（X-UEnv-Run-Id）。
+    run_id: Mutex<String>,
 }
 
 impl SweSession {
@@ -129,6 +131,7 @@ impl SweSession {
             trace: Mutex::new(Vec::new()),
             worker_id: worker_id.to_string(),
             gateway_base_url: gateway_base_url.to_string(),
+            run_id: Mutex::new(String::new()),
         };
 
         // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified 在 /testbed）。
@@ -159,6 +162,13 @@ impl SweSession {
 
     pub fn container(&self) -> &str {
         &self.container
+    }
+
+    /// v2.2：注入一次评测作业 ID（gateway 在 create_session 时从 X-UEnv-Run-Id 设置）。
+    pub fn set_run_id(&self, run_id: impl Into<String>) {
+        if let Ok(mut g) = self.run_id.lock() {
+            *g = run_id.into();
+        }
     }
 
     pub fn instance_id(&self) -> &str {
@@ -341,6 +351,21 @@ impl SweSession {
         let sealed_at_ms = now_ms();
         let bundle = TrajectoryBundle {
             trajectory_id: trajectory_id.clone(),
+            // v2.2 聚合字段：run_id 由 gateway 在 Stage B 注入（X-UEnv-Run-Id）；
+            // native 路径下 episode_id 取会话 episode_id，run_id 暂空。
+            run_id: {
+                let rid = self.run_id.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                if rid.trim().is_empty() {
+                    // v2.2 fallback: gateway did not inject X-UEnv-Run-Id; synthesize a
+                    // non-empty run_id so the server does not reject the upload with 400.
+                    format!("run-gw-{}", self.episode_id)
+                } else {
+                    rid
+                }
+            },
+            batch_id: None,
+            correlation_id: None,
+            episode_id: Some(self.episode_id.clone()),
             session_id: self.episode_id.clone(),
             instance_id: self.instance.instance_id.clone(),
             benchmark_variant: self.instance.variant().as_str().to_string(),
@@ -348,6 +373,8 @@ impl SweSession {
             gateway_base_url: self.gateway_base_url.clone(),
             steps,
             artifact: outcome.artifact.clone(),
+            reward: outcome.reward,
+            resolved: outcome.resolved,
             sealed_at_ms,
         };
         store.seal(bundle, outcome.resolved, outcome.reward)

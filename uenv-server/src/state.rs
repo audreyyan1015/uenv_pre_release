@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Semaphore};
 
 pub struct ServerState {
     pub scheduler: Arc<RwLock<RoundRobinScheduler>>,
@@ -16,8 +16,19 @@ pub struct ServerState {
     pub seen_idempotency: parking_lot::Mutex<std::collections::HashSet<String>>,
     pub completed_async: DashMap<String, EpisodeResult>,
     pub episode_broadcast: broadcast::Sender<EpisodeResult>,
-    /// 单个 episode 最多尝试次数，超过后返回失败。默认 3。
     pub max_attempts: u32,
+    pub default_episode_timeout_secs: u64,
+    pub stale_warning_secs: u64,
+    pub schedule_retry_interval_ms: u64,
+    pub heartbeat_interval_ms: u64,
+    /// adapter 层并发 semaphore：限制最多同时 in-flight 的 episode 数。
+    /// None 表示不限制（queue_max_in_flight=0 且 queue_dynamic=false）。
+    /// 动态模式下从 0 个 permit 开始，随 worker 注册/注销自动增减。
+    pub episode_semaphore: Option<Arc<Semaphore>>,
+    /// 是否启用动态队列（permit 数跟随 worker 容量变化）。
+    pub queue_dynamic: bool,
+    /// v2.2：轨迹/episode_results 存储（bridge main 启用时注入；None=未启用持久化）。
+    pub trajectory_store: std::sync::OnceLock<Arc<crate::trajectory::TrajectoryStore>>,
 }
 
 pub struct ActiveEpisode {
@@ -35,8 +46,8 @@ pub struct PendingResult {
 }
 
 impl ServerState {
-    pub fn new(scheduler: Arc<RwLock<RoundRobinScheduler>>) -> Self {
-        let (episode_broadcast, _) = broadcast::channel(1024);
+    pub fn new(scheduler: Arc<RwLock<RoundRobinScheduler>>, config: &crate::config::ServerConfig) -> Self {
+        let (episode_broadcast, _) = broadcast::channel(config.episode.broadcast_capacity.max(1));
         Self {
             scheduler,
             active_episodes: DashMap::new(),
@@ -54,7 +65,22 @@ impl ServerState {
             seen_idempotency: parking_lot::Mutex::new(std::collections::HashSet::new()),
             completed_async: DashMap::new(),
             episode_broadcast,
-            max_attempts: 3,
+            max_attempts: config.episode.max_attempts,
+            default_episode_timeout_secs: config.episode.default_timeout_secs,
+            stale_warning_secs: config.episode.stale_warning_secs,
+            schedule_retry_interval_ms: config.scheduler.schedule_retry_interval_ms,
+            heartbeat_interval_ms: config.scheduler.heartbeat_interval_ms,
+            episode_semaphore: if config.episode.queue_dynamic {
+                // 动态模式：从 0 开始，worker 注册时 add_permits
+                Some(Arc::new(Semaphore::new(0)))
+            } else if config.episode.queue_max_in_flight > 0 {
+                // 静态模式：固定容量
+                Some(Arc::new(Semaphore::new(config.episode.queue_max_in_flight)))
+            } else {
+                None
+            },
+            queue_dynamic: config.episode.queue_dynamic,
+            trajectory_store: std::sync::OnceLock::new(),
         }
     }
 

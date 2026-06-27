@@ -1,0 +1,12 @@
+[package]
+name = "uenv-common"
+version = "0.1.0"
+edition = "2024"
+description = "UEnv 共享契约类型（worker 与 server 共用）"
+
+[lib]
+name = "uenv_common"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

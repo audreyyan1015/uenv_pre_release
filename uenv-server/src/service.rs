@@ -51,9 +51,24 @@ impl UEnvEpisodeService {
         let timeout_secs = if req.timeout_seconds > 0 {
             req.timeout_seconds as u64
         } else {
-            300
+            self.state.default_episode_timeout_secs
         };
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+
+        // ── adapter 层队列：持有 permit 才能进入 dispatch 循环 ──────────────
+        // 当 in-flight 数达到上限时，新 episode 在此等待（队列语义），
+        // 直到有 slot 空出或 deadline 超时。permit 在函数返回时自动释放。
+        let _queue_permit = if let Some(ref sem) = self.state.episode_semaphore {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let permit = tokio::time::timeout(remaining, sem.clone().acquire_owned())
+                .await
+                .map_err(|_| anyhow::anyhow!("episode {episode_id} timeout waiting in queue"))?
+                .map_err(|_| anyhow::anyhow!("episode queue semaphore closed"))?;
+            tracing::debug!(episode_id = %episode_id, "episode_queue_admitted");
+            Some(permit)
+        } else {
+            None
+        };
 
         loop {
             let attempt_id = req.attempt_id;
@@ -74,12 +89,12 @@ impl UEnvEpisodeService {
                         if Instant::now() > deadline {
                             anyhow::bail!("no worker available: {e}");
                         }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)).await;
                     }
                 }
             };
 
-            let (tx, rx) = tokio::sync::oneshot::channel();
+            let (tx, mut rx) = tokio::sync::oneshot::channel();
             self.state.pending_results.insert(
                 (episode_id.clone(), attempt_id),
                 crate::state::PendingResult {
@@ -123,31 +138,28 @@ impl UEnvEpisodeService {
             });
 
             // clone req：dispatch 会消耗所有权，外层循环重试时还需要 req
-            let dispatch_timeout = Duration::from_secs(
-                deadline.saturating_duration_since(Instant::now()).as_secs().saturating_add(60),
-            );
-            let dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone(), dispatch_timeout).await;
-            self.state.scheduler.write().decrement_load(&assignment.worker_id);
-            self.state.active_episodes.remove(&episode_id);
-
-            // 判断是否需要重试
-            let retry_reason: Option<String> = match dispatch_result {
-                Err(e) => {
-                    // dispatch 失败（连接问题、worker 拒绝等）
-                    self.state
-                        .pending_results
-                        .remove(&(episode_id.clone(), attempt_id));
-                    Some(format!("dispatch_failed: {e}"))
+            //
+            // select! 同时等三件事，哪个先发生就处理哪个：
+            //   arm1 deadline  — episode 整体超时，直接失败，不重试
+            //   arm2 rx        — report_result 先到（正常路径），立即返回成功
+            //   arm3 dispatch  — gRPC 流关闭或失败，根据结果决定是否重试
+            // 修复串行问题：原来先 await dispatch、再 await rx，
+            // dispatch 卡住时 deadline 无法触发；现在三路并发，deadline 始终有效。
+            let retry_reason: Option<String> = tokio::select! {
+                // arm1：deadline 到期，episode 超时
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    self.state.pending_results.remove(&(episode_id.clone(), attempt_id));
+                    self.state.scheduler.write().decrement_load(&assignment.worker_id);
+                    self.state.active_episodes.remove(&episode_id);
+                    anyhow::bail!("episode execution timeout");
                 }
-                Ok(()) => {
-                    match tokio::time::timeout(
-                        deadline.saturating_duration_since(Instant::now()),
-                        rx,
-                    )
-                    .await
-                    {
-                        Ok(Ok(result)) => {
-                            // 成功：广播并返回
+
+                // arm2：report_result 已到达（主路径）
+                result = &mut rx => {
+                    self.state.scheduler.write().decrement_load(&assignment.worker_id);
+                    self.state.active_episodes.remove(&episode_id);
+                    match result {
+                        Ok(result) => {
                             tracing::info!(
                                 episode_id = %episode_id,
                                 batch_id = %req.correlation_id,
@@ -157,34 +169,77 @@ impl UEnvEpisodeService {
                             let _ = self.state.episode_broadcast.send(result.clone());
                             return Ok(result);
                         }
-                        Ok(Err(_)) => {
+                        Err(_) => {
                             // oneshot 发送端被 drop = worker 崩溃
-                            self.state
-                                .pending_results
-                                .remove(&(episode_id.clone(), attempt_id));
+                            self.state.pending_results.remove(&(episode_id.clone(), attempt_id));
                             Some("worker_channel_closed".to_string())
                         }
-                        Err(_) => {
-                            // 整体 deadline 超时，不再重试
-                            self.state
-                                .pending_results
-                                .remove(&(episode_id.clone(), attempt_id));
-                            anyhow::bail!("episode execution timeout");
+                    }
+                }
+
+                // arm3：dispatch 流关闭或失败
+                dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone()) => {
+                    self.state.scheduler.write().decrement_load(&assignment.worker_id);
+                    self.state.active_episodes.remove(&episode_id);
+                    match dispatch_result {
+                        Err(e) => {
+                            // dispatch 失败（连接问题、worker 拒绝等）
+                            self.state.pending_results.remove(&(episode_id.clone(), attempt_id));
+                            Some(format!("dispatch_failed: {e}"))
+                        }
+                        Ok(()) => {
+                            // 流正常关闭：report_result 可能稍后到达（Worker 在 spawn 里发）
+                            // 用剩余 deadline 等一次
+                            match tokio::time::timeout(
+                                deadline.saturating_duration_since(Instant::now()),
+                                rx,
+                            ).await {
+                                Ok(Ok(result)) => {
+                                    tracing::info!(
+                                        episode_id = %episode_id,
+                                        batch_id = %req.correlation_id,
+                                        worker_id = %assignment.worker_id,
+                                        "episode_completed"
+                                    );
+                                    let _ = self.state.episode_broadcast.send(result.clone());
+                                    return Ok(result);
+                                }
+                                Ok(Err(_)) => {
+                                    self.state.pending_results.remove(&(episode_id.clone(), attempt_id));
+                                    Some("worker_channel_closed".to_string())
+                                }
+                                Err(_) => {
+                                    self.state.pending_results.remove(&(episode_id.clone(), attempt_id));
+                                    anyhow::bail!("episode execution timeout");
+                                }
+                            }
                         }
                     }
                 }
             };
 
             if let Some(reason) = retry_reason {
-                tracing::warn!(
-                    episode_id = %episode_id,
-                    attempt_id = attempt_id,
-                    worker_id = %assignment.worker_id,
-                    reason = %reason,
-                    next_attempt = attempt_id + 1,
-                    "episode_attempt_failed_retrying"
-                );
-                req.attempt_id += 1;
+                // max_concurrency_acquire_timeout：worker 并发槽位瞬时满载，
+                // 属于调度层面的临时冲突（非持久错误），不消耗 attempt 次数。
+                // 直接回到调度循环重试，稍作等待让 load 稳定。
+                if reason.contains("max_concurrency_acquire_timeout") {
+                    tracing::debug!(
+                        episode_id = %episode_id,
+                        worker_id = %assignment.worker_id,
+                        "worker_slot_full_reschedule"
+                    );
+                    tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)).await;
+                } else {
+                    tracing::warn!(
+                        episode_id = %episode_id,
+                        attempt_id = attempt_id,
+                        worker_id = %assignment.worker_id,
+                        reason = %reason,
+                        next_attempt = attempt_id + 1,
+                        "episode_attempt_failed_retrying"
+                    );
+                    req.attempt_id += 1;
+                }
             }
         }
     }
@@ -194,7 +249,7 @@ impl UEnvEpisodeService {
         requests: Vec<EpisodeRequest>,
     ) -> Vec<anyhow::Result<EpisodeResult>> {
         // 每次 batch 提交时顺带检查 active_episodes 中的老龄 episode 并打 warn
-        let stale_threshold = Duration::from_secs(600);  // 10 分钟未完成视为异常
+        let stale_threshold = Duration::from_secs(self.state.stale_warning_secs);
         for entry in self.state.active_episodes.iter() {
             let ep = entry.value();
             if ep.started_at.elapsed() > stale_threshold {
@@ -263,7 +318,6 @@ impl UEnvEpisodeService {
 async fn dispatch_to_worker(
     endpoint: &str,
     request: EpisodeRequest,
-    timeout: Duration,
 ) -> anyhow::Result<()> {
     let mut client =
         WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
@@ -271,22 +325,17 @@ async fn dispatch_to_worker(
         episode: Some(request),
     };
     let mut stream = client.dispatch_episode(dispatch).await?.into_inner();
-    let read_stream = async move {
-        while let Some(report) = stream.message().await? {
-            info!(
-                episode_id = %report.episode_id,
-                attempt_id = report.attempt_id,
-                phase = %report.phase,
-                current_step = report.current_step,
-                "stream_report"
-            );
-        }
-        Ok::<(), tonic::Status>(())
-    };
-    tokio::time::timeout(timeout, read_stream)
-        .await
-        .map_err(|_| anyhow::anyhow!("dispatch stream timeout after {:?}", timeout))?
-        .map_err(|e| anyhow::anyhow!("dispatch stream error: {e}"))?;
+    // 读取 Worker 回传的进度报告，直到流关闭。
+    // 不在此处设超时：外层 select! 的 deadline arm 负责取消整个 future。
+    while let Some(report) = stream.message().await? {
+        info!(
+            episode_id = %report.episode_id,
+            attempt_id = report.attempt_id,
+            phase = %report.phase,
+            current_step = report.current_step,
+            "stream_report"
+        );
+    }
     Ok(())
 }
 
@@ -336,6 +385,20 @@ impl AdminService for AdminServiceImpl {
         let worker_id = req.worker_id;
         let grace_period = req.grace_period_sec;
 
+        // 动态队列：注销前先取该 worker 的容量，注销后减少相应 permits
+        let drained_capacity = if self.state.queue_dynamic {
+            self.state
+                .scheduler
+                .read()
+                .list_workers()
+                .into_iter()
+                .find(|w| w.worker_id == worker_id)
+                .map(|w| w.capacity)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         // 立即停止向该 worker 分配新 episode（标记为 draining）
         self.state.scheduler.write().set_worker_draining(&worker_id);
 
@@ -347,9 +410,31 @@ impl AdminService for AdminServiceImpl {
                 tokio::time::sleep(Duration::from_secs(grace_period as u64)).await;
                 state.scheduler.write().unregister_worker(&wid);
                 tracing::info!(worker_id = %wid, grace_period_sec = grace_period, "worker_drain_complete");
+                // 动态队列：减少 permits（background acquire+forget）
+                if drained_capacity > 0 {
+                    if let Some(ref sem) = state.episode_semaphore {
+                        let sem = Arc::clone(sem);
+                        tokio::spawn(async move {
+                            if let Ok(permit) = sem.acquire_many(drained_capacity).await {
+                                permit.forget();
+                            }
+                        });
+                    }
+                }
             });
         } else {
             self.state.scheduler.write().unregister_worker(&worker_id);
+            // 动态队列：减少 permits
+            if drained_capacity > 0 {
+                if let Some(ref sem) = self.state.episode_semaphore {
+                    let sem = Arc::clone(sem);
+                    tokio::spawn(async move {
+                        if let Ok(permit) = sem.acquire_many(drained_capacity).await {
+                            permit.forget();
+                        }
+                    });
+                }
+            }
         }
 
         Ok(Response::new(DrainWorkerResponse { accepted: true }))
