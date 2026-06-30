@@ -40,6 +40,11 @@ pub struct SweSection {
     /// SWE-bench 对宽 syscall 的依赖；运维确认 profile 兼容后再开）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seccomp_profile_dir: Option<String>,
+    /// 本地已同步的 Hub EnvPackage 目录（`uenv env sync` 的产物，含 catalog.json /
+    /// images.manifest.json / worker.overlay.yaml）。`Some` 时 catalog 优先从此目录加载，
+    /// worker 不再从第三方重新拉取（EnvPackage 设计 §5.1 / §8.1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_package_dir: Option<String>,
 }
 
 fn default_swe_variants() -> Vec<String> {
@@ -53,6 +58,7 @@ impl Default for SweSection {
             prewarm: Vec::new(),
             warm_tag: false,
             seccomp_profile_dir: None,
+            env_package_dir: None,
         }
     }
 }
@@ -398,6 +404,11 @@ impl WorkerConfig {
         if let Ok(v) = std::env::var("UENV_SWE_SECCOMP_DIR") {
             if !v.trim().is_empty() {
                 self.swe.seccomp_profile_dir = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_ENV_PACKAGE") {
+            if !v.trim().is_empty() {
+                self.swe.env_package_dir = Some(v);
             }
         }
     }

@@ -14,6 +14,8 @@ pub struct Config {
     pub auth: AuthConfig,
     pub rate_limit: RateLimitConfig,
     pub cors: CorsConfig,
+    #[serde(default)]
+    pub packages: PackagesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +54,30 @@ pub struct CorsConfig {
     pub allow_origins: Vec<String>,
 }
 
+/// EnvPackage artifact store + catalog seed configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackagesConfig {
+    /// Filesystem root where published package artifacts (catalog.json,
+    /// images.manifest.json, …) are written and served from. Image *bytes* are
+    /// never stored here — only digest-indexed small artifacts (design §2.1).
+    pub artifact_dir: String,
+    /// Directory the package seed reads `<variant>.json` catalogs from (mirrors
+    /// the SWE catalog endpoint's `UENV_HUB_SWE_CATALOG_DIR`).
+    pub catalog_seed_dir: String,
+    /// Seed the example SWE EnvPackages on startup (idempotent).
+    pub seed_examples: bool,
+}
+
+impl Default for PackagesConfig {
+    fn default() -> Self {
+        Self {
+            artifact_dir: "data/artifacts".into(),
+            catalog_seed_dir: "config/swe".into(),
+            seed_examples: true,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -75,6 +101,7 @@ impl Default for Config {
             cors: CorsConfig {
                 allow_origins: vec!["*".into()],
             },
+            packages: PackagesConfig::default(),
         }
     }
 }

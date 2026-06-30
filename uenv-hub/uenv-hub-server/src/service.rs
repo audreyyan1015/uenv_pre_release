@@ -8,9 +8,10 @@
 use crate::errors::{ApiError, ApiResult};
 use crate::middleware::ensure_namespace;
 use serde_json::json;
+use std::path::Path;
 use uenv_hub_core::domain::manifest;
 use uenv_hub_core::models::{NewAuditEntry, NewManifest};
-use uenv_hub_core::{HubError, SqliteStore};
+use uenv_hub_core::{package, HubError, SqliteStore};
 use uenv_hub_types as dto;
 use uenv_hub_types::TokenInfo;
 
@@ -189,6 +190,39 @@ pub async fn delete_env(
     store.soft_delete_env(env_type).await?;
     audit(store, principal, source_ip, "DELETE", "env", env_type, None).await;
     Ok(())
+}
+
+/// Orchestrates publishing an EnvPackage version: stage the inline artifacts to
+/// the content-addressed store, assemble + persist the manifest, then audit.
+/// Role enforcement (`Publisher`) happens in the route handler.
+pub async fn publish_package(
+    store: &SqliteStore,
+    principal: &TokenInfo,
+    source_ip: Option<String>,
+    artifact_root: &Path,
+    package_id: &str,
+    req: dto::PublishPackageRequest,
+) -> ApiResult<dto::EnvPackageManifest> {
+    let published_by = if principal.id != 0 {
+        Some(principal.id)
+    } else {
+        None
+    };
+    let version = req.version.clone();
+    let manifest =
+        package::publish_inline_package(store, artifact_root, package_id, req, published_by)
+            .await?;
+    audit(
+        store,
+        principal,
+        source_ip,
+        "PUBLISH",
+        "package",
+        &format!("{package_id}@{version}"),
+        None,
+    )
+    .await;
+    Ok(manifest)
 }
 
 /// Best-effort audit write. A failed audit insert is logged but never fails the

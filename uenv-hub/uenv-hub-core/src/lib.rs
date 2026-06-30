@@ -22,6 +22,7 @@ pub mod db;
 pub mod domain;
 pub mod error;
 pub mod models;
+pub mod package;
 pub mod repository;
 pub mod schema_validator;
 pub mod seed;

@@ -90,6 +90,26 @@ enum EnvCommand {
         #[arg(long)]
         reason: String,
     },
+    /// Sync a published EnvPackage to a local directory (digest-verified).
+    ///
+    /// Downloads the manifest + every artifact into
+    /// `<target_dir>/envs/<package>/<version>/`, verifies each sha256, and writes
+    /// a `.synced` marker so a Worker/Agent node can pre-provision the
+    /// environment without re-pulling from third parties.
+    Sync {
+        /// Package id, e.g. `swe-bench-pro`.
+        package: String,
+        #[arg(long, default_value = "latest")]
+        version: String,
+        #[arg(long, default_value = "/var/lib/uenv")]
+        target_dir: PathBuf,
+        /// Only print the fetch plan; download nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// This node's `uenv-worker` version; checked against `platform.uenv_worker_min`.
+        #[arg(long)]
+        worker_version: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -290,8 +310,127 @@ async fn run_env(
             client.yank_version(&env, &version, &reason).await?;
             println!("yanked {env}@{version}");
         }
+        EnvCommand::Sync {
+            package,
+            version,
+            target_dir,
+            dry_run,
+            worker_version,
+        } => {
+            run_env_sync(&client, &package, &version, &target_dir, dry_run, worker_version).await?;
+        }
     }
     Ok(())
+}
+
+/// Compare two dotted-numeric versions; returns true when `a` < `b`.
+/// Tolerant: non-numeric / missing components are treated as 0.
+fn version_lt(a: &str, b: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim()
+            .split(['.', '-', '+'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (pa, pb) = (parts(a), parts(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// `uenv env sync` — pull a package to `<target_dir>/envs/<pkg>/<ver>/`,
+/// digest-verifying every artifact, and write a `.synced` marker.
+async fn run_env_sync(
+    client: &HttpClient,
+    package: &str,
+    version: &str,
+    target_dir: &Path,
+    dry_run: bool,
+    worker_version: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = client.get_package_manifest(package, version).await?;
+    let resolved = manifest.version.clone();
+
+    // Platform compatibility check (A-layer contract).
+    let min = manifest.platform.uenv_worker_min.trim();
+    if let Some(wv) = &worker_version {
+        if !min.is_empty() && version_lt(wv, min) {
+            return Err(format!(
+                "worker version {wv} is below package requirement uenv_worker_min={min}"
+            )
+            .into());
+        }
+    }
+
+    let dest = target_dir.join("envs").join(package).join(&resolved);
+    println!("package {package}@{resolved}");
+    println!("  platform: uenv_worker_min={min} features={:?}", manifest.platform.features);
+    println!("  target:   {}", dest.display());
+    println!("  artifacts ({}):", manifest.artifacts.len());
+    for a in &manifest.artifacts {
+        println!(
+            "    - {:<22} kind={:<10} mode={:<8} {} -> {}",
+            a.name, a.kind, a.sync_mode, a.digest, a.target_rel_path
+        );
+    }
+    let bundle = uenv_hub_core::package::bundle_digest(&manifest.artifacts);
+    println!("  bundle_digest: {bundle}");
+
+    if dry_run {
+        println!("(dry-run: nothing downloaded)");
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dest)?;
+    for a in &manifest.artifacts {
+        // Only artifacts the Hub actually serves are downloadable; external
+        // (registry/tarball) references are recorded in images.manifest.json.
+        if a.sync_mode != "inline" {
+            println!("  skip {} (sync_mode={}, fetched out-of-band)", a.name, a.sync_mode);
+            continue;
+        }
+        let bytes = client.get_artifact_bytes(package, &resolved, &a.name).await?;
+        let actual = uenv_hub_core::package::sha256_hex(&bytes);
+        if actual != a.digest {
+            return Err(format!(
+                "artifact {} digest mismatch: expected {}, got {actual}",
+                a.name, a.digest
+            )
+            .into());
+        }
+        let out = dest.join(&a.target_rel_path);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&out, &bytes)?;
+        println!("  wrote {} ({} bytes)", out.display(), bytes.len());
+    }
+
+    // Persist the manifest so the Worker can read worker_overlay / artifact list.
+    std::fs::write(dest.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
+    // `.synced` marker (bundle digest is the integrity anchor).
+    let marker = serde_json::json!({
+        "package_id": package,
+        "version": resolved,
+        "bundle_digest": bundle,
+        "synced_at": chrono_now_secs(),
+    });
+    std::fs::write(dest.join(".synced"), serde_json::to_vec_pretty(&marker)?)?;
+    println!("synced {package}@{resolved} -> {}", dest.display());
+    println!("next: point the worker at it via UENV_SWE_ENV_PACKAGE={}", dest.display());
+    Ok(())
+}
+
+/// Seconds since the Unix epoch (avoids pulling in `chrono`).
+fn chrono_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 async fn publish_manifest(

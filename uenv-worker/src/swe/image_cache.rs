@@ -26,26 +26,76 @@ pub enum ImageState {
     Pulled,
 }
 
+/// 镜像拉取策略（EnvPackage `worker_overlay.swe.image_pull_policy`）。
+///
+/// - `LocalOnly`：只用本地镜像，miss 即失败（离线/组合包预制场景，杜绝公网 pull）。
+/// - `Mirror`：允许从镜像源拉取（当前等同 `AllowPublic`，registry host 改写为后续项）。
+/// - `AllowPublic`：允许从默认 registry 拉取（历史默认行为）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePullPolicy {
+    LocalOnly,
+    Mirror,
+    AllowPublic,
+}
+
+impl ImagePullPolicy {
+    /// 该策略是否允许 miss 时 `pull`。
+    pub fn allows_pull(self) -> bool {
+        !matches!(self, ImagePullPolicy::LocalOnly)
+    }
+
+    /// 解析策略字符串（容忍常见别名）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "local_only" | "local" | "localonly" => Some(ImagePullPolicy::LocalOnly),
+            "mirror" => Some(ImagePullPolicy::Mirror),
+            "allow_public" | "public" | "allowpublic" => Some(ImagePullPolicy::AllowPublic),
+            _ => None,
+        }
+    }
+}
+
 /// 镜像缓存工厂：按 `image_cache_key` 确保镜像存在，可选打 warm tag。
 #[derive(Debug, Clone)]
 pub struct ImageCacheFactory {
     runtime: ContainerRuntime,
-    /// miss 时是否允许 `pull`（离线可关：`UENV_SWE_IMAGE_PULL=0`）。
-    pull_enabled: bool,
+    /// miss 时的拉取策略（`LocalOnly` 时离线零 egress）。
+    policy: ImagePullPolicy,
 }
 
 impl ImageCacheFactory {
     pub fn new(runtime: ContainerRuntime, pull_enabled: bool) -> Self {
-        Self { runtime, pull_enabled }
+        let policy = if pull_enabled {
+            ImagePullPolicy::AllowPublic
+        } else {
+            ImagePullPolicy::LocalOnly
+        };
+        Self { runtime, policy }
+    }
+
+    /// 以显式策略构造。
+    pub fn with_policy(runtime: ContainerRuntime, policy: ImagePullPolicy) -> Self {
+        Self { runtime, policy }
     }
 
     /// miss 时是否允许 pull（测试 / 内省用）。
     pub fn pull_enabled(&self) -> bool {
-        self.pull_enabled
+        self.policy.allows_pull()
     }
 
-    /// 从环境构造：`UENV_SWE_IMAGE_PULL`（默认开启，命中即跳过、零开销）。
+    /// 当前拉取策略。
+    pub fn policy(&self) -> ImagePullPolicy {
+        self.policy
+    }
+
+    /// 从环境构造。优先 `UENV_SWE_IMAGE_PULL_POLICY`（local_only|mirror|allow_public）；
+    /// 否则兼容旧 `UENV_SWE_IMAGE_PULL` 布尔（默认开启，命中即跳过、零开销）。
     pub fn from_env(runtime: ContainerRuntime) -> Self {
+        if let Ok(p) = std::env::var("UENV_SWE_IMAGE_PULL_POLICY") {
+            if let Some(policy) = ImagePullPolicy::parse(&p) {
+                return Self::with_policy(runtime, policy);
+            }
+        }
         let pull_enabled = std::env::var("UENV_SWE_IMAGE_PULL")
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
             .unwrap_or(true);
@@ -61,14 +111,56 @@ impl ImageCacheFactory {
             .unwrap_or(false)
     }
 
-    /// 确保镜像可用：命中→Present；miss 且允许→pull→Pulled；否则错误。
+    /// 读取本地镜像的首个 RepoDigest（`image inspect --format '{{index .RepoDigests 0}}'`）。
+    pub fn local_repo_digest(&self, image: &str) -> Option<String> {
+        let out = Command::new(self.runtime.cli())
+            .args(digest_args(image))
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() || s == "<no value>" {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    /// 校验本地镜像 digest 是否匹配期望（`images.manifest.json`，EnvPackage 内容寻址）。
+    /// `expected` 为空时退化为「仅要求本地存在」。
+    pub fn verify_local_digest(&self, image: &str, expected: &str) -> Result<(), DynErr> {
+        if !self.image_present(image) {
+            return Err(format!(
+                "image `{image}` not present locally (image_pull_policy=local_only; sync the EnvPackage or pre-cache it)"
+            )
+            .into());
+        }
+        if expected.trim().is_empty() {
+            return Ok(());
+        }
+        match self.local_repo_digest(image) {
+            Some(actual) if digest_matches(&actual, expected) => Ok(()),
+            Some(actual) => Err(format!(
+                "image `{image}` digest mismatch: EnvPackage expects {expected}, local is {actual}"
+            )
+            .into()),
+            None => Err(format!(
+                "image `{image}` has no local RepoDigest to verify against {expected}"
+            )
+            .into()),
+        }
+    }
+
+    /// 确保镜像可用：命中→Present；miss 且策略允许→pull→Pulled；否则错误。
     pub fn ensure_image(&self, image: &str) -> Result<ImageState, DynErr> {
         if self.image_present(image) {
             return Ok(ImageState::Present);
         }
-        if !self.pull_enabled {
+        if !self.policy.allows_pull() {
             return Err(format!(
-                "image `{image}` not present locally and pull disabled (set UENV_SWE_IMAGE_PULL=1 to allow, or pre-cache the image)"
+                "image `{image}` not present locally and image_pull_policy=local_only (sync the EnvPackage or pre-cache the image)"
             )
             .into());
         }
@@ -121,6 +213,25 @@ pub fn tag_args(src: &str, dst: &str) -> Vec<String> {
     vec!["tag".to_string(), src.to_string(), dst.to_string()]
 }
 
+/// `image inspect --format '{{index .RepoDigests 0}}' <image>` 的 argv。
+pub fn digest_args(image: &str) -> Vec<String> {
+    vec![
+        "image".to_string(),
+        "inspect".to_string(),
+        "--format".to_string(),
+        "{{index .RepoDigests 0}}".to_string(),
+        image.to_string(),
+    ]
+}
+
+/// 期望 digest 是否与本地 RepoDigest 匹配。本地形如 `repo@sha256:...`，期望可为裸
+/// `sha256:...` 或带 repo 前缀；按 `@` 后缀比较，兼容两种写法。
+pub fn digest_matches(local: &str, expected: &str) -> bool {
+    let local_sha = local.rsplit('@').next().unwrap_or(local);
+    let expected_sha = expected.rsplit('@').next().unwrap_or(expected);
+    local == expected || local_sha == expected_sha
+}
+
 /// 实例 warm tag 名：`cache/swe-<sanitized id>:warm`。
 pub fn warm_tag(instance_id: &str) -> String {
     let id: String = instance_id
@@ -154,5 +265,31 @@ mod tests {
     fn new_sets_pull_flag() {
         assert!(ImageCacheFactory::new(ContainerRuntime::Docker, true).pull_enabled());
         assert!(!ImageCacheFactory::new(ContainerRuntime::Podman, false).pull_enabled());
+    }
+
+    #[test]
+    fn pull_policy_parse_and_allows() {
+        assert_eq!(ImagePullPolicy::parse("local_only"), Some(ImagePullPolicy::LocalOnly));
+        assert_eq!(ImagePullPolicy::parse("MIRROR"), Some(ImagePullPolicy::Mirror));
+        assert_eq!(ImagePullPolicy::parse("allow_public"), Some(ImagePullPolicy::AllowPublic));
+        assert_eq!(ImagePullPolicy::parse("nonsense"), None);
+        assert!(!ImagePullPolicy::LocalOnly.allows_pull());
+        assert!(ImagePullPolicy::Mirror.allows_pull());
+        assert!(ImagePullPolicy::AllowPublic.allows_pull());
+        // local_only factory must refuse to pull.
+        assert!(!ImageCacheFactory::with_policy(ContainerRuntime::Docker, ImagePullPolicy::LocalOnly).pull_enabled());
+    }
+
+    #[test]
+    fn digest_args_and_matching() {
+        assert_eq!(
+            digest_args("a:b"),
+            vec!["image", "inspect", "--format", "{{index .RepoDigests 0}}", "a:b"]
+        );
+        // bare sha vs repo@sha
+        assert!(digest_matches("repo/x@sha256:abc", "sha256:abc"));
+        assert!(digest_matches("sha256:abc", "sha256:abc"));
+        assert!(digest_matches("repo/x@sha256:abc", "repo/x@sha256:abc"));
+        assert!(!digest_matches("repo/x@sha256:abc", "sha256:def"));
     }
 }
