@@ -200,6 +200,7 @@ mod tests {
             error_message: String::new(),
             trajectory_checksum: "x".to_string(),
             integrity_verified: true,
+            ..Default::default()
         };
         let key = wal
             .persist_pending(&ep, "worker-1", 1, &result)

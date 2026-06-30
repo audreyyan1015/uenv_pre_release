@@ -22,6 +22,13 @@ uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
 anyhow = "1"
 thiserror = "2"
+serde_yaml = "0.9"
+bytes = "1"
+sha2 = "0.10"
+flate2 = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+axum = "0.8"
+uenv-common = { path = "../uenv-common" }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

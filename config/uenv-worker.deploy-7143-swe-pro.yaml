@@ -1,0 +1,56 @@
+# UEnv Worker — A100 7143 SWE-bench Pro 联调（Hub 元数据 + Gateway + 单实例）
+# 公网：gRPC 28888 / health 28777 / Runtime Gateway 28097（208.77 OpenHands 等外网调用）
+# 注：28099 公网口当前映射 llm-relay，勿用于 Runtime Gateway
+server:
+  endpoint: "8.130.86.71:8088"
+
+worker:
+  id: "worker-7143-pro"
+  listen: "0.0.0.0:28888"
+  advertise_endpoint: "219.147.100.43:28888"
+  max_concurrent: 4
+
+scheduler:
+  mode: "remote"
+
+env:
+  types: ["math", "swe"]
+  backend: "process"
+  plugin_dir: "/root/UEnv/plugins"
+
+pool:
+  warmup_size: 0
+  prewarm_on_startup: false
+  max_idle_time: 300
+  cool_timeout: 60
+  max_episode_count: 1000
+
+logging:
+  level: "INFO"
+  file: "/var/log/uenv/worker-swe-pro.log"
+
+wal:
+  dir: "/tmp/uenv/wal-swe"
+
+llm:
+  env_file: "config/uenv-worker-llm.env"
+
+observability:
+  metrics_listen: "0.0.0.0:28777"
+  health_listen: "0.0.0.0:28777"
+
+hub:
+  enabled: true
+  endpoint: "http://8.130.95.176:8088"
+
+swe:
+  variants: ["pro"]
+  # 启动预热单实例镜像（M4 pull from Docker Hub jefzda/sweap-images）
+  # prewarm 由 deploy 脚本按导出的 instance_id 注入
+  warm_tag: true
+
+runtime_gateway:
+  enabled: true
+  listen: "0.0.0.0:28097"
+  capacity: 1
+  api_key: "swe-pro-secret"

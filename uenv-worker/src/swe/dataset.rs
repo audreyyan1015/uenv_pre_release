@@ -53,6 +53,12 @@ pub struct SweInstance {
     /// （如 `pip install -e .`）。缺省不安装（依赖镜像已 setup）。
     #[serde(default)]
     pub install_cmd: Option<String>,
+    /// Pro 变体：评测前 repo 置备脚本（`before_repo_set_cmd`，含 git reset + test 文件 checkout）。
+    #[serde(default)]
+    pub setup_cmd: Option<String>,
+    /// Pro 变体：跑测试前依赖服务（如 NodeBB 需 `redis-server --daemonize yes`）。
+    #[serde(default)]
+    pub pre_test_cmd: Option<String>,
 }
 
 impl SweInstance {
@@ -88,14 +94,46 @@ impl SweInstance {
         self.repo_spec().log_parser
     }
 
+    /// 容器内工作区路径：Verified=`/testbed`；Pro（jefzda/sweap-images）=`/app`。
+    pub fn workspace_dir(&self) -> &'static str {
+        match self.variant() {
+            BenchmarkVariant::Pro => "/app",
+            _ => "/testbed",
+        }
+    }
+
+    /// Pro 置备脚本（`before_repo_set_cmd`）：git reset + 测试文件 checkout。
+    pub fn resolved_setup_command(&self) -> Option<String> {
+        if let Some(c) = self.setup_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Some(format!("cd {} && {}", self.workspace_dir(), c.replace('\n', " && ")));
+        }
+        None
+    }
+
+    /// Pro 测试前依赖（Redis 等）；在 setup 之后、test_cmd 之前执行。
+    pub fn resolved_pre_test_command(&self) -> Option<String> {
+        if self.variant() != BenchmarkVariant::Pro {
+            return None;
+        }
+        if let Some(c) = self.pre_test_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Some(c.replace('\n', " && "));
+        }
+        None
+    }
+
     /// 解析最终测试命令（M1-4）：实例显式 `test_cmd` 优先（按原样执行，适配 Pro / 非 pytest
     /// 整套 runner），否则按 `repo@version` 规格拼接节点 id。
     pub fn resolved_test_command(&self, testbed: &str) -> String {
+        let ws = self.workspace_dir();
+        let bed = if self.variant() == BenchmarkVariant::Pro { ws } else { testbed };
         if let Some(cmd) = self.test_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
-            return format!("{CONDA_ACTIVATE}; cd {testbed} && {cmd}");
+            if self.variant() == BenchmarkVariant::Pro {
+                return format!("cd {ws} && {cmd}");
+            }
+            return format!("{CONDA_ACTIVATE}; cd {bed} && {cmd}");
         }
         self.repo_spec()
-            .build_test_command(CONDA_ACTIVATE, testbed, &self.fail_to_pass, &self.pass_to_pass)
+            .build_test_command(CONDA_ACTIVATE, bed, &self.fail_to_pass, &self.pass_to_pass)
     }
 
     /// 解析 post-patch 安装命令原文（M1-3 / M1-2）：实例显式 `install_cmd` 优先，
@@ -200,6 +238,13 @@ impl InstanceStore {
 
     pub fn len(&self) -> usize {
         self.instances.len()
+    }
+
+    /// 目录内全部 instance_id（批量预热 / 编排用）。
+    pub fn instance_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.instances.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 
     pub fn is_empty(&self) -> bool {

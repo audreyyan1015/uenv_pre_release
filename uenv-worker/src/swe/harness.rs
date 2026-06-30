@@ -82,12 +82,17 @@ pub fn run_instance(
     episode_id: &str,
     opts: &RunOptions,
 ) -> Result<EpisodeOutcome, DynErr> {
+    let worker_id = std::env::var("UENV_WORKER_ID").unwrap_or_else(|_| "harness-local".to_string());
+    let gateway_base_url = std::env::var("UENV_SWE_GATEWAY_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:28999".to_string());
     let (session, _observation) = SweSession::provision(
         instance,
         episode_id,
         opts.runtime,
         opts.policy.clone(),
         opts.keep_container,
+        &worker_id,
+        &gateway_base_url,
     )?;
     if opts.use_gold_patch {
         session.apply_patch(&instance.patch, "gold")?;

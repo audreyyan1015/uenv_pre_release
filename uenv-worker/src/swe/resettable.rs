@@ -5,8 +5,9 @@
 //! `SnapshotResettableInstance`（`Backend::restore`）。
 
 use std::process::Command;
+use std::sync::Mutex;
 
-use crate::backend::{BackendError, BackendHandle};
+use crate::backend::{BackendError, BackendHandle, PodmanBackend, SandboxProvisioner, SnapshotId};
 use crate::swe::command_policy::CommandPolicy;
 use crate::swe::spec::{InstanceSpec, TaskSpec, Workspace};
 
@@ -145,6 +146,79 @@ impl ResettableInstance for PodmanResettableInstance {
     }
 }
 
+/// 快照级可重置实例（M3）：`reset_for_episode` 经 `Backend::restore` 从快照镜像
+/// 拉起新容器，比 git reset 更快（跨 episode 复用已编译层）。
+pub struct SnapshotResettableInstance {
+    backend: PodmanBackend,
+    snapshot: SnapshotId,
+    handle: Mutex<BackendHandle>,
+    workspace: Workspace,
+    policy: CommandPolicy,
+}
+
+impl SnapshotResettableInstance {
+    pub fn new(
+        backend: PodmanBackend,
+        snapshot: SnapshotId,
+        handle: BackendHandle,
+        workspace: Workspace,
+        policy: CommandPolicy,
+    ) -> Self {
+        Self {
+            backend,
+            snapshot,
+            handle: Mutex::new(handle),
+            workspace,
+            policy,
+        }
+    }
+
+    pub fn snapshot_id(&self) -> &SnapshotId {
+        &self.snapshot
+    }
+
+    pub fn handle(&self) -> BackendHandle {
+        self.handle.lock().expect("snapshot handle lock").clone()
+    }
+
+    pub fn policy(&self) -> CommandPolicy {
+        self.policy
+    }
+}
+
+impl ResettableInstance for SnapshotResettableInstance {
+    fn id(&self) -> &str {
+        &self.workspace.instance_id
+    }
+
+    fn workspace(&self) -> &Workspace {
+        &self.workspace
+    }
+
+    fn reset_for_episode(&self, _instance: &InstanceSpec, _task: &TaskSpec) -> Result<(), BackendError> {
+        let old = self.handle.lock().expect("snapshot handle lock").clone();
+        let _ = self.backend.destroy(&old);
+        let restored = self.backend.restore(&self.snapshot)?;
+        *self.handle.lock().expect("snapshot handle lock") = restored;
+        Ok(())
+    }
+
+    fn health_check(&self) -> bool {
+        let handle = self.handle.lock().expect("snapshot handle lock");
+        let target = handle.container_id.as_deref().unwrap_or(handle.id.as_str());
+        Command::new("podman")
+            .args(["exec", target, "true"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn destroy(&self) -> Result<(), BackendError> {
+        let handle = self.handle.lock().expect("snapshot handle lock").clone();
+        self.backend.destroy(&handle)
+    }
+}
+
 /// 极简单引号转义，避免 repo 路径 / commit 含空格或特殊字符时破坏脚本。
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -154,6 +228,8 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::backend::BackendKind;
+    use crate::backend::PodmanBackend;
+    use crate::backend::SnapshotId;
     use crate::swe::spec::{EvaluationSpec, IssueRef};
     use std::path::PathBuf;
 
@@ -195,5 +271,21 @@ mod tests {
     fn reset_script_quotes_special_chars() {
         let script = PodmanResettableInstance::reset_script("/path with space", "v1.0");
         assert!(script.contains("cd '/path with space'"));
+    }
+
+    #[test]
+    fn snapshot_instance_exposes_snapshot_and_handle() {
+        let (handle, ws) = instance_handle();
+        let snap = SnapshotId("uenv-snap-test".to_string());
+        let inst = SnapshotResettableInstance::new(
+            PodmanBackend::new(),
+            snap.clone(),
+            handle.clone(),
+            ws,
+            CommandPolicy::RestrictedShell,
+        );
+        assert_eq!(inst.snapshot_id(), &snap);
+        assert_eq!(inst.id(), "sympy__sympy-20590");
+        assert_eq!(inst.handle().id, handle.id);
     }
 }

@@ -63,6 +63,9 @@ message EpisodeResult {
     string error_message  = 7;
     string trajectory_checksum = 8;
     bool integrity_verified = 9;
+    // v2.2：轨迹指针（native 路径 ReportResult 关联 trajectory 库）。
+    string trajectory_id = 10;
+    string trajectory_storage_url = 11;
 }
 
 // ─── StreamReport ─────────────────────────────────────────────

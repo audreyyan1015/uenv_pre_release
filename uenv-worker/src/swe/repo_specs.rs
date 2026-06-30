@@ -104,7 +104,7 @@ pub const DEFAULT_SPEC: RepoSpec = RepoSpec::pytest(None);
 ///
 /// `repo` 形如 `django/django`；`version` 可为空（按 repo 默认）。命中返回登记规格，
 /// 未命中返回 `None`（调用方回退 [`DEFAULT_SPEC`]）。表为可扩展子集，新增仓库在此登记即可。
-pub fn spec_for(repo: &str, _version: &str) -> Option<RepoSpec> {
+pub fn spec_for(repo: &str, version: &str) -> Option<RepoSpec> {
     let repo = repo.trim().to_ascii_lowercase();
     let spec = match repo.as_str() {
         // Django 自带 runner（非 pytest 节点 id，输出口径不同）。
@@ -115,8 +115,19 @@ pub fn spec_for(repo: &str, _version: &str) -> Option<RepoSpec> {
         "matplotlib/matplotlib" => RepoSpec::pytest(Some("pip install -e .")),
         "pydata/xarray" => RepoSpec::pytest(Some("pip install -e .")),
 
-        // sympy：新版用 pytest（镜像已按 version setup），旧版可用 bin/test；默认 pytest。
-        "sympy/sympy" => RepoSpec::pytest(None),
+        // sympy/sympy：1.9 前用 `bin/test`（节点 id 为短 label）；1.9+ 用 pytest。
+        "sympy/sympy" => {
+            if sympy_uses_bin_test(version) {
+                RepoSpec {
+                    runner: TestRunner::SympyBinTest,
+                    log_parser: LogParser::Pytest,
+                    install: None,
+                    pytest_flags: "",
+                }
+            } else {
+                RepoSpec::pytest(None)
+            }
+        }
 
         // 纯 pytest（镜像已 setup，无需再装）。
         "astropy/astropy"
@@ -137,6 +148,19 @@ pub fn spec_for(repo: &str, _version: &str) -> Option<RepoSpec> {
     Some(spec)
 }
 
+/// sympy 旧版（< 1.9）使用 `bin/test`，节点 id 为短 label 而非 pytest nodeid。
+fn sympy_uses_bin_test(version: &str) -> bool {
+    parse_version_major_minor(version)
+        .map(|(maj, min)| maj < 1 || (maj == 1 && min < 9))
+        .unwrap_or(true)
+}
+
+fn parse_version_major_minor(version: &str) -> Option<(u32, u32)> {
+    let head = version.split(|c| c == '.' || c == '-' || c == '+').take(2);
+    let mut parts = head.filter_map(|p| p.parse::<u32>().ok());
+    Some((parts.next()?, parts.next().unwrap_or(0)))
+}
+
 fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -144,6 +168,12 @@ fn single_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sympy_version_selects_bin_test_for_old_releases() {
+        assert_eq!(spec_for("sympy/sympy", "1.8").unwrap().runner, TestRunner::SympyBinTest);
+        assert_eq!(spec_for("sympy/sympy", "1.12").unwrap().runner, TestRunner::Pytest);
+    }
 
     #[test]
     fn known_repo_resolves_runner() {

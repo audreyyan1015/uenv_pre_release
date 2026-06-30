@@ -22,6 +22,8 @@ pub struct WorkerConfig {
     pub runtime_gateway: RuntimeGatewayConfig,
     #[serde(default)]
     pub swe: SweSection,
+    #[serde(default)]
+    pub trajectory_upload: TrajectoryUploadConfig,
 }
 
 /// SWE 变体加载（plan §5.4.3）：M1–M4 默认 `["verified"]`，M6 可加 `"pro"`。
@@ -95,6 +97,18 @@ impl Default for RuntimeGatewayConfig {
             api_key: None,
         }
     }
+}
+
+/// 轨迹上传旁路（260625 冻结方案 v2.2 §8.2）：yaml 声明 + UENV_TRAJECTORY_* 环境变量覆盖。
+/// endpoint 存在即启用上传；gzip/超时/重试等固定行为见 swe::trajectory_upload 模块常量。
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct TrajectoryUploadConfig {
+    /// Server 轨迹服务地址，如 `http://10.x.x.x:8077`；空则不上传。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// 上传 token（建议改用 UENV_TRAJECTORY_TOKEN 环境变量，勿提交真实 token 到 yaml）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -231,6 +245,7 @@ impl Default for WorkerConfig {
             llm: LlmConfigSection::default(),
             runtime_gateway: RuntimeGatewayConfig::default(),
             swe: SweSection::default(),
+            trajectory_upload: TrajectoryUploadConfig::default(),
         }
     }
 }
@@ -260,6 +275,7 @@ impl WorkerConfig {
         load_env_file_if_exists(&llm_env_path)?;
         cfg.apply_env();
         cfg.apply_cli(overrides);
+        cfg.export_trajectory_env();
         Ok(LoadedWorkerConfig {
             llm: LlmConfig::from_env(),
             worker: cfg,
@@ -412,6 +428,31 @@ impl WorkerConfig {
             }
         }
     }
+
+    /// 把 trajectory_upload 的 yaml 解析值导出到进程环境（已设的环境变量不覆盖），
+    /// 供 `TrajectoryUploader::from_env()` 消费。env > yaml 优先级由"不覆盖已设"保证。
+    fn export_trajectory_env(&self) {
+        let t = &self.trajectory_upload;
+        if let Some(ep) = &t.endpoint {
+            if !ep.trim().is_empty() {
+                set_env_if_unset("UENV_TRAJECTORY_ENDPOINT", ep);
+            }
+        }
+        if let Some(tok) = &t.token {
+            if !tok.trim().is_empty() {
+                set_env_if_unset("UENV_TRAJECTORY_TOKEN", tok);
+            }
+        }
+    }
+}
+
+/// 仅在环境变量未设置时写入（保证 env > yaml 优先级）。
+fn set_env_if_unset(key: &str, val: &str) {
+    if std::env::var(key).is_err() {
+        unsafe {
+            std::env::set_var(key, val);
+        }
+    }
 }
 
 fn load_env_file_if_exists(path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -483,6 +524,28 @@ fn load_from_file(path: &Path) -> Result<WorkerConfig, Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trajectory_upload_yaml_parses() {
+        let d = TrajectoryUploadConfig::default();
+        assert!(d.endpoint.is_none());
+        assert!(d.token.is_none());
+
+        let yaml = r#"
+server: { endpoint: "localhost:50051" }
+worker: { id: "w", listen: "0.0.0.0:1", max_concurrent: 1 }
+scheduler: { mode: "remote" }
+env: { types: ["swe"], backend: "process", plugin_dir: "./p" }
+pool: { warmup_size: 0, max_idle_time: 1, cool_timeout: 1, max_episode_count: 1 }
+logging: { level: "INFO", file: "/tmp/w.log" }
+wal: { dir: "/tmp/wal" }
+trajectory_upload:
+  endpoint: "http://10.0.0.5:8077"
+"#;
+        let cfg: WorkerConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(cfg.trajectory_upload.endpoint.as_deref(), Some("http://10.0.0.5:8077"));
+        assert!(cfg.trajectory_upload.token.is_none());
+    }
 
     #[test]
     fn env_mapping_overrides_loaded_config() {

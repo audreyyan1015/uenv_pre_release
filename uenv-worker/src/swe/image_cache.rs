@@ -164,18 +164,7 @@ impl ImageCacheFactory {
             )
             .into());
         }
-        let out = Command::new(self.runtime.cli())
-            .args(pull_args(image))
-            .output()
-            .map_err(|e| format!("{} pull spawn failed: {e}", self.runtime.cli()))?;
-        if !out.status.success() {
-            return Err(format!(
-                "{} pull failed for `{image}` (offline? not in registry?): {}",
-                self.runtime.cli(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )
-            .into());
-        }
+        pull_image_with_mirrors(self.runtime, image)?;
         Ok(ImageState::Pulled)
     }
 
@@ -206,6 +195,69 @@ pub fn inspect_args(image: &str) -> Vec<String> {
 /// `pull <image>` 的 argv。
 pub fn pull_args(image: &str) -> Vec<String> {
     vec!["pull".to_string(), image.to_string()]
+}
+
+/// 7143 等环境默认 registry mirror 易 429；miss 时依次 direct → 备用 mirror prefix。
+pub fn pull_mirrors_from_env() -> Vec<String> {
+    std::env::var("UENV_SWE_PULL_MIRRORS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .unwrap_or_else(|| vec!["dockerproxy.net".to_string()])
+}
+
+/// 带 mirror 回退的 pull；成功后将 mirror 引用 tag 为 `image`。
+pub fn pull_image_with_mirrors(runtime: ContainerRuntime, image: &str) -> Result<(), String> {
+    let cli = runtime.cli();
+    if run_pull(cli, image).is_ok() {
+        return Ok(());
+    }
+    let mut last_err = format!("direct pull `{image}` failed");
+    for mirror in pull_mirrors_from_env() {
+        let mirrored = format!("{mirror}/{image}");
+        match run_pull(cli, &mirrored) {
+            Ok(()) => {
+                if run_tag(cli, &mirrored, image).is_ok() {
+                    tracing::info!(image = %image, mirror = %mirror, msg = "swe_image_pulled_via_mirror");
+                    return Ok(());
+                }
+                last_err = format!("tag {mirrored} -> {image} failed");
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(format!(
+        "{cli} pull failed for `{image}` (tried mirrors): {last_err}"
+    ))
+}
+
+fn run_pull(cli: &str, ref_: &str) -> Result<(), String> {
+    let out = Command::new(cli)
+        .args(pull_args(ref_))
+        .output()
+        .map_err(|e| format!("{cli} pull spawn failed: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn run_tag(cli: &str, src: &str, dst: &str) -> Result<(), String> {
+    let out = Command::new(cli)
+        .args(tag_args(src, dst))
+        .output()
+        .map_err(|e| format!("{cli} tag spawn failed: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 /// `tag <src> <dst>` 的 argv。
@@ -239,6 +291,17 @@ pub fn warm_tag(instance_id: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
         .collect();
     format!("cache/swe-{id}:warm")
+}
+
+/// provision 时优先选用 warm tag（M0-3 / M4-3）：本地存在 `cache/swe-<id>:warm` 则用之，
+/// 否则回退 base 镜像（已 ensure 就绪）。
+pub fn resolve_provision_image(factory: &ImageCacheFactory, base_image: &str, instance_id: &str) -> String {
+    let tag = warm_tag(instance_id);
+    if factory.image_present(&tag) {
+        tag
+    } else {
+        base_image.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -291,5 +354,37 @@ mod tests {
         assert!(digest_matches("sha256:abc", "sha256:abc"));
         assert!(digest_matches("repo/x@sha256:abc", "repo/x@sha256:abc"));
         assert!(!digest_matches("repo/x@sha256:abc", "sha256:def"));
+    }
+
+    #[test]
+    fn pull_mirrors_default_includes_dockerproxy() {
+        unsafe {
+            std::env::remove_var("UENV_SWE_PULL_MIRRORS");
+        }
+        assert_eq!(pull_mirrors_from_env(), vec!["dockerproxy.net".to_string()]);
+    }
+
+    #[test]
+    fn pull_mirrors_env_override() {
+        unsafe {
+            std::env::set_var("UENV_SWE_PULL_MIRRORS", "a.example,b.example");
+        }
+        assert_eq!(
+            pull_mirrors_from_env(),
+            vec!["a.example".to_string(), "b.example".to_string()]
+        );
+        unsafe {
+            std::env::remove_var("UENV_SWE_PULL_MIRRORS");
+        }
+    }
+
+    #[test]
+    fn resolve_provision_image_prefers_warm_tag_when_present() {
+        // 无 docker 时 image_present 恒 false → 回退 base。
+        let factory = ImageCacheFactory::new(ContainerRuntime::Docker, false);
+        assert_eq!(
+            resolve_provision_image(&factory, "base:tag", "astropy__astropy-7166"),
+            "base:tag"
+        );
     }
 }

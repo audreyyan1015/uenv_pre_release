@@ -9,13 +9,19 @@
   fake_reward: ${oc.env:UENV_AGENT_LOOP_FAKE_REWARD,1.0}
   fake_response_text: ${oc.env:UENV_AGENT_LOOP_FAKE_RESPONSE_TEXT,""}
   default_env_type: math
-  default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,https://openrouter.ai/api/v1}
-  default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,qwen/qwen-2.5-7b-instruct}
+  # 留空时 Worker 使用 config/uenv-worker-llm.env 默认 LLM；显式 override 时再设置
+  default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,}
+  default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,}
   default_max_steps: 10
   default_max_turns: 1
   seed_base: 42
   result_record_path: ${oc.env:UENV_AGENT_LOOP_RESULT_RECORD_PATH,""}
   request_record_path: ${oc.env:UENV_AGENT_LOOP_REQUEST_RECORD_PATH,""}
-  batch_size: ${oc.env:UENV_AGENT_LOOP_BATCH_SIZE,1}
+  model_gateway_enabled: ${oc.env:UENV_MODEL_GATEWAY_ENABLED,false}
+  model_gateway_bind_host: ${oc.env:UENV_MODEL_GATEWAY_BIND_HOST,0.0.0.0}
+  model_gateway_port: ${oc.env:UENV_MODEL_GATEWAY_PORT,18080}
+  model_gateway_public_url: ${oc.env:UENV_MODEL_GATEWAY_PUBLIC_URL,""}
+  model_gateway_log_path: ${oc.env:UENV_MODEL_GATEWAY_LOG_PATH,""}
+  batch_size: ${oc.env:UENV_AGENT_LOOP_BATCH_SIZE,0}
   batch_retry_attempts: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS,3}
   batch_retry_delay_seconds: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS,5}

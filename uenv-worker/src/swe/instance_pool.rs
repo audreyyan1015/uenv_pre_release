@@ -12,11 +12,13 @@ use std::sync::{Arc, Mutex};
 use crate::metrics::MetricsExporter;
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
-use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
+use crate::swe::harness::ContainerRuntime;
 use crate::swe::image_cache::ImageCacheFactory;
 use crate::swe::resettable::ResettableSession;
-use crate::swe::session::{ExecResult, SweSession};
+use crate::swe::session::{ExecResult, SubmitOutcome, SweSession};
 use crate::swe::spec::ResetObservation;
+use crate::swe::trajectory::{TrajectoryRef, TrajectoryStore};
+use crate::swe::trajectory_upload::TrajectoryUploader;
 use crate::swe::variant::BenchmarkVariant;
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
@@ -31,6 +33,10 @@ pub struct SweInstancePool {
     metrics: Option<MetricsExporter>,
     /// seccomp profile 目录（M2-4）：`Some` 时所有 session provision 注入 `--security-opt seccomp`。
     seccomp_dir: Option<PathBuf>,
+    worker_id: String,
+    gateway_base_url: String,
+    /// v2.2 轨迹上传旁路（None=未启用，走本地真值过渡态）。
+    uploader: Option<TrajectoryUploader>,
 }
 
 impl SweInstancePool {
@@ -43,7 +49,17 @@ impl SweInstancePool {
             seq: AtomicU64::new(1),
             metrics: None,
             seccomp_dir: None,
+            worker_id: "worker".to_string(),
+            gateway_base_url: "http://127.0.0.1:28999".to_string(),
+            uploader: TrajectoryUploader::from_env(),
         }
+    }
+
+    /// Gateway 轨迹元数据（worker_id + 对外 base URL）。
+    pub fn with_trajectory_meta(mut self, worker_id: String, gateway_base_url: String) -> Self {
+        self.worker_id = worker_id;
+        self.gateway_base_url = gateway_base_url;
+        self
     }
 
     /// 注入 metrics（M2-5）：session 数变化时更新 `uenv_swe_instance_pool_size`。
@@ -110,7 +126,15 @@ impl SweInstancePool {
         let policy = self.apply_seccomp(policy);
         let session_id = format!("sess-{}-{}", sanitize(instance_id), self.seq.fetch_add(1, Ordering::SeqCst));
         let (session, observation) =
-            SweSession::provision(&instance, &session_id, self.runtime, policy, false)?;
+            SweSession::provision(
+                &instance,
+                &session_id,
+                self.runtime,
+                policy,
+                false,
+                &self.worker_id,
+                &self.gateway_base_url,
+            )?;
 
         let count = {
             let mut guard = self.sessions.lock().expect("pool lock");
@@ -135,8 +159,11 @@ impl SweInstancePool {
         variant: BenchmarkVariant,
         policy: CommandPolicyConfig,
         gold_patch: Option<&str>,
-    ) -> Result<EpisodeOutcome, DynErr> {
+        run_id: &str,
+    ) -> Result<SubmitOutcome, DynErr> {
         let (session_id, _obs) = self.create_session(instance_id, variant, policy)?;
+        // v2.2：native 路径注入 run_id（correlation_id），使 submit seal 的轨迹带正确 run_id。
+        self.set_session_run_id(&session_id, run_id);
         let result = (|| {
             if let Some(p) = gold_patch {
                 self.apply_patch(&session_id, p, "gold")?;
@@ -193,6 +220,12 @@ impl SweInstancePool {
         (ok, fail)
     }
 
+    /// 批量预热目录内全部实例镜像（M4 Lite 编排入口）：等价于对 catalog 全量 `prewarm_images`。
+    pub fn prewarm_catalog(&self, warm_tag: bool) -> (usize, usize) {
+        let ids = self.store.instance_ids();
+        self.prewarm_images(&ids, warm_tag)
+    }
+
     fn get(&self, session_id: &str) -> Result<Arc<SweSession>, DynErr> {
         self.sessions
             .lock()
@@ -214,9 +247,71 @@ impl SweInstancePool {
         self.get(session_id)?.read_file(path)
     }
 
-    /// 提交评测：应用 test_patch → 跑测试 → grader 评分 → EpisodeOutcome。
-    pub fn submit(&self, session_id: &str) -> Result<EpisodeOutcome, DynErr> {
-        self.get(session_id)?.evaluate()
+    /// 提交评测：应用 test_patch → 跑测试 → grader 评分 → EpisodeOutcome + 可选轨迹索引。
+    pub fn submit(&self, session_id: &str) -> Result<SubmitOutcome, DynErr> {
+        let session = self.get(session_id)?;
+        let outcome = session.evaluate()?;
+        let trajectory_ref = if let Some(store) = TrajectoryStore::from_env() {
+            match session.seal_trajectory(&outcome, &store) {
+                Ok(mut r) => {
+                    // v2.2：seal 成功后登记上传（失败不阻断 reward）。
+                    if let Some(up) = &self.uploader {
+                        up.enqueue(&r.trajectory_id);
+                        r.upload_status = uenv_common::UploadStatus::Pending;
+                        r.storage_url = Some(up.endpoint().to_string());
+                        r.storage_kind = Some("server".to_string());
+                    }
+                    Some(r)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        msg = "swe_trajectory_seal_failed"
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::warn!(
+                session_id = %session_id,
+                msg = "swe_trajectory_skipped_no_artifact_dir"
+            );
+            None
+        };
+        Ok(SubmitOutcome {
+            outcome,
+            trajectory_ref,
+        })
+    }
+
+    /// v2.2：把 run_id 注入已建会话（gateway 从 X-UEnv-Run-Id 头读取）。
+    pub fn set_session_run_id(&self, session_id: &str, run_id: &str) {
+        if run_id.is_empty() {
+            return;
+        }
+        if let Ok(guard) = self.sessions.lock() {
+            if let Some(sess) = guard.get(session_id) {
+                sess.set_run_id(run_id);
+            }
+        }
+    }
+
+    pub fn get_trajectory(&self, trajectory_id: &str) -> Result<crate::swe::trajectory::TrajectoryBundle, DynErr> {
+        let store = TrajectoryStore::from_env()
+            .ok_or_else(|| "UENV_SWE_ARTIFACT_DIR not configured".to_string())?;
+        store.get(trajectory_id)
+    }
+
+    pub fn list_trajectories(
+        &self,
+        instance_id: Option<&str>,
+        since_ms: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<TrajectoryRef>, DynErr> {
+        let store = TrajectoryStore::from_env()
+            .ok_or_else(|| "UENV_SWE_ARTIFACT_DIR not configured".to_string())?;
+        store.list(instance_id, since_ms, limit)
     }
 
     /// 释放 session：移出表，`Arc` 归零后 `SweSession::drop` 销毁容器。

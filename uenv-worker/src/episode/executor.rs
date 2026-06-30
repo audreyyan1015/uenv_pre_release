@@ -141,7 +141,6 @@ impl EpisodeExecutor {
                     &episode.payload,
                     &episode.reward_config,
                     step_index as u32,
-                    &episode.model_endpoint,
                 )
                 .await
                 .map_err(|err| {
@@ -251,6 +250,7 @@ impl EpisodeExecutor {
             error_message: String::new(),
             trajectory_checksum: checksum,
             integrity_verified: true,
+            ..Default::default()
         };
 
         if let Some(last) = stream_reports.last_mut() {
@@ -334,18 +334,26 @@ impl EpisodeExecutor {
         let episode_id = episode.episode_id.clone();
         let policy = CommandPolicyConfig::default().with_mode(mode);
         // M2-2：优先经共享 L2 池（与 Gateway 同源）；无池时回退一次性 harness。
-        let outcome = if let Some(pool) = self.swe_pool.clone() {
+        // v2.2：native run_id（correlation_id 优先，否则 run-native-{episode_id}）。
+        let native_run_id = if !episode.correlation_id.is_empty() {
+            episode.correlation_id.clone()
+        } else {
+            format!("run-native-{}", episode.episode_id)
+        };
+        let (outcome, pool_trajectory_ref) = if let Some(pool) = self.swe_pool.clone() {
             let gold = if use_gold { Some(instance.patch.clone()) } else { None };
             let id = instance_id.clone();
-            tokio::task::spawn_blocking(move || {
-                pool.run_episode(&id, variant, policy, gold.as_deref())
+            let rid = native_run_id.clone();
+            let submit = tokio::task::spawn_blocking(move || {
+                pool.run_episode(&id, variant, policy, gold.as_deref(), &rid)
             })
             .await
             .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
             .map_err(|err| {
                 log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
                 err
-            })?
+            })?;
+            (submit.outcome, submit.trajectory_ref)
         } else {
             let opts = RunOptions {
                 runtime,
@@ -353,13 +361,14 @@ impl EpisodeExecutor {
                 keep_container: false,
                 policy,
             };
-            tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+            let oc = tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
                 .await
                 .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
                 .map_err(|err| {
                     log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
                     err
-                })?
+                })?;
+            (oc, None)
         };
 
         let reward = outcome.reward;
@@ -395,6 +404,13 @@ impl EpisodeExecutor {
             info.insert("artifact_uri".to_string(), uri.clone());
         }
 
+        // v2.2 native 路径：复用 pool 在 submit 时已 seal+上传 的轨迹（含真实 steps + artifact），
+        // 不再另造一条空 steps 的 bundle 重复上传（去重）。run_id 已在 run_episode 注入会话。
+        let (trajectory_id, trajectory_storage_url) = match pool_trajectory_ref {
+            Some(r) => (r.trajectory_id, r.storage_url.unwrap_or_default()),
+            None => (String::new(), String::new()),
+        };
+
         let step = StepRecord {
             step_index: 1,
             observation: Vec::new(),
@@ -427,6 +443,8 @@ impl EpisodeExecutor {
             error_message: String::new(),
             trajectory_checksum: checksum,
             integrity_verified: true,
+            trajectory_id,
+            trajectory_storage_url,
         };
         let stream = StreamReport {
             episode_id: episode.episode_id.clone(),
