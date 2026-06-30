@@ -1,0 +1,7 @@
+{
+  "model": "openai/DeepSeek-V3-0324-AWQ",
+  "base_url": "http://219.147.100.43:18888/v1",
+  "api_key": "REPLACE_ME",
+  "temperature": 0.2,
+  "max_output_tokens": 4096
+}

@@ -14,9 +14,9 @@ use serde::de::DeserializeOwned;
 use std::path::Path;
 use std::time::Duration;
 use uenv_hub_types::{
-    EnvDetail, ErrorResponse, Example, FullManifest, InterfaceSchema, Page, PublishVersionRequest,
-    PublishVersionResponse, SearchQuery, SearchResponse, SyncResponse, TemplateSummary,
-    ValidationReport, VersionSummary, YankRequest,
+    EnvDetail, EnvPackageManifest, ErrorResponse, Example, FullManifest, InterfaceSchema, Page,
+    PackageSummary, PublishVersionRequest, PublishVersionResponse, SearchQuery, SearchResponse,
+    SyncPlan, SyncResponse, TemplateSummary, ValidationReport, VersionSummary, YankRequest,
 };
 
 /// Consistent client surface shared by Worker / Server / CLI.
@@ -365,5 +365,80 @@ impl HttpClient {
 
     pub async fn list_templates(&self) -> Result<Vec<TemplateSummary>> {
         self.get_json("/api/v1/templates", &[], None).await
+    }
+
+    // --- EnvPackages -------------------------------------------------------
+
+    /// Publish an EnvPackage version (Publisher role).
+    pub async fn publish_package(
+        &self,
+        package_id: &str,
+        req: &uenv_hub_types::PublishPackageRequest,
+    ) -> Result<uenv_hub_types::PublishPackageResponse> {
+        self.send_body(
+            Method::POST,
+            &format!("/api/v1/packages/{package_id}/versions"),
+            req,
+        )
+        .await
+    }
+
+    /// List published packages.
+    pub async fn list_packages(
+        &self,
+        page: u32,
+        per_page: u32,
+    ) -> Result<Page<PackageSummary>> {
+        self.get_json(
+            "/api/v1/packages",
+            &[("page", page.to_string()), ("per_page", per_page.to_string())],
+            None,
+        )
+        .await
+    }
+
+    /// Fetch a package version's full manifest (`latest` resolves server-side).
+    pub async fn get_package_manifest(
+        &self,
+        package_id: &str,
+        version: &str,
+    ) -> Result<EnvPackageManifest> {
+        self.get_json(
+            &format!("/api/v1/packages/{package_id}/versions/{version}"),
+            &[],
+            None,
+        )
+        .await
+    }
+
+    /// Fetch the deterministic sync plan for a package version.
+    pub async fn get_package_sync_plan(
+        &self,
+        package_id: &str,
+        version: &str,
+    ) -> Result<SyncPlan> {
+        self.get_json(
+            &format!("/api/v1/packages/{package_id}/versions/{version}/sync-plan"),
+            &[],
+            None,
+        )
+        .await
+    }
+
+    /// Download one artifact's raw bytes (no caching — caller verifies digest).
+    pub async fn get_artifact_bytes(
+        &self,
+        package_id: &str,
+        version: &str,
+        name: &str,
+    ) -> Result<Vec<u8>> {
+        let path = format!("/api/v1/packages/{package_id}/versions/{version}/artifacts/{name}");
+        let req = self.authed(self.http.request(Method::GET, self.url(&path)));
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(decode_error(status, resp).await);
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 }

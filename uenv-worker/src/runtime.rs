@@ -50,6 +50,7 @@ pub struct WorkerRuntime {
     pub swe_prewarm: Vec<String>,
     pub swe_warm_tag: bool,
     pub swe_seccomp_dir: Option<String>,
+    pub swe_env_package_dir: Option<String>,
 }
 
 impl WorkerRuntime {
@@ -211,6 +212,7 @@ impl WorkerRuntime {
                 hub_endpoint.as_deref(),
                 hub_token.as_deref(),
                 &self.swe_variants,
+                self.swe_env_package_dir.as_deref(),
             )
             .await,
         );
@@ -330,6 +332,7 @@ async fn load_swe_catalog(
     hub_endpoint: Option<&str>,
     hub_token: Option<&str>,
     variants: &[String],
+    env_package_dir: Option<&str>,
 ) -> crate::swe::dataset::InstanceStore {
     use crate::swe::dataset::InstanceStore;
     let local_path =
@@ -341,6 +344,66 @@ async fn load_swe_catalog(
     };
 
     let mut merged = InstanceStore::default();
+
+    // Highest precedence: a locally-synced Hub EnvPackage (uenv env sync output).
+    // Loading the catalog from here is what lets the Worker run a complete,
+    // pre-provisioned environment without re-pulling from third parties.
+    let env_pkg_dir = env_package_dir
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("UENV_SWE_ENV_PACKAGE").ok())
+        .filter(|s| !s.trim().is_empty());
+    if let Some(dir) = &env_pkg_dir {
+        match crate::swe::env_package::EnvPackageDir::load(std::path::Path::new(dir)) {
+            Ok(pkg) => match InstanceStore::from_json_file(&pkg.catalog_path) {
+                Ok(store) => {
+                    tracing::info!(
+                        trace_id = "runtime",
+                        worker_id = "worker",
+                        episode_id = "-",
+                        package_id = %pkg.package_id,
+                        version = %pkg.version,
+                        variant = pkg.variant.as_deref().unwrap_or("-"),
+                        image_pull_policy = ?pkg.image_pull_policy,
+                        images = pkg.images.len(),
+                        count = store.len(),
+                        path = %pkg.catalog_path.display(),
+                        msg = "swe_catalog_loaded_from_env_package"
+                    );
+                    // Honesty for ops: if the package mandates local_only but the
+                    // runtime policy env is unset, warn (we never mutate process env).
+                    if matches!(
+                        pkg.image_pull_policy,
+                        Some(crate::swe::image_cache::ImagePullPolicy::LocalOnly)
+                    ) && std::env::var("UENV_SWE_IMAGE_PULL_POLICY").is_err()
+                    {
+                        tracing::warn!(
+                            msg = "env_package declares image_pull_policy=local_only; \
+                                   set UENV_SWE_IMAGE_PULL_POLICY=local_only to enforce it"
+                        );
+                    }
+                    merged.merge_from(store);
+                    return finalize_catalog(merged);
+                }
+                Err(err) => tracing::warn!(
+                    trace_id = "runtime",
+                    worker_id = "worker",
+                    episode_id = "-",
+                    dir = %dir,
+                    error = %err,
+                    msg = "swe_env_package_catalog_parse_failed_falling_back"
+                ),
+            },
+            Err(err) => tracing::warn!(
+                trace_id = "runtime",
+                worker_id = "worker",
+                episode_id = "-",
+                dir = %dir,
+                error = %err,
+                msg = "swe_env_package_load_failed_falling_back"
+            ),
+        }
+    }
+
     if hub_enabled {
         if let Some(endpoint) = hub_endpoint {
             for variant in &variants {
@@ -448,6 +511,12 @@ async fn load_swe_catalog(
     }
 
     // plan §6.2 启动校验：变体与镜像命名空间一致性（Pro 不得占用 sweb.eval.*）。
+    finalize_catalog(merged)
+}
+
+/// Startup validation common to every catalog source: warn on image-namespace
+/// violations (Pro must not occupy `sweb.eval.*`) and return the store.
+fn finalize_catalog(merged: crate::swe::dataset::InstanceStore) -> crate::swe::dataset::InstanceStore {
     let violations = merged.image_namespace_violations();
     if !violations.is_empty() {
         tracing::warn!(

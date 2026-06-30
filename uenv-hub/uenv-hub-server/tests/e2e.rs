@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use uenv_hub_client::{HttpClient, UEnvHubClient};
 use uenv_hub_server::config::{
-    AuthConfig, Config, CorsConfig, DatabaseConfig, RateLimitConfig, ServerConfig,
+    AuthConfig, Config, CorsConfig, DatabaseConfig, PackagesConfig, RateLimitConfig, ServerConfig,
 };
 use uenv_hub_server::{build_state, routes};
 use uenv_hub_types::{InterfaceSchema, PublishVersionRequest, ResourceSpec, SearchQuery};
@@ -32,6 +32,12 @@ async fn spawn_server() -> (SocketAddr, tempfile::TempDir) {
         },
         cors: CorsConfig {
             allow_origins: vec!["*".into()],
+        },
+        packages: PackagesConfig {
+            artifact_dir: tmp.path().join("artifacts").display().to_string(),
+            catalog_seed_dir: tmp.path().join("no-catalog").display().to_string(),
+            // Other tests don't need example packages; the package test publishes its own.
+            seed_examples: false,
         },
     };
 
@@ -221,3 +227,65 @@ async fn invalid_version_is_rejected() {
     let res = client.publish_version(&env_type, &manifest("not-semver")).await;
     assert!(res.is_err());
 }
+
+#[tokio::test]
+async fn env_package_publish_manifest_artifact_and_sync_plan() {
+    use uenv_hub_types::{InlineArtifact, PackageContracts, PackagePlatform, PublishPackageRequest};
+
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let catalog = r#"{"x__y-1":{"instance_id":"x__y-1","repo":"x/y","base_commit":"abc","FAIL_TO_PASS":[],"PASS_TO_PASS":[]}}"#;
+    let req = PublishPackageRequest {
+        version: "0.1.0".into(),
+        publisher: Some("tester".into()),
+        description: Some("e2e package".into()),
+        changelog: None,
+        platform: PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["runtime_gateway".into()],
+        },
+        worker_overlay: serde_json::json!({"swe": {"benchmark_variant": "verified", "image_pull_policy": "local_only"}}),
+        agent_defaults: serde_json::json!({}),
+        contracts: PackageContracts::default(),
+        artifacts: vec![InlineArtifact {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("catalog.json".into()),
+            content: Some(catalog.to_string()),
+            content_b64: None,
+        }],
+    };
+
+    let resp = client.publish_package("e2e-pkg", &req).await.unwrap();
+    assert_eq!(resp.package_id, "e2e-pkg");
+    assert_eq!(resp.version, "0.1.0");
+
+    // list
+    let page = client.list_packages(1, 20).await.unwrap();
+    assert!(page.items.iter().any(|p| p.package_id == "e2e-pkg"));
+
+    // manifest (latest)
+    let manifest = client.get_package_manifest("e2e-pkg", "latest").await.unwrap();
+    assert_eq!(manifest.version, "0.1.0");
+    assert_eq!(manifest.artifacts.len(), 1);
+    let art = &manifest.artifacts[0];
+    assert!(art.digest.starts_with("sha256:"));
+
+    // artifact bytes round-trip (digest verified server-side on read)
+    let bytes = client
+        .get_artifact_bytes("e2e-pkg", "0.1.0", "catalog.json")
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("x__y-1"));
+    assert_eq!(uenv_hub_core::package::sha256_hex(&bytes), art.digest);
+
+    // sync plan
+    let plan = client.get_package_sync_plan("e2e-pkg", "latest").await.unwrap();
+    assert_eq!(plan.files.len(), 1);
+    assert!(plan.bundle_digest.starts_with("sha256:"));
+}
+

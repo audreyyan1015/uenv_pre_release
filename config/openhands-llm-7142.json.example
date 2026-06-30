@@ -1,7 +1,0 @@
-{
-  "model": "openai/deepseek-v4-flash",
-  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "api_key": "REPLACE_ME",
-  "temperature": 0.2,
-  "max_output_tokens": 4096
-}

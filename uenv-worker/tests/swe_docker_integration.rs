@@ -58,10 +58,12 @@ fn gold_patch_reaches_reward_one_via_shared_pool() {
     // FullShell：与 native/gateway 默认一致（对标 SWE-bench harness 宽容策略）。
     let policy = CommandPolicyConfig::default().with_mode(CommandPolicy::FullShell);
 
-    let outcome = pool
-        .run_episode(&instance_id, BenchmarkVariant::default(), policy, Some(&gold))
+    let submit = pool
+        .run_episode(&instance_id, BenchmarkVariant::default(), policy, Some(&gold), "swe-docker-it")
         .expect("run_episode");
 
+    // run_episode now returns SubmitOutcome { outcome, trajectory_ref } (v2.2).
+    let outcome = &submit.outcome;
     assert!(
         outcome.resolved && (outcome.reward - 1.0).abs() < f64::EPSILON,
         "gold patch did not resolve instance {instance_id}: reward={}",

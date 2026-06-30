@@ -1,0 +1,14 @@
+[Unit]
+Description=SSH tunnel to 7143 Runtime Gateway via 7142 jump
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=AUTOSSH_GATETIME=0
+ExecStart=/usr/bin/autossh -M 0 -N -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -i /root/.ssh/uenv-7142-jump -p 7142 -L 127.0.0.1:28097:10.10.20.143:28097 root@219.147.100.43
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""OpenHands official SDK + SWE-bench Pro via UEnv Gateway (7142 → 7143).
+"""OpenHands official SDK + SWE-bench Pro via UEnv Gateway (208.77 → 7143).
 
-Uses OpenHands Software Agent SDK (Agent, Conversation, default tools) with
-gateway-backed terminal/file_editor executors. Grading via Worker submit().
-
-Requires OpenHands/benchmarks venv on 7142 (see scripts/deploy-openhands-7142.sh).
+Requires OpenHands/benchmarks on 208.77 (see scripts/deploy-openhands-20877.sh).
 
 Example:
-  cd /opt/openhands/benchmarks
+  bash /root/UEnv/scripts/run-openhands-pro-20877.sh gold
+  # or manually:
+  cd /opt/openhands/benchmarks/vendor/software-agent-sdk
   uv run python /root/UEnv/integrations/openhands/run_swebenchpro_official.py \\
-      --llm-config /root/UEnv/config/openhands-llm-7142.json \\
-      --gateway http://10.10.20.143:28999 --api-key swe-pro-secret \\
+      --llm-config /root/UEnv/config/openhands-llm-20877.json \\
+      --gateway http://127.0.0.1:28097 --api-key swe-pro-secret \\
       --instance instance_qutebrowser__... \\
       --instances /root/UEnv/config/swe/pro-python-smoke.json \\
       --output-dir /var/log/uenv/openhands-runs/run1 \\

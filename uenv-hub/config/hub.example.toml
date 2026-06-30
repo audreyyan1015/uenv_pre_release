@@ -30,3 +30,13 @@ burst = 100
 [cors]
 # Use ["*"] to allow any origin, or list explicit origins.
 allow_origins = ["*"]
+
+[packages]
+# EnvPackage artifact store: content-addressed small artifacts (catalog.json,
+# images.manifest.json, ...) are written and served from here. Image *bytes* are
+# referenced by digest (registry/tarball), never stored here.
+artifact_dir = "data/artifacts"
+# Directory the startup seed reads `<variant>.json` catalogs from to publish the
+# example swe-bench-verified / swe-bench-pro packages (idempotent, tolerant).
+catalog_seed_dir = "config/swe"
+seed_examples = true

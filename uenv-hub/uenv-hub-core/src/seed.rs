@@ -5,9 +5,12 @@
 
 use crate::error::Result;
 use crate::models::{NewEnv, NewManifest, NewTemplate};
+use crate::package;
 use crate::repository::SqliteStore;
 use crate::templates;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::path::Path;
+use uenv_hub_types as dto;
 use uenv_hub_types::{Dependencies, Example, ImageSpec, InterfaceSchema, ResourceSpec};
 
 /// Seed the official scaffold templates into the DB.
@@ -89,6 +92,196 @@ pub async fn seed_all(store: &SqliteStore) -> Result<()> {
     seed_templates(store).await?;
     seed_envs(store).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// EnvPackages (design 260629-hub-env-package-design.md)
+// ---------------------------------------------------------------------------
+
+/// Seed the example SWE EnvPackages (`swe-bench-verified`, `swe-bench-pro`) from
+/// the on-disk catalog files, if not already present. Tolerant: a missing
+/// catalog file is logged and skipped rather than failing startup.
+///
+/// `catalog_dir` defaults to the same `config/swe` the SWE catalog endpoint
+/// reads; `artifact_root` is the Hub artifact store.
+pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_dir: &Path) -> Result<()> {
+    seed_swe_package(
+        store,
+        artifact_root,
+        catalog_dir,
+        "swe-bench-verified",
+        "1.0.0",
+        "verified",
+        "swebench",
+        "SWE-bench Verified — gold/agent patch evaluation (official sweb.eval images).",
+    )
+    .await?;
+    seed_swe_package(
+        store,
+        artifact_root,
+        catalog_dir,
+        "swe-bench-pro",
+        "0.1.0",
+        "pro",
+        "swebench_pro",
+        "SWE-bench Pro — multi-runner (pytest/go test/TAP) evaluation. Seed catalog is a placeholder example (swe-pro__example-go-1); real Pro images require an internal Pro registry.",
+    )
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_swe_package(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    catalog_dir: &Path,
+    package_id: &str,
+    version: &str,
+    variant: &str,
+    grader: &str,
+    description: &str,
+) -> Result<()> {
+    if store.find_package_row(package_id).await?.is_some() {
+        return Ok(());
+    }
+    let catalog_path = catalog_dir.join(format!("{variant}.json"));
+    let catalog_raw = match std::fs::read_to_string(&catalog_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                package_id,
+                path = %catalog_path.display(),
+                error = %e,
+                "skip seeding package: catalog file not readable"
+            );
+            return Ok(());
+        }
+    };
+    let catalog: serde_json::Map<String, Value> = match serde_json::from_str(&catalog_raw) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(package_id, error = %e, "skip seeding package: catalog not a JSON object");
+            return Ok(());
+        }
+    };
+
+    let images_manifest = build_images_manifest(variant, &catalog);
+    let overlay = json!({
+        "swe": {
+            "benchmark_variant": variant,
+            "command_mode": "FullShell",
+            "grader": grader,
+            "image_pull_policy": "local_only"
+        },
+        "runtime_gateway": { "enabled": true },
+        "trajectory": { "enabled": true, "artifact_dir": "/var/lib/uenv/trajectories" }
+    });
+    let eval_spec = json!({
+        "grader": grader,
+        "log_parser": if variant == "pro" { "multi_runner" } else { "pytest" },
+        "variant": variant
+    });
+    let agent_defaults = json!({
+        "driver_entrypoint": if variant == "pro" { "run_swebenchpro_official.py" } else { "run_swebench.py" },
+        "workspace_dir": "/app",
+        "tools": ["terminal", "file_editor"],
+        "max_iterations_default": 30
+    });
+    let contracts = dto::PackageContracts {
+        runtime_gateway_api: Some("runtime/v1".into()),
+        trajectory_bundle_schema: Some("v2.2".into()),
+        tool_bridge_schema: Some("openhands-uenv-v1".into()),
+    };
+    let platform = dto::PackagePlatform {
+        uenv_worker_min: "0.1.0".into(),
+        uenv_server_min: None,
+        features: vec!["runtime_gateway".into(), "swe_instance_pool".into()],
+    };
+
+    let req = dto::PublishPackageRequest {
+        version: version.to_string(),
+        publisher: Some("org-uenv-swe".into()),
+        description: Some(description.to_string()),
+        changelog: Some(format!("Seed {package_id}@{version} from {}", catalog_path.display())),
+        platform,
+        worker_overlay: overlay.clone(),
+        agent_defaults,
+        contracts,
+        artifacts: vec![
+            dto::InlineArtifact {
+                name: "catalog.json".into(),
+                kind: "catalog".into(),
+                sync_mode: "inline".into(),
+                media_type: Some("application/json".into()),
+                target_rel_path: Some("catalog.json".into()),
+                content: Some(catalog_raw.clone()),
+                content_b64: None,
+            },
+            dto::InlineArtifact {
+                name: "images.manifest.json".into(),
+                kind: "images".into(),
+                sync_mode: "inline".into(),
+                media_type: Some("application/json".into()),
+                target_rel_path: Some("images.manifest.json".into()),
+                content: Some(serde_json::to_string_pretty(&images_manifest)?),
+                content_b64: None,
+            },
+            dto::InlineArtifact {
+                name: "eval_spec.json".into(),
+                kind: "eval_spec".into(),
+                sync_mode: "inline".into(),
+                media_type: Some("application/json".into()),
+                target_rel_path: Some("eval_spec.json".into()),
+                content: Some(serde_json::to_string_pretty(&eval_spec)?),
+                content_b64: None,
+            },
+            dto::InlineArtifact {
+                // JSON is valid YAML, so ops can also consume this with a YAML parser.
+                name: "worker.overlay.yaml".into(),
+                kind: "overlay".into(),
+                sync_mode: "inline".into(),
+                media_type: Some("application/yaml".into()),
+                target_rel_path: Some("worker.overlay.yaml".into()),
+                content: Some(serde_json::to_string_pretty(&overlay)?),
+                content_b64: None,
+            },
+        ],
+    };
+
+    package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
+    tracing::info!(package_id, version, variant, "seeded EnvPackage");
+    Ok(())
+}
+
+/// Build the `images.manifest.json` body from a SWE catalog: one entry per
+/// instance with the resolved image reference and (optional) digest.
+fn build_images_manifest(variant: &str, catalog: &serde_json::Map<String, Value>) -> Value {
+    let mut images = Vec::with_capacity(catalog.len());
+    for (instance_id, row) in catalog {
+        let image = row
+            .get("image_cache_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                // Mirror uenv-worker's default sweb.eval image derivation.
+                let slug = instance_id.replace("__", "_1776_");
+                format!("swebench/sweb.eval.x86_64.{slug}:latest")
+            });
+        let digest = row
+            .get("image_digest")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        images.push(json!({ "instance_id": instance_id, "image": image, "digest": digest }));
+    }
+    // Stable ordering so the artifact digest is deterministic across runs.
+    images.sort_by(|a, b| a["instance_id"].as_str().cmp(&b["instance_id"].as_str()));
+    json!({
+        "schema": "uenv.images.manifest/v1",
+        "variant": variant,
+        "pull_policy": "local_only",
+        "images": images
+    })
 }
 
 fn math_manifest() -> NewManifest {

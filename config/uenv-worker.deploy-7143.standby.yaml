@@ -1,5 +1,5 @@
 # UEnv Worker — A100 7143 保活（临时）
-# 阿里云 Server (8.130.86.71:8088) 未就绪时，先连本机 uenv-server 完成 Register，
+# 阿里云 Server (8.130.75.157:8088) 未就绪时，先连本机 uenv-server 完成 Register，
 # 对外仍监听 28888/28777，advertise 仍为公网地址。
 # Server 就绪后改回 config/uenv-worker.deploy-7143.yaml 并重启。
 

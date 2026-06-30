@@ -38,6 +38,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search", get(search))
         // SWE-bench instance catalog（M1-1 / M6-1）：worker 按变体拉取实例真值。
         .route("/swe/:variant/instances", get(swe_instances))
+        // environment packages (EnvPackage): registry + content-addressed artifacts
+        .route("/packages", get(list_packages))
+        .route("/packages/:package_id/versions", post(publish_package))
+        .route("/packages/:package_id/versions/:version", get(get_package))
+        .route(
+            "/packages/:package_id/versions/:version/sync-plan",
+            get(get_package_sync_plan),
+        )
+        .route(
+            "/packages/:package_id/versions/:version/artifacts/:name",
+            get(get_package_artifact),
+        )
         // templates
         .route("/templates", get(list_templates))
         .route("/templates/:name/archive", get(template_archive))
@@ -298,6 +310,109 @@ async fn swe_instances(
         )
     })?;
     Ok(json_with_etag(&headers, &value))
+}
+
+// ---------------------------------------------------------------------------
+// environment packages (EnvPackage)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct PageQuery {
+    #[serde(default = "one")]
+    page: u32,
+    #[serde(default = "twenty")]
+    per_page: u32,
+}
+
+/// `GET /packages` — paginated package list.
+async fn list_packages(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Response> {
+    let page = state.store.list_packages(q.page, q.per_page).await?;
+    Ok(json_with_etag(&headers, &page))
+}
+
+/// `POST /packages/{package_id}/versions` — publish a package version.
+async fn publish_package(
+    State(state): State<AppState>,
+    Principal(principal): Principal,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    Path(package_id): Path<String>,
+    Json(req): Json<dto::PublishPackageRequest>,
+) -> ApiResult<(StatusCode, Json<dto::PublishPackageResponse>)> {
+    ensure_role(&principal, Role::Publisher)?;
+    let artifact_root = std::path::PathBuf::from(&state.config.packages.artifact_dir);
+    let manifest = service::publish_package(
+        &state.store,
+        &principal,
+        client_ip(&connect_info),
+        &artifact_root,
+        &package_id,
+        req,
+    )
+    .await?;
+    let resp = dto::PublishPackageResponse {
+        package_id: manifest.package_id.clone(),
+        version: manifest.version.clone(),
+        published_at: manifest.published_at,
+        manifest_url: format!(
+            "/api/v1/packages/{}/versions/{}",
+            manifest.package_id, manifest.version
+        ),
+    };
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// `GET /packages/{package_id}/versions/{version}` — full manifest (`latest` ok).
+async fn get_package(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((package_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let manifest = state.store.get_package_manifest(&package_id, &version).await?;
+    Ok(json_with_etag(&headers, &manifest))
+}
+
+/// `GET /packages/{package_id}/versions/{version}/sync-plan` — fetch plan.
+async fn get_package_sync_plan(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((package_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let manifest = state.store.get_package_manifest(&package_id, &version).await?;
+    let plan = uenv_hub_core::package::sync_plan(&manifest);
+    Ok(json_with_etag(&headers, &plan))
+}
+
+/// `GET /packages/{package_id}/versions/{version}/artifacts/{name}` — serve bytes.
+///
+/// The bytes are re-hashed against the stored digest on every read (integrity
+/// self-check); the digest is also returned as the strong ETag.
+async fn get_package_artifact(
+    State(state): State<AppState>,
+    _principal: Principal,
+    Path((package_id, version, name)): Path<(String, String, String)>,
+) -> ApiResult<Response> {
+    let meta = state
+        .store
+        .get_artifact_meta(&package_id, &version, &name)
+        .await?;
+    let root = std::path::Path::new(&state.config.packages.artifact_dir);
+    let bytes = uenv_hub_core::package::read_artifact_verified(root, &meta.rel_path, &meta.digest)?;
+    let content_type = meta
+        .media_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let mut resp = ([(header::CONTENT_TYPE, content_type)], bytes).into_response();
+    if let Ok(v) = format!("\"{}\"", meta.digest).parse() {
+        resp.headers_mut().insert(header::ETAG, v);
+    }
+    Ok(resp)
 }
 
 // ---------------------------------------------------------------------------

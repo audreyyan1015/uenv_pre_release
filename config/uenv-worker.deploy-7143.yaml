@@ -7,7 +7,7 @@
 # | health   | 0.0.0.0:28777 | —                                    |
 
 server:
-  endpoint: "8.130.86.71:8088"
+  endpoint: "8.130.75.157:8088"
 
 worker:
   id: "auto"

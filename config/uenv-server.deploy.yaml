@@ -1,4 +1,4 @@
-# 阿里云 8.130.86.71 — Adapter + Server 合一部署
+# 阿里云 8.130.75.157 — Adapter + Server 合一部署
 # SSH：root / dev@BDW2026
 # 公网 gRPC 入口：8088
 #
@@ -9,9 +9,9 @@
 #   export UENV_ADDR=0.0.0.0:8088
 #   /home/uenv/target/release/uenv-adapter-core
 #
-# Worker server.endpoint / 7142 Adapter 均指向：8.130.86.71:8088
+# Worker server.endpoint / 7142 Adapter 均指向：8.130.75.157:8088
 
 process: uenv-adapter-core
 bind_env: UENV_ADDR
 bind: "0.0.0.0:8088"
-public_endpoint: "8.130.86.71:8088"
+public_endpoint: "8.130.75.157:8088"

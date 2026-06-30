@@ -1,3 +1,5 @@
+> **SWE-bench Pro + OpenHands 最终方案**：见 [`260627-swe-openhands-integration-plan.md`](./260627-swe-openhands-integration-plan.md)（本文 §5.3–§5.6 已被其取代，保留作历史设计参考）。
+
 # SWE-bench 环境镜像与 Worker 实例化规划
 
 > **文档版本**：v1.5  

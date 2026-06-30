@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Generate openhands-llm-7142.json from uenv-worker-llm.env."""
+"""Generate openhands-llm-20877.json from uenv-worker-llm.env."""
 import json
 import sys
 from pathlib import Path
 
 src = Path(sys.argv[1] if len(sys.argv) > 1 else "config/uenv-worker-llm.env")
-dst = Path(sys.argv[2] if len(sys.argv) > 2 else "config/openhands-llm-7142.json")
+dst = Path(sys.argv[2] if len(sys.argv) > 2 else "config/openhands-llm-20877.json")
 env: dict[str, str] = {}
 for line in src.read_text(encoding="utf-8").splitlines():
     line = line.strip()
