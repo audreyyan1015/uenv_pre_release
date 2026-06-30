@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 /temp/
+/output/
 /logs/*
 !/logs/README.md
 !/logs/curated/

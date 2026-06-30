@@ -1,0 +1,141 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+exp_name: ${oc.env:ROLL_EXP_NAME,roll_agentic_async_rollout_qwen25_05b}
+seed: 42
+max_steps: ${oc.decode:${oc.env:ROLL_MAX_STEPS,1}}
+eval_steps: 0
+logging_steps: 1
+save_steps: 10000
+world_size: 1
+num_gpus_per_node: 2
+async_generation_ratio: ${oc.decode:${oc.env:ROLL_ASYNC_GENERATION_RATIO,1}}
+
+logging_dir: ${oc.env:ROLL_LOGGING_DIR,/uenv/uenv-bridge/temp/logs/roll_step_parallel/roll_logs}
+output_dir: ${oc.env:ROLL_OUTPUT_DIR,/uenv/uenv-bridge/temp/logs/roll_step_parallel/output}
+base_dir: ${oc.env:ROLL_OUTPUT_DIR,/uenv/uenv-bridge/temp/logs/roll_step_parallel/output}
+track_with: stdout
+tracker_kwargs: {}
+system_envs:
+  USE_MODELSCOPE: "0"
+
+pretrain: ${oc.env:ROLL_MODEL_PATH,/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct}
+sequence_length: ${oc.decode:${oc.env:ROLL_SEQUENCE_LENGTH,1024}}
+rollout_batch_size: ${oc.decode:${oc.env:ROLL_ROLLOUT_BATCH_SIZE,8}}
+val_batch_size: 1
+
+actor_train:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: null
+  training_args:
+    learning_rate: 1.0e-6
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: ${oc.decode:${oc.env:ROLL_GRAD_ACCUM_STEPS,4}}
+  device_mapping: list(range(${oc.decode:${oc.env:ROLL_ACTOR_TRAIN_START_GPU,1}},${oc.decode:${oc.env:ROLL_ACTOR_TRAIN_END_GPU,2}}))
+  strategy_args:
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: ${oc.decode:${oc.env:ROLL_ACTOR_TRAIN_WORLD_SIZE,1}}
+      param_dtype: bf16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      offload_policy: false
+  data_args:
+    template: qwen2_5
+
+actor_infer:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: ${oc.decode:${oc.env:ROLL_VLLM_GPU_MEMORY_UTILIZATION,0.4}}
+      max_model_len: ${sequence_length}
+      enforce_eager: true
+      enable_prefix_caching: false
+  device_mapping: "[0]"
+  generating_args:
+    do_sample: true
+    temperature: 1.0
+    top_p: 0.95
+    max_new_tokens: ${oc.decode:${oc.env:ROLL_RESPONSE_LENGTH,256}}
+max_tokens_per_step: ${oc.decode:${oc.env:ROLL_RESPONSE_LENGTH,256}}
+
+reference:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: null
+  data_args:
+    template: qwen2_5
+  device_mapping: list(range(${oc.decode:${oc.env:ROLL_REFERENCE_START_GPU,1}},${oc.decode:${oc.env:ROLL_REFERENCE_END_GPU,2}}))
+  strategy_args:
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: ${oc.decode:${oc.env:ROLL_REFERENCE_WORLD_SIZE,1}}
+      param_dtype: bf16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      offload_policy: false
+
+adv_estimator: "grpo"
+batch_adjust_mode: "random_sample"
+step_reward_gamma: 1.0
+use_kl_loss: true
+kl_loss_coef: 0.001
+whiten_advantages: true
+reward_normalization:
+  grouping: "traj_group_id"
+  norm_mean_type: "group"
+  norm_std_type: "group"
+entropy_loss_coef: 0
+max_grad_norm: 1.0
+
+max_actions_per_traj: 1
+env_manager_cls: roll.pipeline.agentic.env_manager.agent_native_env_manager.AgentNativeStepEnvManager
+
+custom_envs:
+  AtroposGSM8KTrain:
+    env_type: "atropos_env"
+    max_steps: ${max_actions_per_traj}
+    max_tokens_per_step: ${max_tokens_per_step}
+    env_manager_cls: ${env_manager_cls}
+    agent_system_template: "You should solve the math problem step by step and put your final answer within \\boxed{}."
+    agent_template: "{observation}"
+    env_config:
+      atropos_env_path: "environments.gsm8k_server:GSM8kEnv"
+      max_steps: ${max_actions_per_traj}
+      debug: false
+      env_config:
+        group_size: 1
+        max_token_length: ${sequence_length}
+      reward_config:
+        format_markers:
+          - marker: "\\boxed{"
+            reward: 0.3
+          - marker: "<think>"
+            reward: 0.2
+        length_bounty_max: 0.2
+
+train_env_manager:
+  max_env_num_per_worker: ${oc.decode:${oc.env:ROLL_MAX_ENV_NUM_PER_WORKER,4}}
+  num_env_groups: ${oc.decode:${oc.env:ROLL_NUM_ENV_GROUPS,4}}
+  group_size: ${oc.decode:${oc.env:ROLL_ENV_GROUP_SIZE,2}}
+  tags: [AtroposGSM8KTrain]
+  num_groups_partition:
+    - ${oc.decode:${oc.env:ROLL_NUM_ENV_GROUPS,4}}
+
+val_env_manager:
+  max_env_num_per_worker: 1
+  num_env_groups: 1
+  group_size: 1
+  tags: [AtroposGSM8KTrain]
+  num_groups_partition: [1]

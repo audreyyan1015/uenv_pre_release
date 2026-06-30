@@ -1,0 +1,154 @@
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+pg_variant: ppo
+exp_name: ${oc.env:ROLL_EXP_NAME,roll_rlvr_sync_qwen25_05b}
+seed: 42
+logging_dir: ${oc.env:ROLL_LOGGING_DIR,/uenv/uenv-bridge/temp/logs/roll_step_parallel/roll_logs}
+output_dir: ${oc.env:ROLL_OUTPUT_DIR,/uenv/uenv-bridge/temp/logs/roll_step_parallel/output}
+base_dir: ${oc.env:ROLL_OUTPUT_DIR,/uenv/uenv-bridge/temp/logs/roll_step_parallel/output}
+track_with: stdout
+tracker_kwargs: {}
+system_envs:
+  USE_MODELSCOPE: "0"
+
+checkpoint_config:
+  type: file_system
+  output_dir: ${oc.env:ROLL_CHECKPOINT_DIR,/uenv/uenv-bridge/temp/logs/roll_step_parallel/checkpoints}/${exp_name}
+
+num_gpus_per_node: ${oc.decode:${oc.env:ROLL_NUM_GPUS_PER_NODE,8}}
+async_generation_ratio: 0
+
+max_steps: ${oc.decode:${oc.env:ROLL_MAX_STEPS,1}}
+save_steps: 10000
+logging_steps: 1
+eval_steps: 10000
+resume_from_checkpoint: false
+rpc_timeout: 7200
+
+rollout_batch_size: ${oc.decode:${oc.env:ROLL_ROLLOUT_BATCH_SIZE,16}}
+prompt_length: ${oc.decode:${oc.env:ROLL_PROMPT_LENGTH,512}}
+response_length: ${oc.decode:${oc.env:ROLL_RESPONSE_LENGTH,512}}
+
+num_return_sequences_in_group: ${oc.decode:${oc.env:ROLL_NUM_RETURN_SEQUENCES,2}}
+ppo_epochs: 1
+adv_estimator: "reinforce"
+
+value_clip: 0.5
+reward_clip: 10
+advantage_clip: 2.0
+dual_clip_loss: true
+
+norm_mean_type: batch
+norm_std_type: batch
+
+max_len_mask: true
+difficulty_mask: false
+whiten_advantages: true
+
+pretrain: ${oc.env:ROLL_MODEL_PATH,/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct}
+reward_pretrain: ${pretrain}
+
+validation:
+  data_args:
+    template: qwen2_5
+    file_name:
+      - /workspace/ROLL-main/data/math_benchmarks.jsonl
+  generating_args:
+    top_p: 0.6
+    top_k: 50
+    num_beams: 1
+    temperature: 0.6
+    num_return_sequences: 1
+
+actor_train:
+  worker_cls: roll.pipeline.rlvr.actor_pg_worker.ActorPGWorker
+  pg_variant: ppo
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: false
+    dtype: bf16
+    model_type: null
+  training_args:
+    learning_rate: 1.0e-6
+    weight_decay: 0
+    per_device_train_batch_size: ${oc.decode:${oc.env:ROLL_TRAIN_MICRO_BATCH_SIZE,1}}
+    gradient_accumulation_steps: ${oc.decode:${oc.env:ROLL_GRAD_ACCUM_STEPS,4}}
+    warmup_steps: 1
+    num_train_epochs: 5
+  data_args:
+    template: qwen2_5
+    file_name:
+      - /workspace/ROLL-main/data/math_benchmarks.jsonl
+    domain_interleave_probs:
+      math_rule: 1
+    messages: messages
+    interleave_probs: "1.0"
+    preprocessing_num_workers: 4
+  strategy_args:
+    strategy_name: fsdp2_train
+    strategy_config:
+      fsdp_size: ${oc.decode:${oc.env:ROLL_ACTOR_TRAIN_WORLD_SIZE,2}}
+      param_dtype: bf16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      offload_policy: false
+  device_mapping: list(range(${oc.decode:${oc.env:ROLL_ACTOR_TRAIN_START_GPU,0}},${oc.decode:${oc.env:ROLL_ACTOR_TRAIN_END_GPU,2}}))
+  infer_batch_size: 2
+
+actor_infer:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+  generating_args:
+    max_new_tokens: ${response_length}
+    top_p: 0.99
+    top_k: 100
+    num_beams: 1
+    temperature: 0.99
+    num_return_sequences: ${num_return_sequences_in_group}
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: vllm
+    strategy_config:
+      gpu_memory_utilization: ${oc.decode:${oc.env:ROLL_VLLM_GPU_MEMORY_UTILIZATION,0.6}}
+      block_size: 16
+      max_model_len: 1200
+      enforce_eager: true
+      enable_prefix_caching: false
+  device_mapping: list(range(${oc.decode:${oc.env:ROLL_ACTOR_INFER_START_GPU,4}},${oc.decode:${oc.env:ROLL_ACTOR_INFER_END_GPU,8}}))
+  infer_batch_size: 1
+
+reference:
+  model_args:
+    flash_attn: fa2
+    disable_gradient_checkpointing: true
+    dtype: bf16
+    model_type: null
+  data_args:
+    template: qwen2_5
+  strategy_args:
+    strategy_name: fsdp2_infer
+    strategy_config:
+      fsdp_size: ${oc.decode:${oc.env:ROLL_REFERENCE_WORLD_SIZE,2}}
+      param_dtype: bf16
+      reduce_dtype: float32
+      reshard_after_forward: true
+      offload_policy: false
+  device_mapping: list(range(${oc.decode:${oc.env:ROLL_REFERENCE_START_GPU,0}},${oc.decode:${oc.env:ROLL_REFERENCE_END_GPU,2}}))
+  infer_batch_size: 4
+
+rewards:
+  math_rule:
+    worker_cls: roll.pipeline.rlvr.rewards.math_rule_reward_worker.MathRuleRewardWorker
+    model_args:
+      model_name_or_path: ${reward_pretrain}
+    data_args:
+      template: qwen2_5
+    tag_included: [math_rule]
+    world_size: ${oc.decode:${oc.env:ROLL_REWARD_WORLD_SIZE,4}}
+    infer_batch_size: 2

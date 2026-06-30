@@ -1,0 +1,9 @@
+defaults:
+  - roll_rlvr_sync
+  - _self_
+
+exp_name: ${oc.env:ROLL_EXP_NAME,roll_rlvr_async_training_qwen25_05b}
+async_generation_ratio: ${oc.decode:${oc.env:ROLL_ASYNC_GENERATION_RATIO,1}}
+is_num_return_sequences_expand: true
+max_running_requests: ${oc.decode:${oc.env:ROLL_MAX_RUNNING_REQUESTS,128}}
+generate_opt_level: 1
