@@ -2,7 +2,7 @@
 # 公网：gRPC 28888 / health 28777 / Runtime Gateway 28097（208.77 OpenHands 等外网调用）
 # 注：28099 公网口当前映射 llm-relay，勿用于 Runtime Gateway
 server:
-  endpoint: "8.130.86.71:8088"
+  endpoint: "8.130.75.157:8088"
 
 worker:
   id: "worker-7143-pro"
@@ -54,3 +54,7 @@ runtime_gateway:
   listen: "0.0.0.0:28097"
   capacity: 1
   api_key: "swe-pro-secret"
+
+# v2.2 轨迹上传至 Server 聚合存储（token 用 UENV_TRAJECTORY_TOKEN 环境变量，勿写入 yaml）
+trajectory_upload:
+  endpoint: "http://8.130.75.157:8077"

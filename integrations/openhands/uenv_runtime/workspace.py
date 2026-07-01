@@ -31,6 +31,7 @@ class UEnvWorkspace(LocalWorkspace):
     command_mode: str = "FullShell"
     api_key: Optional[str] = None
     gateway_timeout: float = 600.0
+    run_id: Optional[str] = None
 
     _client: Any = None
     _session: Any = None
@@ -41,6 +42,7 @@ class UEnvWorkspace(LocalWorkspace):
             self.gateway_url,
             timeout=self.gateway_timeout,
             api_key=self.api_key,
+            run_id=self.run_id,
         )
 
     @property

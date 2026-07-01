@@ -45,15 +45,22 @@ TAG=$(python3 -c "import json; d=json.load(open('config/swe/pro.json')); print(n
 bash scripts/pull-pro-image-7143.sh "$TAG"
 
 source ~/.cargo/env
+bash scripts/gen-worker-proto.sh
 cargo build -p uenv-worker --release 2>&1 | tail -5
+
+sudo mkdir -p /var/lib/uenv/swe-artifacts/spool/pending /var/lib/uenv/swe-artifacts/bodies /var/lib/uenv/swe-artifacts/index/by-id
 
 pkill -f 'uenv-worker.*serve' || true
 sleep 2
 source /root/.uenv-worker.env 2>/dev/null || true
+source /root/.uenv-trajectory.env 2>/dev/null || true
 export UENV_WORKER_ALLOW_DEGRADED_START=1
 export UENV_SWE_INSTANCES=/root/UEnv/config/swe/pro.json
 export UENV_SWE_RUNTIME=docker
 export UENV_SWE_IMAGE_PULL=1
+export UENV_SWE_ARTIFACT_DIR="${UENV_SWE_ARTIFACT_DIR:-/var/lib/uenv/swe-artifacts}"
+export UENV_SWE_GATEWAY_PUBLIC_URL="${UENV_SWE_GATEWAY_PUBLIC_URL:-http://219.147.100.43:28097}"
+export UENV_TRAJECTORY_ENDPOINT="${UENV_TRAJECTORY_ENDPOINT:-http://8.130.75.157:8077}"
 nohup ./target/release/uenv-worker --config config/uenv-worker.deploy-7143-swe-pro.yaml serve \
   >> /var/log/uenv/worker-swe-pro.log 2>&1 &
 sleep 6

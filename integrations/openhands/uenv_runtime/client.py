@@ -58,21 +58,37 @@ class SubmitResult:
 class UEnvGatewayClient:
     """Thin HTTP client over the Worker L4 gateway."""
 
-    def __init__(self, base_url: str, timeout: float = 600.0, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 600.0,
+        api_key: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ):
         # Accept "host:port" or "http://host:port".
         if not base_url.startswith(("http://", "https://")):
             base_url = "http://" + base_url
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.api_key = api_key
+        self.run_id = (run_id or "").strip() or None
 
-    def _request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
         if self.api_key:
             req.add_header("X-API-Key", self.api_key)
+        for key, val in (extra_headers or {}).items():
+            if val:
+                req.add_header(key, val)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode()
@@ -99,7 +115,10 @@ class UEnvGatewayClient:
         instance_id: str,
         benchmark_variant: str = "verified",
         command_mode: str = "FullShell",
+        run_id: Optional[str] = None,
     ) -> "UEnvSession":
+        rid = (run_id or self.run_id or "").strip()
+        extra_headers = {"X-UEnv-Run-Id": rid} if rid else None
         resp = self._request(
             "POST",
             "/runtime/v1/sessions",
@@ -108,6 +127,7 @@ class UEnvGatewayClient:
                 "benchmark_variant": benchmark_variant,
                 "command_mode": command_mode,
             },
+            extra_headers=extra_headers,
         )
         return UEnvSession(
             client=self,

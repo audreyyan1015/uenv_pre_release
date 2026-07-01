@@ -30,6 +30,9 @@ scripts/uenv-llm-gateway/
 ├── stop-uenv-llm-7142.sh        # 停止并释放 GPU
 ├── smoke-test-7142.sh           # 本机冒烟
 ├── start-vllm-when-ready-7142.sh
+├── resume-download-7142.sh          # 7142 断点续传 + 断线自动重试
+├── download-awq-resumable.py        # snapshot_download（禁用 xet CAS）
+├── remote-start-resume-download-7142.sh  # 开发机同步并启动续传
 ├── monitor-download-7142.py
 └── README.md
 
@@ -74,17 +77,23 @@ bash scripts/uenv-llm-gateway/deploy-uenv-llm-7142.sh
 
 ### 模型下载与 vLLM 启动
 
-7142 无法直连 HuggingFace，使用 **hf-mirror**：
+7142 无法直连 HuggingFace，使用 **hf-mirror**；下载脚本带**断点续传 + 断线自动重试**（关闭 `hf_transfer`，避免 xet CAS 403）。
 
 ```bash
-# 7142 上（已在后台下载时可跳过）
-export HF_ENDPOINT=https://hf-mirror.com HF_HOME=/data/huggingface
-/opt/hf-download/bin/hf download cognitivecomputations/DeepSeek-V3-0324-AWQ \
-  --local-dir /data/models/DeepSeek-V3-0324-AWQ
+# 开发机：同步脚本并启动续传（推荐）
+bash scripts/uenv-llm-gateway/remote-start-resume-download-7142.sh
 
-# 查看进度
-du -sh /data/models/DeepSeek-V3-0324-AWQ
+# 开发机：持续监控（可选 --auto-restart 在 supervisor 挂掉时自动拉起）
+python scripts/uenv-llm-gateway/monitor-download-7142.py --auto-restart
+
+# 7142 上手动
+bash /root/UEnv/scripts/uenv-llm-gateway/resume-download-7142.sh start
+bash /root/UEnv/scripts/uenv-llm-gateway/resume-download-7142.sh status
 tail -f /var/log/uenv/model-download.log
+
+# 查看体积
+du -sh /data/models/DeepSeek-V3-0324-AWQ
+```
 
 # 下载完成后（≥300GB）一键启动 vLLM 并等待网关就绪
 bash /root/UEnv/scripts/uenv-llm-gateway/start-vllm-when-ready-7142.sh

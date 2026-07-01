@@ -25,12 +25,14 @@ secrets/*
 !/scripts/gen-math-fixture.sh
 !/scripts/export_swe_instances.py
 !/scripts/export_swe_pro_instances.py
-!/scripts/seed-hub-pro-catalog.sh
 !/scripts/deploy-pro-python-openhands-7143.sh
 !/scripts/pull-pro-image-7143.sh
 !/scripts/deploy-openhands-20877.sh
 !/scripts/run-openhands-pro-20877.sh
 !/scripts/restart-worker-gateway-28097-7143.sh
+!/scripts/deploy-adapter-core-75157.sh
+!/scripts/deploy-trajectory-chain.sh
+!/scripts/verify-openhands-trajectory-e2e-20877.sh
 !/scripts/gen-openhands-llm-config.py
 !/scripts/swe_gateway_demo.py
 !/scripts/deploy-uenv-llm-7142.sh

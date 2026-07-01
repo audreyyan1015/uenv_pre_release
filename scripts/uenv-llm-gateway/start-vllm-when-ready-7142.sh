@@ -13,7 +13,23 @@ if [[ ! -d "$MODEL_DIR" ]] || [[ "$size_gb" -lt "$MIN_SIZE_GB" ]]; then
   exit 1
 fi
 
-CHAT_TEMPLATE="$("$VLLM_VENV/bin/python" -c "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent / 'examples/tool_chat_template_deepseekv3.jinja')")"
+CHAT_TEMPLATE="${UENV_VLLM_CHAT_TEMPLATE:-}"
+if [[ -z "$CHAT_TEMPLATE" ]]; then
+  legacy="$("$VLLM_VENV/bin/python" -c "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent / 'examples/tool_chat_template_deepseekv3.jinja')")"
+  bundled="/opt/vllm-dsv3-awq/etc/tool_chat_template_deepseekv3.jinja"
+  repo_tpl="$(dirname "$0")/tool_chat_template_deepseekv3.jinja"
+  for candidate in "$legacy" "$bundled" "$repo_tpl"; do
+    if [[ -f "$candidate" ]]; then
+      CHAT_TEMPLATE="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$CHAT_TEMPLATE" || ! -f "$CHAT_TEMPLATE" ]]; then
+  echo "ERROR: DeepSeek-V3 tool chat template not found; set UENV_VLLM_CHAT_TEMPLATE or install $bundled" >&2
+  exit 1
+fi
+echo "Using chat template: $CHAT_TEMPLATE"
 
 cat > /etc/systemd/system/vllm-dsv3-awq.service <<UNIT
 [Unit]
@@ -31,6 +47,7 @@ Environment=VLLM_MARLIN_USE_ATOMIC_ADD=1
 ExecStart=$VLLM_VENV/bin/vllm serve $MODEL_DIR \\
   --served-model-name deepseek-v3-0324-awq \\
   --host 127.0.0.1 --port 8000 --trust-remote-code \\
+  --dtype auto \\
   --tensor-parallel-size 8 --gpu-memory-utilization 0.90 \\
   --max-model-len 32768 --max-num-seqs 4 \\
   --enable-chunked-prefill --enable-prefix-caching \\

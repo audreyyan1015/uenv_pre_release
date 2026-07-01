@@ -97,19 +97,22 @@ Pro 工作区 **`/app`**（非 `/testbed`）。鉴权：`X-API-Key: swe-pro-secr
 
 ---
 
-## 4. 轨迹捕获（Worker 本地真值）
+## 4. 轨迹捕获（Worker seal + Server 聚合 v2.2）
 
-轨迹 **不** 经 Server/Hub；执行 session 的 Worker 落盘：
+轨迹在 **7143 Worker** 执行 session 时 seal 为真值；配置 `trajectory_upload.endpoint`（或 `UENV_TRAJECTORY_ENDPOINT`）后异步上传至 **Server `:8077`** 统一聚合（`trajectory.db` + `bodies/`）。208.77 OpenHands 经 Gateway submit 后同样走此路径。
 
 ```text
 ${UENV_SWE_ARTIFACT_DIR}/
-  index/by-id/{trajectory_id}.json   # TrajectoryRef
-  bodies/{trajectory_id}.json        # TrajectoryBundle（含 StepTrace）
+  index/by-id/{trajectory_id}.json   # TrajectoryRef（含 storage_url / upload_status）
+  bodies/{trajectory_id}.json        # TrajectoryBundle
+  spool/pending/{trajectory_id}.json # 上传队列 marker
 ```
 
-`TrajectoryRef` 字段：`trajectory_id`、`worker_id`、`gateway_base_url`、`instance_id`、`reward`、`step_count`。
+`TrajectoryRef` 字段：`trajectory_id`、`worker_id`、`gateway_base_url`、`storage_url`、`run_id`、`upload_status`。
 
-OpenHands 客户端 submit 后保存 ref；step 正文向 Gateway GET。
+OpenHands driver 通过 **`X-UEnv-Run-Id`**（或 `UENV_RUN_ID` / `--run-id`）注入一次评测作业 ID；验收脚本会 GET Server `/control/v1/trajectories` 校验聚合。
+
+> **过渡态**：未配置 `UENV_TRAJECTORY_ENDPOINT` 时仍仅 Worker 本地 + Gateway GET（与 rollout 开关一致）。
 
 ---
 

@@ -24,13 +24,15 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 # UEnv integration (dependency-free client + workspace)
 _INTEGRATION = Path(__file__).resolve().parent
 sys.path.insert(0, str(_INTEGRATION))
-from uenv_runtime.client import UEnvGatewayClient  # noqa: E402
+from uenv_runtime.client import UEnvGatewayClient, GatewayError  # noqa: E402
 from uenv_runtime.gateway_tools import patch_openhands_tools_for_uenv  # noqa: E402
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
 
@@ -67,6 +69,96 @@ def _build_instruction(instance: dict[str, Any], repo_path: str) -> str:
 def _save_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _verify_server_trajectory(
+    trajectory_id: str,
+    run_id: str,
+    out: Path,
+) -> dict[str, Any]:
+    """Optional: GET trajectory from Server :8077 after Worker upload ack."""
+    endpoint = os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+    token = os.environ.get("UENV_TRAJECTORY_TOKEN", "").strip()
+    if not endpoint or not trajectory_id:
+        return {"skipped": True, "reason": "UENV_TRAJECTORY_ENDPOINT unset or no trajectory_id"}
+
+    headers = {"X-Trajectory-Token": token} if token else {}
+    doc: dict[str, Any] = {"endpoint": endpoint, "trajectory_id": trajectory_id, "run_id": run_id}
+
+    def _get(path: str) -> tuple[int, str]:
+        req = urllib.request.Request(f"{endpoint}{path}", method="GET")
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(errors="replace")
+
+    # Wait for async uploader (spool drainer polls every 5s).
+    body_ok = False
+    list_ok = False
+    for attempt in range(1, 25):
+        status, raw = _get(f"/control/v1/trajectories/{trajectory_id}")
+        doc[f"body_attempt_{attempt}"] = status
+        if status == 200:
+            body_ok = True
+            try:
+                doc["body_keys"] = list(json.loads(raw).keys())
+            except json.JSONDecodeError:
+                doc["body_keys"] = []
+            break
+        time.sleep(5)
+
+    if run_id:
+        status, raw = _get(f"/control/v1/trajectories?run_id={urllib.parse.quote(run_id)}&limit=10")
+        doc["list_status"] = status
+        if status == 200:
+            try:
+                arr = json.loads(raw).get("trajectories", [])
+                doc["list_count"] = len(arr) if isinstance(arr, list) else 0
+                list_ok = isinstance(arr, list) and any(
+                    x.get("trajectory_id") == trajectory_id for x in arr
+                )
+            except json.JSONDecodeError:
+                doc["list_count"] = 0
+
+    doc["body_ok"] = body_ok
+    doc["list_ok"] = list_ok
+    doc["server_verified"] = body_ok
+    _save_json(out / "server_trajectory_verify.json", doc)
+    return doc
+
+
+def _fetch_trajectory_bundle(client: UEnvGatewayClient, ref: dict, out: Path) -> dict | None:
+    """Fetch full bundle from Server (preferred after upload) or Gateway."""
+    tid = ref.get("trajectory_id")
+    if not tid:
+        return None
+    endpoint = os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+    token = os.environ.get("UENV_TRAJECTORY_TOKEN", "").strip()
+
+    if endpoint:
+        headers = {"X-Trajectory-Token": token} if token else {}
+        for attempt in range(1, 25):
+            req = urllib.request.Request(f"{endpoint}/control/v1/trajectories/{tid}", method="GET")
+            for k, v in headers.items():
+                req.add_header(k, v)
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    return json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 503) and attempt < 24:
+                    time.sleep(5)
+                    continue
+                _save_json(out / "server_trajectory_fetch_error.json", {"status": e.code, "body": e.read().decode(errors="replace")})
+                break
+
+    try:
+        return client.get_trajectory(tid)
+    except GatewayError as e:
+        _save_json(out / "gateway_trajectory_fetch_error.json", {"status": e.status, "message": e.message})
+        return None
 
 
 def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
@@ -109,7 +201,14 @@ def main() -> int:
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--max-iterations", type=int, default=30)
     ap.add_argument("--mode", choices=["llm", "gold"], default="llm")
+    ap.add_argument(
+        "--run-id",
+        default=os.environ.get("UENV_RUN_ID", ""),
+        help="一次评测作业 ID（注入 X-UEnv-Run-Id；默认 UENV_RUN_ID 或自动生成）",
+    )
     args = ap.parse_args()
+
+    run_id = (args.run_id or "").strip() or f"run-oh-{time.strftime('%Y%m%d-%H%M%S')}-pro-{args.mode}"
 
     _ensure_benchmarks_path()
     patch_openhands_tools_for_uenv()
@@ -146,6 +245,7 @@ def main() -> int:
         instance_id=args.instance,
         benchmark_variant=args.benchmark_variant,
         api_key=args.api_key,
+        run_id=run_id,
     )
 
     _save_json(
@@ -154,6 +254,7 @@ def main() -> int:
             "gateway": args.gateway,
             "instance": args.instance,
             "mode": args.mode,
+            "run_id": run_id,
             "max_iterations": args.max_iterations,
             "llm_model": str(llm.model),
             "benchmark_variant": args.benchmark_variant,
@@ -217,16 +318,21 @@ def main() -> int:
         ref = result.trajectory_ref
         if ref and ref.get("trajectory_id"):
             _save_json(out / "trajectory_ref.json", ref)
-            try:
-                bundle = client.get_trajectory(ref["trajectory_id"])
+            bundle = _fetch_trajectory_bundle(client, ref, out)
+            if bundle:
                 _save_json(out / "trajectory_bundle.json", bundle)
-            except urllib.error.HTTPError as e:
-                print(f"get_trajectory failed: {e.code}", file=sys.stderr)
+
+        server_doc = _verify_server_trajectory(
+            (ref or {}).get("trajectory_id", ""),
+            run_id,
+            out,
+        )
 
         with run_log.open("a", encoding="utf-8") as f:
             f.write(
                 f"[done] mode={args.mode} reward={result.reward} "
-                f"tests={result.tests_passed}/{result.tests_total} elapsed={elapsed:.1f}s\n"
+                f"tests={result.tests_passed}/{result.tests_total} elapsed={elapsed:.1f}s "
+                f"run_id={run_id} server_verified={server_doc.get('server_verified')}\n"
             )
 
         print(
@@ -236,7 +342,10 @@ def main() -> int:
                     "reward": result.reward,
                     "tests_passed": result.tests_passed,
                     "tests_total": result.tests_total,
+                    "run_id": run_id,
                     "trajectory_id": (ref or {}).get("trajectory_id"),
+                    "upload_status": (ref or {}).get("upload_status"),
+                    "server_verified": server_doc.get("server_verified"),
                     "output_dir": str(out),
                 }
             )

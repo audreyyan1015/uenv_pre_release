@@ -83,7 +83,7 @@ cd uenv-worker && cargo run -- serve --config ../config/uenv-worker.yaml
 pip install ./uenv-bridge
 ```
 
-配置示例：`config/uenv-worker.yaml`（YAML/JSON，ADR-002）。`config/worker.example.toml` 已 deprecated。
+配置示例：`config/uenv-worker.yaml`（YAML/JSON，ADR-002）。
 
 ---
 

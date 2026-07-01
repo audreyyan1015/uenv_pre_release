@@ -1,7 +1,0 @@
-# DEPRECATED — 请使用 config/uenv-worker.yaml 或 config/uenv-worker.json（ADR-002）
-# 本 TOML 示例将在后续版本移除。
-
-server_addr = "http://127.0.0.1:50051"
-worker_id = "worker-1"
-supported_env_types = ["math"]
-max_concurrent_episodes = 8
