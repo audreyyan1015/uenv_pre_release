@@ -32,6 +32,7 @@ class UEnvWorkspace(LocalWorkspace):
     api_key: Optional[str] = None
     gateway_timeout: float = 600.0
     run_id: Optional[str] = None
+    session_id: Optional[str] = None
 
     _client: Any = None
     _session: Any = None
@@ -48,11 +49,14 @@ class UEnvWorkspace(LocalWorkspace):
     @property
     def session(self) -> UEnvSession:
         if self._session is None:
-            self._session = self._client.create_session(
-                self.instance_id,
-                self.benchmark_variant,
-                self.command_mode,
-            )
+            if self.session_id:
+                self._session = self._client.attach_session(self.session_id, self.instance_id)
+            else:
+                self._session = self._client.create_session(
+                    self.instance_id,
+                    self.benchmark_variant,
+                    self.command_mode,
+                )
         return self._session
 
     @property

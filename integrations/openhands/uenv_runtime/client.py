@@ -138,6 +138,45 @@ class UEnvGatewayClient:
             observation=resp.get("observation", {}),
         )
 
+    def create_session_for_episode(
+        self,
+        instance_id: str,
+        episode_id: str,
+        run_id: str,
+        benchmark_variant: str = "verified",
+        command_mode: str = "FullShell",
+    ) -> "UEnvSession":
+        resp = self._request(
+            "POST",
+            "/runtime/v1/sessions/for-episode",
+            {
+                "instance_id": instance_id,
+                "episode_id": episode_id,
+                "run_id": run_id,
+                "benchmark_variant": benchmark_variant,
+                "command_mode": command_mode,
+            },
+        )
+        return UEnvSession(
+            client=self,
+            session_id=resp["session_id"],
+            instance_id=resp.get("instance_id", instance_id),
+            benchmark_variant=resp.get("benchmark_variant", benchmark_variant),
+            command_mode=resp.get("command_mode", command_mode),
+            observation=resp.get("observation", {}),
+        )
+
+    def attach_session(self, session_id: str, instance_id: str) -> "UEnvSession":
+        """Use a Server/Worker pre-created session (skip POST /sessions)."""
+        return UEnvSession(
+            client=self,
+            session_id=session_id,
+            instance_id=instance_id,
+            benchmark_variant="pro",
+            command_mode="FullShell",
+            observation={},
+        )
+
     # ── per-session ops (used by UEnvSession) ────────────────────────
     def exec(self, session_id: str, command: str) -> ExecResult:
         r = self._request(

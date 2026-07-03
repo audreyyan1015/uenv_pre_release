@@ -297,6 +297,18 @@ impl SweInstancePool {
         }
     }
 
+    /// Bind platform episode_id for trajectory metadata (for-episode pre-create path).
+    pub fn set_session_episode_id(&self, session_id: &str, episode_id: &str) {
+        if episode_id.is_empty() {
+            return;
+        }
+        if let Ok(guard) = self.sessions.lock() {
+            if let Some(sess) = guard.get(session_id) {
+                sess.set_episode_id(episode_id);
+            }
+        }
+    }
+
     pub fn get_trajectory(&self, trajectory_id: &str) -> Result<crate::swe::trajectory::TrajectoryBundle, DynErr> {
         let store = TrajectoryStore::from_env()
             .ok_or_else(|| "UENV_SWE_ARTIFACT_DIR not configured".to_string())?;

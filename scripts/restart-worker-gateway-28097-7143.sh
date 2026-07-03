@@ -18,6 +18,12 @@ export UENV_WORKER_ALLOW_DEGRADED_START=1
 export UENV_SWE_GATEWAY_PUBLIC_URL=http://219.147.100.43:28097
 export UENV_SWE_ARTIFACT_DIR="${UENV_SWE_ARTIFACT_DIR:-/var/lib/uenv/swe-artifacts}"
 export UENV_TRAJECTORY_ENDPOINT="${UENV_TRAJECTORY_ENDPOINT:-http://8.130.75.157:8077}"
+# EnvPackage sync dir (Phase A): set by deploy-phase-abc-e2e.sh or manually after `uenv env sync`
+export UENV_SWE_ENV_PACKAGE="${UENV_SWE_ENV_PACKAGE:-}"
+if [[ -z "$UENV_SWE_ENV_PACKAGE" && -d /var/lib/uenv/envs/swe-bench-pro/0.2.0 ]]; then
+  export UENV_SWE_ENV_PACKAGE=/var/lib/uenv/envs/swe-bench-pro/0.2.0
+fi
+# Legacy fallback when EnvPackage not synced
 export UENV_SWE_INSTANCES="${UENV_SWE_INSTANCES:-/root/UEnv/config/swe/pro.json}"
 export UENV_SWE_RUNTIME=docker
 export UENV_SWE_IMAGE_PULL=1

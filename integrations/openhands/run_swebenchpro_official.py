@@ -33,6 +33,7 @@ from typing import Any
 _INTEGRATION = Path(__file__).resolve().parent
 sys.path.insert(0, str(_INTEGRATION))
 from uenv_runtime.client import UEnvGatewayClient, GatewayError  # noqa: E402
+from uenv_runtime.agent_job import load_agent_job  # noqa: E402
 from uenv_runtime.gateway_tools import patch_openhands_tools_for_uenv  # noqa: E402
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
 
@@ -192,11 +193,25 @@ def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="OpenHands SDK Pro eval via UEnv Gateway")
-    ap.add_argument("--llm-config", required=True, help="OpenHands LLM JSON (openhands.sdk.LLM)")
-    ap.add_argument("--gateway", default=os.environ.get("UENV_GATEWAY", "http://10.10.20.143:28999"))
+    ap.add_argument(
+        "--llm-config",
+        default=os.environ.get("OPENHANDS_LLM_CONFIG", ""),
+        help="OpenHands LLM JSON (openhands.sdk.LLM); optional for gold mode",
+    )
+    ap.add_argument(
+        "--gateway",
+        default=os.environ.get("UENV_GATEWAY", ""),
+        help="Runtime Gateway URL (optional when UENV_AGENT_JOB_FILE is set)",
+    )
     ap.add_argument("--api-key", default=os.environ.get("UENV_GATEWAY_API_KEY"))
-    ap.add_argument("--instance", required=True)
-    ap.add_argument("--instances", default="config/swe/pro-python-smoke.json")
+    ap.add_argument("--instance", default=os.environ.get("UENV_PRO_INSTANCE", ""))
+    ap.add_argument(
+        "--instances",
+        default=os.environ.get(
+            "UENV_SWE_INSTANCES",
+            os.environ.get("UENV_SWE_ENV_PACKAGE_CATALOG", "config/swe/pro-python-smoke.json"),
+        ),
+    )
     ap.add_argument("--benchmark-variant", default="pro")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--max-iterations", type=int, default=30)
@@ -206,7 +221,52 @@ def main() -> int:
         default=os.environ.get("UENV_RUN_ID", ""),
         help="一次评测作业 ID（注入 X-UEnv-Run-Id；默认 UENV_RUN_ID 或自动生成）",
     )
+    ap.add_argument(
+        "--agent-job-file",
+        default=os.environ.get("UENV_AGENT_JOB_FILE", ""),
+        help="AgentJob JSON (Phase B); overrides gateway/session/run/instance when set",
+    )
     args = ap.parse_args()
+
+    agent_job = None
+    if args.agent_job_file:
+        os.environ["UENV_AGENT_JOB_FILE"] = args.agent_job_file
+    try:
+        agent_job = load_agent_job(args.agent_job_file or None)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"AgentJob load failed: {exc}", file=sys.stderr)
+        return 1
+
+    if agent_job:
+        if agent_job.gateway_url:
+            args.gateway = agent_job.gateway_url
+        if agent_job.gateway_api_key:
+            args.api_key = agent_job.gateway_api_key
+        if agent_job.instance_id:
+            args.instance = agent_job.instance_id
+        if agent_job.benchmark_variant:
+            args.benchmark_variant = agent_job.benchmark_variant
+        if agent_job.max_iterations:
+            args.max_iterations = agent_job.max_iterations
+        if agent_job.mode in ("llm", "gold"):
+            args.mode = agent_job.mode
+        if agent_job.run_id:
+            args.run_id = agent_job.run_id
+        if agent_job.llm_config_path:
+            args.llm_config = agent_job.llm_config_path
+        if agent_job.instances_catalog:
+            args.instances = agent_job.instances_catalog
+        elif agent_job.env_package_id:
+            sync_root = os.environ.get("UENV_SWE_ENV_PACKAGE", "")
+            if sync_root:
+                cat = Path(sync_root) / "catalog.json"
+                if cat.is_file():
+                    args.instances = str(cat)
+
+    if not args.instance:
+        ap.error("--instance or AgentJob.instance_id is required")
+    if not args.gateway and not (agent_job and agent_job.session_id):
+        ap.error("--gateway or AgentJob.gateway_url/session_id is required")
 
     run_id = (args.run_id or "").strip() or f"run-oh-{time.strftime('%Y%m%d-%H%M%S')}-pro-{args.mode}"
 
@@ -231,21 +291,31 @@ def main() -> int:
     row = _load_catalog(catalog_path, args.instance)
     workspace_dir = _pro_workspace_dir(args.benchmark_variant)
 
-    client = UEnvGatewayClient(args.gateway, api_key=args.api_key)
-    if not client.health():
-        print("gateway health check failed", file=sys.stderr)
-        return 1
+    if args.gateway:
+        client = UEnvGatewayClient(args.gateway, api_key=args.api_key, run_id=run_id)
+        if not client.health():
+            print("gateway health check failed", file=sys.stderr)
+            return 1
+    else:
+        client = UEnvGatewayClient("http://127.0.0.1:1", api_key=args.api_key, run_id=run_id)
 
-    llm = load_llm_config(args.llm_config)
-    logger.info("LLM model=%s", llm.model)
+    llm = None
+    if args.mode == "llm":
+        if not args.llm_config:
+            print("--llm-config required for llm mode", file=sys.stderr)
+            return 1
+        llm = load_llm_config(args.llm_config)
+        logger.info("LLM model=%s", llm.model)
 
+    session_id = agent_job.session_id if agent_job else None
     ws = UEnvWorkspace(
         working_dir=workspace_dir,
-        gateway_url=args.gateway,
+        gateway_url=args.gateway or (agent_job.gateway_url if agent_job else ""),
         instance_id=args.instance,
         benchmark_variant=args.benchmark_variant,
         api_key=args.api_key,
         run_id=run_id,
+        session_id=session_id,
     )
 
     _save_json(
@@ -255,8 +325,10 @@ def main() -> int:
             "instance": args.instance,
             "mode": args.mode,
             "run_id": run_id,
+            "session_id": session_id,
+            "agent_job_file": args.agent_job_file or None,
             "max_iterations": args.max_iterations,
-            "llm_model": str(llm.model),
+            "llm_model": str(llm.model) if llm else None,
             "benchmark_variant": args.benchmark_variant,
         },
     )

@@ -28,15 +28,20 @@ fi
 mkdir -p "$OUT"
 export OPENHANDS_BENCHMARKS_DIR="$BENCH"
 export UENV_REPO="$UENV"
+BRIDGE_DIR="${UENV_AGENT_BRIDGE_DIR:-$UENV/integrations/openhands}"
+export PYTHONPATH="$BRIDGE_DIR:${PYTHONPATH:-}"
+DRIVER="$BRIDGE_DIR/drivers/run_swebenchpro_official.py"
+[[ -f "$DRIVER" ]] || DRIVER="$BRIDGE_DIR/run_swebenchpro_official.py"
+INSTANCES="${UENV_SWE_INSTANCES:-$UENV/config/swe/pro-python-smoke.json}"
 
 cd "$SDK"
-exec uv run python "$UENV/integrations/openhands/run_swebenchpro_official.py" \
+exec uv run python "$DRIVER" \
   --llm-config "$LLM_JSON" \
   --gateway "$GATEWAY" \
   --api-key "$API_KEY" \
   --run-id "$RUN_ID" \
   --instance "$INSTANCE" \
-  --instances "$UENV/config/swe/pro-python-smoke.json" \
+  --instances "$INSTANCES" \
   --benchmark-variant pro \
   --mode "$MODE" \
   --max-iterations "${MAX_ITERATIONS:-30}" \

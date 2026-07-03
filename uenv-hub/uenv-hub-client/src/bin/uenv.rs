@@ -27,6 +27,11 @@ enum TopCommand {
         #[command(subcommand)]
         command: EnvCommand,
     },
+    /// Agent framework bridge packages (OpenHands, etc.).
+    AgentBridge {
+        #[command(subcommand)]
+        command: AgentBridgeCommand,
+    },
     /// Hub session / configuration.
     Hub {
         #[command(subcommand)]
@@ -112,6 +117,21 @@ enum EnvCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum AgentBridgeCommand {
+    /// Sync a published AgentBridgePackage to a local directory (digest-verified).
+    Sync {
+        /// Package id, e.g. `uenv-agent-openhands`.
+        package: String,
+        #[arg(long, default_value = "latest")]
+        version: String,
+        #[arg(long, default_value = "/opt/uenv/agent-bridges")]
+        target_dir: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[derive(Args)]
 struct PageArgs {
     #[arg(long, default_value_t = 1)]
@@ -181,6 +201,7 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         TopCommand::Env { command } => run_env(command, cli.endpoint).await,
+        TopCommand::AgentBridge { command } => run_agent_bridge(command, cli.endpoint).await,
         TopCommand::Hub { command } => run_hub(command, cli.endpoint).await,
     }
 }
@@ -342,20 +363,18 @@ fn version_lt(a: &str, b: &str) -> bool {
     false
 }
 
-/// `uenv env sync` — pull a package to `<target_dir>/envs/<pkg>/<ver>/`,
-/// digest-verifying every artifact, and write a `.synced` marker.
-async fn run_env_sync(
+/// Shared package sync implementation (EnvPackage + AgentBridgePackage).
+async fn run_package_sync(
     client: &HttpClient,
     package: &str,
     version: &str,
-    target_dir: &Path,
+    target_parent: &Path,
     dry_run: bool,
     worker_version: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manifest = client.get_package_manifest(package, version).await?;
     let resolved = manifest.version.clone();
 
-    // Platform compatibility check (A-layer contract).
     let min = manifest.platform.uenv_worker_min.trim();
     if let Some(wv) = &worker_version {
         if !min.is_empty() && version_lt(wv, min) {
@@ -366,7 +385,7 @@ async fn run_env_sync(
         }
     }
 
-    let dest = target_dir.join("envs").join(package).join(&resolved);
+    let dest = target_parent.join(package).join(&resolved);
     println!("package {package}@{resolved}");
     println!("  platform: uenv_worker_min={min} features={:?}", manifest.platform.features);
     println!("  target:   {}", dest.display());
@@ -387,8 +406,6 @@ async fn run_env_sync(
 
     std::fs::create_dir_all(&dest)?;
     for a in &manifest.artifacts {
-        // Only artifacts the Hub actually serves are downloadable; external
-        // (registry/tarball) references are recorded in images.manifest.json.
         if a.sync_mode != "inline" {
             println!("  skip {} (sync_mode={}, fetched out-of-band)", a.name, a.sync_mode);
             continue;
@@ -410,9 +427,7 @@ async fn run_env_sync(
         println!("  wrote {} ({} bytes)", out.display(), bytes.len());
     }
 
-    // Persist the manifest so the Worker can read worker_overlay / artifact list.
     std::fs::write(dest.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
-    // `.synced` marker (bundle digest is the integrity anchor).
     let marker = serde_json::json!({
         "package_id": package,
         "version": resolved,
@@ -421,6 +436,58 @@ async fn run_env_sync(
     });
     std::fs::write(dest.join(".synced"), serde_json::to_vec_pretty(&marker)?)?;
     println!("synced {package}@{resolved} -> {}", dest.display());
+    Ok(())
+}
+
+async fn run_agent_bridge(
+    command: AgentBridgeCommand,
+    endpoint: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (client, _cfg) = make_client(endpoint);
+    match command {
+        AgentBridgeCommand::Sync {
+            package,
+            version,
+            target_dir,
+            dry_run,
+        } => {
+            run_package_sync(&client, &package, &version, &target_dir, dry_run, None).await?;
+            let dest = target_dir.join(&package).join(
+                client
+                    .get_package_manifest(&package, &version)
+                    .await?
+                    .version,
+            );
+            println!("next: export UENV_AGENT_BRIDGE_DIR={}", dest.display());
+            Ok(())
+        }
+    }
+}
+
+/// `uenv env sync` — pull a package to `<target_dir>/envs/<pkg>/<ver>/`,
+/// digest-verifying every artifact, and write a `.synced` marker.
+async fn run_env_sync(
+    client: &HttpClient,
+    package: &str,
+    version: &str,
+    target_dir: &Path,
+    dry_run: bool,
+    worker_version: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_package_sync(
+        client,
+        package,
+        version,
+        &target_dir.join("envs"),
+        dry_run,
+        worker_version,
+    )
+    .await?;
+    let manifest = client.get_package_manifest(package, version).await?;
+    let dest = target_dir
+        .join("envs")
+        .join(package)
+        .join(manifest.version);
     println!("next: point the worker at it via UENV_SWE_ENV_PACKAGE={}", dest.display());
     Ok(())
 }

@@ -40,6 +40,14 @@ pub struct EnvPackageDir {
     pub images: HashMap<String, ImageEntry>,
 }
 
+/// Marker written by `uenv env sync` (`.synced`).
+#[derive(Debug, Clone)]
+pub struct SyncedPackageMarker {
+    pub package_id: String,
+    pub version: String,
+    pub bundle_digest: String,
+}
+
 impl EnvPackageDir {
     /// True if `dir` looks like a synced package (manifest + catalog present).
     pub fn is_synced(dir: &Path) -> bool {
@@ -91,6 +99,27 @@ impl EnvPackageDir {
             catalog_path,
             images,
         })
+    }
+
+    /// Read `.synced` marker if present.
+    pub fn read_synced_marker(dir: &Path) -> Option<SyncedPackageMarker> {
+        let raw = std::fs::read_to_string(dir.join(".synced")).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        Some(SyncedPackageMarker {
+            package_id: v.get("package_id")?.as_str()?.to_string(),
+            version: v.get("version")?.as_str()?.to_string(),
+            bundle_digest: v.get("bundle_digest")?.as_str()?.to_string(),
+        })
+    }
+
+    /// Apply `worker.overlay.yaml` hints into process env (safe subset only).
+    pub fn apply_overlay_env_hints(&self) {
+        if matches!(self.image_pull_policy, Some(ImagePullPolicy::LocalOnly)) {
+            // Edition 2024: set_var in multi-thread is discouraged; ops should export explicitly.
+            tracing::info!(
+                msg = "env_package overlay suggests UENV_SWE_IMAGE_PULL_POLICY=local_only"
+            );
+        }
     }
 }
 

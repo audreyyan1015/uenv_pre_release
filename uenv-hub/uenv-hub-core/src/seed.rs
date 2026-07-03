@@ -121,12 +121,13 @@ pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_di
         artifact_root,
         catalog_dir,
         "swe-bench-pro",
-        "0.1.0",
+        "0.2.0",
         "pro",
         "swebench_pro",
-        "SWE-bench Pro — multi-runner (pytest/go test/TAP) evaluation. Seed catalog is a placeholder example (swe-pro__example-go-1); real Pro images require an internal Pro registry.",
+        "SWE-bench Pro smoke catalog (pro-python-smoke.json) for 7143/OpenHands联调.",
     )
     .await?;
+    seed_agent_bridge_openhands(store, artifact_root, catalog_dir).await?;
     Ok(())
 }
 
@@ -142,9 +143,20 @@ async fn seed_swe_package(
     description: &str,
 ) -> Result<()> {
     if store.find_package_row(package_id).await?.is_some() {
-        return Ok(());
+        if store.get_package_manifest(package_id, version).await.is_ok() {
+            return Ok(());
+        }
     }
-    let catalog_path = catalog_dir.join(format!("{variant}.json"));
+    let catalog_path = if variant == "pro" {
+        let smoke = catalog_dir.join("pro-python-smoke.json");
+        if smoke.is_file() {
+            smoke
+        } else {
+            catalog_dir.join(format!("{variant}.json"))
+        }
+    } else {
+        catalog_dir.join(format!("{variant}.json"))
+    };
     let catalog_raw = match std::fs::read_to_string(&catalog_path) {
         Ok(s) => s,
         Err(e) => {
@@ -183,9 +195,11 @@ async fn seed_swe_package(
     });
     let agent_defaults = json!({
         "driver_entrypoint": if variant == "pro" { "run_swebenchpro_official.py" } else { "run_swebench.py" },
-        "workspace_dir": "/app",
+        "workspace_dir": if variant == "pro" { "/app" } else { "/testbed" },
         "tools": ["terminal", "file_editor"],
-        "max_iterations_default": 30
+        "max_iterations_default": 30,
+        "agent_bridge_id": "uenv-agent-openhands",
+        "agent_bridge_version": "1.0.0"
     });
     let contracts = dto::PackageContracts {
         runtime_gateway_api: Some("runtime/v1".into()),
@@ -195,7 +209,11 @@ async fn seed_swe_package(
     let platform = dto::PackagePlatform {
         uenv_worker_min: "0.1.0".into(),
         uenv_server_min: None,
-        features: vec!["runtime_gateway".into(), "swe_instance_pool".into()],
+        features: vec![
+            "runtime_gateway".into(),
+            "swe_instance_pool".into(),
+            "trajectory_v2_2".into(),
+        ],
     };
 
     let req = dto::PublishPackageRequest {
@@ -282,6 +300,139 @@ fn build_images_manifest(variant: &str, catalog: &serde_json::Map<String, Value>
         "pull_policy": "local_only",
         "images": images
     })
+}
+
+/// Seed `uenv-agent-openhands@1.0.0` when `integrations/openhands` exists beside the repo.
+pub async fn seed_agent_bridge_openhands(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    catalog_dir: &Path,
+) -> Result<()> {
+    let package_id = "uenv-agent-openhands";
+    let version = "1.0.0";
+    if store.get_package_manifest(package_id, version).await.is_ok() {
+        return Ok(());
+    }
+    let bridge_root = catalog_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|r| r.join("integrations/openhands"));
+    let Some(src) = bridge_root.filter(|p| p.is_dir()) else {
+        tracing::warn!(
+            package_id,
+            "skip agent bridge seed: integrations/openhands not found beside catalog_dir"
+        );
+        return Ok(());
+    };
+
+    let mut artifacts: Vec<dto::InlineArtifact> = Vec::new();
+    fn push_file(
+        artifacts: &mut Vec<dto::InlineArtifact>,
+        name: &str,
+        kind: &str,
+        rel: &str,
+        path: &Path,
+    ) -> Result<bool> {
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::error::HubError::Internal(format!("read {}: {e}", path.display()))
+        })?;
+        artifacts.push(dto::InlineArtifact {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            sync_mode: "inline".to_string(),
+            media_type: Some("text/plain".into()),
+            target_rel_path: Some(rel.to_string()),
+            content: Some(content),
+            content_b64: None,
+        });
+        Ok(true)
+    }
+
+    let manifest_added = push_file(
+        &mut artifacts,
+        "MANIFEST.json",
+        "other",
+        "MANIFEST.json",
+        &src.join("MANIFEST.json"),
+    )?;
+    if !manifest_added {
+        let manifest = json!({
+            "package_id": package_id,
+            "version": version,
+            "openhands_sdk_pin": "1.27.0",
+            "drivers": ["run_swebenchpro_official.py", "run_swebench.py"]
+        });
+        artifacts.push(dto::InlineArtifact {
+            name: "MANIFEST.json".into(),
+            kind: "other".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("MANIFEST.json".into()),
+            content: Some(serde_json::to_string_pretty(&manifest)?),
+            content_b64: None,
+        });
+    }
+    push_file(&mut artifacts, "PIN.md", "other", "PIN.md", &src.join("PIN.md"))?;
+
+    for name in [
+        "client.py",
+        "workspace.py",
+        "gateway_tools.py",
+        "runtime.py",
+        "agent_job.py",
+    ] {
+        push_file(
+            &mut artifacts,
+            &format!("uenv_runtime-{name}"),
+            "other",
+            &format!("uenv_runtime/{name}"),
+            &src.join("uenv_runtime").join(name),
+        )?;
+    }
+    for driver in ["run_swebenchpro_official.py", "run_swebench.py", "run_pro_agent.py"] {
+        push_file(
+            &mut artifacts,
+            &format!("drivers-{driver}"),
+            "other",
+            &format!("drivers/{driver}"),
+            &src.join(driver),
+        )?;
+    }
+
+    if artifacts.is_empty() {
+        tracing::warn!(package_id, "skip agent bridge seed: no artifacts collected");
+        return Ok(());
+    }
+
+    let req = dto::PublishPackageRequest {
+        version: version.to_string(),
+        publisher: Some("org-uenv-agent".into()),
+        description: Some("OpenHands UEnv agent bridge (uenv_runtime + drivers)".into()),
+        changelog: Some(format!("Seed {package_id}@{version} from {}", src.display())),
+        platform: dto::PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["runtime_gateway".into()],
+        },
+        worker_overlay: json!({}),
+        agent_defaults: json!({
+            "driver_entrypoint": "run_swebenchpro_official.py",
+            "workspace_dir": "/app",
+            "tools": ["terminal", "file_editor"]
+        }),
+        contracts: dto::PackageContracts {
+            runtime_gateway_api: Some("runtime/v1".into()),
+            tool_bridge_schema: Some("openhands-uenv-v1".into()),
+            ..Default::default()
+        },
+        artifacts,
+    };
+    package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
+    tracing::info!(package_id, version, "seeded AgentBridgePackage");
+    Ok(())
 }
 
 fn math_manifest() -> NewManifest {

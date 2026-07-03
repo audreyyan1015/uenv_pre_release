@@ -45,6 +45,7 @@ hub:
 
 swe:
   variants: ["pro"]
+  env_package_dir: "/var/lib/uenv/envs/swe-bench-pro/0.2.0"
   # 启动预热单实例镜像（M4 pull from Docker Hub jefzda/sweap-images）
   # prewarm 由 deploy 脚本按导出的 instance_id 注入
   warm_tag: true
