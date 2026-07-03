@@ -113,6 +113,35 @@ class CapacityAwareEpisodeClient(BatchRecordingEpisodeClient):
         )
 
 
+class ReorderedEpisodeClient(BatchRecordingEpisodeClient):
+    def submit_episode_stream(self, requests):
+        request_list = list(requests)
+        self.stream_calls.append(request_list)
+        results = []
+        for index, request in enumerate(request_list):
+            results.append(
+                EpisodeResult(
+                    request_id=request.request_id,
+                    status="completed",
+                    trajectory=Trajectory(
+                        steps=[
+                            StepRecord(
+                                step_index=0,
+                                action=f"answer-{index}".encode("utf-8"),
+                                reward=float(index),
+                                terminated=True,
+                                info={"response_ids": json.dumps([300 + index]), "response_mask": "[1]"},
+                            )
+                        ],
+                        total_reward=float(index),
+                        total_steps=1,
+                    ),
+                    summary=EpisodeSummary(total_reward=float(index), total_steps=1, terminate_reason="done"),
+                )
+            )
+        yield from reversed(results)
+
+
 class FakeServerManager:
     def __init__(self, addresses):
         self.server_addresses = addresses
@@ -368,6 +397,103 @@ class UEnvAgentLoopTest(unittest.TestCase):
 
         self.assertEqual([len(call) for call in client.stream_calls], [3, 1, 2, 1, 1])
         self.assertEqual([output.response_ids for output in outputs], [[42], [42], [42]])
+
+    def test_run_batch_reorders_results_by_request_id(self) -> None:
+        client = ReorderedEpisodeClient()
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+
+        outputs = asyncio.run(
+            loop.run_batch(
+                [{}, {}, {}],
+                [
+                    {"raw_prompt": "a", "data_source": "gsm8k"},
+                    {"raw_prompt": "b", "data_source": "gsm8k"},
+                    {"raw_prompt": "c", "data_source": "gsm8k"},
+                ],
+                batch_id="batch-reorder",
+            )
+        )
+
+        self.assertEqual([output.response_ids for output in outputs], [[300], [301], [302]])
+        self.assertEqual([output.reward_score for output in outputs], [0.0, 1.0, 2.0])
+
+    def test_build_episode_request_defaults_to_sync_parallel_mode(self) -> None:
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(self._result_with_token_ids()))
+
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt="2+2?",
+            sample_kwargs={"extra_info": {"batch_id": "batch-sync", "sample_index": 0}},
+        )
+
+        metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
+        self.assertEqual(metadata["parallel_mode"], "sync")
+        self.assertNotIn("generation_step", metadata)
+        self.assertNotIn("policy_version", metadata)
+
+    def test_build_episode_request_adds_one_step_parallel_metadata(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+            parallel_mode="one_step_off_policy",
+        )
+
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt="2+2?",
+            sample_kwargs={"extra_info": {"batch_id": "batch-one-step", "sample_index": 0, "global_steps": 3}},
+        )
+
+        metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
+        self.assertEqual(metadata["parallel_mode"], "one_step_off_policy")
+        self.assertEqual(metadata["global_step"], 3)
+        self.assertEqual(metadata["generation_step"], 3)
+        self.assertEqual(metadata["target_train_step"], 4)
+        self.assertEqual(metadata["rollout_step"], 3)
+        self.assertEqual(metadata["consume_step"], 4)
+        self.assertEqual(metadata["policy_version"], "actor-step-3")
+        self.assertEqual(metadata["rollout_policy_version"], "actor-step-3")
+        self.assertEqual(metadata["parameter_sync_id"], "sync-3")
+        self.assertEqual(metadata["max_allowed_staleness"], 1)
+
+    def test_build_episode_request_allows_one_step_metadata_overrides(self) -> None:
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(self._result_with_token_ids()))
+
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt="2+2?",
+            sample_kwargs={
+                "extra_info": {
+                    "batch_id": "batch-one-step",
+                    "sample_index": 0,
+                    "parallel_mode": "one_step_off_policy",
+                    "global_step": 10,
+                    "generation_step": 8,
+                    "target_train_step": 10,
+                    "rollout_step": 8,
+                    "consume_step": 10,
+                    "policy_version": "actor-custom-8",
+                    "rollout_policy_version": "rollout-custom-8",
+                    "parameter_sync_id": "sync-custom-8",
+                    "max_allowed_staleness": 2,
+                }
+            },
+        )
+
+        metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
+        self.assertEqual(metadata["parallel_mode"], "one_step_off_policy")
+        self.assertEqual(metadata["global_step"], 10)
+        self.assertEqual(metadata["generation_step"], 8)
+        self.assertEqual(metadata["target_train_step"], 10)
+        self.assertEqual(metadata["rollout_step"], 8)
+        self.assertEqual(metadata["consume_step"], 10)
+        self.assertEqual(metadata["policy_version"], "actor-custom-8")
+        self.assertEqual(metadata["rollout_policy_version"], "rollout-custom-8")
+        self.assertEqual(metadata["parameter_sync_id"], "sync-custom-8")
+        self.assertEqual(metadata["max_allowed_staleness"], 2)
 
     def test_run_can_fall_back_to_action_text(self) -> None:
         result = EpisodeResult(

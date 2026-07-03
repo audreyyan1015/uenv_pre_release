@@ -1,7 +1,7 @@
 # VeRL 异步模式接入 UEnv 字段设计
 
 > 版本：v0.1  
-> 日期：2026-07-02  
+> 日期：2026-07-03  
 > 范围：VeRL one-step off-policy 与 fully async 接入 UEnv pre-rollout 链路时，需要新增或透传的字段，以及 Server / Worker 对这些字段的处理方式。
 
 ## 1. 背景
@@ -55,11 +55,11 @@ UEnv 只补齐跨 Adapter / Server / Worker 的异步元数据、日志和结果
 ```text
 Python EpisodeRequest.payload JSON
   -> SampleEnvelope.payload_json
-  -> Rust adapter core 转成 Server EpisodeRequest.payload / metadata
+  -> Rust adapter core 转成 Server EpisodeRequest.payload，payload 内保留 metadata
   -> Server / Worker 读取或透传
 ```
 
-也就是说，异步字段应以 JSON metadata 的形式进入 episode payload，并由 Rust adapter core 原样透传给 Server / Worker。
+也就是说，异步字段应以 JSON metadata 的形式进入 episode payload，并由 Rust adapter core 放进 Server EpisodeRequest.payload.metadata，供 Server / Worker 读取、记录或继续透传。
 
 ## 4. 字段分级
 
@@ -377,13 +377,24 @@ Adapter 或 VeRL 也可以选择关闭 `actor_rollout_ref.actor.use_rollout_log_
 
 | 修改点 | 说明 |
 |---|---|
-| 识别 parallel mode | 根据启动脚本或环境变量写入 `parallel_mode` |
-| 提取 global step | 从 VeRL sample kwargs、extra_info 或 trainer runtime 中获取 |
+| 识别 parallel mode | 根据 `UENV_AGENT_LOOP_PARALLEL_MODE` 写入 `parallel_mode`，默认 `sync` |
+| 提取 global step | 从 VeRL sample kwargs / extra_info 获取；one-step 下由 batch patch 将 `gen_batch.meta_info.global_steps` 注入 sample extra_info |
 | 提取 policy version | 如果 VeRL runtime 暴露 actor version / sync step，应写入 metadata |
 | 记录 rollout step / consume step | one-step 下尤其重要 |
 | fully async 入口适配 | `fully_async_main` 使用 `FullyAsyncAgentLoopManager`，需要验证 UEnvAgentLoop 输出字段是否满足其 message queue |
-| result 校验 | 校验 `request_id`、`batch_id`、`sample_index`、`policy_version` 是否匹配 |
+| result 校验 | 校验 `request_id`、`batch_id`、`sample_index`、`policy_version` 是否匹配；Adapter 按 `request_id` 恢复 batch result 顺序 |
 | logprob 回填 | 如果 result 中有 `response_logprobs`，需要回填到 `AgentLoopOutput.response_logprobs` |
+
+当前 adapter 侧已落地的 one-step 字段能力：
+
+| 能力 | 当前实现 |
+|---|---|
+| 配置入口 | `configs/uenv-agent-loop.yaml` 读取 `UENV_AGENT_LOOP_PARALLEL_MODE` |
+| one-step 默认字段 | `parallel_mode=one_step_off_policy` 时，根据 `global_step/global_steps` 派生 `generation_step`、`target_train_step`、`rollout_step`、`consume_step`、`policy_version`、`rollout_policy_version`、`parameter_sync_id`、`max_allowed_staleness` |
+| 字段覆盖 | 上述字段可以通过 sample `extra_info` 显式覆盖 |
+| Rust core 透传 | Rust adapter core 将 `payload.metadata` 放入 Server / Worker payload 的 `metadata` 字段 |
+| 日志验证 | AgentLoop request/result JSONL 中记录 request metadata，便于证明 result 归属 |
+| 启动入口 | `scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh` 启用 VeRL one-step trainer + UEnvAgentLoop |
 
 ## 10. 推荐落地顺序
 
@@ -393,8 +404,8 @@ Adapter 或 VeRL 也可以选择关闭 `actor_rollout_ref.actor.use_rollout_log_
 
 | 步骤 | 内容 |
 |---|---|
-| 1 | Adapter 写入 `parallel_mode=one_step_off_policy` |
-| 2 | Adapter 写入 `global_step`、`generation_step`、`target_train_step`、`policy_version` |
+| 1 | Adapter 通过 `UENV_AGENT_LOOP_PARALLEL_MODE=one_step_off_policy` 写入 `parallel_mode=one_step_off_policy` |
+| 2 | Adapter 写入 `global_step`、`generation_step`、`target_train_step`、`policy_version`；只有 VeRL batch patch 能稳定把 one-step `global_steps` 带到每个 sample |
 | 3 | Server / Worker 原样透传 metadata |
 | 4 | Result 返回 `response_ids`、`response_mask`、`reward`、`trajectory`、metadata |
 | 5 | 日志验证每个 result 都能映射回 request |

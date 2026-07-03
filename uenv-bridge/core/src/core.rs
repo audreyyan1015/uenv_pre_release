@@ -225,6 +225,8 @@ fn sample_to_worker_payload(
         "request_id": sample.request_id,
         "question": question,
         "dataset": dataset,
+        "correlation_id": json_string(payload, "correlation_id").unwrap_or_else(|| sample.batch_id.clone()),
+        "metadata": metadata,
         "model_endpoint": model_endpoint,
         "model_name": json_string(model_ep, "model_name").unwrap_or_else(|| "policy-model".to_string()),
         "generation_config": model_ep.get("generation_config").cloned().unwrap_or_else(|| json!({})),
@@ -586,6 +588,55 @@ mod tests {
         assert_eq!(worker_payload["model_name"], "mock-policy");
         assert_eq!(worker_reward["type"], "rule_reward");
         assert_eq!(worker_reward["target"], "72");
+    }
+
+    #[tokio::test]
+    async fn execute_batch_preserves_async_metadata_in_worker_payload() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core = AdapterCore::new(RecordingEpisodeService {
+            requests: Arc::clone(&recorded),
+        });
+        let payload = br#"{
+            "correlation_id":"batch-async-0",
+            "env_config":{"data_source":"openai/gsm8k","raw_prompt":"user: 1+1?"},
+            "metadata":{
+                "batch_id":"batch-async",
+                "sample_index":0,
+                "parallel_mode":"one_step_off_policy",
+                "global_step":3,
+                "generation_step":3,
+                "target_train_step":4,
+                "policy_version":"actor-step-3",
+                "max_allowed_staleness":1
+            },
+            "model_endpoint":{
+                "url":"http://127.0.0.1:18080/v1",
+                "model_name":"mock-policy",
+                "generation_config":{"max_new_tokens":8}
+            }
+        }"#;
+
+        core.execute_batch(ExecuteBatchRequest {
+            request_id: "request-1".to_string(),
+            batch_id: "batch-async".to_string(),
+            samples: vec![make_sample("episode-1", 0, payload)],
+        })
+        .await
+        .unwrap();
+
+        let episode_requests = recorded.lock().unwrap().pop().unwrap();
+        let worker_payload: Value =
+            serde_json::from_slice(&episode_requests[0].payload).expect("worker payload json");
+
+        assert_eq!(worker_payload["correlation_id"], "batch-async-0");
+        assert_eq!(
+            worker_payload["metadata"]["parallel_mode"],
+            "one_step_off_policy"
+        );
+        assert_eq!(worker_payload["metadata"]["generation_step"], 3);
+        assert_eq!(worker_payload["metadata"]["target_train_step"], 4);
+        assert_eq!(worker_payload["metadata"]["policy_version"], "actor-step-3");
+        assert_eq!(worker_payload["metadata"]["max_allowed_staleness"], 1);
     }
 
     #[tokio::test]
