@@ -13,9 +13,11 @@ API_KEY="${UENV_GATEWAY_API_KEY:-swe-pro-secret}"
 LLM_JSON="${OPENHANDS_LLM_CONFIG:-$UENV/config/openhands-llm-20877.json}"
 INSTANCE="${UENV_PRO_INSTANCE:-instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+RUN_ID="${UENV_RUN_ID:-run-oh-${STAMP}-pro-${MODE}}"
 OUT="${OPENHANDS_RUNS_DIR:-/var/log/uenv/openhands-runs}/pro-official-${MODE}-${STAMP}"
 
 export PATH="$HOME/.local/bin:$PATH"
+source /root/.uenv-trajectory.env 2>/dev/null || true
 
 if [[ -f "$UENV/config/uenv-worker-llm.env" && ! -f "$LLM_JSON" ]]; then
   python3 "$UENV/scripts/gen-openhands-llm-config.py" \
@@ -26,14 +28,20 @@ fi
 mkdir -p "$OUT"
 export OPENHANDS_BENCHMARKS_DIR="$BENCH"
 export UENV_REPO="$UENV"
+BRIDGE_DIR="${UENV_AGENT_BRIDGE_DIR:-$UENV/integrations/openhands}"
+export PYTHONPATH="$BRIDGE_DIR:${PYTHONPATH:-}"
+DRIVER="$BRIDGE_DIR/drivers/run_swebenchpro_official.py"
+[[ -f "$DRIVER" ]] || DRIVER="$BRIDGE_DIR/run_swebenchpro_official.py"
+INSTANCES="${UENV_SWE_INSTANCES:-$UENV/config/swe/pro-python-smoke.json}"
 
 cd "$SDK"
-exec uv run python "$UENV/integrations/openhands/run_swebenchpro_official.py" \
+exec uv run python "$DRIVER" \
   --llm-config "$LLM_JSON" \
   --gateway "$GATEWAY" \
   --api-key "$API_KEY" \
+  --run-id "$RUN_ID" \
   --instance "$INSTANCE" \
-  --instances "$UENV/config/swe/pro-python-smoke.json" \
+  --instances "$INSTANCES" \
   --benchmark-variant pro \
   --mode "$MODE" \
   --max-iterations "${MAX_ITERATIONS:-30}" \

@@ -3,5 +3,7 @@
   "base_url": "http://219.147.100.43:18888/v1",
   "api_key": "REPLACE_ME",
   "temperature": 0.2,
-  "max_output_tokens": 4096
+  "max_output_tokens": 512,
+  "timeout": 1200,
+  "request_timeout": 1200
 }

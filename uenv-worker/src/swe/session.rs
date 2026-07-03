@@ -59,6 +59,8 @@ pub struct SweSession {
     gateway_base_url: String,
     /// v2.2：一次评测作业 ID，gateway create_session 后可注入（X-UEnv-Run-Id）。
     run_id: Mutex<String>,
+    /// Platform episode id when session pre-created via for-episode (SubmitEpisode path).
+    platform_episode_id: Mutex<Option<String>>,
 }
 
 impl SweSession {
@@ -132,6 +134,7 @@ impl SweSession {
             worker_id: worker_id.to_string(),
             gateway_base_url: gateway_base_url.to_string(),
             run_id: Mutex::new(String::new()),
+            platform_episode_id: Mutex::new(None),
         };
 
         // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified 在 /testbed）。
@@ -168,6 +171,13 @@ impl SweSession {
     pub fn set_run_id(&self, run_id: impl Into<String>) {
         if let Ok(mut g) = self.run_id.lock() {
             *g = run_id.into();
+        }
+    }
+
+    /// Platform episode id from Server scheduling (for-episode pre-create).
+    pub fn set_episode_id(&self, episode_id: impl Into<String>) {
+        if let Ok(mut g) = self.platform_episode_id.lock() {
+            *g = Some(episode_id.into());
         }
     }
 
@@ -365,7 +375,12 @@ impl SweSession {
             },
             batch_id: None,
             correlation_id: None,
-            episode_id: Some(self.episode_id.clone()),
+            episode_id: self
+                .platform_episode_id
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .or_else(|| Some(self.episode_id.clone())),
             session_id: self.episode_id.clone(),
             instance_id: self.instance.instance_id.clone(),
             benchmark_variant: self.instance.variant().as_str().to_string(),

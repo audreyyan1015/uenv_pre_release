@@ -58,21 +58,37 @@ class SubmitResult:
 class UEnvGatewayClient:
     """Thin HTTP client over the Worker L4 gateway."""
 
-    def __init__(self, base_url: str, timeout: float = 600.0, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 600.0,
+        api_key: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ):
         # Accept "host:port" or "http://host:port".
         if not base_url.startswith(("http://", "https://")):
             base_url = "http://" + base_url
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.api_key = api_key
+        self.run_id = (run_id or "").strip() or None
 
-    def _request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
         if self.api_key:
             req.add_header("X-API-Key", self.api_key)
+        for key, val in (extra_headers or {}).items():
+            if val:
+                req.add_header(key, val)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode()
@@ -99,12 +115,44 @@ class UEnvGatewayClient:
         instance_id: str,
         benchmark_variant: str = "verified",
         command_mode: str = "FullShell",
+        run_id: Optional[str] = None,
     ) -> "UEnvSession":
+        rid = (run_id or self.run_id or "").strip()
+        extra_headers = {"X-UEnv-Run-Id": rid} if rid else None
         resp = self._request(
             "POST",
             "/runtime/v1/sessions",
             {
                 "instance_id": instance_id,
+                "benchmark_variant": benchmark_variant,
+                "command_mode": command_mode,
+            },
+            extra_headers=extra_headers,
+        )
+        return UEnvSession(
+            client=self,
+            session_id=resp["session_id"],
+            instance_id=resp.get("instance_id", instance_id),
+            benchmark_variant=resp.get("benchmark_variant", benchmark_variant),
+            command_mode=resp.get("command_mode", command_mode),
+            observation=resp.get("observation", {}),
+        )
+
+    def create_session_for_episode(
+        self,
+        instance_id: str,
+        episode_id: str,
+        run_id: str,
+        benchmark_variant: str = "verified",
+        command_mode: str = "FullShell",
+    ) -> "UEnvSession":
+        resp = self._request(
+            "POST",
+            "/runtime/v1/sessions/for-episode",
+            {
+                "instance_id": instance_id,
+                "episode_id": episode_id,
+                "run_id": run_id,
                 "benchmark_variant": benchmark_variant,
                 "command_mode": command_mode,
             },
@@ -116,6 +164,17 @@ class UEnvGatewayClient:
             benchmark_variant=resp.get("benchmark_variant", benchmark_variant),
             command_mode=resp.get("command_mode", command_mode),
             observation=resp.get("observation", {}),
+        )
+
+    def attach_session(self, session_id: str, instance_id: str) -> "UEnvSession":
+        """Use a Server/Worker pre-created session (skip POST /sessions)."""
+        return UEnvSession(
+            client=self,
+            session_id=session_id,
+            instance_id=instance_id,
+            benchmark_variant="pro",
+            command_mode="FullShell",
+            observation={},
         )
 
     # ── per-session ops (used by UEnvSession) ────────────────────────

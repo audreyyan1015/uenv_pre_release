@@ -35,6 +35,8 @@ struct GatewayState {
     pool: Arc<SweInstancePool>,
     /// 可选 `X-API-Key`（M5-5）：`Some` 时所有非 health 路由强制校验。
     api_key: Option<String>,
+    /// Public URL returned in for-episode responses (AgentJob.gateway_url).
+    gateway_public_url: String,
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResp>)>;
@@ -49,10 +51,19 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorResp>) 
 }
 
 /// 构建 Gateway 路由（注入 L2 池 + 可选 API key）。health 公开，其余经 `X-API-Key` 校验。
-pub fn router(pool: Arc<SweInstancePool>, api_key: Option<String>) -> Router {
-    let state = GatewayState { pool, api_key };
+pub fn router(
+    pool: Arc<SweInstancePool>,
+    api_key: Option<String>,
+    gateway_public_url: String,
+) -> Router {
+    let state = GatewayState {
+        pool,
+        api_key,
+        gateway_public_url,
+    };
     let protected = Router::new()
         .route("/runtime/v1/sessions", post(create_session))
+        .route("/runtime/v1/sessions/for-episode", post(create_session_for_episode))
         .route("/runtime/v1/sessions/{id}/exec", post(exec))
         .route("/runtime/v1/sessions/{id}/read", post(read))
         .route("/runtime/v1/sessions/{id}/write", post(write))
@@ -72,6 +83,7 @@ pub async fn serve_gateway(
     pool: Arc<SweInstancePool>,
     listen: String,
     api_key: Option<String>,
+    gateway_public_url: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = listen.parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -80,11 +92,12 @@ pub async fn serve_gateway(
         worker_id = "worker",
         episode_id = "-",
         gateway_addr = %addr,
+        gateway_public_url = %gateway_public_url,
         catalog = pool.catalog_len(),
         auth = %if api_key.is_some() { "x-api-key" } else { "none" },
         msg = "runtime_gateway_start"
     );
-    axum::serve(listener, router(pool, api_key)).await?;
+    axum::serve(listener, router(pool, api_key, gateway_public_url)).await?;
     Ok(())
 }
 
@@ -170,6 +183,80 @@ async fn create_session(
             command_mode: format!("{mode:?}"),
             observation,
         }))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let status = if msg.contains("not in catalog") {
+                StatusCode::NOT_FOUND
+            } else if msg.contains("at capacity") {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            Err(err(status, msg))
+        }
+    }
+}
+
+// ─── for-episode (Server pre-create; Phase B without uenv-server orchestration) ─
+#[derive(Deserialize)]
+struct ForEpisodeReq {
+    instance_id: String,
+    episode_id: String,
+    run_id: String,
+    #[serde(default)]
+    benchmark_variant: Option<String>,
+    #[serde(default)]
+    command_mode: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ForEpisodeResp {
+    session_id: String,
+    gateway_url: String,
+    instance_id: String,
+    benchmark_variant: String,
+    command_mode: String,
+    observation: ResetObservation,
+}
+
+async fn create_session_for_episode(
+    State(st): State<GatewayState>,
+    Json(req): Json<ForEpisodeReq>,
+) -> ApiResult<ForEpisodeResp> {
+    let variant = match &req.benchmark_variant {
+        Some(v) => BenchmarkVariant::parse(v)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("invalid benchmark_variant `{v}`")))?,
+        None => BenchmarkVariant::default(),
+    };
+    let mode = match &req.command_mode {
+        Some(m) => CommandPolicy::parse(m)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("invalid command_mode `{m}`")))?,
+        None => CommandPolicy::FullShell,
+    };
+    let policy = CommandPolicyConfig::default().with_mode(mode);
+    let instance_id = req.instance_id.clone();
+    let episode_id = req.episode_id.clone();
+    let run_id = req.run_id.clone();
+    let pool = st.pool.clone();
+    let gateway_url = st.gateway_public_url.clone();
+
+    let result = tokio::task::spawn_blocking(move || pool.create_session(&instance_id, variant, policy))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
+
+    match result {
+        Ok((session_id, observation)) => {
+            st.pool.set_session_run_id(&session_id, &run_id);
+            st.pool.set_session_episode_id(&session_id, &episode_id);
+            Ok(Json(ForEpisodeResp {
+                session_id,
+                gateway_url,
+                instance_id: req.instance_id,
+                benchmark_variant: variant.as_str().to_string(),
+                command_mode: format!("{mode:?}"),
+                observation,
+            }))
         }
         Err(e) => {
             let msg = e.to_string();

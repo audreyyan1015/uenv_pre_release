@@ -24,6 +24,10 @@ message EpisodeRequest {
     google.protobuf.Timestamp lease_expire_at = 14;
     uint64 scheduler_epoch = 15;
     bytes dispatch_token = 16;
+
+    // Hub EnvPackage reference (design 260629).
+    string env_package_id = 17;
+    string env_package_version = 18;
 }
 
 // ─── StepRecord ──────────────────────────────────────────────

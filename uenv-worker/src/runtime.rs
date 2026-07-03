@@ -177,6 +177,8 @@ impl WorkerRuntime {
         let scheduler_mode: SchedulerMode = self.scheduler_mode.parse()?;
         let metrics = MetricsExporter::new();
         let worker_id = self.worker_id.clone();
+        let gw_public = gateway_public_url(&self.gateway_listen);
+        let synced_packages = load_synced_env_packages(self.swe_env_package_dir.as_deref());
         let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
             scheduler_mode,
             self.server_endpoint.clone(),
@@ -186,6 +188,8 @@ impl WorkerRuntime {
             worker_id.clone(),
             detect_resource_spec(),
             metrics.clone(),
+            gw_public.clone(),
+            synced_packages,
         ));
         if let Err(err) = control_plane.register().await {
             if allow_degraded_start() {
@@ -260,7 +264,14 @@ impl WorkerRuntime {
             let listen = self.gateway_listen.clone();
             let api_key = self.gateway_api_key.clone();
             tokio::spawn(async move {
-                if let Err(err) = crate::runtime_gateway::serve_gateway(pool, listen, api_key).await {
+                if let Err(err) = crate::runtime_gateway::serve_gateway(
+                    pool,
+                    listen,
+                    api_key,
+                    gw_public,
+                )
+                .await
+                {
                     tracing::error!(
                         trace_id = "runtime",
                         worker_id = "worker",
@@ -305,7 +316,6 @@ fn allow_degraded_start() -> bool {
         .unwrap_or(false)
 }
 
-/// Gateway 对外 URL（轨迹 ref 中的 fetch 基址）。
 fn gateway_public_url(listen: &str) -> String {
     if let Ok(url) = std::env::var("UENV_SWE_GATEWAY_PUBLIC_URL") {
         let t = url.trim();
@@ -325,7 +335,39 @@ fn gateway_public_url(listen: &str) -> String {
     }
 }
 
-/// 加载 SWE-bench 实例目录（plan §5.4.3）：按 `swe.variants` 逐变体从 Hub 下发拉取
+/// Build RegisterWorker.synced_env_packages from a synced EnvPackage directory.
+fn load_synced_env_packages(env_package_dir: Option<&str>) -> Vec<crate::proto::scheduler::v1::SyncedEnvPackage> {
+    use crate::proto::scheduler::v1::SyncedEnvPackage;
+    use crate::swe::env_package::EnvPackageDir;
+    let Some(dir) = env_package_dir
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("UENV_SWE_ENV_PACKAGE").ok())
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let path = std::path::Path::new(&dir);
+    if !EnvPackageDir::is_synced(path) {
+        return Vec::new();
+    }
+    let marker = EnvPackageDir::read_synced_marker(path);
+    let pkg = EnvPackageDir::load(path).ok();
+    match (marker, pkg) {
+        (Some(m), Some(p)) => vec![SyncedEnvPackage {
+            package_id: p.package_id,
+            version: p.version,
+            bundle_digest: m.bundle_digest,
+        }],
+        (None, Some(p)) => vec![SyncedEnvPackage {
+            package_id: p.package_id,
+            version: p.version,
+            bundle_digest: String::new(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+/// 加载 SWE-bench 实例目录
 /// （`GET /api/v1/swe/{variant}/instances`），失败回退本地文件；合并后做镜像命名空间校验。
 async fn load_swe_catalog(
     hub_enabled: bool,

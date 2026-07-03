@@ -1,0 +1,55 @@
+syntax = "proto3";
+package uenv.v1;
+
+// Server → Agent pool job contract (design 260629 / 260701).
+// C-layer scheduling state: gateway_url, session_id, run_id are injected per job.
+
+message AgentJob {
+    string job_id = 1;
+    string run_id = 2;
+    string gateway_url = 3;
+    // Secret name or inline key ref for Agent runtime (not stored in Hub).
+    string gateway_api_key = 4;
+    string session_id = 5;
+    string instance_id = 6;
+    string benchmark_variant = 7;
+    string env_package_id = 8;
+    string env_package_version = 9;
+    string agent_bridge_id = 10;
+    string agent_bridge_version = 11;
+    string driver_entrypoint = 12;
+    string model_endpoint = 13;
+    int32 max_iterations = 14;
+    string workspace_dir = 15;
+    string episode_id = 16;
+    string llm_config_path = 17;
+    string mode = 18; // "llm" | "gold"
+}
+
+message PollAgentJobRequest {
+    string agent_pool_id = 1;
+    string worker_id = 2;
+}
+
+message PollAgentJobResponse {
+    bool has_job = 1;
+    AgentJob job = 2;
+}
+
+message AgentJobCompleteRequest {
+    string job_id = 1;
+    string run_id = 2;
+    string status = 3; // "completed" | "failed" | "timeout"
+    double reward = 4;
+    string trajectory_id = 5;
+    string error_message = 6;
+}
+
+message AgentJobCompleteResponse {
+    bool ack = 1;
+}
+
+service AgentControlService {
+    rpc PollAgentJob(PollAgentJobRequest) returns (PollAgentJobResponse);
+    rpc CompleteAgentJob(AgentJobCompleteRequest) returns (AgentJobCompleteResponse);
+}

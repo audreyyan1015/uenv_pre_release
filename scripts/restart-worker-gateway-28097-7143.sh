@@ -5,13 +5,25 @@ cd /root/UEnv
 
 echo "== rebuild worker =="
 source ~/.cargo/env 2>/dev/null || true
+bash scripts/gen-worker-proto.sh
 cargo build -p uenv-worker --release 2>&1 | tail -5
+
+sudo mkdir -p /var/lib/uenv/swe-artifacts/spool/pending /var/lib/uenv/swe-artifacts/bodies /var/lib/uenv/swe-artifacts/index/by-id
 
 pkill -f 'uenv-worker.*serve' || true
 sleep 2
 source /root/.uenv-worker.env 2>/dev/null || true
+source /root/.uenv-trajectory.env 2>/dev/null || true
 export UENV_WORKER_ALLOW_DEGRADED_START=1
 export UENV_SWE_GATEWAY_PUBLIC_URL=http://219.147.100.43:28097
+export UENV_SWE_ARTIFACT_DIR="${UENV_SWE_ARTIFACT_DIR:-/var/lib/uenv/swe-artifacts}"
+export UENV_TRAJECTORY_ENDPOINT="${UENV_TRAJECTORY_ENDPOINT:-http://8.130.75.157:8077}"
+# EnvPackage sync dir (Phase A): set by deploy-phase-abc-e2e.sh or manually after `uenv env sync`
+export UENV_SWE_ENV_PACKAGE="${UENV_SWE_ENV_PACKAGE:-}"
+if [[ -z "$UENV_SWE_ENV_PACKAGE" && -d /var/lib/uenv/envs/swe-bench-pro/0.2.0 ]]; then
+  export UENV_SWE_ENV_PACKAGE=/var/lib/uenv/envs/swe-bench-pro/0.2.0
+fi
+# Legacy fallback when EnvPackage not synced
 export UENV_SWE_INSTANCES="${UENV_SWE_INSTANCES:-/root/UEnv/config/swe/pro.json}"
 export UENV_SWE_RUNTIME=docker
 export UENV_SWE_IMAGE_PULL=1

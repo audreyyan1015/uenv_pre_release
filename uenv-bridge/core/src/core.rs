@@ -156,6 +156,7 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
     let model_endpoint = json_string(model_ep, "url").unwrap_or_default();
     let worker_payload = sample_to_worker_payload(&sample, &payload, model_ep, &model_endpoint);
     let worker_reward_config = sample_to_worker_reward_config(&payload);
+    let env_cfg = payload.get("env_config").unwrap_or(&Value::Null);
 
     Ok(ProtoEpisodeRequest {
         episode_id: sample.request_id,
@@ -170,6 +171,12 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
         seed: json_i32(episode_cfg, "seed"),
         timeout_seconds: json_i32(&payload, "timeout_seconds").unwrap_or(300),
         reward_config: serde_json::to_vec(&worker_reward_config).unwrap_or_default(),
+        env_package_id: json_string(env_cfg, "env_package_id")
+            .or_else(|| json_string(env_cfg, "package_id"))
+            .unwrap_or_default(),
+        env_package_version: json_string(env_cfg, "env_package_version")
+            .or_else(|| json_string(env_cfg, "package_version"))
+            .unwrap_or_default(),
         ..Default::default()
     })
 }
@@ -206,6 +213,11 @@ fn sample_to_worker_payload(
     if sample.env_type == "swe" {
         if let Some(obj) = worker_payload.as_object_mut() {
             for key in ["instance_id", "benchmark_variant", "use_gold_patch", "command_mode"] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+            for key in ["env_package_id", "env_package_version"] {
                 if let Some(v) = env_cfg.get(key) {
                     obj.insert(key.to_string(), v.clone());
                 }

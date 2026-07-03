@@ -24,13 +24,16 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 # UEnv integration (dependency-free client + workspace)
 _INTEGRATION = Path(__file__).resolve().parent
 sys.path.insert(0, str(_INTEGRATION))
-from uenv_runtime.client import UEnvGatewayClient  # noqa: E402
+from uenv_runtime.client import UEnvGatewayClient, GatewayError  # noqa: E402
+from uenv_runtime.agent_job import load_agent_job  # noqa: E402
 from uenv_runtime.gateway_tools import patch_openhands_tools_for_uenv  # noqa: E402
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
 
@@ -69,6 +72,96 @@ def _save_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _verify_server_trajectory(
+    trajectory_id: str,
+    run_id: str,
+    out: Path,
+) -> dict[str, Any]:
+    """Optional: GET trajectory from Server :8077 after Worker upload ack."""
+    endpoint = os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+    token = os.environ.get("UENV_TRAJECTORY_TOKEN", "").strip()
+    if not endpoint or not trajectory_id:
+        return {"skipped": True, "reason": "UENV_TRAJECTORY_ENDPOINT unset or no trajectory_id"}
+
+    headers = {"X-Trajectory-Token": token} if token else {}
+    doc: dict[str, Any] = {"endpoint": endpoint, "trajectory_id": trajectory_id, "run_id": run_id}
+
+    def _get(path: str) -> tuple[int, str]:
+        req = urllib.request.Request(f"{endpoint}{path}", method="GET")
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(errors="replace")
+
+    # Wait for async uploader (spool drainer polls every 5s).
+    body_ok = False
+    list_ok = False
+    for attempt in range(1, 25):
+        status, raw = _get(f"/control/v1/trajectories/{trajectory_id}")
+        doc[f"body_attempt_{attempt}"] = status
+        if status == 200:
+            body_ok = True
+            try:
+                doc["body_keys"] = list(json.loads(raw).keys())
+            except json.JSONDecodeError:
+                doc["body_keys"] = []
+            break
+        time.sleep(5)
+
+    if run_id:
+        status, raw = _get(f"/control/v1/trajectories?run_id={urllib.parse.quote(run_id)}&limit=10")
+        doc["list_status"] = status
+        if status == 200:
+            try:
+                arr = json.loads(raw).get("trajectories", [])
+                doc["list_count"] = len(arr) if isinstance(arr, list) else 0
+                list_ok = isinstance(arr, list) and any(
+                    x.get("trajectory_id") == trajectory_id for x in arr
+                )
+            except json.JSONDecodeError:
+                doc["list_count"] = 0
+
+    doc["body_ok"] = body_ok
+    doc["list_ok"] = list_ok
+    doc["server_verified"] = body_ok
+    _save_json(out / "server_trajectory_verify.json", doc)
+    return doc
+
+
+def _fetch_trajectory_bundle(client: UEnvGatewayClient, ref: dict, out: Path) -> dict | None:
+    """Fetch full bundle from Server (preferred after upload) or Gateway."""
+    tid = ref.get("trajectory_id")
+    if not tid:
+        return None
+    endpoint = os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+    token = os.environ.get("UENV_TRAJECTORY_TOKEN", "").strip()
+
+    if endpoint:
+        headers = {"X-Trajectory-Token": token} if token else {}
+        for attempt in range(1, 25):
+            req = urllib.request.Request(f"{endpoint}/control/v1/trajectories/{tid}", method="GET")
+            for k, v in headers.items():
+                req.add_header(k, v)
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    return json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 503) and attempt < 24:
+                    time.sleep(5)
+                    continue
+                _save_json(out / "server_trajectory_fetch_error.json", {"status": e.code, "body": e.read().decode(errors="replace")})
+                break
+
+    try:
+        return client.get_trajectory(tid)
+    except GatewayError as e:
+        _save_json(out / "gateway_trajectory_fetch_error.json", {"status": e.status, "message": e.message})
+        return None
+
+
 def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
     """Like benchmarks fake_user_response helper but compatible with LocalConversation."""
     from benchmarks.utils.fake_user_response import (
@@ -100,16 +193,82 @@ def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="OpenHands SDK Pro eval via UEnv Gateway")
-    ap.add_argument("--llm-config", required=True, help="OpenHands LLM JSON (openhands.sdk.LLM)")
-    ap.add_argument("--gateway", default=os.environ.get("UENV_GATEWAY", "http://10.10.20.143:28999"))
+    ap.add_argument(
+        "--llm-config",
+        default=os.environ.get("OPENHANDS_LLM_CONFIG", ""),
+        help="OpenHands LLM JSON (openhands.sdk.LLM); optional for gold mode",
+    )
+    ap.add_argument(
+        "--gateway",
+        default=os.environ.get("UENV_GATEWAY", ""),
+        help="Runtime Gateway URL (optional when UENV_AGENT_JOB_FILE is set)",
+    )
     ap.add_argument("--api-key", default=os.environ.get("UENV_GATEWAY_API_KEY"))
-    ap.add_argument("--instance", required=True)
-    ap.add_argument("--instances", default="config/swe/pro-python-smoke.json")
+    ap.add_argument("--instance", default=os.environ.get("UENV_PRO_INSTANCE", ""))
+    ap.add_argument(
+        "--instances",
+        default=os.environ.get(
+            "UENV_SWE_INSTANCES",
+            os.environ.get("UENV_SWE_ENV_PACKAGE_CATALOG", "config/swe/pro-python-smoke.json"),
+        ),
+    )
     ap.add_argument("--benchmark-variant", default="pro")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--max-iterations", type=int, default=30)
     ap.add_argument("--mode", choices=["llm", "gold"], default="llm")
+    ap.add_argument(
+        "--run-id",
+        default=os.environ.get("UENV_RUN_ID", ""),
+        help="一次评测作业 ID（注入 X-UEnv-Run-Id；默认 UENV_RUN_ID 或自动生成）",
+    )
+    ap.add_argument(
+        "--agent-job-file",
+        default=os.environ.get("UENV_AGENT_JOB_FILE", ""),
+        help="AgentJob JSON (Phase B); overrides gateway/session/run/instance when set",
+    )
     args = ap.parse_args()
+
+    agent_job = None
+    if args.agent_job_file:
+        os.environ["UENV_AGENT_JOB_FILE"] = args.agent_job_file
+    try:
+        agent_job = load_agent_job(args.agent_job_file or None)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"AgentJob load failed: {exc}", file=sys.stderr)
+        return 1
+
+    if agent_job:
+        if agent_job.gateway_url:
+            args.gateway = agent_job.gateway_url
+        if agent_job.gateway_api_key:
+            args.api_key = agent_job.gateway_api_key
+        if agent_job.instance_id:
+            args.instance = agent_job.instance_id
+        if agent_job.benchmark_variant:
+            args.benchmark_variant = agent_job.benchmark_variant
+        if agent_job.max_iterations:
+            args.max_iterations = agent_job.max_iterations
+        if agent_job.mode in ("llm", "gold"):
+            args.mode = agent_job.mode
+        if agent_job.run_id:
+            args.run_id = agent_job.run_id
+        if agent_job.llm_config_path:
+            args.llm_config = agent_job.llm_config_path
+        if agent_job.instances_catalog:
+            args.instances = agent_job.instances_catalog
+        elif agent_job.env_package_id:
+            sync_root = os.environ.get("UENV_SWE_ENV_PACKAGE", "")
+            if sync_root:
+                cat = Path(sync_root) / "catalog.json"
+                if cat.is_file():
+                    args.instances = str(cat)
+
+    if not args.instance:
+        ap.error("--instance or AgentJob.instance_id is required")
+    if not args.gateway and not (agent_job and agent_job.session_id):
+        ap.error("--gateway or AgentJob.gateway_url/session_id is required")
+
+    run_id = (args.run_id or "").strip() or f"run-oh-{time.strftime('%Y%m%d-%H%M%S')}-pro-{args.mode}"
 
     _ensure_benchmarks_path()
     patch_openhands_tools_for_uenv()
@@ -132,20 +291,31 @@ def main() -> int:
     row = _load_catalog(catalog_path, args.instance)
     workspace_dir = _pro_workspace_dir(args.benchmark_variant)
 
-    client = UEnvGatewayClient(args.gateway, api_key=args.api_key)
-    if not client.health():
-        print("gateway health check failed", file=sys.stderr)
-        return 1
+    if args.gateway:
+        client = UEnvGatewayClient(args.gateway, api_key=args.api_key, run_id=run_id)
+        if not client.health():
+            print("gateway health check failed", file=sys.stderr)
+            return 1
+    else:
+        client = UEnvGatewayClient("http://127.0.0.1:1", api_key=args.api_key, run_id=run_id)
 
-    llm = load_llm_config(args.llm_config)
-    logger.info("LLM model=%s", llm.model)
+    llm = None
+    if args.mode == "llm":
+        if not args.llm_config:
+            print("--llm-config required for llm mode", file=sys.stderr)
+            return 1
+        llm = load_llm_config(args.llm_config)
+        logger.info("LLM model=%s", llm.model)
 
+    session_id = agent_job.session_id if agent_job else None
     ws = UEnvWorkspace(
         working_dir=workspace_dir,
-        gateway_url=args.gateway,
+        gateway_url=args.gateway or (agent_job.gateway_url if agent_job else ""),
         instance_id=args.instance,
         benchmark_variant=args.benchmark_variant,
         api_key=args.api_key,
+        run_id=run_id,
+        session_id=session_id,
     )
 
     _save_json(
@@ -154,8 +324,11 @@ def main() -> int:
             "gateway": args.gateway,
             "instance": args.instance,
             "mode": args.mode,
+            "run_id": run_id,
+            "session_id": session_id,
+            "agent_job_file": args.agent_job_file or None,
             "max_iterations": args.max_iterations,
-            "llm_model": str(llm.model),
+            "llm_model": str(llm.model) if llm else None,
             "benchmark_variant": args.benchmark_variant,
         },
     )
@@ -217,16 +390,21 @@ def main() -> int:
         ref = result.trajectory_ref
         if ref and ref.get("trajectory_id"):
             _save_json(out / "trajectory_ref.json", ref)
-            try:
-                bundle = client.get_trajectory(ref["trajectory_id"])
+            bundle = _fetch_trajectory_bundle(client, ref, out)
+            if bundle:
                 _save_json(out / "trajectory_bundle.json", bundle)
-            except urllib.error.HTTPError as e:
-                print(f"get_trajectory failed: {e.code}", file=sys.stderr)
+
+        server_doc = _verify_server_trajectory(
+            (ref or {}).get("trajectory_id", ""),
+            run_id,
+            out,
+        )
 
         with run_log.open("a", encoding="utf-8") as f:
             f.write(
                 f"[done] mode={args.mode} reward={result.reward} "
-                f"tests={result.tests_passed}/{result.tests_total} elapsed={elapsed:.1f}s\n"
+                f"tests={result.tests_passed}/{result.tests_total} elapsed={elapsed:.1f}s "
+                f"run_id={run_id} server_verified={server_doc.get('server_verified')}\n"
             )
 
         print(
@@ -236,7 +414,10 @@ def main() -> int:
                     "reward": result.reward,
                     "tests_passed": result.tests_passed,
                     "tests_total": result.tests_total,
+                    "run_id": run_id,
                     "trajectory_id": (ref or {}).get("trajectory_id"),
+                    "upload_status": (ref or {}).get("upload_status"),
+                    "server_verified": server_doc.get("server_verified"),
                     "output_dir": str(out),
                 }
             )

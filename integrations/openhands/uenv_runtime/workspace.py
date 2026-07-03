@@ -31,6 +31,8 @@ class UEnvWorkspace(LocalWorkspace):
     command_mode: str = "FullShell"
     api_key: Optional[str] = None
     gateway_timeout: float = 600.0
+    run_id: Optional[str] = None
+    session_id: Optional[str] = None
 
     _client: Any = None
     _session: Any = None
@@ -41,16 +43,20 @@ class UEnvWorkspace(LocalWorkspace):
             self.gateway_url,
             timeout=self.gateway_timeout,
             api_key=self.api_key,
+            run_id=self.run_id,
         )
 
     @property
     def session(self) -> UEnvSession:
         if self._session is None:
-            self._session = self._client.create_session(
-                self.instance_id,
-                self.benchmark_variant,
-                self.command_mode,
-            )
+            if self.session_id:
+                self._session = self._client.attach_session(self.session_id, self.instance_id)
+            else:
+                self._session = self._client.create_session(
+                    self.instance_id,
+                    self.benchmark_variant,
+                    self.command_mode,
+                )
         return self._session
 
     @property

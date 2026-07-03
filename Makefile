@@ -20,6 +20,7 @@ proto-server:
 		$(PROTO_ROOT)/uenv/v1/scheduler.proto \
 		$(PROTO_WORKER) \
 		$(PROTO_ROOT)/uenv/v1/episode.proto \
+		$(PROTO_ROOT)/uenv/v1/agent.proto \
 		$(PROTO_ROOT)/uenv/v1/common.proto \
 		$(PROTO_ROOT)/uenv/v1/wal.proto \
 		--prost_out=uenv-server/src/gen \
@@ -30,6 +31,7 @@ proto-worker:
 		$(PROTO_WORKER) \
 		$(PROTO_SCHED) \
 		$(PROTO_ROOT)/uenv/v1/episode.proto \
+		$(PROTO_ROOT)/uenv/v1/agent.proto \
 		$(PROTO_ROOT)/uenv/v1/common.proto \
 		$(PROTO_ROOT)/uenv/v1/wal.proto \
 		--prost_out=uenv-worker/src/gen \
