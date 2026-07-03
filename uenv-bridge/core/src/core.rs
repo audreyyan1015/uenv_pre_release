@@ -16,11 +16,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use uenv_server::proto::v1::{
-    EpisodeRequest as ProtoEpisodeRequest,
-    EpisodeResult as ProtoEpisodeResult,
+    EpisodeRequest as ProtoEpisodeRequest, EpisodeResult as ProtoEpisodeResult,
 };
 
 use crate::protocol::{
@@ -66,13 +65,33 @@ where
             results,
         })
     }
+
+    pub async fn execute_sample(&self, sample: SampleEnvelope) -> Result<SampleResult, CoreError> {
+        validate_batch(std::slice::from_ref(&sample))?;
+        let sample_context = sample_context_by_request_id(std::slice::from_ref(&sample));
+        let episode_request = sample_to_episode_request(sample)?;
+        let episode_results = self
+            .episode_service
+            .submit_episode_batch(vec![episode_request])
+            .await?;
+        validate_episode_results(&episode_results, &sample_context)?;
+        let mut results = episode_results
+            .into_iter()
+            .map(|r| episode_result_to_sample_result(r, &sample_context))
+            .collect::<Result<Vec<_>, _>>()?;
+        results.pop().ok_or_else(|| {
+            CoreError::InvalidEpisodeResult("EpisodeService returned no result".to_string())
+        })
+    }
 }
 
 fn validate_batch(samples: &[SampleEnvelope]) -> Result<(), CoreError> {
     let mut request_ids = BTreeSet::new();
     for sample in samples {
         if sample.request_id.is_empty() {
-            return Err(CoreError::InvalidEnvelope("request_id is required".to_string()));
+            return Err(CoreError::InvalidEnvelope(
+                "request_id is required".to_string(),
+            ));
         }
         if !request_ids.insert(sample.request_id.as_str()) {
             return Err(CoreError::InvalidEnvelope(format!(
@@ -81,13 +100,19 @@ fn validate_batch(samples: &[SampleEnvelope]) -> Result<(), CoreError> {
             )));
         }
         if sample.batch_id.is_empty() {
-            return Err(CoreError::InvalidEnvelope("batch_id is required".to_string()));
+            return Err(CoreError::InvalidEnvelope(
+                "batch_id is required".to_string(),
+            ));
         }
         if sample.framework.is_empty() {
-            return Err(CoreError::InvalidEnvelope("framework is required".to_string()));
+            return Err(CoreError::InvalidEnvelope(
+                "framework is required".to_string(),
+            ));
         }
         if sample.payload_json.is_empty() {
-            return Err(CoreError::InvalidEnvelope("payload_json is required".to_string()));
+            return Err(CoreError::InvalidEnvelope(
+                "payload_json is required".to_string(),
+            ));
         }
     }
     Ok(())
@@ -105,7 +130,10 @@ fn sample_context_by_request_id(samples: &[SampleEnvelope]) -> BTreeMap<String, 
         .map(|s| {
             (
                 s.request_id.clone(),
-                SampleContext { batch_id: s.batch_id.clone(), sample_index: s.sample_index },
+                SampleContext {
+                    batch_id: s.batch_id.clone(),
+                    sample_index: s.sample_index,
+                },
             )
         })
         .collect()
@@ -280,7 +308,9 @@ fn proto_trajectory_to_json_bytes(
         "total_reward": trajectory.total_reward,
         "total_steps": trajectory.total_steps,
     }))
-    .map_err(|err| CoreError::InvalidEpisodeResult(format!("failed to encode trajectory_json: {err}")))
+    .map_err(|err| {
+        CoreError::InvalidEpisodeResult(format!("failed to encode trajectory_json: {err}"))
+    })
 }
 
 fn bytes_to_lossy_string(bytes: &[u8]) -> String {
@@ -288,18 +318,24 @@ fn bytes_to_lossy_string(bytes: &[u8]) -> String {
 }
 
 fn json_i32(value: &Value, key: &str) -> Option<i32> {
-    value.get(key).and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok())
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .and_then(|v| i32::try_from(v).ok())
 }
 
 fn json_string(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(ToString::to_string)
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use uenv_server::proto::v1::episode_result::Summary;
     use uenv_server::proto::v1::{StepRecord, Trajectory};
     use uenv_server::{EpisodeService, EpisodeServiceError};
@@ -343,7 +379,10 @@ mod tests {
                 .map(|r| ProtoEpisodeResult {
                     episode_id: r.episode_id.clone(),
                     status: "completed".to_string(),
-                    summary: Some(Summary { total_reward: 0.0, ..Default::default() }),
+                    summary: Some(Summary {
+                        total_reward: 0.0,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 })
                 .collect();
@@ -377,7 +416,10 @@ mod tests {
                 .map(|_| ProtoEpisodeResult {
                     episode_id: "episode-1".to_string(),
                     status: "completed".to_string(),
-                    summary: Some(Summary { total_reward: 0.0, ..Default::default() }),
+                    summary: Some(Summary {
+                        total_reward: 0.0,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 })
                 .collect())
@@ -453,9 +495,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_sample_uses_single_episode_request() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core = AdapterCore::new(RecordingEpisodeService {
+            requests: Arc::clone(&recorded),
+        });
+        let result = core
+            .execute_sample(make_sample(
+                "episode-1",
+                9,
+                b"{\"episode_config\":{\"max_steps\":3},\"model_endpoint\":{\"url\":\"http://vllm:8000/v1\"}}",
+            ))
+            .await
+            .unwrap();
+
+        let calls = recorded.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].len(), 1);
+        assert_eq!(calls[0][0].episode_id, "episode-1");
+        assert_eq!(result.request_id, "episode-1");
+        assert_eq!(result.sample_index, 9);
+    }
+
+    #[tokio::test]
     async fn execute_batch_converts_envelope_to_episode_request() {
         let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let core = AdapterCore::new(RecordingEpisodeService { requests: Arc::clone(&recorded) });
+        let core = AdapterCore::new(RecordingEpisodeService {
+            requests: Arc::clone(&recorded),
+        });
         let response = core
             .execute_batch(ExecuteBatchRequest {
                 request_id: "request-1".to_string(),
@@ -479,7 +546,9 @@ mod tests {
     #[tokio::test]
     async fn execute_batch_maps_verl_math_payload_to_worker_contract() {
         let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let core = AdapterCore::new(RecordingEpisodeService { requests: Arc::clone(&recorded) });
+        let core = AdapterCore::new(RecordingEpisodeService {
+            requests: Arc::clone(&recorded),
+        });
         let payload = br#"{
             "env_config":{"data_source":"openai/gsm8k","raw_prompt":"user: ignored"},
             "metadata":{"extra_info":{"question":"How many clips?"}},
@@ -505,12 +574,15 @@ mod tests {
         let episode_requests = recorded.lock().unwrap().pop().unwrap();
         let worker_payload: Value =
             serde_json::from_slice(&episode_requests[0].payload).expect("worker payload json");
-        let worker_reward: Value = serde_json::from_slice(&episode_requests[0].reward_config)
-            .expect("worker reward json");
+        let worker_reward: Value =
+            serde_json::from_slice(&episode_requests[0].reward_config).expect("worker reward json");
 
         assert_eq!(worker_payload["question"], "How many clips?");
         assert_eq!(worker_payload["dataset"], "openai/gsm8k");
-        assert_eq!(worker_payload["model_endpoint"], "http://127.0.0.1:18080/v1");
+        assert_eq!(
+            worker_payload["model_endpoint"],
+            "http://127.0.0.1:18080/v1"
+        );
         assert_eq!(worker_payload["model_name"], "mock-policy");
         assert_eq!(worker_reward["type"], "rule_reward");
         assert_eq!(worker_reward["target"], "72");

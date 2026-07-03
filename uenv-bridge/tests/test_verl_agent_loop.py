@@ -4,8 +4,10 @@ import asyncio
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
+from uenv.bridge.agent_loop_clients import AgentLoopClientConfig
 from uenv.bridge.clients import RustCoreClientConfig, RustCoreEpisodeClient
 from uenv.bridge.protocol import EpisodeResult, EpisodeSummary, StepRecord, Trajectory
 from uenv.bridge.verl_agent_loop import UEnvAgentLoop
@@ -224,6 +226,43 @@ class FakeCoreBatchStub:
                 for sample in request["samples"]
             ],
         }
+
+
+class FakeCoreStreamStub:
+    def __init__(self) -> None:
+        self.seen_samples = []
+
+    def ExecuteBatchStream(self, samples, timeout=None):
+        for sample in samples:
+            self.seen_samples.append(sample)
+            yield {
+                "request_id": sample["request_id"],
+                "batch_id": sample["batch_id"],
+                "sample_index": sample["sample_index"],
+                "status": "completed",
+                "reward": float(sample["sample_index"]) + 10.0,
+                "done": True,
+                "termination_reason": "stream_done",
+                "trajectory_json": json.dumps(
+                    {
+                        "steps": [
+                            {
+                                "step_index": 0,
+                                "action": f"stream-{sample['sample_index']}",
+                                "reward": float(sample["sample_index"]) + 10.0,
+                                "terminated": True,
+                            }
+                        ],
+                        "total_reward": float(sample["sample_index"]) + 10.0,
+                        "total_steps": 1,
+                    }
+                ).encode("utf-8"),
+                "error_code": "",
+                "error_message": "",
+            }
+
+    def ExecuteBatch(self, request, timeout=None):
+        raise AssertionError("streaming client should not call ExecuteBatch")
 
 
 class UEnvAgentLoopTest(unittest.TestCase):
@@ -594,6 +633,32 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual([sample["sample_index"] for sample in stub.last_request["samples"]], [0, 1, 2])
         self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
         self.assertEqual([result.summary.total_reward for result in results], [0.0, 1.0, 2.0])
+
+    def test_rust_core_client_can_use_execute_batch_stream(self) -> None:
+        stub = FakeCoreStreamStub()
+        client = RustCoreEpisodeClient(RustCoreClientConfig(streaming=True), stub=stub)
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+        requests = [
+            loop.build_episode_request(
+                sampling_params={},
+                prompt_ids=[10],
+                raw_prompt=f"question-{index}",
+                sample_kwargs={"extra_info": {"batch_id": "batch-stream", "sample_index": index}},
+            )
+            for index in range(3)
+        ]
+
+        results = list(client.submit_episode_stream(requests))
+
+        self.assertEqual([sample["sample_index"] for sample in stub.seen_samples], [0, 1, 2])
+        self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
+        self.assertEqual([result.summary.total_reward for result in results], [10.0, 11.0, 12.0])
+
+    def test_agent_loop_client_config_reads_streaming_env(self) -> None:
+        with unittest.mock.patch.dict("os.environ", {"UENV_ADAPTER_CORE_STREAMING": "1"}):
+            config = AgentLoopClientConfig.from_env()
+
+        self.assertTrue(config.streaming)
 
     def _result_with_token_ids(self) -> EpisodeResult:
         step = StepRecord(
