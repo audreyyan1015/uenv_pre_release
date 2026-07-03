@@ -17,6 +17,7 @@ class AgentLoopClientConfig:
     startup_timeout_seconds: float = 30.0
     auto_start: bool = False
     binary: str | None = None
+    streaming: bool = False
     fake_reward: float = 1.0
     fake_response_text: str = ""
 
@@ -30,6 +31,7 @@ class AgentLoopClientConfig:
         startup_timeout_seconds: float | None = None,
         auto_start: bool | None = None,
         binary: str | None = None,
+        streaming: bool | None = None,
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
     ) -> "AgentLoopClientConfig":
@@ -48,6 +50,11 @@ class AgentLoopClientConfig:
                 else os.getenv("UENV_ADAPTER_CORE_AUTO_START", "0") not in {"0", "false", "False"}
             ),
             binary=binary or os.getenv("UENV_ADAPTER_CORE_BINARY"),
+            streaming=(
+                streaming
+                if streaming is not None
+                else os.getenv("UENV_ADAPTER_CORE_STREAMING", "0") not in {"0", "false", "False"}
+            ),
             fake_reward=float(fake_reward if fake_reward is not None else os.getenv("UENV_AGENT_LOOP_FAKE_REWARD", "1.0")),
             fake_response_text=fake_response_text
             if fake_response_text is not None
@@ -111,6 +118,7 @@ def build_agent_loop_episode_client(
     startup_timeout_seconds: float | None = None,
     auto_start: bool | None = None,
     binary: str | None = None,
+    streaming: bool | None = None,
     fake_reward: float | None = None,
     fake_response_text: str | None = None,
 ) -> EpisodeClient:
@@ -121,6 +129,7 @@ def build_agent_loop_episode_client(
         startup_timeout_seconds=startup_timeout_seconds,
         auto_start=auto_start,
         binary=binary,
+        streaming=streaming,
         fake_reward=fake_reward,
         fake_response_text=fake_response_text,
     )
@@ -134,6 +143,7 @@ def build_agent_loop_episode_client(
                 startup_timeout_seconds=config.startup_timeout_seconds,
                 auto_start=config.auto_start,
                 binary=config.binary,
+                streaming=config.streaming,
             )
         )
     raise ValueError(f"Unsupported UENV_AGENT_LOOP_CLIENT={config.mode!r}; expected fake or rust_core")

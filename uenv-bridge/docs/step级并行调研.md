@@ -720,3 +720,162 @@ metrics collector
 | 第四阶段 | 将 VeRL、ROLL、ROCK + ROLL 的 step time、gen time、idle ratio、GPU util 做统一对比 |
 | 第五阶段 | 结合 NexRL 重新设计 trajectory pool、weight sync 和 inference service 边界 |
 | 第六阶段 | 调研并设计异构计算资源下的 step 级并行 GPU 调度策略 |
+
+## 12. UEnv 集成 VeRL 原生 Step 级并行设计方案
+
+本节给出 UEnv 当前阶段的实际集成方案：先不在 UEnv 中重新实现统一的 step 级并行层，而是直接使用 VeRL 自身提供的并行模式和参数。UEnv 只负责在 pre-rollout 阶段接出请求、转发到 Server/Worker、回填结果、记录元数据和统计指标。
+
+### 12.1 设计目标
+
+| 目标 | 说明 |
+|---|---|
+| 保持 VeRL 原生语义 | one-step off-policy、fully async、同步 GRPO 的训练语义仍由 VeRL 控制 |
+| 降低 UEnv 接入风险 | UEnv 不重新实现 policy version、staleness、logprob 对齐和异步队列 |
+| 支持对比实验 | 在相同 UEnv Server/Worker 链路下，对比 VeRL 同步、one-step off-policy、fully async 的效果 |
+| 保持 Adapter 边界清晰 | Adapter 只处理 EpisodeRequest / EpisodeResult，不介入 loss、advantage、optimizer 和权重更新 |
+
+### 12.2 总体边界
+
+UEnv 与 VeRL 的边界保持在 pre-rollout AgentLoop 附近：
+
+```text
+VeRL trainer / rollout runtime
+  -> UEnv AgentLoop shim
+  -> Python Adapter
+  -> Rust adapter core
+  -> UEnv Server / Worker
+  -> EpisodeResult
+  -> Python Adapter
+  -> AgentLoopOutput
+  -> VeRL trainer continues advantage / loss / update
+```
+
+其中，VeRL 仍负责：
+
+| VeRL 负责 | 说明 |
+|---|---|
+| step 调度 | 同步 step、one-step off-policy、fully async 的执行顺序 |
+| policy version 语义 | 当前 batch 使用哪个 actor 权重，由 VeRL runtime 决定 |
+| logprob / ref logprob | 训练所需概率项仍由 VeRL 计算 |
+| advantage / loss / optimizer | GRPO/PPO 的训练计算仍在 VeRL 内部 |
+| 权重同步 | actor 更新后如何同步到 rollout engine，沿用 VeRL 原生机制 |
+
+UEnv 负责：
+
+| UEnv 负责 | 说明 |
+|---|---|
+| pre-rollout 请求接出 | 将 VeRL prompt batch 转成 EpisodeRequest |
+| Server/Worker 调用 | 将 episode 交给外部 Server/Worker 完成 rollout 和 reward |
+| 结果回填 | 将 response、reward、trajectory 等结果转回 AgentLoopOutput |
+| 请求归属记录 | 记录 task、step、episode、request、model endpoint 等元数据 |
+| 指标观测 | 记录 gen time、server latency、result latency、reward 分布和失败率 |
+
+### 12.3 VeRL 三种模式的接入方式
+
+| 模式 | VeRL 入口 | UEnv 接入方式 | 预期用途 |
+|---|---|---|---|
+| 同步 GRPO | `verl.trainer.main_ppo` | 当前 pre-rollout AgentLoop 接出 | 稳定基线，验证 UEnv 全链路正确性 |
+| One-step off-policy | `verl.experimental.one_step_off_policy.main_ppo` | 仍使用同一个 UEnv AgentLoop shim，由 VeRL 控制一拍流水线 | 验证 rollout 与 update 的部分重叠 |
+| Fully async | `verl.experimental.fully_async_policy.fully_async_main` | VeRL fully async rollouter 本身基于 AgentLoop server mode；UEnv 可复用 AgentLoop shim，但需要单独验证请求/结果队列与异步回填语义 | 验证更强异步队列下的吞吐变化 |
+
+关键原则是：UEnv 不判断当前该不该训练某个旧 batch，也不决定 stale sample 是否可用。这些逻辑必须留在 VeRL 内部。
+
+补充说明：VeRL fully async 的官方实现要求 vLLM 使用基于 AgentLoop 的 server mode，源码中由 `FullyAsyncAgentLoopManager` 组织 rollout worker。因此从机制上看，它可以接入 AgentLoop。当前文档中的 UEnv fully async 接入仍是设计目标，不等价于已经完成全链路验证；现有 fully async 基线脚本主要用于纯 VeRL 对比，未启用 UEnv Server/Worker。
+
+### 12.4 配置映射
+
+VeRL 并行相关参数仍按 VeRL 原生方式配置。UEnv 只读取和记录必要上下文。
+
+| 参数类别 | 示例 | 归属 |
+|---|---|---|
+| 训练步数 | `TRAINING_STEPS` | VeRL 脚本 |
+| 训练 batch | `TRAIN_BATCH_SIZE`、`PPO_MINI_BATCH_SIZE`、`PPO_MICRO_BATCH_SIZE_PER_GPU` | VeRL |
+| rollout 数量 | `ROLLOUT_N`、`DATA_MAX_RESPONSE_LENGTH` | VeRL / UEnv request payload |
+| GPU 资源 | `NGPUS_PER_NODE`、`CUDA_VISIBLE_DEVICES_IN_CONTAINER`、`ROLLOUT_TP` | VeRL runtime |
+| UEnv 连接 | `UENV_ADAPTER_CORE_ENDPOINT`、`UENV_ADAPTER_CORE_AUTO_START` | UEnv Adapter |
+| 模型入口 | `UENV_ROLLOUT_MODEL_ENDPOINT` 或 UEnv model gateway URL | UEnv request payload |
+| 日志目录 | `UENV_RECORD_DIR`、脚本 log path | UEnv / 脚本 |
+
+如果 VeRL 模式不同，例如同步、one-step、fully async，应该通过不同脚本或显式环境变量选择 VeRL 启动入口，而不是让 Adapter 内部推断。
+
+### 12.5 Request / Result 元数据要求
+
+为了支持 VeRL 原生异步模式下的排查，UEnv 发送给 Server/Worker 的 episode 请求中应尽量包含以下元数据：
+
+| 字段 | 用途 |
+|---|---|
+| `request_id` | 单次 episode 请求唯一标识 |
+| `batch_id` | VeRL 当前 batch 或 UEnv 构造 batch 的标识 |
+| `sample_index` | batch 内样本位置 |
+| `global_step` | VeRL 当前训练 step；如果拿不到，应记录为 unknown，而不是伪造 |
+| `task_type` | 当前阶段主要为 `math` |
+| `prompt` | rollout 输入 |
+| `model_endpoint` | Server/Worker 调用模型的入口；可以是真实 vLLM URL 或 UEnv gateway URL |
+| `model_name` | 模型名 |
+| `max_new_tokens` | rollout 最大生成长度 |
+
+如果后续能从 VeRL runtime 中稳定拿到 policy version，应继续补充：
+
+| 字段 | 用途 |
+|---|---|
+| `policy_version` | 判断 result 属于哪个 actor 权重 |
+| `rollout_step` | 区分 rollout 发起 step 与 trainer 消费 step |
+| `parallel_mode` | `sync`、`one_step_off_policy`、`fully_async` |
+
+当前阶段不强制 UEnv 根据这些字段做调度，但必须把它们作为日志和排错依据。
+
+### 12.6 日志与指标
+
+为了判断 VeRL 原生并行方案在 UEnv 链路中的收益，必须同时记录 VeRL 侧和 UEnv 侧指标。
+
+| 指标 | 来源 | 说明 |
+|---|---|---|
+| `timing_s/step` | VeRL log | 每个 trainer step 的端到端耗时 |
+| `timing_s/gen` | VeRL log | VeRL 认为的 rollout/generation 等待时间 |
+| `timing_s/update_actor` | VeRL log | actor 更新耗时 |
+| `timing_s/ref` / ref logprob 相关指标 | VeRL log | reference 计算耗时 |
+| request count | UEnv request jsonl | 每 step 发出的 episode 数量 |
+| result count | UEnv result jsonl | 每 step 收到的 episode 数量 |
+| server latency | UEnv / Server log | Server/Worker 执行 episode 的耗时 |
+| reward mean / max / min | UEnv result + VeRL log | 判断 reward 是否正常进入训练 |
+| failure / timeout count | UEnv log | 判断异步模式下是否有请求丢失或超时 |
+
+对比时应至少区分 cold start 和 steady-state。短程实验需要剔除首个 step，长程实验需要单独统计 warmup、稳态均值、长尾和失败率。
+
+### 12.7 实验计划
+
+第一轮只考虑 VeRL，并保持 Server/Worker、模型、数据集尽量一致。
+
+| 阶段 | 内容 | 目标 |
+|---|---|---|
+| A | 同步 GRPO + UEnv pre-rollout | 作为正确性和性能基线 |
+| B | one-step off-policy + UEnv pre-rollout | 验证一拍流水线是否能隐藏部分 rollout 时间 |
+| C | fully async + UEnv pre-rollout | 验证更强异步队列是否能降低 trainer idle |
+| D | 8GPU 资源切分对照 | 比较 rollout GPU 与 trainer GPU 的不同分配 |
+| E | 长步数验证 | 从 5/10 steps 扩展到 50+ steps，观察 reward、loss、吞吐是否稳定 |
+
+推荐优先比较以下配置：
+
+| 配置 | 说明 |
+|---|---|
+| sync 8GPU | 同步基线 |
+| one-step 6 rollout / 2 train | 目前 VeRL 纯框架实验中较有代表性的切分 |
+| one-step 4 rollout / 4 train | 检查 trainer 侧加速是否抵消 rollout endpoint 减少 |
+| fully async 6 rollout / 2 train | 检查 async queue 能否降低 trainer idle |
+| fully async 4 rollout / 4 train | 作为更均衡资源切分对照 |
+
+### 12.8 风险与约束
+
+| 风险 | 说明 | 处理方式 |
+|---|---|---|
+| VeRL experimental 接口不稳定 | one-step 和 fully async 都可能受版本影响 | 脚本固定镜像和 commit，日志记录入口与参数 |
+| UEnv result 延迟放大异步长尾 | Server/Worker 慢请求会影响 async queue | 记录 request/result latency，必要时设置 timeout 和重试 |
+| policy version 不可见 | Adapter 当前不一定能稳定拿到 actor 版本 | 先记录 global step 和 request id，后续再补 policy_version |
+| batch 与 micro-batch 不整除 | 多 GPU 配置容易触发 shape/assertion 错误 | 在脚本中显式校验 batch、mini-batch、micro-batch 和 GPU 数 |
+| 资源切分不当反而变慢 | rollout 和 trainer 任一侧资源不足都会拖慢 step | 使用小规模矩阵实验找可行区间，不默认异步一定更快 |
+
+### 12.9 当前结论
+
+UEnv 当前阶段应采用“VeRL 原生 step 并行 + UEnv 透明接出”的方式推进。也就是说，UEnv 不提供新的 step 并行算法，不接管 VeRL 的训练调度，只保证在不同 VeRL 并行模式下，EpisodeRequest 能正确发出，EpisodeResult 能正确回填，日志能够证明请求、结果、reward、trajectory 和 step 指标是可追踪的。
+
+这条路线的优点是实现风险低、能快速复用 VeRL 已有能力，并且便于和纯 VeRL baseline 做公平对比。后续只有在多个框架都跑通并确认 UEnv 需要跨框架统一调度时，才考虑更高层的统一并行控制面。

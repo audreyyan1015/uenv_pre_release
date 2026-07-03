@@ -34,6 +34,7 @@ class RustCoreClientConfig:
     startup_timeout_seconds: float = 30.0
     auto_start: bool = False
     binary: str | None = None
+    streaming: bool = False
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "RustCoreClientConfig":
@@ -44,6 +45,7 @@ class RustCoreClientConfig:
             startup_timeout_seconds=float(core.get("startup_timeout_seconds", 30.0)),
             auto_start=bool(core.get("auto_start", False)),
             binary=str(core["binary"]) if core.get("binary") else None,
+            streaming=bool(core.get("streaming", False)),
         )
 
 
@@ -171,16 +173,32 @@ class RustCoreEpisodeClient:
     def submit_episode_stream(self, requests: Iterable[EpisodeRequest]) -> Iterable[EpisodeResult]:
         if self.stub is None:
             raise RuntimeError("RustCoreEpisodeClient requires an AdapterCoreService stub before submitting episodes")
+        request_list = list(requests)
+        if self.config.streaming:
+            yield from self._submit_episode_streaming(request_list)
+            return
+
         if not hasattr(self.stub, "ExecuteBatch"):
             raise RuntimeError("RustCoreEpisodeClient stub does not provide ExecuteBatch")
 
-        request_list = list(requests)
         core_request = self._to_core_execute_batch_request(request_list)
         try:
             core_response = self.stub.ExecuteBatch(core_request, timeout=self.config.timeout_seconds)
         except TypeError:
             core_response = self.stub.ExecuteBatch(core_request)
         for result in self._core_response_results(core_response):
+            yield self._from_core_result(result)
+
+    def _submit_episode_streaming(self, requests: list[EpisodeRequest]) -> Iterable[EpisodeResult]:
+        if not hasattr(self.stub, "ExecuteBatchStream"):
+            raise RuntimeError("RustCoreEpisodeClient streaming mode requires ExecuteBatchStream")
+        core_request = self._to_core_execute_batch_request(requests)
+        samples = self._core_request_samples(core_request)
+        try:
+            core_results = self.stub.ExecuteBatchStream(iter(samples), timeout=self.config.timeout_seconds)
+        except TypeError:
+            core_results = self.stub.ExecuteBatchStream(iter(samples))
+        for result in core_results:
             yield self._from_core_result(result)
 
     def _to_core_execute_batch_request(self, requests: list[EpisodeRequest]) -> dict[str, Any]:
@@ -315,6 +333,11 @@ class RustCoreEpisodeClient:
         if isinstance(response, dict):
             return response.get("results") or []
         return getattr(response, "results", [])
+
+    def _core_request_samples(self, request: Any) -> Iterable[Any]:
+        if isinstance(request, dict):
+            return request.get("samples") or []
+        return getattr(request, "samples", [])
 
     def _field(self, value: Any, name: str, default: Any) -> Any:
         if isinstance(value, dict):
