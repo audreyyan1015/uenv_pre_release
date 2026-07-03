@@ -1,6 +1,6 @@
 # OpenHands 任务链路与 Hub 组合包实现现状报告
 
-> **日期**：2026-07-01（**v1.3 实机同步更新**：2026-07-03）  
+> **日期**：2026-07-01（**v1.4**：2026-07-03 增补 §2.0 核心架构冻结）  
 > **依据**：`260629-hub-env-package-design.md`、`260627-swe-openhands-integration-plan.md`、`260627-openhands-swe-trajectory-chain-audit.md`、`Docs/hub/uenv-hub环境标准化指南.md` 及当前仓库代码  
 > **目的**：对照目标架构，梳理 SWE/OpenHands 联调链路与 Hub EnvPackage 两条线的**代码实现现状**、**实机部署态**与**差距**
 
@@ -19,13 +19,166 @@
 
 **一句话**：**Phase A 实机已闭环**（Hub 发布 → 7143 `env sync` → Worker 加载 EnvPackage）；**Phase B 代码侧 proto/Worker/for-episode/OpenHands AgentJob 消费已就绪，但 uenv-server 编排未实现**，OpenHands 联调仍走「Agent 直连 Gateway」旁路；**Phase C 桥接包已在 Hub 发布，208.77 部署仍以 rsync 源码为主**。
 
-**后续规划**：见 **§5 分模块后续调整规划**（Phase A/B/C + 9 个模块的 P0/P1/P2 清单与验收口径）。
+**后续规划**：见 **§2.0 核心架构（冻结）**、**§5 分模块后续调整规划**（Phase A/B/C + 9 个模块的 P0/P1/P2 清单与验收口径）。
 
 ---
 
 ## 2. 任务链路：目标架构 vs 当前实现
 
-### 2.1 目标架构（规划冻结）
+### 2.0 核心架构（冻结）
+
+本节冻结 **Agent 池 + Worker 池 + Server 编排 + Hub 制品分发** 的职责边界与调度方案，作为 Phase B（uenv-server）实施的架构依据。与 `260629-hub-env-package-design.md` §5–§8 一致，并补齐原文档未显式写清的 **Agent 池一等资源** 模型。
+
+#### 2.0.1 一句话
+
+- **Hub**：管 EnvPackage、AgentBridgePackage 的**版本化制品与 sync 源**，不管池、不调度。
+- **Server**：Episode 的**唯一编排者**——为每单完成 **Worker（环境）+ Agent（框架）** 的组合选择与下派，并注入全部 C 层运行时参数。
+- **Agent 池**：独立机器上的 **OpenHands + bridge sync 产物**，向 Server **注册能力与负载**，通过 **`PollAgentJob`** 领任务。
+
+#### 2.0.2 三层职责
+
+| 层 | 组件 | 职责 | 不负责 |
+|----|------|------|--------|
+| **B — Hub** | `uenv-hub` | EnvPackage、AgentBridgePackage 的**注册、版本、制品、sync 源** | Episode 调度、选机、`gateway_url`、在线状态 |
+| **A — 执行面** | Worker 池 + Agent 池 | Worker 跑 SWE 沙箱；Agent 跑 OpenHands tool loop | 任务编排、跨池配对 |
+| **C — Server** | `uenv-server` | 按 Episode **选 Worker + 选 Agent → 建 session → 下派 AgentJob → 收结果** | 制品存储、bulk sync |
+
+Hub 回答「**有什么版本可用**」；Server 回答「**这一单用哪台 Worker、哪台 Agent、带什么运行时参数**」。
+
+#### 2.0.3 拓扑：双执行池 + Server 居中
+
+```text
+                    ┌─────────────┐
+                    │   Server    │  Episode 编排、双池调度、AgentJob 队列
+                    └──────┬──────┘
+           ┌───────────────┼───────────────┐
+           ▼                               ▼
+   ┌───────────────┐               ┌───────────────┐
+   │  Worker 池     │               │  Agent 池      │
+   │  (7143 等)     │               │  (208.77 等)   │
+   │  SWE 环境执行   │◄── HTTP ──────│  OpenHands     │
+   │  Runtime GW    │   Gateway     │  + bridge 包   │
+   └───────────────┘               └───────────────┘
+           ▲                               ▲
+           │ uenv env sync                 │ uenv agent-bridge sync
+           └───────────────┬───────────────┘
+                       ▼
+                 ┌──────────┐
+                 │   Hub    │  仅制品与版本（不参与 Episode 热路径）
+                 └──────────┘
+```
+
+| | **Worker 池** | **Agent 池** |
+|--|---------------|--------------|
+| 部署内容 | `uenv-worker` + EnvPackage sync 目录 | OpenHands 基础环境 + AgentBridgePackage sync 目录 |
+| 向 Server 注册 | ✅ `RegisterWorker`（已有） | ❌ **待增** `RegisterAgent`（与 Worker 对称） |
+| 上报能力 | `synced_env_packages`、`gateway_public_url` | `synced_agent_bridges`、`agent_pool_id`、并发上限 |
+| 运行时作用 | `for-episode` 建 session、Gateway exec/submit、grader、轨迹 seal | `PollAgentJob` 取任务、attach session、tool loop |
+| Hub 关系 | `uenv env sync` | `uenv agent-bridge sync` |
+
+**Agent 池不是 Hub 里的调度概念**，而是 **Server 控制面上的调度资源**；Hub 只保证 Agent 机上能 sync 到正确版本的 bridge 包。
+
+#### 2.0.4 Hub 边界
+
+**Hub 管（已实现 / 继续完善）**
+
+- **EnvPackage**：如 `swe-bench-pro@0.2.0`（catalog、images.manifest、worker.overlay 等）
+- **AgentBridgePackage**：如 `uenv-agent-openhands@1.0.0`（`uenv_runtime/`、drivers、MANIFEST、SDK pin）
+- **CLI**：`uenv env sync`、`uenv agent-bridge sync`
+- **（P1）** EnvPackage manifest **引用**推荐的 `agent_bridge` 版本（组合声明，非运行时调度）
+
+**Hub 不管**
+
+- 哪台 Agent 机在线、负载多少
+- 某一 Episode 派给哪个 Agent
+- `gateway_url`、`session_id`、`run_id`（C 层，由 Server 注入）
+
+#### 2.0.5 Server 调度：Episode → 环境 + Agent 组合
+
+**入口（`SubmitEpisode`）**
+
+```text
+Adapter / 运维 / 批量脚本
+  └─► SubmitEpisode(
+        env_type = swe,
+        execution_mode = agent,              // 与 native gold 区分
+        env_package_id / version,
+        instance_id,
+        benchmark_variant,
+        agent_bridge_id / version,             // 可选；缺省从 EnvPackage.agent_defaults 或 Server 配置
+        model_endpoint,
+      )
+```
+
+**组合选择（Server 内五步）**
+
+| 步骤 | 动作 | 要点 |
+|------|------|------|
+| 1 选 Worker | 过滤 `supported_env_types` 含 swe；`synced_env_packages` 含目标 `env_package@version`；负载未满 | RoundRobin / 最少负载（与 math 路径一致） |
+| 2 选 Agent | 过滤 `agent_pool_id`；`synced_agent_bridges` 含目标 bridge 版本；并发未满 | 首版可单池 `openhands-default`，唯一可用即选 |
+| 3 绑定环境 | 调所选 Worker：`POST /runtime/v1/sessions/for-episode` | 带 `episode_id`、`run_id`、`instance_id`；`gateway_url` 取自 Worker 的 `gateway_public_url` |
+| 4 下派 Agent | 组装 `AgentJob` 入 Server Job 队列；Agent `PollAgentJob(agent_pool_id)` 拉取 | **首版冻结 Poll 模式**（适合 208.77 跳板/NAT） |
+| 5 收尾 | `CompleteAgentJob` 或 Gateway `submit` 触发完成；填 `EpisodeResult` | 轨迹仍由 Worker upload 至 Server `:8077` |
+
+**组合约束来源**
+
+| 约束来源 | 内容 | 谁校验 |
+|----------|------|--------|
+| Hub EnvPackage | 默认 `agent_defaults`、推荐 bridge 版本 | Server 可读 manifest 缓存；**运行时以注册信息为准** |
+| Worker 注册 | 实际 sync 的 env 包 | Server **必须**校验 `synced_env_packages` |
+| Agent 注册 | 实际 sync 的 bridge | Server **必须**校验 `synced_agent_bridges` |
+| Episode 请求 | 可显式指定 bridge 版本 | Server 校验 Agent 池是否满足 |
+
+#### 2.0.6 Agent 池注册（待补齐 proto / Server）
+
+现有 `proto/uenv/v1/agent.proto` 已有 `PollAgentJob` / `CompleteAgentJob`，缺池成员登记。建议与 Worker 对称，由 **Server** 维护 Agent 注册表：
+
+```protobuf
+message SyncedAgentBridge {
+  string package_id = 1;   // uenv-agent-openhands
+  string version = 2;
+  string bundle_digest = 3;
+}
+
+message RegisterAgentRequest {
+  string agent_id = 1;
+  string agent_pool_id = 2;              // 如 "openhands-pro"
+  repeated SyncedAgentBridge synced_agent_bridges = 3;
+  uint32 max_concurrent_jobs = 4;
+}
+
+// AgentControlService 扩展：RegisterAgent / AgentHeartbeat
+// 已有：PollAgentJob / CompleteAgentJob
+```
+
+**208.77 `openhands_runner` 目标态**：启动时 `RegisterAgent` + 循环 `PollAgentJob` → 执行 driver（`UENV_AGENT_JOB_FILE` 注入），**不再**自填 `UENV_GATEWAY`。
+
+#### 2.0.7 与现状对照
+
+| 现状 | 目标态 |
+|------|--------|
+| 208.77 自发起 + 硬编码 `UENV_GATEWAY` | Server 下派 `AgentJob`；Agent 只消费 Job |
+| Hub 已发 bridge 包，208.77 tar 同步 | 运维 `agent-bridge sync`；Agent 注册上报 `synced_agent_bridges` |
+| 7143 已 Hub `env sync` + `for-episode` | Server 调度时调 `for-episode`，不由 Agent 直连建 session |
+| Server 仅 native `DispatchEpisode` | 新增 `swe + agent` 分支，**不走** Worker 内 `EpisodeExecutor` 循环 |
+| Hub 不管 Agent 在线状态 | **保持**；Agent 池状态只在 Server |
+
+旁路联调（Agent 直连 Gateway）可保留作过渡，**不作为目标架构入口**。
+
+#### 2.0.8 实施分阶段（架构裁剪）
+
+| 阶段 | 内容 |
+|------|------|
+| **P0** | `RegisterAgent` + Server Job 队列 + `SubmitEpisode(swe+agent)` + Worker `for-episode` + Agent Poll/Complete |
+| **P0** | 单 Worker 池 + 单 Agent 池（208.77），选择可简化为「唯一可用即选」 |
+| **P1** | 严格 `synced_*` 匹配；`EpisodeResult` / 轨迹与 `episode_id` 关联；EnvPackage 引用 `agent_bridge` |
+| **P2** | 多 Agent 池、多 Worker 池、地域亲和、Push 模式 |
+
+---
+
+### 2.1 目标架构（简图）
+
+本节为 §2.0 的简图；调度细节与职责边界以 **§2.0** 为准。
 
 依据 `260629-hub-env-package-design.md` §7–§8 与 `全链路联调-各层接口与参数字段.md`：
 
@@ -300,7 +453,7 @@ flowchart LR
 | **保持** | `DispatchEpisode` / `ReportResult` / `StreamReport` 现有语义；Gateway REST `runtime/v1/*` 不变 | — |
 | **P0** | 新增 `AgentJob` message（`proto/uenv/v1/agent.proto`） | ✅ 已合入 |
 | **P0** | 扩展 `EpisodeRequest`：`env_package_id` + `env_package_version` | ✅ 已合入 |
-| **P0** | Server→Agent 拉取或推送 RPC（`AgentControlService`） | ✅ proto 已定义；**Server 未实现** |
+| **P0** | Server→Agent 拉取或推送 RPC（`AgentControlService`） | ✅ proto 已定义 Poll/Complete；**RegisterAgent 待增**（§2.0.6）；Server 未实现 |
 | **P1** | `EpisodeResult` 增加 `gateway_session_id`、`trajectory_ref` 摘要 | ❌ 待做 |
 | **P1** | `RegisterWorker` 增加 `synced_packages[]`、`gateway_public_url` | ✅ 已合入 |
 | **P2** | `SubmitEpisodeStream` 批量 SWE 评测 | ❌ 待做 |
@@ -313,7 +466,7 @@ flowchart LR
 
 ### 5.2 uenv-server（控制面 + 轨迹 HTTP）
 
-**现状**：`SubmitEpisode` → 调度 → `DispatchEpisode` → 等 `ReportResult` **仅服务 native 执行**；**SWE+Agent 编排、AgentJob 下发均未实现**（刻意排除在本轮实装外）。
+**现状**：`SubmitEpisode` → 调度 → `DispatchEpisode` → 等 `ReportResult` **仅服务 native 执行**；**SWE+Agent 编排、AgentJob 下发均未实现**（刻意排除在本轮实装外）。**架构依据见 §2.0.5–§2.0.6**。
 
 | 类别 | 调整项 | 状态 |
 |------|--------|------|
@@ -324,7 +477,7 @@ flowchart LR
 | **P1** | 调度约束：`synced_packages` 与 Episode `env_package` 匹配 | ❌ 待做 |
 | **P1** | Agent 完成后回调 → `EpisodeResult` | ❌ 待做 |
 | **P1** | Admin HTTP：查询 in-flight AgentJob | ❌ 待做 |
-| **P2** | 多 Agent 池路由 | ❌ 待做 |
+| **P2** | 多 Agent 池路由 | ❌ 待做 | 见 §2.0.8 P2 |
 
 **关键改动面**：`uenv-server/src/service.rs`（SubmitEpisode 分支）、`scheduler/`（package 感知）、`control_plane.rs`（RegisterWorker 扩展）；可能新增 `agent_job.rs` 状态机。
 
@@ -505,6 +658,7 @@ flowchart LR
 
 | 关注点 | 路径 |
 |--------|------|
+| AgentJob / Agent 池注册 | `proto/uenv/v1/agent.proto`（§2.0.6 待扩展 `RegisterAgent`） |
 | OpenHands 主驱动（旁路入口） | `integrations/openhands/run_swebenchpro_official.py` |
 | Gateway HTTP 客户端 / patch | `integrations/openhands/uenv_runtime/` |
 | Runtime Gateway | `uenv-worker/src/runtime_gateway/mod.rs` |
@@ -528,6 +682,7 @@ flowchart LR
 | v1.1 | 2026-07-01 | §5 扩展：分模块（proto/server/worker/hub/agent/bridge/部署）P0/P1/P2 调整项、Phase A/B/C 与 checklist |
 | v1.2 | 2026-07-03 | 代码实装（除 uenv-server）；7143 实机验收 EnvPackage + for-episode + gold |
 | v1.3 | 2026-07-03 | 远程同步完成：Hub 发布 + 7143 正式 env sync + 208.77 integrations 同步；§5 各模块状态列、§8 实机记录更新 |
+| v1.4 | 2026-07-03 | 新增 **§2.0 核心架构（冻结）**：Hub/Server/双池职责、Server 组合调度五步、`RegisterAgent` 待补、与现状对照 |
 
 ---
 
