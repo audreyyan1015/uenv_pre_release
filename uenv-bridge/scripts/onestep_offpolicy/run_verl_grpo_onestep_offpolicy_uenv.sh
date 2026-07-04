@@ -42,7 +42,7 @@ Common overrides:
   RAY_NUM_CPUS                  Default: 10 + NGPUS_PER_NODE * 4
   RAY_NOSET_CUDA_VISIBLE_DEVICES Default: empty; leave empty for Ray per-actor GPU isolation.
   LOG_ROOT                      Default: <repo>/temp/logs
-  SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core endpoint. Default: 8.130.86.71:8088
+  SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core endpoint. Default: 8.130.75.157:8088
   UENV_ADAPTER_CORE_STREAMING   Use Python -> Rust ExecuteBatchStream. Default: 0
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
   UENV_MODEL_GATEWAY_ENABLED    Start adapter-side model gateway and send its URL to Worker. Default: 0
@@ -50,7 +50,7 @@ Common overrides:
   EXTRA_VERL_ARGS               Extra Hydra args appended to main_ppo.
 
 Layer4-aligned 4-GPU comparison example:
-  SERVER_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088 \
+  SERVER_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
   TRAINING_STEPS=10 \
   TRAIN_BATCH_SIZE=4 \
   PPO_MINI_BATCH_SIZE=4 \
@@ -68,7 +68,7 @@ Layer4-aligned 4-GPU comparison example:
   ./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh
 
 8-GPU smoke:
-  SERVER_ADAPTER_CORE_ENDPOINT=8.130.86.71:8088 \
+  SERVER_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
   TRAINING_STEPS=1 \
   TRAIN_BATCH_SIZE=6 \
   PPO_MINI_BATCH_SIZE=6 \
@@ -97,7 +97,7 @@ fi
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}
 VERL_WORKSPACE=${VERL_WORKSPACE:-/data/podman/verl/workspace}
 IMAGE=${IMAGE:-localhost/uenv-bridge-verl:layer4-build}
-SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.86.71:8088}
+SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.75.157:8088}
 if [ -z "${SERVER_ADAPTER_CORE_ENDPOINT}" ]; then
   echo "SERVER_ADAPTER_CORE_ENDPOINT is required." >&2
   exit 1

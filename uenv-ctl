@@ -9,7 +9,7 @@ Usage:
 
 Examples:
   uenv-ctl status
-  uenv-ctl --host 8.130.86.71:50052 workers
+  uenv-ctl --host 8.130.75.157:50052 workers
   uenv-ctl watch --interval 1
 """
 import argparse

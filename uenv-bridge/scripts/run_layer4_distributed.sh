@@ -43,7 +43,7 @@ Common environment overrides:
   UENV_MODEL_GATEWAY_PORT       Adapter-side model gateway port. Default: 18080
   UENV_MODEL_GATEWAY_PUBLIC_URL Worker-visible gateway URL. Default: http://10.10.20.142:<port>/v1
   RAY_NUM_CPUS                  Default: NGPUS_PER_NODE * 4
-  SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.86.71:8088
+  SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.75.157:8088
   LOG_ROOT                      Host directory for run logs. Default: <repo>/temp/logs
   CONTAINER_LOG_ROOT            Container directory for run logs. Default: /uenv/uenv-bridge/temp/logs
 
@@ -57,7 +57,7 @@ Example:
   REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1 \
   TRAIN_BATCH_SIZE=4 \
   TEST_FREQ=-1 \
-  PODMAN_GPU_ARGS="nvidia.com/gpu=2,5,6,7" \
+  PODMAN_GPU_ARGS="nvidia.com/gpu=4,5,6,7" \
   CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3 \
   NGPUS_PER_NODE=4 \
   ./scripts/run_layer4_distributed.sh
@@ -102,7 +102,7 @@ REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 VERL_WORKSPACE=${VERL_WORKSPACE:-/data/podman/verl/workspace}
 
 # Server 侧已经启动的 Rust adapter core 地址
-SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.86.71:8088}
+SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.75.157:8088}
 if [ -z "${SERVER_ADAPTER_CORE_ENDPOINT}" ]; then
   echo "SERVER_ADAPTER_CORE_ENDPOINT is required." >&2
   exit 1
