@@ -64,11 +64,25 @@ pub struct WorkerInfo {
     /// 是否正在 drain：true 时不再接受新 episode，等待当前任务执行完毕
     pub draining: bool,
     /// 上次成功上报 report_result 的时刻（None 表示从未上报）。
-    /// 用于检测 Worker 假活：load > 0 但长时间无上报时跳过调度。
+    /// 用于检测 Worker 假活：load > 0 但长时间无 episode 完成时跳过调度。
     pub last_report_at: Option<std::time::Instant>,
     /// 上次收到心跳包的时刻（注册时初始化为 Some(now)）。
     /// 超过 heartbeat_timeout_secs 无心跳则认为连接断开。
     pub last_heartbeat_at: Option<std::time::Instant>,
+    /// Runtime Gateway 对外可访问 URL（SWE+Agent 编排时写入 AgentJob.gateway_url）。
+    /// 由 RegisterWorker.gateway_public_url 上报；native 路径不使用。
+    pub gateway_public_url: String,
+    /// 该 worker 已 sync 的 EnvPackage 列表（严格版本校验用）。
+    /// SWE+Agent 调度时要求 synced_env_packages 含请求的 env_package@version。
+    pub synced_env_packages: Vec<SyncedEnvPackageInfo>,
+}
+
+/// Worker 已 sync 的 EnvPackage 记录（对应 proto SyncedEnvPackage）。
+#[derive(Clone)]
+pub struct SyncedEnvPackageInfo {
+    pub package_id: String,
+    pub version: String,
+    pub bundle_digest: String,
 }
 
 /// WorkerAssignment：调度结果，表示一个 episode 应该分发给哪个 worker。
@@ -78,6 +92,8 @@ pub struct WorkerAssignment {
     pub worker_id: String,
     /// 被选中的 worker 的 gRPC 地址（用于建立连接并下发 episode）
     pub endpoint: String,
+    /// 被选中的 worker 的 Runtime Gateway 对外 URL（SWE+Agent 编排注入 AgentJob）。
+    pub gateway_public_url: String,
 }
 
 /// 调度失败时的错误类型，描述失败的具体原因。
@@ -94,4 +110,7 @@ pub enum ScheduleError {
     /// 支持该 env_type 的 worker 都已满载（current_load >= capacity）
     #[error("all workers at capacity")]
     AllWorkersAtCapacity,
+    /// 有支持该 env_type 的 worker，但没有一个 sync 了请求的 env_package@version
+    #[error("no worker has synced the requested env_package")]
+    NoMatchingEnvPackage,
 }

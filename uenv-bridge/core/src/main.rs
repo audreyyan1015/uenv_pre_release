@@ -19,7 +19,9 @@ use uenv_server::proto::v1::{
     EpisodeRequest, EpisodeResult, StepRecord, Trajectory,
 };
 use uenv_server::proto::scheduler::v1::control_plane_service_server::ControlPlaneServiceServer;
+use uenv_server::proto::v1::agent_control_service_server::AgentControlServiceServer;
 use uenv_server::control_plane::ControlPlaneServiceImpl;
+use uenv_server::agent_job::AgentControlServiceImpl;
 use uenv_server::service::AdminServiceImpl;
 use uenv_server::{create_default_state, EpisodeService, EpisodeServiceError, UEnvEpisodeService};
 
@@ -83,6 +85,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(AdapterCoreServiceServer::new(adapter_service))
         .add_service(ControlPlaneServiceServer::new(ControlPlaneServiceImpl {
             state: Arc::clone(&state),
+        }))
+        .add_service(AgentControlServiceServer::new(AgentControlServiceImpl {
+            queue: Arc::clone(&state.agent_job_queue),
+            registry: Arc::clone(&state.agent_registry),
+            heartbeat_interval_ms: config.scheduler.heartbeat_interval_ms as i32,
         }))
         .add_service(AdminServiceServer::new(AdminServiceImpl {
             state: state.clone(),

@@ -120,6 +120,8 @@ CREATE TABLE IF NOT EXISTS episode_results (
     trajectory_storage_url TEXT,
     result_checksum        TEXT NOT NULL,
     acked_at_ms            INTEGER NOT NULL,
+    env_package_id         TEXT,
+    agent_bridge_version   TEXT,
     PRIMARY KEY (episode_id, attempt_id, worker_id)
 );
 "#;
@@ -220,6 +222,14 @@ impl TrajectoryStore {
         let conn = Connection::open(&cfg.db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(SCHEMA)?;
+        // 兼容旧库：episode_results 增列（SQLite 不支持 ADD COLUMN IF NOT EXISTS，
+        // 已存在时返回 "duplicate column" 错误，忽略即可）。
+        for col in ["env_package_id", "agent_bridge_version"] {
+            let _ = conn.execute(
+                &format!("ALTER TABLE episode_results ADD COLUMN {col} TEXT"),
+                [],
+            );
+        }
         Ok(Self {
             data_dir: cfg.data_dir.clone(),
             conn: Mutex::new(conn),
@@ -407,7 +417,7 @@ impl TrajectoryStore {
     }
 }
 
-/// 控制面摘要行（native 路径 ReportResult ack 后写入）。
+/// 控制面摘要行（native 路径 ReportResult ack 后写入；SWE+Agent 路径完成后写入）。
 pub struct EpisodeResultRow {
     pub episode_id: String,
     pub attempt_id: u32,
@@ -418,6 +428,10 @@ pub struct EpisodeResultRow {
     pub trajectory_id: Option<String>,
     pub trajectory_storage_url: Option<String>,
     pub result_checksum: String,
+    /// P1 查询维度：环境包 ID（native 路径可为空）。
+    pub env_package_id: Option<String>,
+    /// P1 查询维度：Agent 框架版本（仅 SWE+Agent 路径有值）。
+    pub agent_bridge_version: Option<String>,
 }
 
 impl TrajectoryStore {
@@ -427,8 +441,9 @@ impl TrajectoryStore {
         conn.execute(
             "INSERT INTO episode_results (
                 episode_id, attempt_id, worker_id, status, total_reward, total_steps,
-                trajectory_id, trajectory_storage_url, result_checksum, acked_at_ms
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                trajectory_id, trajectory_storage_url, result_checksum, acked_at_ms,
+                env_package_id, agent_bridge_version
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(episode_id, attempt_id, worker_id) DO UPDATE SET
                 status=excluded.status,
                 total_reward=excluded.total_reward,
@@ -436,7 +451,9 @@ impl TrajectoryStore {
                 trajectory_id=excluded.trajectory_id,
                 trajectory_storage_url=excluded.trajectory_storage_url,
                 result_checksum=excluded.result_checksum,
-                acked_at_ms=excluded.acked_at_ms",
+                acked_at_ms=excluded.acked_at_ms,
+                env_package_id=excluded.env_package_id,
+                agent_bridge_version=excluded.agent_bridge_version",
             params![
                 row.episode_id,
                 row.attempt_id as i64,
@@ -448,6 +465,8 @@ impl TrajectoryStore {
                 row.trajectory_storage_url,
                 row.result_checksum,
                 now_ms(),
+                row.env_package_id,
+                row.agent_bridge_version,
             ],
         )?;
         Ok(())
@@ -534,6 +553,7 @@ impl TrajectoryStore {
         let mut stmt = conn.prepare(
             "SELECT e.episode_id, e.attempt_id, e.worker_id, e.status, e.total_reward, e.total_steps, \
                     e.trajectory_id, e.trajectory_storage_url, e.acked_at_ms, \
+                    e.env_package_id, e.agent_bridge_version, \
                     t.run_id, t.reward, t.resolved, t.step_count \
              FROM episode_results e \
              LEFT JOIN trajectories t ON e.trajectory_id = t.trajectory_id \
@@ -550,10 +570,12 @@ impl TrajectoryStore {
                 "trajectory_id": r.get::<_, Option<String>>(6)?,
                 "trajectory_storage_url": r.get::<_, Option<String>>(7)?,
                 "acked_at_ms": r.get::<_, i64>(8)?,
-                "run_id": r.get::<_, Option<String>>(9)?,
-                "trajectory_reward": r.get::<_, Option<f64>>(10)?,
-                "resolved": r.get::<_, Option<i64>>(11)?.map(|v| v != 0),
-                "step_count": r.get::<_, Option<i64>>(12)?,
+                "env_package_id": r.get::<_, Option<String>>(9)?,
+                "agent_bridge_version": r.get::<_, Option<String>>(10)?,
+                "run_id": r.get::<_, Option<String>>(11)?,
+                "trajectory_reward": r.get::<_, Option<f64>>(12)?,
+                "resolved": r.get::<_, Option<i64>>(13)?.map(|v| v != 0),
+                "step_count": r.get::<_, Option<i64>>(14)?,
             }))
         })?;
         let mut out = Vec::new();

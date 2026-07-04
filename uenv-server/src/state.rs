@@ -29,6 +29,10 @@ pub struct ServerState {
     pub queue_dynamic: bool,
     /// v2.2：轨迹/episode_results 存储（bridge main 启用时注入；None=未启用持久化）。
     pub trajectory_store: std::sync::OnceLock<Arc<crate::trajectory::TrajectoryStore>>,
+    /// SWE+Agent 编排：Agent 池注册表（设计 260701 §2.0）。
+    pub agent_registry: Arc<crate::agent_pool::AgentRegistry>,
+    /// SWE+Agent 编排：AgentJob 待领队列 + in-flight 表。
+    pub agent_job_queue: Arc<crate::agent_job::AgentJobQueue>,
 }
 
 pub struct ActiveEpisode {
@@ -48,6 +52,18 @@ pub struct PendingResult {
 impl ServerState {
     pub fn new(scheduler: Arc<RwLock<RoundRobinScheduler>>, config: &crate::config::ServerConfig) -> Self {
         let (episode_broadcast, _) = broadcast::channel(config.episode.broadcast_capacity.max(1));
+        // SWE+Agent 编排资源：Agent 注册表复用 scheduler 的心跳超时阈值判定掉线，
+        // 并注入多池路由配置（variant→pool 映射）。
+        let routing = crate::agent_pool::RoutingConfig {
+            variant_pool_map: config.scheduler.agent_pool_routing.clone(),
+        };
+        let agent_registry = Arc::new(crate::agent_pool::AgentRegistry::with_routing(
+            config.scheduler.heartbeat_timeout_secs,
+            routing,
+        ));
+        let agent_job_queue = Arc::new(crate::agent_job::AgentJobQueue::new(Arc::clone(
+            &agent_registry,
+        )));
         Self {
             scheduler,
             active_episodes: DashMap::new(),
@@ -81,6 +97,8 @@ impl ServerState {
             },
             queue_dynamic: config.episode.queue_dynamic,
             trajectory_store: std::sync::OnceLock::new(),
+            agent_registry,
+            agent_job_queue,
         }
     }
 

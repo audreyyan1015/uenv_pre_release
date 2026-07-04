@@ -30,6 +30,8 @@ pub struct WorkerSnapshot {
     pub last_report_at: Option<std::time::Instant>,
     pub last_heartbeat_at: Option<std::time::Instant>,
     pub degraded: bool,
+    pub gateway_public_url: String,
+    pub synced_env_packages: Vec<SyncedEnvPackageInfo>,
 }
 
 /// 轮询调度器。
@@ -71,6 +73,8 @@ impl RoundRobinScheduler {
                 last_report_at: w.last_report_at,
                 last_heartbeat_at: w.last_heartbeat_at,
                 degraded: is_worker_degraded(w, self.degraded_threshold_secs, self.heartbeat_timeout_secs),
+                gateway_public_url: w.gateway_public_url.clone(),
+                synced_env_packages: w.synced_env_packages.clone(),
             })
             .collect()
     }
@@ -201,6 +205,19 @@ impl Scheduler for RoundRobinScheduler {
         //   条件 2：worker 当前负载 < 容量上限（还有空余）
         let threshold = self.degraded_threshold_secs;
         let hb_timeout = self.heartbeat_timeout_secs;
+        // SWE+Agent 路径会带 env_package_id/version；非空时要求 worker 已 sync 该包。
+        let require_pkg = !request.env_package_id.is_empty();
+        let pkg_matches = |w: &WorkerInfo| -> bool {
+            if !require_pkg {
+                return true;
+            }
+            w.synced_env_packages.iter().any(|p| {
+                p.package_id == request.env_package_id
+                    // version 为空表示不限定具体版本，仅要求 package_id 命中
+                    && (request.env_package_version.is_empty()
+                        || p.version == request.env_package_version)
+            })
+        };
         let candidates: Vec<_> = self
             .workers
             .iter()
@@ -210,6 +227,7 @@ impl Scheduler for RoundRobinScheduler {
                     && w.supported_env_types.contains(&request.env_type)
                     && w.current_load < w.capacity
                     && resource_fits(&w.resource, &request.resource_spec)
+                    && pkg_matches(w)
             })
             .collect();
 
@@ -227,7 +245,14 @@ impl Scheduler for RoundRobinScheduler {
                 // 情况 2：有 worker，但没有一个支持请求的 env_type
                 return Err(ScheduleError::NoMatchingEnvType);
             }
-            // 情况 3：有支持该 env_type 的 worker，但全都已满载
+            // 情况 3：有支持该 env_type 的 worker，区分「包不匹配」与「全满载」
+            if require_pkg
+                && !self.workers.iter().any(|w| {
+                    w.supported_env_types.contains(&request.env_type) && pkg_matches(w)
+                })
+            {
+                return Err(ScheduleError::NoMatchingEnvPackage);
+            }
             return Err(ScheduleError::AllWorkersAtCapacity);
         }
 
@@ -240,6 +265,7 @@ impl Scheduler for RoundRobinScheduler {
         Ok(WorkerAssignment {
             worker_id: w.worker_id.clone(),
             endpoint: w.endpoint.clone(),
+            gateway_public_url: w.gateway_public_url.clone(),
         })
     }
 }

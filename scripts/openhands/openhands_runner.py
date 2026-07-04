@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""OpenHands benchmark runner HTTP API (208.77 :8888, health :8777)."""
+"""OpenHands benchmark runner HTTP API (208.77 :8888, health :8777).
+
+两种触发模式并存：
+  - HTTP 旁路（原有）：POST /v1/runs 手动/调试触发。
+  - Server 编排（新增，OPENHANDS_AGENT_POLL=1）：启动即 RegisterAgent，后台循环
+    PollAgentJob 领取 Server 下派的 AgentJob，跑完 CompleteAgentJob 回填 reward。
+    此模式下 gateway_url 来自 AgentJob，不再依赖硬编码 UENV_GATEWAY。
+"""
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -20,8 +28,39 @@ RUN_SCRIPT = os.environ.get(
 )
 RUNS_DIR = Path(os.environ.get("OPENHANDS_RUNS_DIR", "/var/log/uenv/openhands-runs"))
 
+# ── Server 编排（Agent 池 poll）模式配置 ────────────────────────────────────
+AGENT_POLL_ENABLED = os.environ.get("OPENHANDS_AGENT_POLL", "0") == "1"
+SERVER_ENDPOINT = os.environ.get("UENV_SERVER_ENDPOINT", "")
+AGENT_POOL_ID = os.environ.get("OPENHANDS_AGENT_POOL_ID", "openhands-default")
+AGENT_ID = os.environ.get("OPENHANDS_AGENT_ID", "")  # 空则注册时由 Server 生成
+AGENT_BRIDGE_ID = os.environ.get("OPENHANDS_AGENT_BRIDGE_ID", "uenv-agent-openhands")
+AGENT_BRIDGE_VERSION = os.environ.get("OPENHANDS_AGENT_BRIDGE_VERSION", "1.0.0")
+AGENT_MAX_CONCURRENT = int(os.environ.get("OPENHANDS_AGENT_MAX_CONCURRENT", "1"))
+POLL_INTERVAL_SEC = float(os.environ.get("OPENHANDS_POLL_INTERVAL_SEC", "3"))
+HEARTBEAT_INTERVAL_SEC = float(os.environ.get("OPENHANDS_HEARTBEAT_INTERVAL_SEC", "10"))
+# uenv_runtime 包所在目录（agent_client / agent_job），默认 monorepo 路径。
+BRIDGE_DIR = os.environ.get("UENV_AGENT_BRIDGE_DIR", "/root/UEnv/integrations/openhands")
+# 路由标签，格式 "k1=v1,k2=v2"（如 "region=bj,gpu=a100"），供 Server 多池标签亲和用。
+AGENT_LABELS = os.environ.get("OPENHANDS_AGENT_LABELS", "")
+
+
+def _parse_labels(raw: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            k = k.strip()
+            if k:
+                out[k] = v.strip()
+    return out
+
 _lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
+_stop = threading.Event()
+_active_jobs = 0  # 当前在跑的 AgentJob 数（心跳上报用）
+_active_lock = threading.Lock()
+
 
 
 def _parse_bind(bind: str) -> tuple[str, int]:
@@ -147,13 +186,205 @@ def _serve(name: str, bind: str, handler: type[BaseHTTPRequestHandler]) -> None:
     httpd.serve_forever()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Server 编排（Agent 池 poll）模式
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _import_agent_client():
+    """把 BRIDGE_DIR 加入 sys.path 后导入 uenv_runtime.agent_client。"""
+    if BRIDGE_DIR and BRIDGE_DIR not in sys.path:
+        sys.path.insert(0, BRIDGE_DIR)
+    # 生成的 stub 目录也需可导入（其内部扁平 import agent_pb2）。
+    gen_dir = os.path.join(BRIDGE_DIR, "uenv_runtime", "gen")
+    if os.path.isdir(gen_dir) and gen_dir not in sys.path:
+        sys.path.insert(0, gen_dir)
+    from uenv_runtime.agent_client import AgentControlClient  # noqa: PLC0415
+
+    return AgentControlClient
+
+
+def _read_reward(out_dir: Path) -> tuple[str, float, str]:
+    """从 driver 输出的 submit_result.json 读 (status, reward, trajectory_id)。
+
+    submit_result.json 结构见 run_swebenchpro_official.py：含 reward / resolved /
+    trajectory_ref.trajectory_id。文件缺失（driver 崩溃）视为 failed。
+    """
+    f = out_dir / "submit_result.json"
+    if not f.is_file():
+        return "failed", 0.0, ""
+    try:
+        doc = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return "failed", 0.0, ""
+    reward = float(doc.get("reward", 0.0) or 0.0)
+    ref = doc.get("trajectory_ref") or {}
+    tid = ref.get("trajectory_id") if isinstance(ref, dict) else None
+    trajectory_id = str(tid) if tid else ""  # null/缺失 → 空串，不要变成 "None"
+    # driver 正常退出即视为 completed（reward 承载评分；resolved 与否由 reward 反映）。
+    status = "completed"
+    return status, reward, trajectory_id
+
+
+def _run_agent_job(client: Any, job: Any) -> None:
+    """跑一个 AgentJob：写 job 文件 → 调 run 脚本 → 读结果 → CompleteAgentJob。
+
+    全程包在 try/finally 内：无论 setup（mkdir/write）还是执行阶段抛错，都保证
+    _active_jobs 被回收（否则 max_concurrent=1 时 poller 会永久卡死），并尽力把
+    结果回填 Server。
+    """
+    global _active_jobs
+    status, reward, trajectory_id, err = "failed", 0.0, "", ""
+    try:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        out_dir = RUNS_DIR / f"agent-{job.job_id}-{stamp}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        job_file = out_dir / "agent_job.json"
+        # AgentJob dataclass → JSON（driver 通过 UENV_AGENT_JOB_FILE 读取并覆盖 gateway 等）。
+        job_file.write_text(json.dumps(job.__dict__, indent=2) + "\n", encoding="utf-8")
+
+        env = os.environ.copy()
+        env["UENV_AGENT_JOB_FILE"] = str(job_file)
+        env["MAX_ITERATIONS"] = str(job.max_iterations or 30)
+        env["OPENHANDS_OUT_DIR"] = str(out_dir)  # 让脚本把输出写到可预测目录
+        if job.run_id:
+            env["UENV_RUN_ID"] = job.run_id
+        # gateway 由 AgentJob 注入，显式清掉环境里可能残留的硬编码值。
+        env.pop("UENV_GATEWAY", None)
+
+        mode = job.mode if job.mode in ("gold", "llm") else "llm"
+        try:
+            proc = subprocess.run(
+                ["bash", RUN_SCRIPT, mode],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=int(os.environ.get("OPENHANDS_RUN_TIMEOUT_SEC", "7200")),
+                check=False,
+            )
+            (out_dir / "runner_stdout.log").write_text(proc.stdout[-16000:], encoding="utf-8")
+            (out_dir / "runner_stderr.log").write_text(proc.stderr[-16000:], encoding="utf-8")
+            if proc.returncode == 0:
+                status, reward, trajectory_id = _read_reward(out_dir)
+            else:
+                status = "failed"
+                err = f"run script exit {proc.returncode}: {proc.stderr[-2000:]}"
+        except subprocess.TimeoutExpired as exc:
+            status, err = "timeout", str(exc)[-2000:]
+    except Exception as exc:  # noqa: BLE001
+        # setup（mkdir/write）或其他意外失败也回填 failed，不吞掉。
+        status, err = "failed", f"{type(exc).__name__}: {exc}"[-2000:]
+    finally:
+        try:
+            acked = client.complete_agent_job(
+                job_id=job.job_id,
+                run_id=job.run_id,
+                status=status,
+                reward=reward,
+                trajectory_id=trajectory_id,
+                error_message=err,
+            )
+            print(
+                f"[agent-poll] completed job={job.job_id} status={status} "
+                f"reward={reward} trajectory_id={trajectory_id} acked={acked}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent-poll] CompleteAgentJob failed job={job.job_id}: {exc}", flush=True)
+        with _active_lock:
+            _active_jobs -= 1
+
+
+
+def _heartbeat_loop(client: Any, agent_id: str) -> None:
+    while not _stop.is_set():
+        try:
+            with _active_lock:
+                active = _active_jobs
+            client.agent_heartbeat(agent_id, active, int(time.time() * 1000))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent-poll] heartbeat failed: {exc}", flush=True)
+        _stop.wait(HEARTBEAT_INTERVAL_SEC)
+
+
+def _poll_loop() -> None:
+    """RegisterAgent + 循环 PollAgentJob。受 AGENT_MAX_CONCURRENT 限流。"""
+    global _active_jobs
+    if not SERVER_ENDPOINT:
+        print("[agent-poll] UENV_SERVER_ENDPOINT unset; poll mode disabled", flush=True)
+        return
+    try:
+        AgentControlClient = _import_agent_client()
+        # __init__ 内懒加载 grpc + stub，未装 grpcio / 未生成 stub 会在此抛错，
+        # 一并 catch，干净退出 poll 线程而不影响 HTTP 旁路。
+        client = AgentControlClient(SERVER_ENDPOINT)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[agent-poll] cannot init agent client (poll mode off): {exc}", flush=True)
+        return
+
+    bridges = [{"package_id": AGENT_BRIDGE_ID, "version": AGENT_BRIDGE_VERSION, "bundle_digest": ""}]
+    labels = _parse_labels(AGENT_LABELS)
+    # 注册（带退避重试，等 Server 就绪）。
+    agent_id = AGENT_ID
+    while not _stop.is_set():
+        try:
+            agent_id = client.register_agent(
+                agent_id=AGENT_ID,
+                agent_pool_id=AGENT_POOL_ID,
+                synced_bridges=bridges,
+                max_concurrent=AGENT_MAX_CONCURRENT,
+                labels=labels,
+            )
+            print(
+                f"[agent-poll] registered agent_id={agent_id} pool={AGENT_POOL_ID} "
+                f"max_concurrent={AGENT_MAX_CONCURRENT}",
+                flush=True,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent-poll] RegisterAgent failed, retrying: {exc}", flush=True)
+            _stop.wait(POLL_INTERVAL_SEC)
+    if _stop.is_set():
+        return
+
+    threading.Thread(target=_heartbeat_loop, args=(client, agent_id), daemon=True).start()
+
+    while not _stop.is_set():
+        # 达到本机并发上限则不 poll（与 Server try_reserve 双侧限流呼应）。
+        with _active_lock:
+            busy = _active_jobs >= AGENT_MAX_CONCURRENT
+        if busy:
+            _stop.wait(POLL_INTERVAL_SEC)
+            continue
+        try:
+            job = client.poll_agent_job(AGENT_POOL_ID, agent_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent-poll] PollAgentJob failed: {exc}", flush=True)
+            _stop.wait(POLL_INTERVAL_SEC)
+            continue
+        if job is None:
+            _stop.wait(POLL_INTERVAL_SEC)
+            continue
+        print(
+            f"[agent-poll] got job={job.job_id} instance={job.instance_id} "
+            f"mode={job.mode} gateway={job.gateway_url}",
+            flush=True,
+        )
+        with _active_lock:
+            _active_jobs += 1
+        threading.Thread(target=_run_agent_job, args=(client, job), daemon=True).start()
+
+
 def main() -> None:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(
         target=_serve, args=("health", HEALTH_BIND, HealthHandler), daemon=True
     ).start()
+    if AGENT_POLL_ENABLED:
+        print("[agent-poll] Server orchestration mode enabled", flush=True)
+        threading.Thread(target=_poll_loop, daemon=True).start()
     _serve("api", API_BIND, ApiHandler)
 
 
 if __name__ == "__main__":
     main()
+

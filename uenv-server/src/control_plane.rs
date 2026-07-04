@@ -82,6 +82,17 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             draining: false,
             last_report_at: Some(std::time::Instant::now()),  // 从注册时刻起算5min超时，防止 None 导致永不降级
             last_heartbeat_at: Some(std::time::Instant::now()),  // 注册即视为一次心跳，30s 内需发真实心跳续期
+            // SWE+Agent 编排：保存 Gateway 对外 URL 与已 sync 的 EnvPackage（严格版本校验用）
+            gateway_public_url: req.gateway_public_url.clone(),
+            synced_env_packages: req
+                .synced_env_packages
+                .iter()
+                .map(|p| crate::scheduler::traits::SyncedEnvPackageInfo {
+                    package_id: p.package_id.clone(),
+                    version: p.version.clone(),
+                    bundle_digest: p.bundle_digest.clone(),
+                })
+                .collect(),
         };
 
         // 动态队列：注册前先取旧容量（重注册时计算 delta）
@@ -292,6 +303,9 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                         trajectory_id: opt(&result.trajectory_id),
                         trajectory_storage_url: opt(&result.trajectory_storage_url),
                         result_checksum: req.idempotency_key.clone(),
+                        // native 路径不带 env_package/agent_bridge 语义。
+                        env_package_id: None,
+                        agent_bridge_version: None,
                     };
                     let store = store.clone();
                     tokio::task::spawn_blocking(move || {

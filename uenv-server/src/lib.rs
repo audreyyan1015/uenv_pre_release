@@ -1,4 +1,6 @@
 pub mod admin_http;
+pub mod agent_job;
+pub mod agent_pool;
 pub mod config;
 pub mod control_plane;
 pub mod proto;
@@ -15,6 +17,7 @@ pub use config::ServerConfig;
 pub use service::{
     AdminServiceImpl, EpisodeService, EpisodeServiceError, UEnvEpisodeService,
 };
+pub use agent_job::AgentControlServiceImpl;
 
 /// 使用所有默认值创建 ServerState（测试 / 不需要配置的场景）。
 pub fn create_default_state() -> Arc<state::ServerState> {

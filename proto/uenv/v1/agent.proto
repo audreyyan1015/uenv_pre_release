@@ -26,6 +26,39 @@ message AgentJob {
     string mode = 18; // "llm" | "gold"
 }
 
+// ─── Agent pool registration (symmetric with RegisterWorker; design 260701 §2.0.6) ─
+message SyncedAgentBridge {
+    string package_id = 1;   // uenv-agent-openhands
+    string version = 2;
+    string bundle_digest = 3;
+}
+
+message RegisterAgentRequest {
+    string agent_id = 1;
+    string agent_pool_id = 2;                        // e.g. "openhands-default"
+    repeated SyncedAgentBridge synced_agent_bridges = 3;
+    uint32 max_concurrent_jobs = 4;
+    string endpoint = 5;                             // optional; empty in Poll mode
+    map<string, string> labels = 6;                  // 路由标签，如 {region: bj, gpu: a100}
+}
+
+message RegisterAgentResponse {
+    bool accepted = 1;
+    string agent_id = 2;
+    string message = 3;
+}
+
+message AgentHeartbeatRequest {
+    string agent_id = 1;
+    uint32 active_jobs = 2;
+    int64 timestamp_ms = 3;
+}
+
+message AgentHeartbeatResponse {
+    bool ok = 1;
+    int32 next_heartbeat_interval_ms = 2;
+}
+
 message PollAgentJobRequest {
     string agent_pool_id = 1;
     string worker_id = 2;
@@ -50,6 +83,8 @@ message AgentJobCompleteResponse {
 }
 
 service AgentControlService {
+    rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+    rpc AgentHeartbeat(AgentHeartbeatRequest) returns (AgentHeartbeatResponse);
     rpc PollAgentJob(PollAgentJobRequest) returns (PollAgentJobResponse);
     rpc CompleteAgentJob(AgentJobCompleteRequest) returns (AgentJobCompleteResponse);
 }

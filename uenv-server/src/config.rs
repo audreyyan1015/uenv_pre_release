@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Server 全局配置，从 server.toml 加载。所有字段均有 serde default，
@@ -26,6 +27,9 @@ pub struct SchedulerConfig {
     pub heartbeat_interval_ms: u64,
     /// Worker 超过此秒数无心跳则认为连接断开（默认 30s，约 6 个心跳周期）
     pub heartbeat_timeout_secs: u64,
+    /// 多池路由：benchmark 变体 → Agent 池 的映射（如 {pro: openhands-pro}）。
+    /// 空表示不启用变体选池策略。请求不指定池时，Server 据此自动选池。
+    pub agent_pool_routing: HashMap<String, String>,
 }
 
 /// Episode 执行相关配置
@@ -68,6 +72,7 @@ impl Default for SchedulerConfig {
             schedule_retry_interval_ms: 500,
             heartbeat_interval_ms: 5000,
             heartbeat_timeout_secs: 30,
+            agent_pool_routing: HashMap::new(),
         }
     }
 }

@@ -250,6 +250,24 @@ fn sample_to_worker_payload(
                     obj.insert(key.to_string(), v.clone());
                 }
             }
+            // SWE+Agent 编排（设计 260701 §2.0.5）：透传 agent 相关字段，供 Server 的
+            // submit_swe_agent_episode 从 payload 解析 SweAgentSpec。缺 execution_mode
+            // 时 Server 自动回退 native 路径，不影响既有 SWE native 行为。
+            for key in [
+                "execution_mode",
+                "mode",
+                "agent_bridge_id",
+                "agent_bridge_version",
+                "agent_pool_id",
+                "driver_entrypoint",
+                "workspace_dir",
+                "llm_config_path",
+                "max_iterations",
+            ] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
         }
     }
     worker_payload

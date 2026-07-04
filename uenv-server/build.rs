@@ -19,6 +19,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!("{proto_root}/uenv/v1/server.proto"),
                 // 调度器/控制平面的 proto：定义 worker 注册、心跳、上报结果的接口
                 format!("{proto_root}/uenv/v1/scheduler.proto"),
+                // Agent 池控制面 proto：AgentJob、RegisterAgent、PollAgentJob、CompleteAgentJob
+                format!("{proto_root}/uenv/v1/agent.proto"),
                 // worker gRPC 服务的 proto：定义服务器下发 episode 给 worker 的接口
                 format!("{worker_proto}/worker_service.proto"),
             ],
