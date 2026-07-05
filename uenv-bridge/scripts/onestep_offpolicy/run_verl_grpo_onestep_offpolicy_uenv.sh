@@ -36,11 +36,21 @@ Common overrides:
   TRAINING_GPUS_PER_NODE        GPUs used by trainer/actor. Default: NGPUS_PER_NODE - ROLLOUT_GPUS_PER_NODE
   ROLLOUT_GPUS_PER_NODE         GPUs used by async rollout server. Default: 1, or 2 when NGPUS_PER_NODE >= 8
   CHECKPOINT_ENGINE_BACKEND     Weight sync backend. Default: nccl
+  ROLLOUT_CORRECTION_BYPASS_MODE
+                                Default: False. UEnv results currently do not
+                                carry token-level rollout_log_probs, so VeRL
+                                recomputes old_log_probs on the training side.
   PODMAN_GPU_ARGS               Default: nvidia.com/gpu=all
   PODMAN_EXTRA_ARGS             Extra podman run args. Default maps hostname to host IP.
   CUDA_VISIBLE_DEVICES_IN_CONTAINER Default: 0,1
   RAY_NUM_CPUS                  Default: 10 + NGPUS_PER_NODE * 4
   RAY_NOSET_CUDA_VISIBLE_DEVICES Default: empty; leave empty for Ray per-actor GPU isolation.
+  UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES
+                                Default: 1; prevents CPU Ray actors from failing
+                                transformer_engine import with Invalid device id.
+  UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK
+                                Default: 1; lets CPU Ray actors import VeRL CUDA
+                                constants while Ray hides GPUs from them.
   LOG_ROOT                      Default: <repo>/temp/logs
   SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core endpoint. Default: 8.130.75.157:8088
   UENV_ADAPTER_CORE_STREAMING   Use Python -> Rust ExecuteBatchStream. Default: 0
@@ -153,6 +163,7 @@ ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
 ROLLOUT_LAYERED_SUMMON=${ROLLOUT_LAYERED_SUMMON:-True}
 CHECKPOINT_ENGINE_BACKEND=${CHECKPOINT_ENGINE_BACKEND:-nccl}
+ROLLOUT_CORRECTION_BYPASS_MODE=${ROLLOUT_CORRECTION_BYPASS_MODE:-False}
 
 ACTOR_LR=${ACTOR_LR:-1e-6}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
@@ -175,6 +186,9 @@ MODEL_GATEWAY_LOG_PATH=${MODEL_GATEWAY_LOG_PATH:-${CONTAINER_SERVICE_DIR}/model-
 
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
+UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES=${UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES:-1}
+UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK:-1}
+UENV_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_VERL_DEVICE_CAPABILITY_FALLBACK:-8,0}
 UENV_ADAPTER_CORE_STREAMING=${UENV_ADAPTER_CORE_STREAMING:-0}
 UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH:-1}
 UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
@@ -388,6 +402,9 @@ export MKL_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
 export UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER}
 export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN}
+export UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES=${UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES}
+export UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK}
+export UENV_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_VERL_DEVICE_CAPABILITY_FALLBACK}
 export UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH}
 export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
 export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
@@ -412,6 +429,7 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \\
   hydra.run.dir=${CONTAINER_LOG_ROOT}/verl_onestep_offpolicy_uenv/hydra_${RUN_ID} \\
   algorithm.adv_estimator=grpo \\
   algorithm.use_kl_in_reward=False \\
+  algorithm.rollout_correction.bypass_mode=${ROLLOUT_CORRECTION_BYPASS_MODE} \\
   data.train_files=${CONTAINER_DATA_DIR}/train.parquet \\
   data.val_files=${CONTAINER_DATA_DIR}/test.parquet \\
   data.train_batch_size=${TRAIN_BATCH_SIZE} \\
