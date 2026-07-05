@@ -156,7 +156,13 @@ impl WorkerRuntime {
             Some(env_resolver),
         );
         if self.prewarm_on_startup {
-            warmup_pool.prewarm(&self.supported_env_types).await?;
+            let mut prewarm_envs = Vec::new();
+            for env_type in &self.supported_env_types {
+                if plugin_host.has_env_type(env_type).await {
+                    prewarm_envs.push(env_type.clone());
+                }
+            }
+            warmup_pool.prewarm(&prewarm_envs).await?;
             tracing::info!(
                 trace_id = "runtime",
                 worker_id = %self.worker_id,

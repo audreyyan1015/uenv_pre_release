@@ -19,8 +19,9 @@ env:
   plugin_dir: "/root/UEnv/plugins"
 
 pool:
-  warmup_size: 0
-  prewarm_on_startup: false
+  # VeRL math rollout 与 SWE 共用 Worker；math 插件需预热，避免首条 Dispatch「plugin not ready」
+  warmup_size: 4
+  prewarm_on_startup: true
   max_idle_time: 300
   cool_timeout: 60
   max_episode_count: 1000

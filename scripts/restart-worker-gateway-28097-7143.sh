@@ -15,6 +15,9 @@ sleep 2
 source /root/.uenv-worker.env 2>/dev/null || true
 source /root/.uenv-trajectory.env 2>/dev/null || true
 export UENV_WORKER_ALLOW_DEGRADED_START=1
+# VeRL math rollout：预热 math 插件池（与 deploy-7143-swe-pro.yaml pool 段一致）
+export UENV_WARMUP_POOL_SIZE="${UENV_WARMUP_POOL_SIZE:-4}"
+export UENV_PREWARM_ON_STARTUP="${UENV_PREWARM_ON_STARTUP:-true}"
 export UENV_SWE_GATEWAY_PUBLIC_URL=http://219.147.100.43:28097
 export UENV_SWE_ARTIFACT_DIR="${UENV_SWE_ARTIFACT_DIR:-/var/lib/uenv/swe-artifacts}"
 export UENV_TRAJECTORY_ENDPOINT="${UENV_TRAJECTORY_ENDPOINT:-http://8.130.75.157:8077}"
