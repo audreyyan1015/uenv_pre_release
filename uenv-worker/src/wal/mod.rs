@@ -189,6 +189,8 @@ mod tests {
             dispatch_lease_id: "lease-1".to_string(),
             lease_expire_at: None,
             scheduler_epoch: 1,
+            env_package_id: String::new(),
+            env_package_version: String::new(),
         };
         let result = EpisodeResult {
             episode_id: "ep-1".to_string(),

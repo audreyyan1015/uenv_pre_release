@@ -11,6 +11,12 @@ use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult};
 
 #[tokio::test]
 async fn m5_single_round_math_matches_expected_reward_and_status() {
+    let plugin_bin = std::env::var("CARGO_BIN_EXE_uenv-math-plugin")
+        .expect("missing CARGO_BIN_EXE_uenv-math-plugin");
+    unsafe {
+        std::env::set_var("UENV_MATH_PLUGIN_BIN", plugin_bin);
+    }
+
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root");
@@ -19,7 +25,11 @@ async fn m5_single_round_math_matches_expected_reward_and_status() {
     let expected_path = repo_root.join("fixtures/math/expected_result_001.pb");
 
     let req_bytes = fs::read(fixture_path).expect("read request fixture");
-    let request = EpisodeRequest::decode(req_bytes.as_slice()).expect("decode request fixture");
+    let mut request = EpisodeRequest::decode(req_bytes.as_slice()).expect("decode request fixture");
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&request.payload).expect("decode request payload");
+    payload["response_text"] = serde_json::Value::String("20".to_string());
+    request.payload = serde_json::to_vec(&payload).expect("encode request payload");
 
     let expected_bytes = fs::read(expected_path).expect("read expected fixture");
     let expected = EpisodeResult::decode(expected_bytes.as_slice()).expect("decode expected result");

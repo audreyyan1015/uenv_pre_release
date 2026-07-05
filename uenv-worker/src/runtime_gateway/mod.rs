@@ -513,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_is_public_and_ok() {
-        let app = router(empty_pool(), Some("secret".to_string()));
+        let app = router(empty_pool(), Some("secret".to_string()), "http://gateway.test".to_string());
         let resp = app
             .oneshot(HttpRequest::get("/runtime/v1/health").body(Body::empty()).unwrap())
             .await
@@ -523,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_unknown_instance_returns_404_without_docker() {
-        let app = router(empty_pool(), None);
+        let app = router(empty_pool(), None, "http://gateway.test".to_string());
         let resp = app
             .oneshot(post_json(
                 "/runtime/v1/sessions",
@@ -538,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_key_enforced_on_protected_routes() {
-        let app = router(empty_pool(), Some("secret".to_string()));
+        let app = router(empty_pool(), Some("secret".to_string()), "http://gateway.test".to_string());
         // 缺 key → 401
         let resp = app
             .clone()

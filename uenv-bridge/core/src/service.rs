@@ -75,16 +75,26 @@ where
             )));
         }
         let request = protocol::ExecuteBatchRequest::try_from(request.into_inner())?;
+        let request_id = request.request_id.clone();
+        let batch_id = request.batch_id.clone();
+        let sample_count = request.samples.len();
         info!(
-            request_id = %request.request_id,
-            batch_id = %request.batch_id,
-            sample_count = request.samples.len(),
+            request_id = %request_id,
+            batch_id = %batch_id,
+            sample_count,
             pending_batches = pending,
             "execute_batch_received"
         );
 
         let response = self.core.execute_batch(request).await.map_err(|err| {
-            tracing::warn!(error = %err, "execute_batch_failed");
+            tracing::warn!(
+                request_id = %request_id,
+                batch_id = %batch_id,
+                sample_count,
+                pending_batches = pending,
+                error = %err,
+                "execute_batch_failed"
+            );
             Status::internal(err.to_string())
         })?;
 

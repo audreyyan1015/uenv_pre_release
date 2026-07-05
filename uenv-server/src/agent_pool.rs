@@ -344,83 +344,172 @@ impl AgentRegistry {
         };
 
         // ① 显式指定池：只在该池判定。
+        // Explicit pool wins and is treated as a hard constraint.
         if !spec_pool.is_empty() {
             let any_in_pool = agents
                 .iter()
                 .any(|a| a.agent_pool_id == spec_pool && !self.is_stale(a));
             if !any_in_pool {
+                tracing::warn!(
+                    spec_pool,
+                    bridge_id,
+                    bridge_version,
+                    benchmark_variant,
+                    selector = ?selector,
+                    reason = "no_agent_in_explicit_pool",
+                    "agent_pool_resolve_failed"
+                );
                 return Err(AgentSelectError::NoAgentInPool);
             }
             let ok = agents
                 .iter()
                 .any(|a| a.agent_pool_id == spec_pool && servable(a));
             return if ok {
+                tracing::info!(
+                    spec_pool,
+                    selected_pool = spec_pool,
+                    bridge_id,
+                    bridge_version,
+                    benchmark_variant,
+                    selector = ?selector,
+                    reason = "explicit_pool",
+                    "agent_pool_resolved"
+                );
                 Ok(spec_pool.to_string())
             } else {
+                let available_bridges: Vec<String> = agents
+                    .iter()
+                    .filter(|a| a.agent_pool_id == spec_pool && !self.is_stale(a))
+                    .flat_map(|a| {
+                        a.synced_agent_bridges
+                            .iter()
+                            .map(|b| format!("{}@{}", b.package_id, b.version))
+                    })
+                    .collect();
+                tracing::warn!(
+                    spec_pool,
+                    bridge_id,
+                    bridge_version,
+                    benchmark_variant,
+                    selector = ?selector,
+                    available_bridges = ?available_bridges,
+                    reason = "no_matching_bridge_in_explicit_pool",
+                    "agent_pool_resolve_failed"
+                );
                 Err(AgentSelectError::NoMatchingBridge)
             };
         }
 
-        // 候选池集合（有存活 Agent 的池）。
+        // Live pools that can participate in soft routing.
         let live_pools: std::collections::HashSet<&str> = agents
             .iter()
             .filter(|a| !self.is_stale(a))
             .map(|a| a.agent_pool_id.as_str())
             .collect();
+        let live_pool_names: Vec<String> = live_pools.iter().map(|p| (*p).to_string()).collect();
         if live_pools.is_empty() {
+            tracing::warn!(
+                bridge_id,
+                bridge_version,
+                benchmark_variant,
+                selector = ?selector,
+                reason = "no_live_agent_pool",
+                "agent_pool_resolve_failed"
+            );
             return Err(AgentSelectError::NoAgentInPool);
         }
 
-        // 满足 bridge 的候选池；为空说明没有任何池能服务该 bridge。
         let mut candidates: Vec<String> = live_pools
             .iter()
             .filter(|p| agents.iter().any(|a| a.agent_pool_id == **p && servable(a)))
             .map(|p| p.to_string())
             .collect();
+        let bridge_candidate_pools = candidates.clone();
         if candidates.is_empty() {
+            let available_bridges: Vec<String> = agents
+                .iter()
+                .filter(|a| !self.is_stale(a))
+                .flat_map(|a| {
+                    a.synced_agent_bridges
+                        .iter()
+                        .map(|b| format!("{}@{}", b.package_id, b.version))
+                })
+                .collect();
+            tracing::warn!(
+                bridge_id,
+                bridge_version,
+                benchmark_variant,
+                selector = ?selector,
+                live_pools = ?live_pool_names,
+                available_bridges = ?available_bridges,
+                reason = "no_pool_matching_bridge",
+                "agent_pool_resolve_failed"
+            );
             return Err(AgentSelectError::NoMatchingBridge);
         }
 
-        // ② benchmark 变体映射（软）：目标池在候选里则收窄到它。
+        let mut route_reason = "capacity";
+        let mut variant_target: Option<String> = None;
+        let mut variant_matched = false;
+        let mut label_matched_pools: Vec<String> = Vec::new();
+
         if !benchmark_variant.is_empty() {
             if let Some(target) = self.routing.variant_pool_map.get(benchmark_variant) {
+                variant_target = Some(target.clone());
                 if candidates.iter().any(|p| p == target) {
                     candidates.retain(|p| p == target);
+                    variant_matched = true;
+                    route_reason = "variant";
                 }
             }
         }
 
-        // ③ 标签亲和（软）：保留池内有 Agent 满足全部 selector 的池；无匹配则不收窄。
         if !selector.is_empty() {
             let matched: Vec<String> = candidates
                 .iter()
                 .filter(|p| {
-                    agents
-                        .iter()
-                        .any(|a| a.agent_pool_id == **p && servable(a) && labels_match(&a.labels, selector))
+                    agents.iter().any(|a| {
+                        a.agent_pool_id == **p && servable(a) && labels_match(&a.labels, selector)
+                    })
                 })
                 .cloned()
                 .collect();
+            label_matched_pools = matched.clone();
             if !matched.is_empty() {
                 candidates = matched;
+                route_reason = "label";
             }
         }
 
-        // ④ 跨池负载均衡：选剩余容量最多的池（并列取 pool_id 字典序最小）。
         let best = candidates
             .iter()
             .max_by(|x, y| {
                 let cx = self.pool_free_capacity_locked(&agents, x);
                 let cy = self.pool_free_capacity_locked(&agents, y);
-                // 容量升序比较后取 max → 容量大者胜；容量相等时 pool_id 小者胜
                 cx.cmp(&cy).then_with(|| y.cmp(x))
             })
             .cloned()
             .expect("candidates non-empty");
+        let selected_free_capacity = self.pool_free_capacity_locked(&agents, &best);
+        tracing::info!(
+            selected_pool = %best,
+            reason = route_reason,
+            bridge_id,
+            bridge_version,
+            benchmark_variant,
+            selector = ?selector,
+            live_pools = ?live_pool_names,
+            bridge_candidate_pools = ?bridge_candidate_pools,
+            final_candidate_pools = ?candidates,
+            variant_target = ?variant_target,
+            variant_matched,
+            label_matched_pools = ?label_matched_pools,
+            selected_free_capacity,
+            "agent_pool_resolved"
+        );
         Ok(best)
     }
 
-    /// 池内存活 Agent 的剩余容量之和（max_concurrent - current_load），复用已持有的读锁。
     fn pool_free_capacity_locked(&self, agents: &[AgentInfo], pool_id: &str) -> u32 {
         agents
             .iter()
@@ -600,7 +689,11 @@ mod tests {
                 r.try_reserve("openhands-default", "", "", "").is_some()
             }));
         }
-        let ok = handles.into_iter().filter(|h| h.join().unwrap()).count();
+        let ok = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
         assert_eq!(ok, 5, "总容量 5，超额占用必须被闸门挡住");
     }
 

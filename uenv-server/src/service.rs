@@ -17,7 +17,7 @@ use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, Worke
 use crate::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
 use crate::proto::worker::v1::DispatchEpisodeRequest;
 use crate::proto::v1::admin_service_server::AdminService;
-use crate::scheduler::traits::Scheduler;
+use crate::scheduler::traits::{ScheduleError, Scheduler};
 use crate::state::{ActiveEpisode, ServerState};
 
 // =============================================================================
@@ -331,10 +331,33 @@ impl UEnvEpisodeService {
                     break (a, permit);
                 }
                 Err(e) => {
-                    // Worker 不可用（满载 / 无匹配 / 暂无）：**释放 Agent permit**（不 hold
-                    // hostage），退避重试至 deadline。
+                    // Worker capacity is transient, but env/package mismatches are persistent.
+                    // Release the Agent permit before either retrying or returning the error.
                     drop(permit);
+                    if !matches!(e, ScheduleError::AllWorkersAtCapacity) {
+                        tracing::warn!(
+                            episode_id = %episode_id,
+                            batch_id = %req.correlation_id,
+                            pool_id = %pool_id,
+                            env_package_id = %req.env_package_id,
+                            env_package_version = %req.env_package_version,
+                            benchmark_variant = %spec.benchmark_variant,
+                            reason = %e,
+                            "worker_select_failed"
+                        );
+                        anyhow::bail!("select worker failed: {e}");
+                    }
                     if Instant::now() > deadline {
+                        tracing::warn!(
+                            episode_id = %episode_id,
+                            batch_id = %req.correlation_id,
+                            pool_id = %pool_id,
+                            env_package_id = %req.env_package_id,
+                            env_package_version = %req.env_package_version,
+                            benchmark_variant = %spec.benchmark_variant,
+                            reason = %e,
+                            "worker_select_timeout"
+                        );
                         anyhow::bail!("select worker failed: {e}");
                     }
                     tokio::time::sleep(Duration::from_millis(
@@ -344,20 +367,35 @@ impl UEnvEpisodeService {
                 }
             }
         };
-        tracing::debug!(episode_id = %episode_id, pool_id = %pool_id, "agent_and_worker_acquired");
+        tracing::info!(
+            episode_id = %episode_id,
+            batch_id = %req.correlation_id,
+            pool_id = %pool_id,
+            worker_id = %assignment.worker_id,
+            worker_endpoint = %assignment.endpoint,
+            gateway_public_url = %assignment.gateway_public_url,
+            env_package_id = %req.env_package_id,
+            env_package_version = %req.env_package_version,
+            agent_bridge_id = %spec.agent_bridge_id,
+            agent_bridge_version = %spec.agent_bridge_version,
+            "agent_and_worker_acquired"
+        );
 
         if assignment.gateway_public_url.is_empty() {
-            // 已占 Worker 负载，失败时回收（此时 active_episodes 尚未登记）。
-            // _admission permit 随函数返回自动释放。
             self.state.scheduler.write().decrement_load(&assignment.worker_id);
+            tracing::warn!(
+                episode_id = %episode_id,
+                batch_id = %req.correlation_id,
+                worker_id = %assignment.worker_id,
+                pool_id = %pool_id,
+                "worker_gateway_public_url_missing"
+            );
             anyhow::bail!(
                 "worker {} has no gateway_public_url; cannot orchestrate agent job",
                 assignment.worker_id
             );
         }
 
-        // 登记到 active_episodes，使 cancel_episode / GetServerStatus / stale 检测
-        // 能感知 SWE+Agent episode（与 native 路径一致的控制面可见性）。
         self.state.active_episodes.insert(
             episode_id.clone(),
             ActiveEpisode {
@@ -377,6 +415,14 @@ impl UEnvEpisodeService {
         };
 
         // ① 调 Worker 的 for-episode 预建 session，拿 session_id。
+        tracing::info!(
+            episode_id = %episode_id,
+            run_id = %run_id,
+            worker_id = %assignment.worker_id,
+            gateway_public_url = %assignment.gateway_public_url,
+            instance_id = %spec.instance_id,
+            "gateway_session_create_start"
+        );
         let session = match create_session_for_episode(
             &assignment.gateway_public_url,
             &spec,
@@ -385,14 +431,34 @@ impl UEnvEpisodeService {
         )
         .await
         {
-            Ok(s) => s,
+            Ok(s) => {
+                tracing::info!(
+                    episode_id = %episode_id,
+                    run_id = %run_id,
+                    worker_id = %assignment.worker_id,
+                    gateway_public_url = %assignment.gateway_public_url,
+                    gateway_url = %s.gateway_url,
+                    session_id = %s.session_id,
+                    instance_id = %spec.instance_id,
+                    "gateway_session_create_done"
+                );
+                s
+            }
             Err(e) => {
                 cleanup();
+                tracing::warn!(
+                    episode_id = %episode_id,
+                    run_id = %run_id,
+                    worker_id = %assignment.worker_id,
+                    gateway_public_url = %assignment.gateway_public_url,
+                    instance_id = %spec.instance_id,
+                    error = %e,
+                    "gateway_session_create_failed"
+                );
                 anyhow::bail!("for-episode failed on worker {}: {e}", assignment.worker_id);
             }
         };
 
-        // 供完成分支填 EpisodeResult / episode_results 用（select! 内不便再借 assignment/spec）。
         let gateway_session_id = session.session_id.clone();
         let worker_id_for_row = assignment.worker_id.clone();
         let agent_bridge_version = spec.agent_bridge_version.clone();
@@ -492,9 +558,27 @@ impl UEnvEpisodeService {
                                 }
                             });
                         }
+                        if status == "failed" || !complete.error_message.is_empty() {
+                            tracing::warn!(
+                                episode_id = %episode_id,
+                                run_id = %run_id,
+                                job_id = %complete.job_id,
+                                worker_id = %worker_id_for_row,
+                                pool_id = %pool_id,
+                                status = %status,
+                                error_message = %complete.error_message,
+                                reward = complete.reward,
+                                trajectory_id = %complete.trajectory_id,
+                                "swe_agent_episode_failed"
+                            );
+                        }
                         info!(
                             episode_id = %episode_id,
                             run_id = %run_id,
+                            job_id = %complete.job_id,
+                            worker_id = %worker_id_for_row,
+                            pool_id = %pool_id,
+                            status = %status,
                             reward = complete.reward,
                             trajectory_id = %complete.trajectory_id,
                             "swe_agent_episode_completed"

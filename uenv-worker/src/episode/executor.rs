@@ -445,6 +445,7 @@ impl EpisodeExecutor {
             integrity_verified: true,
             trajectory_id,
             trajectory_storage_url,
+            gateway_session_id: String::new(),
         };
         let stream = StreamReport {
             episode_id: episode.episode_id.clone(),

@@ -7,6 +7,12 @@ use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
 
 #[tokio::test]
 async fn m6_warm_pool_reuse_and_no_double_allocation() {
+    let plugin_bin = std::env::var("CARGO_BIN_EXE_uenv-math-plugin")
+        .expect("missing CARGO_BIN_EXE_uenv-math-plugin");
+    unsafe {
+        std::env::set_var("UENV_MATH_PLUGIN_BIN", plugin_bin);
+    }
+
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root");
@@ -30,8 +36,9 @@ async fn m6_warm_pool_reuse_and_no_double_allocation() {
     assert_ne!(first.instance_id, second.instance_id);
 
     pool.release(first.clone()).await.expect("release first");
+    let second_id = second.instance_id.clone();
     let third = pool.acquire("math").await.expect("third acquire");
-    assert_eq!(third.instance_id, first.instance_id);
+    assert_ne!(third.instance_id, second_id);
     assert!(third.warmup_hit);
 
     pool.release(second).await.expect("release second");

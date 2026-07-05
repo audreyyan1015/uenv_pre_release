@@ -60,6 +60,7 @@ _jobs: dict[str, dict[str, Any]] = {}
 _stop = threading.Event()
 _active_jobs = 0  # 当前在跑的 AgentJob 数（心跳上报用）
 _active_lock = threading.Lock()
+_registration_lock = threading.Lock()
 
 
 
@@ -295,27 +296,71 @@ def _run_agent_job(client: Any, job: Any) -> None:
 
 
 
-def _heartbeat_loop(client: Any, agent_id: str) -> None:
+def _mark_agent_unregistered(agent_state: dict[str, Any], reason: str) -> None:
+    with _registration_lock:
+        was_registered = bool(agent_state.get("registered"))
+        agent_state["registered"] = False
+    if was_registered:
+        print(f"[agent-poll] registration invalidated: {reason}", flush=True)
+
+
+def _register_agent_once(
+    client: Any,
+    agent_state: dict[str, Any],
+    bridges: list[dict[str, str]],
+    labels: dict[str, str],
+) -> bool:
+    with _registration_lock:
+        requested_agent_id = str(agent_state.get("agent_id") or AGENT_ID)
+    try:
+        agent_id = client.register_agent(
+            agent_id=requested_agent_id,
+            agent_pool_id=AGENT_POOL_ID,
+            synced_bridges=bridges,
+            max_concurrent=AGENT_MAX_CONCURRENT,
+            labels=labels,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[agent-poll] RegisterAgent failed, retrying: {exc}", flush=True)
+        return False
+    with _registration_lock:
+        agent_state["agent_id"] = agent_id
+        agent_state["registered"] = True
+    print(
+        f"[agent-poll] registered agent_id={agent_id} pool={AGENT_POOL_ID} "
+        f"max_concurrent={AGENT_MAX_CONCURRENT}",
+        flush=True,
+    )
+    return True
+
+
+def _heartbeat_loop(client: Any, agent_state: dict[str, Any]) -> None:
     while not _stop.is_set():
+        with _registration_lock:
+            agent_id = str(agent_state.get("agent_id") or "")
+            registered = bool(agent_state.get("registered"))
+        if not registered or not agent_id:
+            _stop.wait(HEARTBEAT_INTERVAL_SEC)
+            continue
         try:
             with _active_lock:
                 active = _active_jobs
             client.agent_heartbeat(agent_id, active, int(time.time() * 1000))
         except Exception as exc:  # noqa: BLE001
             print(f"[agent-poll] heartbeat failed: {exc}", flush=True)
+            _mark_agent_unregistered(agent_state, "heartbeat_failed")
         _stop.wait(HEARTBEAT_INTERVAL_SEC)
 
 
 def _poll_loop() -> None:
-    """RegisterAgent + 循环 PollAgentJob。受 AGENT_MAX_CONCURRENT 限流。"""
     global _active_jobs
     if not SERVER_ENDPOINT:
         print("[agent-poll] UENV_SERVER_ENDPOINT unset; poll mode disabled", flush=True)
         return
     try:
         AgentControlClient = _import_agent_client()
-        # __init__ 内懒加载 grpc + stub，未装 grpcio / 未生成 stub 会在此抛错，
-        # 一并 catch，干净退出 poll 线程而不影响 HTTP 旁路。
+        # __init__ ???? grpc + stub??? grpcio / ??? stub ??????
+        # ?? catch????? poll ?????? HTTP ???
         client = AgentControlClient(SERVER_ENDPOINT)
     except Exception as exc:  # noqa: BLE001
         print(f"[agent-poll] cannot init agent client (poll mode off): {exc}", flush=True)
@@ -323,33 +368,29 @@ def _poll_loop() -> None:
 
     bridges = [{"package_id": AGENT_BRIDGE_ID, "version": AGENT_BRIDGE_VERSION, "bundle_digest": ""}]
     labels = _parse_labels(AGENT_LABELS)
-    # 注册（带退避重试，等 Server 就绪）。
-    agent_id = AGENT_ID
+    agent_state: dict[str, Any] = {"agent_id": AGENT_ID, "registered": False}
+
+    # ?????????? Server ?????? heartbeat/poll ???? registered
+    # ????????? RegisterAgent??? Server ?????????????
     while not _stop.is_set():
-        try:
-            agent_id = client.register_agent(
-                agent_id=AGENT_ID,
-                agent_pool_id=AGENT_POOL_ID,
-                synced_bridges=bridges,
-                max_concurrent=AGENT_MAX_CONCURRENT,
-                labels=labels,
-            )
-            print(
-                f"[agent-poll] registered agent_id={agent_id} pool={AGENT_POOL_ID} "
-                f"max_concurrent={AGENT_MAX_CONCURRENT}",
-                flush=True,
-            )
+        if _register_agent_once(client, agent_state, bridges, labels):
             break
-        except Exception as exc:  # noqa: BLE001
-            print(f"[agent-poll] RegisterAgent failed, retrying: {exc}", flush=True)
-            _stop.wait(POLL_INTERVAL_SEC)
+        _stop.wait(POLL_INTERVAL_SEC)
     if _stop.is_set():
         return
 
-    threading.Thread(target=_heartbeat_loop, args=(client, agent_id), daemon=True).start()
+    threading.Thread(target=_heartbeat_loop, args=(client, agent_state), daemon=True).start()
 
     while not _stop.is_set():
-        # 达到本机并发上限则不 poll（与 Server try_reserve 双侧限流呼应）。
+        with _registration_lock:
+            registered = bool(agent_state.get("registered"))
+            agent_id = str(agent_state.get("agent_id") or "")
+        if not registered:
+            if not _register_agent_once(client, agent_state, bridges, labels):
+                _stop.wait(POLL_INTERVAL_SEC)
+            continue
+
+        # ?????????? poll?? Server try_reserve ????????
         with _active_lock:
             busy = _active_jobs >= AGENT_MAX_CONCURRENT
         if busy:
@@ -359,6 +400,7 @@ def _poll_loop() -> None:
             job = client.poll_agent_job(AGENT_POOL_ID, agent_id)
         except Exception as exc:  # noqa: BLE001
             print(f"[agent-poll] PollAgentJob failed: {exc}", flush=True)
+            _mark_agent_unregistered(agent_state, "poll_failed")
             _stop.wait(POLL_INTERVAL_SEC)
             continue
         if job is None:

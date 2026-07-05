@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Child;
 use tokio::sync::Mutex;
@@ -116,8 +116,25 @@ impl PluginHost {
         };
 
         let entry = self.plugin_dir.join(env_type).join(manifest.entry);
-        let child = ProcessBackend::create(&entry, &uds_path)?;
+        let mut child = ProcessBackend::create(&entry, &uds_path)?;
         let pid = child.id().ok_or("failed to resolve plugin pid")?;
+        let started = tokio::time::Instant::now();
+        while tokio::fs::metadata(&uds_path).await.is_err() {
+            if let Some(status) = child.try_wait()? {
+                return Err(format!(
+                    "plugin process exited before UDS became ready: status={status}"
+                )
+                .into());
+            }
+            if started.elapsed() > Duration::from_secs(2) {
+                return Err(format!(
+                    "plugin UDS did not become ready within timeout: {}",
+                    uds_path.display()
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let instance = PluginInstance {
             instance_id: instance_id.clone(),
             env_type: env_type.to_string(),

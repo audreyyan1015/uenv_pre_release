@@ -23,7 +23,7 @@ use uenv_server::proto::v1::agent_control_service_server::AgentControlServiceSer
 use uenv_server::control_plane::ControlPlaneServiceImpl;
 use uenv_server::agent_job::AgentControlServiceImpl;
 use uenv_server::service::AdminServiceImpl;
-use uenv_server::{create_default_state, EpisodeService, EpisodeServiceError, UEnvEpisodeService};
+use uenv_server::{EpisodeService, EpisodeServiceError, UEnvEpisodeService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,11 +37,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    let binary_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let package_version = env!("CARGO_PKG_VERSION");
+    let build_git_sha = option_env!("UENV_BUILD_GIT_SHA").unwrap_or("unknown");
+    let build_time = option_env!("UENV_BUILD_TIME").unwrap_or("unknown");
+
     tracing::info!(%addr, "uenv listening");
     println!("uenv listening on {addr}");
 
     let backend = std::env::var("UENV_ADAPTER_CORE_BACKEND")
         .unwrap_or_else(|_| "server".to_string());
+    tracing::info!(
+        addr = %addr,
+        backend = %backend,
+        binary_path = %binary_path,
+        package_version,
+        build_git_sha,
+        build_time,
+        "uenv_adapter_core_startup"
+    );
     if backend == "static_rollout" {
         let core = AdapterCore::new(StaticRolloutEpisodeService::from_env());
         let adapter_service = AdapterCoreServiceImpl::new(core);
@@ -55,7 +71,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = std::env::var("UENV_CONFIG_PATH")
         .unwrap_or_else(|_| "config/server.yaml".to_string());
     let config = uenv_server::ServerConfig::load_or_default(&config_path);
-    tracing::info!(config_path = %config_path, "server_config_loaded");
+    tracing::info!(
+        config_path = %config_path,
+        scheduler_heartbeat_interval_ms = config.scheduler.heartbeat_interval_ms,
+        scheduler_heartbeat_timeout_secs = config.scheduler.heartbeat_timeout_secs,
+        admin_http_port = config.admin_http_port,
+        "server_config_loaded"
+    );
     let state = uenv_server::create_state_with_config(&config);
 
     // 轨迹聚合存储 HTTP（:8077，v2.2）：按环境变量启用。同一 store 同时供 HTTP 与 episode_results。
@@ -64,7 +86,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if trj_cfg.enabled {
             if let Some(trj_store) = uenv_server::trajectory::open_shared(&trj_cfg) {
                 let _ = state.trajectory_store.set(trj_store.clone());
-                tracing::info!(listen = %trj_cfg.http_listen, "trajectory_server_spawning");
+                tracing::info!(
+                    listen = %trj_cfg.http_listen,
+                    data_dir = %trj_cfg.data_dir.display(),
+                    "trajectory_server_spawning"
+                );
                 tokio::spawn(uenv_server::trajectory::serve_with(trj_store, trj_cfg));
             }
         }
