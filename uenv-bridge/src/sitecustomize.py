@@ -138,10 +138,15 @@ def _patch_transformers_pad_return_tensors() -> None:
     requested.
     """
 
-    import torch
-    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+    import sys
 
-    cls = PreTrainedTokenizerBase
+    module = sys.modules.get("transformers.tokenization_utils_base")
+    cls = getattr(module, "PreTrainedTokenizerBase", None)
+    if cls is None:
+        raise AttributeError("transformers.tokenization_utils_base is not fully initialized")
+
+    import torch
+
     if getattr(cls, "_uenv_pad_return_tensors_patch_applied", False):
         return
 

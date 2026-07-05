@@ -312,6 +312,7 @@ class UEnvAgentLoop(AgentLoopBase):
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=agent_metrics,
             extra_fields={
+                **self._fully_async_extra_fields_from_payload(request),
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
@@ -469,6 +470,7 @@ class UEnvAgentLoop(AgentLoopBase):
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=AgentLoopMetrics(generate_sequences=0.0, tool_calls=0.0, compute_score=0.0, num_preempted=-1),
             extra_fields={
+                **self._fully_async_extra_fields_from_payload(request),
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
@@ -486,6 +488,22 @@ class UEnvAgentLoop(AgentLoopBase):
         )
         prompt_ids = initial_observation.get("prompt_ids") if isinstance(initial_observation, dict) else []
         return [int(item) for item in prompt_ids] if isinstance(prompt_ids, list) else []
+
+    def _fully_async_extra_fields_from_payload(self, request: EpisodeRequest) -> dict[str, Any]:
+        payload = self._payload_dict(request)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        global_steps = metadata.get("global_steps")
+        if global_steps is None:
+            global_steps = metadata.get("global_step")
+        try:
+            step = int(self._python_value(global_steps))
+        except Exception:
+            step = 0
+        return {
+            "global_steps": step,
+            "min_global_steps": step,
+            "max_global_steps": step,
+        }
 
     def build_episode_request(
         self,
@@ -519,7 +537,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "task_name": task_name,
             "data_source": data_source,
             "ability": self._string_or_none(sample_kwargs.get("ability")),
-            "extra_info": self._jsonable(sample_kwargs.get("extra_info") or {}),
+            "extra_info": self._metadata_extra_info(sample_kwargs, prompt_as_text),
             "rollout_n": self._value_from_extra_info(sample_kwargs, "rollout_n", None),
             "global_steps": self._value_from_extra_info(sample_kwargs, "global_steps", None),
             "model_gateway_upstreams": model_upstream_overrides or [],
@@ -706,6 +724,20 @@ class UEnvAgentLoop(AgentLoopBase):
         return [{"role": "user", "content": "" if value is None else str(value)}]
 
     def _response_ids_from_result(self, result: EpisodeResult) -> list[int]:
+        ids: list[int] = []
+        fallback_text = ""
+        for step in result.trajectory.steps:
+            step_ids = self._ids_from_info(step.info, "response_ids")
+            if step_ids:
+                ids.extend(step_ids)
+                continue
+            text = step.info.get("response_text") or step.action.decode("utf-8", errors="replace")
+            if text:
+                fallback_text += text
+        if ids:
+            return ids
+        if fallback_text:
+            return self._encode_response_text(fallback_text)
         for step in reversed(result.trajectory.steps):
             ids = self._ids_from_info(step.info, "response_ids")
             if ids:
@@ -717,10 +749,13 @@ class UEnvAgentLoop(AgentLoopBase):
         return self._encode_response_text("")
 
     def _response_mask_from_result(self, result: EpisodeResult, fallback_len: int) -> list[int]:
-        for step in reversed(result.trajectory.steps):
-            mask = self._ids_from_info(step.info, "response_mask")
-            if mask:
-                return [1 if item else 0 for item in mask]
+        masks: list[int] = []
+        for step in result.trajectory.steps:
+            step_mask = self._ids_from_info(step.info, "response_mask")
+            if step_mask:
+                masks.extend(1 if item else 0 for item in step_mask)
+        if masks:
+            return masks
         return [1] * fallback_len
 
     def _ids_from_info(self, info: dict[str, str], key: str) -> list[int]:
@@ -1014,6 +1049,18 @@ class UEnvAgentLoop(AgentLoopBase):
         if key in sample_kwargs:
             return sample_kwargs[key]
         return default
+
+    def _metadata_extra_info(self, sample_kwargs: dict[str, Any], prompt_as_text: str) -> dict[str, Any]:
+        extra_info = self._python_value(sample_kwargs.get("extra_info") or {})
+        output = dict(extra_info) if isinstance(extra_info, dict) else {}
+        output.setdefault("question", self._question_from_prompt_text(prompt_as_text))
+        return self._jsonable(output)
+
+    def _question_from_prompt_text(self, prompt_as_text: str) -> str:
+        prefix = "user: "
+        if prompt_as_text.startswith(prefix):
+            return prompt_as_text[len(prefix) :]
+        return prompt_as_text
 
     def _trajectory_to_jsonable(self, result: EpisodeResult) -> list[dict[str, Any]]:
         output = []
