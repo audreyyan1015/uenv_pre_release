@@ -215,6 +215,18 @@ if os.environ.get("UENV_PATCH_VERL_AGENT_LOOP_EMPTY_RESPONSE") == "1":
     _run_when_module_imported("verl.experimental.agent_loop.agent_loop", _patch_verl_agent_loop_empty_response)
 
 
+def _patch_verl_model_version_response() -> None:
+    """Attach rollout parameter version to VeRL vLLM OpenAI responses."""
+
+    from uenv.bridge.verl_model_version_patch import apply_verl_vllm_model_version_patch
+
+    apply_verl_vllm_model_version_patch()
+
+
+if os.environ.get("UENV_PATCH_VERL_MODEL_VERSION_RESPONSE") in {"1", "true", "True", "enabled"}:
+    _run_when_module_imported("verl.workers.rollout.vllm_rollout.vllm_async_server", _patch_verl_model_version_response)
+
+
 def _patch_torch_cuda_is_available_no_devices() -> None:
     """Treat Ray CPU actors with zero visible GPUs as CUDA-unavailable.
 

@@ -312,7 +312,7 @@ class UEnvAgentLoop(AgentLoopBase):
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=agent_metrics,
             extra_fields={
-                **self._fully_async_extra_fields_from_payload(request),
+                **self._fully_async_extra_fields_from_result(request, result),
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
@@ -470,7 +470,7 @@ class UEnvAgentLoop(AgentLoopBase):
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=AgentLoopMetrics(generate_sequences=0.0, tool_calls=0.0, compute_score=0.0, num_preempted=-1),
             extra_fields={
-                **self._fully_async_extra_fields_from_payload(request),
+                **self._fully_async_extra_fields_from_result(request, result),
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
@@ -489,21 +489,80 @@ class UEnvAgentLoop(AgentLoopBase):
         prompt_ids = initial_observation.get("prompt_ids") if isinstance(initial_observation, dict) else []
         return [int(item) for item in prompt_ids] if isinstance(prompt_ids, list) else []
 
-    def _fully_async_extra_fields_from_payload(self, request: EpisodeRequest) -> dict[str, Any]:
+    def _fully_async_extra_fields_from_result(self, request: EpisodeRequest, result: EpisodeResult) -> dict[str, Any]:
+        result_metadata = self._model_version_from_result(result)
+        fallback_step = self._global_step_from_payload(request)
+        max_step = self._int_from_mapping(
+            result_metadata,
+            ("max_global_steps", "max_rollout_param_version", "rollout_max_param_version", "rollout_param_version"),
+            fallback_step,
+        )
+        min_step = self._int_from_mapping(
+            result_metadata,
+            ("min_global_steps", "min_rollout_param_version", "rollout_min_param_version", "rollout_param_version"),
+            max_step,
+        )
+        return {
+            "global_steps": max_step,
+            "min_global_steps": min_step,
+            "max_global_steps": max_step,
+        }
+
+    def _global_step_from_payload(self, request: EpisodeRequest) -> int:
         payload = self._payload_dict(request)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         global_steps = metadata.get("global_steps")
         if global_steps is None:
             global_steps = metadata.get("global_step")
         try:
-            step = int(self._python_value(global_steps))
+            return int(self._python_value(global_steps))
         except Exception:
-            step = 0
-        return {
-            "global_steps": step,
-            "min_global_steps": step,
-            "max_global_steps": step,
-        }
+            return 0
+
+    def _model_version_from_result(self, result: EpisodeResult) -> dict[str, Any]:
+        output: dict[str, Any] = {}
+        for step in result.trajectory.steps:
+            info = step.info if isinstance(step.info, dict) else {}
+            nested = self._json_object_from_info(info.get("uenv_model_version"))
+            if nested:
+                output.update(nested)
+            for key in (
+                "model_upstream",
+                "rollout_param_version",
+                "rollout_policy_version",
+                "min_global_steps",
+                "max_global_steps",
+                "min_rollout_param_version",
+                "max_rollout_param_version",
+                "rollout_min_param_version",
+                "rollout_max_param_version",
+            ):
+                value = info.get(key)
+                if value not in (None, ""):
+                    output[key] = value
+        return output
+
+    def _json_object_from_info(self, raw: Any) -> dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
+        if raw in (None, ""):
+            return {}
+        try:
+            value = json.loads(str(raw))
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _int_from_mapping(self, data: dict[str, Any], keys: tuple[str, ...], default: int) -> int:
+        for key in keys:
+            value = data.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return int(self._python_value(value))
+            except Exception:
+                continue
+        return default
 
     def build_episode_request(
         self,
@@ -861,7 +920,6 @@ class UEnvAgentLoop(AgentLoopBase):
             "policy_version",
             self._policy_version_from_step(generation_step),
         )
-        max_allowed_staleness = self._value_from_extra_info(sample_kwargs, "max_allowed_staleness", 1)
         output.update(
             {
                 "generation_step": self._jsonable(generation_step),
@@ -875,7 +933,6 @@ class UEnvAgentLoop(AgentLoopBase):
                 "parameter_sync_id": self._jsonable(
                     self._value_from_extra_info(sample_kwargs, "parameter_sync_id", self._sync_id_from_step(generation_step))
                 ),
-                "max_allowed_staleness": self._jsonable(max_allowed_staleness),
             }
         )
         return output

@@ -456,7 +456,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(metadata["policy_version"], "actor-step-3")
         self.assertEqual(metadata["rollout_policy_version"], "actor-step-3")
         self.assertEqual(metadata["parameter_sync_id"], "sync-3")
-        self.assertEqual(metadata["max_allowed_staleness"], 1)
+        self.assertNotIn("max_allowed_staleness", metadata)
 
     def test_build_episode_request_allows_one_step_metadata_overrides(self) -> None:
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(self._result_with_token_ids()))
@@ -478,7 +478,6 @@ class UEnvAgentLoopTest(unittest.TestCase):
                     "policy_version": "actor-custom-8",
                     "rollout_policy_version": "rollout-custom-8",
                     "parameter_sync_id": "sync-custom-8",
-                    "max_allowed_staleness": 2,
                 }
             },
         )
@@ -493,7 +492,45 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(metadata["policy_version"], "actor-custom-8")
         self.assertEqual(metadata["rollout_policy_version"], "rollout-custom-8")
         self.assertEqual(metadata["parameter_sync_id"], "sync-custom-8")
-        self.assertEqual(metadata["max_allowed_staleness"], 2)
+        self.assertNotIn("max_allowed_staleness", metadata)
+
+    def test_output_prefers_result_rollout_param_version_for_fully_async_steps(self) -> None:
+        result = EpisodeResult(
+            request_id="result-versioned",
+            status="completed",
+            trajectory=Trajectory(
+                steps=[
+                    StepRecord(
+                        step_index=0,
+                        action=b"4",
+                        reward=1.0,
+                        terminated=True,
+                        info={
+                            "response_ids": "[101]",
+                            "response_mask": "[1]",
+                            "rollout_param_version": "11",
+                            "rollout_policy_version": "actor-step-11",
+                        },
+                    )
+                ],
+                total_reward=1.0,
+                total_steps=1,
+            ),
+            summary=EpisodeSummary(total_reward=1.0, total_steps=1, terminate_reason="done"),
+        )
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result), parallel_mode="fully_async")
+
+        output = asyncio.run(
+            loop.run(
+                sampling_params={},
+                raw_prompt="2+2?",
+                sample_kwargs={"extra_info": {"batch_id": "batch-fully-async", "sample_index": 0, "global_step": 10}},
+            )
+        )
+
+        self.assertEqual(output.extra_fields["global_steps"], 11)
+        self.assertEqual(output.extra_fields["min_global_steps"], 11)
+        self.assertEqual(output.extra_fields["max_global_steps"], 11)
 
     def test_run_can_fall_back_to_action_text(self) -> None:
         result = EpisodeResult(

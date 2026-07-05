@@ -148,6 +148,7 @@ RAY_NOSET_CUDA_VISIBLE_DEVICES=${RAY_NOSET_CUDA_VISIBLE_DEVICES:-$([ "${NGPUS_PE
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
+UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE:-1}
 UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH:-1}
 UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
 UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
@@ -217,6 +218,7 @@ export MKL_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
 export UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER}
 export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN}
+export UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE}
 export UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH}
 export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
 export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
@@ -237,7 +239,7 @@ export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
 export UENV_ADAPTER_CORE_BACKEND=server
 export UENV_AGENT_LOOP_REQUEST_RECORD_PATH=\"${AGENT_LOOP_REQUEST_RECORD_PATH}\"
 export UENV_AGENT_LOOP_RESULT_RECORD_PATH=\"${AGENT_LOOP_RESULT_RECORD_PATH}\"
-python3 -m verl.trainer.main_ppo \\
+python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   hydra.run.dir=${CONTAINER_LOG_ROOT}/verl_layer4_agent_loop/hydra_${RUN_ID} \\
   algorithm.adv_estimator=grpo \\
   algorithm.use_kl_in_reward=False \\
@@ -304,6 +306,8 @@ python3 -m verl.trainer.main_ppo \\
   trainer.default_local_dir=/uenv/uenv-bridge/tmp/verl_layer4_agent_loop_ckpt \\
   ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS} \\
   +ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=enabled \\
   +ray_kwargs.ray_init.include_dashboard=False" 2>&1 | tee "${LOG_FILE}"
 }
 
