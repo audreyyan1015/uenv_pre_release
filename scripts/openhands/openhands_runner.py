@@ -241,7 +241,18 @@ def _run_agent_job(client: Any, job: Any) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         job_file = out_dir / "agent_job.json"
         # AgentJob dataclass → JSON（driver 通过 UENV_AGENT_JOB_FILE 读取并覆盖 gateway 等）。
-        job_file.write_text(json.dumps(job.__dict__, indent=2) + "\n", encoding="utf-8")
+        job_dict = dict(job.__dict__)
+        # 208.77 经 SSH 隧道访问 7143 Gateway 时，将 Server 下发的公网 URL 换成本机隧道口。
+        local_gw = os.environ.get("UENV_GATEWAY_LOCAL", "").strip()
+        if local_gw and job_dict.get("gateway_url"):
+            print(
+                f"[agent-poll] gateway rewrite {job_dict['gateway_url']} -> {local_gw}",
+                flush=True,
+            )
+            job_dict["gateway_url"] = local_gw
+        if not job_dict.get("gateway_api_key"):
+            job_dict["gateway_api_key"] = os.environ.get("UENV_GATEWAY_API_KEY", "swe-pro-secret")
+        job_file.write_text(json.dumps(job_dict, indent=2) + "\n", encoding="utf-8")
 
         env = os.environ.copy()
         env["UENV_AGENT_JOB_FILE"] = str(job_file)

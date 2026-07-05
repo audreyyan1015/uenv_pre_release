@@ -423,8 +423,10 @@ impl UEnvEpisodeService {
             instance_id = %spec.instance_id,
             "gateway_session_create_start"
         );
+        let gateway_api_key = swe_gateway_api_key();
         let session = match create_session_for_episode(
             &assignment.gateway_public_url,
+            &gateway_api_key,
             &spec,
             &episode_id,
             &run_id,
@@ -469,7 +471,7 @@ impl UEnvEpisodeService {
             job_id: job_id.clone(),
             run_id: run_id.clone(),
             gateway_url: session.gateway_url.clone(),
-            gateway_api_key: String::new(),
+            gateway_api_key: gateway_api_key.clone(),
             session_id: session.session_id.clone(),
             instance_id: spec.instance_id.clone(),
             benchmark_variant: spec.benchmark_variant.clone(),
@@ -507,8 +509,9 @@ impl UEnvEpisodeService {
                 // fire-and-forget：失败仅记日志，不影响 episode 结果。
                 let gw = assignment.gateway_public_url.clone();
                 let sid = session.session_id.clone();
+                let key = gateway_api_key.clone();
                 tokio::spawn(async move {
-                    destroy_session(&gw, &sid).await;
+                    destroy_session(&gw, &key, &sid).await;
                 });
                 anyhow::bail!("swe agent episode {episode_id} timeout waiting for agent completion");
             }
@@ -783,10 +786,16 @@ struct ForEpisodeSession {
     gateway_url: String,
 }
 
+/// Runtime Gateway `X-API-Key`（与 7143 Worker runtime_gateway.api_key 一致）。
+fn swe_gateway_api_key() -> String {
+    std::env::var("UENV_SWE_GATEWAY_API_KEY").unwrap_or_else(|_| "swe-pro-secret".to_string())
+}
+
 /// 调 Worker 的 `POST {gateway_public_url}/runtime/v1/sessions/for-episode` 预建 session。
 /// 请求/响应契约见 uenv-worker/src/runtime_gateway/mod.rs 的 ForEpisodeReq/ForEpisodeResp。
 async fn create_session_for_episode(
     gateway_public_url: &str,
+    gateway_api_key: &str,
     spec: &SweAgentSpec,
     episode_id: &str,
     run_id: &str,
@@ -808,7 +817,11 @@ async fn create_session_for_episode(
     }
 
     let client = reqwest::Client::new();
-    let resp = client.post(&url).json(&body).send().await?;
+    let mut req = client.post(&url).json(&body);
+    if !gateway_api_key.is_empty() {
+        req = req.header("X-API-Key", gateway_api_key);
+    }
+    let resp = req.send().await?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -838,7 +851,7 @@ async fn create_session_for_episode(
 
 /// best-effort 关闭 Worker 上的 session（`DELETE /runtime/v1/sessions/{id}`）。
 /// 用于 episode 超时兜底，失败仅记日志——绝不影响 episode 结果。
-async fn destroy_session(gateway_public_url: &str, session_id: &str) {
+async fn destroy_session(gateway_public_url: &str, gateway_api_key: &str, session_id: &str) {
     if session_id.is_empty() {
         return;
     }
@@ -847,7 +860,12 @@ async fn destroy_session(gateway_public_url: &str, session_id: &str) {
         gateway_public_url.trim_end_matches('/'),
         session_id
     );
-    match reqwest::Client::new().delete(&url).send().await {
+    let client = reqwest::Client::new();
+    let mut req = client.delete(&url);
+    if !gateway_api_key.is_empty() {
+        req = req.header("X-API-Key", gateway_api_key);
+    }
+    match req.send().await {
         Ok(resp) => {
             if !resp.status().is_success() {
                 tracing::warn!(session_id, status = %resp.status(), "destroy_session_non_success");
