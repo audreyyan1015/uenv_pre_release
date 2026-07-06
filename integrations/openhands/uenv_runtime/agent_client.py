@@ -35,11 +35,16 @@ def _load_grpc_modules() -> tuple[Any, Any, Any]:
             "integrations/openhands/requirements-agent.txt`"
         ) from exc
 
-    # 生成的 agent_pb2_grpc.py 内部 `import agent_pb2`（扁平），需保证同目录可导入。
-    # 优先按包路径导入，并把 agent_pb2 注册到顶层 sys.modules 满足其扁平 import。
+    # 生成的 stub 位于 gen/uenv/v1/（包名 uenv.v1）；旧文档曾写扁平 gen/agent_pb2。
     pb2 = None
     pb2_grpc = None
-    for pkg in ("uenv_runtime.gen", "gen", ""):
+    for pkg in (
+        "uenv.v1",
+        "uenv_runtime.gen.uenv.v1",
+        "uenv_runtime.gen",
+        "gen",
+        "",
+    ):
         prefix = f"{pkg}." if pkg else ""
         try:
             pb2 = importlib.import_module(f"{prefix}agent_pb2")

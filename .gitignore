@@ -16,8 +16,10 @@ Thumbs.db
 /uenv-server/target
 secrets/*
 !secrets/README.md
-# scripts 默认忽略，显式保留运维交付脚本
+# scripts 默认忽略，显式保留运维交付脚本；_ 前缀为联调临时脚本，不入库
 /scripts/*
+/scripts/_*
+/scripts/integrations/
 !/scripts/connect-remote.sh
 !/scripts/gen-worker-proto.sh
 !/scripts/proto-gen.sh
@@ -27,6 +29,7 @@ secrets/*
 !/scripts/export_swe_pro_instances.py
 !/scripts/deploy-pro-python-openhands-7143.sh
 !/scripts/pull-pro-image-7143.sh
+!/scripts/hub-stage-image-package.sh
 !/scripts/deploy-openhands-20877.sh
 !/scripts/run-openhands-pro-20877.sh
 !/scripts/restart-worker-gateway-28097-7143.sh
@@ -45,6 +48,10 @@ secrets/*
 /logs
 /Docs/scripts
 /tmp
+# 含服务器账号密码的联调指南，严禁入库
+/Docs/README.md
+# 联调周报（本地产物，勿入库）
+/周报/
 
 # stress_test: 生成的 gRPC Python 框、临时的 proto 源文件及临时日志
 /uenv-server/stress_test/uenv/

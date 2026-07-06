@@ -2,7 +2,7 @@
 //! templates. Handlers stay thin — reads hit the store directly, writes go
 //! through the `service` orchestration layer.
 
-use crate::errors::ApiResult;
+use crate::errors::{ApiError, ApiResult};
 use crate::etag::json_with_etag;
 use crate::middleware::{ensure_role, Principal};
 use crate::service;
@@ -389,30 +389,57 @@ async fn get_package_sync_plan(
     Ok(json_with_etag(&headers, &plan))
 }
 
+/// Query for artifact downloads.
+#[derive(Debug, Deserialize)]
+struct ArtifactQuery {
+    /// Re-hash the file against the stored digest before serving (integrity
+    /// self-check). Off by default so multi-GB image tarballs aren't re-read on
+    /// every request; the digest is always exposed as the strong ETag regardless.
+    #[serde(default)]
+    verify: bool,
+}
+
 /// `GET /packages/{package_id}/versions/{version}/artifacts/{name}` — serve bytes.
 ///
-/// The bytes are re-hashed against the stored digest on every read (integrity
-/// self-check); the digest is also returned as the strong ETag.
+/// The file is **streamed** from the artifact store (chunked, never buffered in
+/// RAM) so large hosted image tarballs don't exhaust the memory-constrained Hub.
+/// The stored digest is returned as the strong ETag; pass `?verify=true` to force
+/// a full re-hash before serving.
 async fn get_package_artifact(
     State(state): State<AppState>,
     _principal: Principal,
     Path((package_id, version, name)): Path<(String, String, String)>,
+    Query(q): Query<ArtifactQuery>,
 ) -> ApiResult<Response> {
     let meta = state
         .store
         .get_artifact_meta(&package_id, &version, &name)
         .await?;
     let root = std::path::Path::new(&state.config.packages.artifact_dir);
-    let bytes = uenv_hub_core::package::read_artifact_verified(root, &meta.rel_path, &meta.digest)?;
+    let abs = uenv_hub_core::package::artifact_abs_path(root, &meta.rel_path)?;
+    if q.verify {
+        uenv_hub_core::package::verify_artifact_file(root, &meta.rel_path, &meta.digest)?;
+    }
+    let file = tokio::fs::File::open(&abs)
+        .await
+        .map_err(|e| ApiError::not_found(format!("package artifact bytes {}: {e}", abs.display())))?;
+    let len = file.metadata().await.ok().map(|m| m.len());
     let content_type = meta
         .media_type
         .clone()
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let mut resp = ([(header::CONTENT_TYPE, content_type)], bytes).into_response();
-    if let Ok(v) = format!("\"{}\"", meta.digest).parse() {
-        resp.headers_mut().insert(header::ETAG, v);
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    let mut builder = Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ETAG, format!("\"{}\"", meta.digest));
+    if let Some(l) = len {
+        builder = builder.header(header::CONTENT_LENGTH, l);
     }
-    Ok(resp)
+    builder
+        .body(body)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, dto::ErrorCode::InternalError, format!("stream artifact: {e}")))
 }
 
 // ---------------------------------------------------------------------------

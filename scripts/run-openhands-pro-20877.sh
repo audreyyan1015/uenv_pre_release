@@ -20,7 +20,7 @@ RUN_ID="${UENV_RUN_ID:-run-oh-${STAMP}-pro-${MODE}}"
 # 未指定时沿用原带时间戳的默认目录。
 OUT="${OPENHANDS_OUT_DIR:-${OPENHANDS_RUNS_DIR:-/var/log/uenv/openhands-runs}/pro-official-${MODE}-${STAMP}}"
 
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="${HOME:-/root}/.local/bin:$PATH"
 source /root/.uenv-trajectory.env 2>/dev/null || true
 
 if [[ -f "$UENV/config/uenv-worker-llm.env" && ! -f "$LLM_JSON" ]]; then

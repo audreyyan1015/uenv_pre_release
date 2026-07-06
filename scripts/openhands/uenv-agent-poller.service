@@ -15,6 +15,8 @@ Environment=OPENHANDS_AGENT_MAX_CONCURRENT=1
 Environment=OPENHANDS_POLL_INTERVAL_SEC=3
 Environment=UENV_AGENT_BRIDGE_DIR=/root/UEnv/integrations/openhands
 Environment=OPENHANDS_RUN_SCRIPT=/root/UEnv/scripts/run-openhands-pro-20877.sh
+Environment=UENV_GATEWAY_LOCAL=http://127.0.0.1:28097
+Environment=UENV_GATEWAY_API_KEY=swe-pro-secret
 # 载入部署机私有环境（LLM 配置、SDK 路径、trajectory endpoint 等）。
 EnvironmentFile=-/root/.openhands-20877.env
 ExecStart=/usr/bin/env python3 /root/UEnv/scripts/openhands/openhands_runner.py

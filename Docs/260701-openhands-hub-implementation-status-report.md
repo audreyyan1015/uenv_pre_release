@@ -306,7 +306,7 @@ flowchart TB
 | `EnvPackageManifest` DTO | P0 | ✅ | `uenv-hub/uenv-hub-types/src/lib.rs` |
 | DB + 迁移 | P0 | ✅ | `migrations/0002_env_packages.sql` |
 | Publish / GET / sync-plan / artifact API | P0 | ✅ | `uenv-hub-core/src/repository.rs`、`routes.rs` |
-| 内容寻址制品存储 | P0 | ✅ inline 小文件；大镜像 **registry 带外** | `uenv-hub-core/src/package.rs` |
+| 内容寻址制品存储 | P0 | ✅ inline 小文件 **+ 大镜像 tar 流式托管（`image_tar`）** | `uenv-hub-core/src/package.rs`（`stage_file_streaming`） |
 | 种子包 swe-bench-verified / pro | P0 | ✅ | `uenv-hub-core/src/seed.rs` |
 | `uenv env sync` CLI | P1 | ✅ | `uenv-hub-client/src/bin/uenv.rs` |
 | Worker 消费 sync 目录 | P1 | ✅ | `uenv-worker/src/swe/env_package.rs`、`runtime.rs::load_swe_catalog` |
@@ -314,7 +314,8 @@ flowchart TB
 | 本地 E2E（publish→sync→worker 加载） | — | ✅ | `Docs/hub/uenv-hub环境标准化指南.md` §9 |
 | **`uenv agent-bridge sync`** | P1 | ✅ | `uenv-hub-client/src/bin/uenv.rs` 子命令；共用 `run_package_sync` |
 | **AgentBridgePackage 独立发布** | P1 | ✅（seed） | `seed_agent_bridge_openhands` 发布 `uenv-agent-openhands@1.0.0`；源码仍在 monorepo |
-| 镜像字节对象存储 / registry push | P2 | ❌ | `images.manifest.json` 索引 + 运维带外 pull/load |
+| **Hub 直接托管镜像 tar（`image_tar`）** | P2 | ✅ 代码（部署待 Hub 重编） | `hub-core`/`hub-server` 流式入库+下发；`uenv env publish-image`；`scripts/hub-stage-image-package.sh` |
+| 镜像对象存储 / OCI registry push | P2 | ❌ 可选后端 | tar 托管已覆盖离线诉求；对象存储/registry 为后续扩展 |
 | Server `AgentJob.gateway_url` | P1 | ⚠️ proto ✅ / server ❌ | `agent.proto` 已定义；**uenv-server 编排未实现** |
 | 生产 Worker 默认走 EnvPackage | — | ✅（7143） | `UENV_SWE_ENV_PACKAGE` + Hub `env sync`；yaml 已增 `env_package_dir` |
 
@@ -343,7 +344,7 @@ Worker 加载优先级（`runtime.rs`）：
 | **7143 Worker** | `uenv env sync` → `UENV_SWE_ENV_PACKAGE` | ✅ **2026-07-03 正式 sync**；`.synced` 已写入；`for-episode` + gold 通过 | 运行时 Hub catalog pull 回退仍可触发（未强制关闭） |
 | **208.77 Agent** | `uenv agent-bridge sync` | ⚠️ **tar 同步** `/root/UEnv/integrations/openhands`（经 7142 跳板） | 未安装 `uenv` CLI、未走 `agent-bridge sync` 目录布局 |
 | **catalog** | package 内 `catalog.json` | ✅ 7143 来自 Hub sync 的 `catalog.json` | 208.77 仍随 tar 带 `config/swe/` 副本 |
-| **镜像** | 内网 registry + manifest digest | `jefzda/sweap-images` 等公网/镜像站 | 设计 P2 未 formalize |
+| **镜像** | Hub 托管 tar / 内网 registry + digest | `jefzda/sweap-images` 等公网/镜像站 | Hub `image_tar` 托管**代码已就绪**（§12A）；实机需在 Hub 重编部署后 `publish-image` 预制 |
 
 ### 3.5 Agent 集成层归属（设计 §4.4.1 vs 代码）
 
@@ -536,7 +537,7 @@ flowchart LR
 | **P1** | CLI `uenv agent-bridge sync` | ✅ 已合入 |
 | **P1** | EnvPackage 内 `agent_bridge` artifact 引用 | ❌ 仍为独立包；manifest 未交叉引用 |
 | **P1** | `platform.features` 补全 `trajectory_v2_2` | ✅ |
-| **P2** | 大文件制品 / registry API | ❌ 待做 |
+| **P2** | 大文件制品托管（镜像 tar，流式入库/下发 + `docker load`） | ✅ 代码（`file_artifacts`/`image_tar`/`env publish-image`）；对象存储/registry 后端仍待做 |
 
 **关键改动面**：`uenv-hub-core/src/seed.rs`、`repository.rs`、`uenv-hub-client/src/bin/uenv.rs`（新 subcommand）、发布 CI。
 
@@ -650,7 +651,7 @@ flowchart LR
 - [x] CLI：`uenv agent-bridge sync`
 - [ ] 208.77：deploy 切 `agent-bridge sync` 目录（当前 tar 同步源码）
 - [ ] EnvPackage manifest 增加 `agent_bridge` artifact 交叉引用
-- [ ] （P2）内网镜像 bundle 运维脚本
+- [x] Hub 镜像 tar 托管 + 预制脚本 `scripts/hub-stage-image-package.sh`（代码就绪；实机需 Hub 重编部署后 `publish-image`）
 
 ---
 
@@ -683,6 +684,7 @@ flowchart LR
 | v1.2 | 2026-07-03 | 代码实装（除 uenv-server）；7143 实机验收 EnvPackage + for-episode + gold |
 | v1.3 | 2026-07-03 | 远程同步完成：Hub 发布 + 7143 正式 env sync + 208.77 integrations 同步；§5 各模块状态列、§8 实机记录更新 |
 | v1.4 | 2026-07-03 | 新增 **§2.0 核心架构（冻结）**：Hub/Server/双池职责、Server 组合调度五步、`RegisterAgent` 待补、与现状对照 |
+| v1.5 | 2026-07-06 | **Hub 直接托管镜像字节落地**（P2 镜像 tar）：`file_artifacts`/`image_tar` 流式入库+下发、`uenv env publish-image`、`env sync --docker-load`、worker `docker load` 预制路径、`scripts/hub-stage-image-package.sh`；§3 制品存储/镜像/Phase C checklist 更新为「代码 ✅ / 实机待 Hub 重编部署」。详见 `260629-hub-env-package-design.md` §12A |
 
 ---
 

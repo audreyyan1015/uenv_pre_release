@@ -441,4 +441,47 @@ impl HttpClient {
         }
         Ok(resp.bytes().await?.to_vec())
     }
+
+    /// Stream one artifact to `dest`, hashing on the fly and verifying it matches
+    /// `expected_digest` (`sha256:<hex>`). Never buffers the whole file in RAM, so
+    /// multi-GB image tarballs sync safely. Returns the number of bytes written.
+    pub async fn download_artifact_to_file(
+        &self,
+        package_id: &str,
+        version: &str,
+        name: &str,
+        dest: &Path,
+        expected_digest: &str,
+    ) -> Result<u64> {
+        use sha2::{Digest, Sha256};
+        use std::io::Write as _;
+
+        let path = format!("/api/v1/packages/{package_id}/versions/{version}/artifacts/{name}");
+        let req = self.authed(self.http.request(Method::GET, self.url(&path)));
+        let mut resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(decode_error(status, resp).await);
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::File::create(dest)?;
+        let mut hasher = Sha256::new();
+        let mut total: u64 = 0;
+        while let Some(chunk) = resp.chunk().await? {
+            hasher.update(&chunk);
+            file.write_all(&chunk)?;
+            total += chunk.len() as u64;
+        }
+        file.flush()?;
+        let actual = format!("sha256:{}", hex::encode(hasher.finalize()));
+        if actual != expected_digest {
+            let _ = std::fs::remove_file(dest);
+            return Err(ClientError::Other(format!(
+                "artifact {name} digest mismatch: expected {expected_digest}, got {actual}"
+            )));
+        }
+        Ok(total)
+    }
 }

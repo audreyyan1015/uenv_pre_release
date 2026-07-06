@@ -114,6 +114,33 @@ enum EnvCommand {
         /// This node's `uenv-worker` version; checked against `platform.uenv_worker_min`.
         #[arg(long)]
         worker_version: Option<String>,
+        /// After syncing, `docker load` every hosted `image_tar` artifact so the
+        /// images are locally available without pulling a third-party registry.
+        #[arg(long)]
+        docker_load: bool,
+        /// Container engine used for `--docker-load` (docker|podman).
+        #[arg(long, default_value = "docker")]
+        engine: String,
+    },
+    /// Publish image tarball(s) already staged on the Hub host as a package
+    /// version, so Workers `docker load` them from the Hub (no third-party pull).
+    ///
+    /// Each `--tar PATH` is a `docker save …` archive resolvable on the **Hub
+    /// host**; its basename becomes the artifact name and lands at
+    /// `images/<basename>` in the synced package.
+    PublishImage {
+        /// Package id to publish under, e.g. `swe-bench-verified-images`.
+        package: String,
+        #[arg(long, default_value = "0.1.0")]
+        version: String,
+        /// One or more image tarball paths on the Hub host.
+        #[arg(long = "tar", value_name = "PATH", num_args = 1.., required = true)]
+        tars: Vec<PathBuf>,
+        /// Minimum consuming `uenv-worker` version.
+        #[arg(long, default_value = "0.1.0")]
+        worker_min: String,
+        #[arg(long)]
+        publisher: Option<String>,
     },
 }
 
@@ -337,10 +364,85 @@ async fn run_env(
             target_dir,
             dry_run,
             worker_version,
+            docker_load,
+            engine,
         } => {
-            run_env_sync(&client, &package, &version, &target_dir, dry_run, worker_version).await?;
+            run_env_sync(
+                &client,
+                &package,
+                &version,
+                &target_dir,
+                dry_run,
+                worker_version,
+                docker_load,
+                &engine,
+            )
+            .await?;
+        }
+        EnvCommand::PublishImage {
+            package,
+            version,
+            tars,
+            worker_min,
+            publisher,
+        } => {
+            run_publish_image(&client, &package, &version, &tars, &worker_min, publisher).await?;
         }
     }
+    Ok(())
+}
+
+/// `uenv env publish-image` — stage `docker save` tarballs (already on the Hub
+/// host) into a package version as `image_tar` artifacts.
+async fn run_publish_image(
+    client: &HttpClient,
+    package: &str,
+    version: &str,
+    tars: &[PathBuf],
+    worker_min: &str,
+    publisher: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_artifacts = Vec::with_capacity(tars.len());
+    for tar in tars {
+        let name = tar
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("invalid tar path {}", tar.display()))?
+            .to_string();
+        file_artifacts.push(uenv_hub_types::FileArtifact {
+            name: name.clone(),
+            kind: "image_tar".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/x-tar".into()),
+            target_rel_path: Some(format!("images/{name}")),
+            local_path: tar.to_string_lossy().into_owned(),
+        });
+    }
+    let req = uenv_hub_types::PublishPackageRequest {
+        version: version.to_string(),
+        publisher,
+        description: Some("image tarball bundle (docker load inputs hosted by Hub)".into()),
+        changelog: Some(format!("publish {} image tarball(s)", file_artifacts.len())),
+        platform: uenv_hub_types::PackagePlatform {
+            uenv_worker_min: worker_min.to_string(),
+            uenv_server_min: None,
+            features: vec![],
+        },
+        worker_overlay: serde_json::json!({ "swe": { "image_pull_policy": "local_only" } }),
+        agent_defaults: serde_json::Value::Null,
+        contracts: uenv_hub_types::PackageContracts::default(),
+        artifacts: vec![],
+        file_artifacts,
+    };
+    let resp = client.publish_package(package, &req).await?;
+    println!(
+        "published {}@{} with {} image tarball(s) -> {}",
+        resp.package_id,
+        resp.version,
+        tars.len(),
+        resp.manifest_url
+    );
+    println!("Workers can now: uenv env sync {} --docker-load", resp.package_id);
     Ok(())
 }
 
@@ -364,6 +466,7 @@ fn version_lt(a: &str, b: &str) -> bool {
 }
 
 /// Shared package sync implementation (EnvPackage + AgentBridgePackage).
+#[allow(clippy::too_many_arguments)]
 async fn run_package_sync(
     client: &HttpClient,
     package: &str,
@@ -371,6 +474,8 @@ async fn run_package_sync(
     target_parent: &Path,
     dry_run: bool,
     worker_version: Option<String>,
+    docker_load: bool,
+    engine: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manifest = client.get_package_manifest(package, version).await?;
     let resolved = manifest.version.clone();
@@ -405,26 +510,35 @@ async fn run_package_sync(
     }
 
     std::fs::create_dir_all(&dest)?;
+    let mut image_tars: Vec<PathBuf> = Vec::new();
     for a in &manifest.artifacts {
         if a.sync_mode != "inline" {
             println!("  skip {} (sync_mode={}, fetched out-of-band)", a.name, a.sync_mode);
             continue;
         }
-        let bytes = client.get_artifact_bytes(package, &resolved, &a.name).await?;
-        let actual = uenv_hub_core::package::sha256_hex(&bytes);
-        if actual != a.digest {
-            return Err(format!(
-                "artifact {} digest mismatch: expected {}, got {actual}",
-                a.name, a.digest
-            )
-            .into());
-        }
         let out = dest.join(&a.target_rel_path);
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)?;
+        // Stream every artifact to disk (hash-verified on the fly) so multi-GB
+        // image tarballs never buffer in RAM.
+        let written = client
+            .download_artifact_to_file(package, &resolved, &a.name, &out, &a.digest)
+            .await?;
+        println!("  wrote {} ({written} bytes)", out.display());
+        if a.kind == "image_tar" {
+            image_tars.push(out);
         }
-        std::fs::write(&out, &bytes)?;
-        println!("  wrote {} ({} bytes)", out.display(), bytes.len());
+    }
+
+    if docker_load && !image_tars.is_empty() {
+        for tar in &image_tars {
+            println!("  docker load -i {}", tar.display());
+            run_engine(engine, &["load", "-i", &tar.to_string_lossy()])?;
+        }
+        println!("  loaded {} image tarball(s) via {engine}", image_tars.len());
+    } else if !image_tars.is_empty() {
+        println!(
+            "  {} image tarball(s) synced; run with --docker-load or `{engine} load -i <file>` to import",
+            image_tars.len()
+        );
     }
 
     std::fs::write(dest.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
@@ -451,7 +565,8 @@ async fn run_agent_bridge(
             target_dir,
             dry_run,
         } => {
-            run_package_sync(&client, &package, &version, &target_dir, dry_run, None).await?;
+            run_package_sync(&client, &package, &version, &target_dir, dry_run, None, false, "docker")
+                .await?;
             let dest = target_dir.join(&package).join(
                 client
                     .get_package_manifest(&package, &version)
@@ -466,6 +581,7 @@ async fn run_agent_bridge(
 
 /// `uenv env sync` — pull a package to `<target_dir>/envs/<pkg>/<ver>/`,
 /// digest-verifying every artifact, and write a `.synced` marker.
+#[allow(clippy::too_many_arguments)]
 async fn run_env_sync(
     client: &HttpClient,
     package: &str,
@@ -473,6 +589,8 @@ async fn run_env_sync(
     target_dir: &Path,
     dry_run: bool,
     worker_version: Option<String>,
+    docker_load: bool,
+    engine: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_package_sync(
         client,
@@ -481,6 +599,8 @@ async fn run_env_sync(
         &target_dir.join("envs"),
         dry_run,
         worker_version,
+        docker_load,
+        engine,
     )
     .await?;
     let manifest = client.get_package_manifest(package, version).await?;

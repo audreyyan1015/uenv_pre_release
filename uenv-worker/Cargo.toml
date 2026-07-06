@@ -42,6 +42,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
 
 [build-dependencies]
 tonic-prost-build = "0.14"

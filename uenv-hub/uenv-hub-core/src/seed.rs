@@ -9,7 +9,8 @@ use crate::package;
 use crate::repository::SqliteStore;
 use crate::templates;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use uenv_hub_types as dto;
 use uenv_hub_types::{Dependencies, Example, ImageSpec, InterfaceSchema, ResourceSpec};
 
@@ -177,7 +178,19 @@ async fn seed_swe_package(
         }
     };
 
-    let images_manifest = build_images_manifest(variant, &catalog);
+    // Pre-staged image tarballs on the Hub host (if the operator ran
+    // `scripts/hub-stage-image-package.sh` / `docker save`): host their bytes so
+    // Workers `docker load` from the Hub instead of pulling third-party registries.
+    let (image_tar_artifacts, tar_map) = discover_swe_image_tars(catalog_dir, variant, &catalog);
+    if !image_tar_artifacts.is_empty() {
+        tracing::info!(
+            package_id,
+            variant,
+            count = image_tar_artifacts.len(),
+            "seed hosting pre-staged image tarballs"
+        );
+    }
+    let images_manifest = build_images_manifest(variant, &catalog, &tar_map);
     let overlay = json!({
         "swe": {
             "benchmark_variant": variant,
@@ -264,6 +277,7 @@ async fn seed_swe_package(
                 content_b64: None,
             },
         ],
+        file_artifacts: image_tar_artifacts,
     };
 
     package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
@@ -272,8 +286,14 @@ async fn seed_swe_package(
 }
 
 /// Build the `images.manifest.json` body from a SWE catalog: one entry per
-/// instance with the resolved image reference and (optional) digest.
-fn build_images_manifest(variant: &str, catalog: &serde_json::Map<String, Value>) -> Value {
+/// instance with the resolved image reference and (optional) digest. When a
+/// pre-staged tarball is hosted for an instance, its consumer-relative path is
+/// recorded as `tar` so the Worker can `docker load` it from the synced package.
+fn build_images_manifest(
+    variant: &str,
+    catalog: &serde_json::Map<String, Value>,
+    tar_map: &BTreeMap<String, String>,
+) -> Value {
     let mut images = Vec::with_capacity(catalog.len());
     for (instance_id, row) in catalog {
         let image = row
@@ -290,7 +310,11 @@ fn build_images_manifest(variant: &str, catalog: &serde_json::Map<String, Value>
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        images.push(json!({ "instance_id": instance_id, "image": image, "digest": digest }));
+        let mut entry = json!({ "instance_id": instance_id, "image": image, "digest": digest });
+        if let Some(tar) = tar_map.get(instance_id) {
+            entry["tar"] = json!(tar);
+        }
+        images.push(entry);
     }
     // Stable ordering so the artifact digest is deterministic across runs.
     images.sort_by(|a, b| a["instance_id"].as_str().cmp(&b["instance_id"].as_str()));
@@ -300,6 +324,47 @@ fn build_images_manifest(variant: &str, catalog: &serde_json::Map<String, Value>
         "pull_policy": "local_only",
         "images": images
     })
+}
+
+/// Sanitize an instance id into a filesystem-safe tarball basename (no `/`).
+fn sanitize_tar_name(instance_id: &str) -> String {
+    instance_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' { c } else { '-' })
+        .collect()
+}
+
+/// Locate pre-staged image tarballs on the Hub host so the seed hosts image bytes
+/// directly. Searches `UENV_HUB_SWE_IMAGE_DIR` (or `<catalog_dir>/images`) for
+/// `<instance_id>.tar`, optionally under a `<variant>/` subdir. Returns the file
+/// artifacts to stage and an `instance_id -> images/<file>.tar` map.
+fn discover_swe_image_tars(
+    catalog_dir: &Path,
+    variant: &str,
+    catalog: &serde_json::Map<String, Value>,
+) -> (Vec<dto::FileArtifact>, BTreeMap<String, String>) {
+    let root = std::env::var("UENV_HUB_SWE_IMAGE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| catalog_dir.join("images"));
+    let mut artifacts = Vec::new();
+    let mut map = BTreeMap::new();
+    for instance_id in catalog.keys() {
+        let fname = format!("{}.tar", sanitize_tar_name(instance_id));
+        let candidates = [root.join(variant).join(&fname), root.join(&fname)];
+        if let Some(src) = candidates.iter().find(|p| p.is_file()) {
+            let target_rel = format!("images/{fname}");
+            artifacts.push(dto::FileArtifact {
+                name: fname.clone(),
+                kind: "image_tar".into(),
+                sync_mode: "inline".into(),
+                media_type: Some("application/x-tar".into()),
+                target_rel_path: Some(target_rel.clone()),
+                local_path: src.to_string_lossy().into_owned(),
+            });
+            map.insert(instance_id.clone(), target_rel);
+        }
+    }
+    (artifacts, map)
 }
 
 /// Seed `uenv-agent-openhands@1.0.0` when `integrations/openhands` exists beside the repo.
@@ -429,6 +494,7 @@ pub async fn seed_agent_bridge_openhands(
             ..Default::default()
         },
         artifacts,
+        file_artifacts: vec![],
     };
     package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
     tracing::info!(package_id, version, "seeded AgentBridgePackage");

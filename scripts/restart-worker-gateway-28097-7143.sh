@@ -12,10 +12,16 @@ sudo mkdir -p /var/lib/uenv/swe-artifacts/spool/pending /var/lib/uenv/swe-artifa
 
 pkill -f 'uenv-worker.*serve' || true
 sleep 2
+fuser -k 28097/tcp 2>/dev/null || true
+sleep 2
 source /root/.uenv-worker.env 2>/dev/null || true
 source /root/.uenv-trajectory.env 2>/dev/null || true
 export UENV_WORKER_ALLOW_DEGRADED_START=1
-export UENV_SWE_GATEWAY_PUBLIC_URL=http://219.147.100.43:28097
+# VeRL math rollout：预热 math 插件池（与 deploy-7143-swe-pro.yaml pool 段一致）
+export UENV_WARMUP_POOL_SIZE="${UENV_WARMUP_POOL_SIZE:-4}"
+export UENV_PREWARM_ON_STARTUP="${UENV_PREWARM_ON_STARTUP:-true}"
+# Server/Agent 均经本机 28097 隧道访问 Gateway；勿用公网 28097（NAT 未通）
+export UENV_SWE_GATEWAY_PUBLIC_URL=http://127.0.0.1:28097
 export UENV_SWE_ARTIFACT_DIR="${UENV_SWE_ARTIFACT_DIR:-/var/lib/uenv/swe-artifacts}"
 export UENV_TRAJECTORY_ENDPOINT="${UENV_TRAJECTORY_ENDPOINT:-http://8.130.75.157:8077}"
 # EnvPackage sync dir (Phase A): set by deploy-phase-abc-e2e.sh or manually after `uenv env sync`
