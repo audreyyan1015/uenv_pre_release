@@ -11,6 +11,7 @@
 //! 离线设计：本机 7143 已预置 500 个 Verified 镜像，inspect 命中即跳过 pull，零 egress；
 //! pull 仅在 miss 时触发，失败时错误信息明确，便于运维定位「需预置镜像」。
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::swe::harness::ContainerRuntime;
@@ -168,6 +169,57 @@ impl ImageCacheFactory {
         Ok(ImageState::Pulled)
     }
 
+    /// 从 Hub 同步下来的镜像 tar（`docker save` 产物）导入本地：`docker load -i <tar>`。
+    /// 这是「Hub 预制存储镜像 → Worker 从 Hub 拉取」的落地动作，替代公网 `docker pull`。
+    /// 幂等：`docker load` 已存在的镜像层会直接跳过。
+    pub fn load_image_tar(&self, tar_path: &Path) -> Result<(), DynErr> {
+        if !tar_path.is_file() {
+            return Err(format!("image tar not found: {}", tar_path.display()).into());
+        }
+        let out = Command::new(self.runtime.cli())
+            .args(load_args(&tar_path.to_string_lossy()))
+            .output()
+            .map_err(|e| format!("{} load spawn failed: {e}", self.runtime.cli()))?;
+        if !out.status.success() {
+            return Err(format!(
+                "{} load -i {} failed: {}",
+                self.runtime.cli(),
+                tar_path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+            .into());
+        }
+        tracing::info!(tar = %tar_path.display(), msg = "swe_image_loaded_from_hub_tar");
+        Ok(())
+    }
+
+    /// 确保镜像可用，且**优先**从 Hub 同步的 tar 导入（离线/预制场景），仅在无 tar 且策略允许时
+    /// 才回退公网 `pull`。命中本地则零动作。
+    pub fn ensure_image_with_tar(
+        &self,
+        image: &str,
+        tar_path: Option<&Path>,
+    ) -> Result<ImageState, DynErr> {
+        if self.image_present(image) {
+            return Ok(ImageState::Present);
+        }
+        if let Some(tar) = tar_path {
+            if tar.is_file() {
+                self.load_image_tar(tar)?;
+                if self.image_present(image) {
+                    return Ok(ImageState::Pulled);
+                }
+                // tar 载入成功但镜像名不匹配：继续按策略回退，错误更明确。
+                tracing::warn!(
+                    image = %image,
+                    tar = %tar.display(),
+                    msg = "image_tar_loaded_but_image_absent"
+                );
+            }
+        }
+        self.ensure_image(image)
+    }
+
     /// 给镜像打 warm tag（`cache/swe-<id>:warm`），返回 tag 名（M4-3）。
     pub fn warm_tag_image(&self, image: &str, instance_id: &str) -> Result<String, DynErr> {
         let tag = warm_tag(instance_id);
@@ -195,6 +247,11 @@ pub fn inspect_args(image: &str) -> Vec<String> {
 /// `pull <image>` 的 argv。
 pub fn pull_args(image: &str) -> Vec<String> {
     vec!["pull".to_string(), image.to_string()]
+}
+
+/// `load -i <tar>` 的 argv（从 Hub 同步的镜像 tar 导入本地）。
+pub fn load_args(tar_path: &str) -> Vec<String> {
+    vec!["load".to_string(), "-i".to_string(), tar_path.to_string()]
 }
 
 /// 7143 等环境默认 registry mirror 易 429；miss 时依次 direct → 备用 mirror prefix。
@@ -313,6 +370,27 @@ mod tests {
         assert_eq!(inspect_args("a:b"), vec!["image", "inspect", "a:b"]);
         assert_eq!(pull_args("a:b"), vec!["pull", "a:b"]);
         assert_eq!(tag_args("src", "dst"), vec!["tag", "src", "dst"]);
+        assert_eq!(load_args("/tmp/x.tar"), vec!["load", "-i", "/tmp/x.tar"]);
+    }
+
+    #[test]
+    fn load_image_tar_missing_file_errors() {
+        let f = ImageCacheFactory::new(ContainerRuntime::Docker, false);
+        let err = f
+            .load_image_tar(Path::new("/nonexistent/definitely-missing.tar"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn ensure_image_with_tar_local_only_no_tar_reports_missing() {
+        // No docker → image_present=false; local_only + no tar must surface the
+        // "pre-cache / sync EnvPackage" error rather than attempting a pull.
+        let f =
+            ImageCacheFactory::with_policy(ContainerRuntime::Docker, ImagePullPolicy::LocalOnly);
+        let err = f.ensure_image_with_tar("repo/x:y", None).unwrap_err().to_string();
+        assert!(err.contains("not present locally"), "unexpected: {err}");
     }
 
     #[test]

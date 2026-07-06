@@ -635,9 +635,31 @@ pub struct InlineArtifact {
     /// with `content_b64`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Base64-encoded bytes for non-text artifacts.
+    /// Base64-encoded bytes for small non-text artifacts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_b64: Option<String>,
+}
+
+/// One large artifact staged from a file **already present on the Hub host**.
+///
+/// The server streams the file into the content-addressed artifact store (chunked
+/// sha256, never buffering the whole file in RAM), so multi-GB Docker image
+/// tarballs produced by `docker save …` can be pre-provisioned into the Hub and
+/// then served to Workers — replacing third-party `docker pull`. Publisher-gated;
+/// `local_path` is resolved on the Hub host only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileArtifact {
+    pub name: String,
+    /// Typically `image_tar` (a `docker save` archive) but any kind is allowed.
+    pub kind: String,
+    #[serde(default = "default_sync_mode")]
+    pub sync_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_rel_path: Option<String>,
+    /// Absolute (or Hub-cwd-relative) path to the source file on the Hub host.
+    pub local_path: String,
 }
 
 fn default_sync_mode() -> String {
@@ -663,6 +685,10 @@ pub struct PublishPackageRequest {
     pub contracts: PackageContracts,
     #[serde(default)]
     pub artifacts: Vec<InlineArtifact>,
+    /// Large artifacts staged from files on the Hub host (e.g. image tarballs).
+    /// Streamed into the artifact store; merged with `artifacts` in the manifest.
+    #[serde(default)]
+    pub file_artifacts: Vec<FileArtifact>,
 }
 
 /// Response for a successful package publish (`201 Created`).

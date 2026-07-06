@@ -258,6 +258,7 @@ async fn env_package_publish_manifest_artifact_and_sync_plan() {
             content: Some(catalog.to_string()),
             content_b64: None,
         }],
+        file_artifacts: vec![],
     };
 
     let resp = client.publish_package("e2e-pkg", &req).await.unwrap();
@@ -287,5 +288,81 @@ async fn env_package_publish_manifest_artifact_and_sync_plan() {
     let plan = client.get_package_sync_plan("e2e-pkg", "latest").await.unwrap();
     assert_eq!(plan.files.len(), 1);
     assert!(plan.bundle_digest.starts_with("sha256:"));
+}
+
+#[tokio::test]
+async fn hub_hosts_image_tarball_and_streams_it_to_worker() {
+    use uenv_hub_types::{
+        FileArtifact, PackageContracts, PackagePlatform, PublishPackageRequest,
+    };
+
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    // Simulate a `docker save …` image tarball pre-staged on the Hub host.
+    let stage = tempfile::tempdir().unwrap();
+    let tar_path = stage.path().join("django-11095.tar");
+    // Larger than the streaming chunk to exercise chunked stage + serve.
+    let payload: Vec<u8> = (0..(1024 * 1024 + 777)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&tar_path, &payload).unwrap();
+    let expected_digest = uenv_hub_core::package::sha256_hex(&payload);
+
+    let req = PublishPackageRequest {
+        version: "0.1.0".into(),
+        publisher: Some("ops".into()),
+        description: Some("image bundle".into()),
+        changelog: None,
+        platform: PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec![],
+        },
+        worker_overlay: serde_json::json!({"swe": {"image_pull_policy": "local_only"}}),
+        agent_defaults: serde_json::json!({}),
+        contracts: PackageContracts::default(),
+        artifacts: vec![],
+        file_artifacts: vec![FileArtifact {
+            name: "django-11095.tar".into(),
+            kind: "image_tar".into(),
+            sync_mode: "inline".into(),
+            media_type: None,
+            target_rel_path: None,
+            local_path: tar_path.to_string_lossy().into_owned(),
+        }],
+    };
+    let resp = client.publish_package("swe-images", &req).await.unwrap();
+    assert_eq!(resp.version, "0.1.0");
+
+    // Manifest records the hosted image tar with the streamed digest + size.
+    let manifest = client.get_package_manifest("swe-images", "latest").await.unwrap();
+    assert_eq!(manifest.artifacts.len(), 1);
+    let art = &manifest.artifacts[0];
+    assert_eq!(art.kind, "image_tar");
+    assert_eq!(art.target_rel_path, "images/django-11095.tar");
+    assert_eq!(art.digest, expected_digest);
+    assert_eq!(art.size_bytes, Some(payload.len() as i64));
+
+    // Streaming download to file, verified on the fly (the Worker path).
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("images/django-11095.tar");
+    let written = client
+        .download_artifact_to_file("swe-images", "0.1.0", "django-11095.tar", &out, &art.digest)
+        .await
+        .unwrap();
+    assert_eq!(written as usize, payload.len());
+    assert_eq!(std::fs::read(&out).unwrap(), payload);
+
+    // sync-plan advertises the tarball for `uenv env sync --docker-load`.
+    let plan = client.get_package_sync_plan("swe-images", "latest").await.unwrap();
+    assert_eq!(plan.files.len(), 1);
+    assert_eq!(plan.files[0].kind, "image_tar");
+
+    // A digest mismatch is detected and the partial file is removed.
+    let bad = out_dir.path().join("bad.tar");
+    let err = client
+        .download_artifact_to_file("swe-images", "0.1.0", "django-11095.tar", &bad, "sha256:dead")
+        .await;
+    assert!(err.is_err());
+    assert!(!bad.exists());
 }
 

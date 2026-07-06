@@ -228,6 +228,7 @@ async fn env_package_publish_get_list_artifacts() {
                 content_b64: None,
             },
         ],
+        file_artifacts: vec![],
     };
 
     let manifest = package::publish_inline_package(&s, artifact_root.path(), "demo-pkg", req, None)
@@ -252,6 +253,7 @@ async fn env_package_publish_get_list_artifacts() {
         agent_defaults: serde_json::Value::Null,
         contracts: PackageContracts::default(),
         artifacts: vec![],
+        file_artifacts: vec![],
     };
     assert!(package::publish_inline_package(&s, artifact_root.path(), "demo-pkg", dup, None).await.is_err());
 

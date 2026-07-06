@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use crate::metrics::MetricsExporter;
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
+use crate::swe::env_package::EnvPackageDir;
 use crate::swe::harness::ContainerRuntime;
 use crate::swe::image_cache::ImageCacheFactory;
 use crate::swe::resettable::ResettableSession;
@@ -37,6 +38,9 @@ pub struct SweInstancePool {
     gateway_base_url: String,
     /// v2.2 轨迹上传旁路（None=未启用，走本地真值过渡态）。
     uploader: Option<TrajectoryUploader>,
+    /// 本地已同步的 Hub EnvPackage（含预制镜像 tar）。`Some` 时 provision/prewarm 优先
+    /// `docker load` Hub 托管的镜像 tar，替代公网 `docker pull`（M4：Hub 批发镜像）。
+    env_package: Option<Arc<EnvPackageDir>>,
 }
 
 impl SweInstancePool {
@@ -52,7 +56,21 @@ impl SweInstancePool {
             worker_id: "worker".to_string(),
             gateway_base_url: "http://127.0.0.1:28999".to_string(),
             uploader: TrajectoryUploader::from_env(),
+            env_package: None,
         }
+    }
+
+    /// 注入本地已同步的 Hub EnvPackage：provision/prewarm 将优先从其托管的镜像 tar 载入。
+    pub fn with_env_package(mut self, pkg: Option<Arc<EnvPackageDir>>) -> Self {
+        self.env_package = pkg;
+        self
+    }
+
+    /// 解析某实例对应的、Hub 托管镜像 tar 的绝对路径（按 instance_id 优先，再按 image ref）。
+    fn image_tar_for(&self, instance_id: &str, image: &str) -> Option<PathBuf> {
+        let pkg = self.env_package.as_ref()?;
+        pkg.image_tar_for_instance(instance_id)
+            .or_else(|| pkg.image_tar_for_ref(image))
     }
 
     /// Gateway 轨迹元数据（worker_id + 对外 base URL）。
@@ -122,6 +140,24 @@ impl SweInstancePool {
             .ok_or_else(|| format!("swe instance_id `{instance_id}` not in catalog (size={})", self.store.len()))?
             .clone();
 
+        // M4：若存在 Hub 预制镜像 tar，且镜像本地缺失，则先 `docker load`（替代公网 pull）。
+        // 主动前置，使随后 provision 内部的 ensure_image 命中本地、零 egress。
+        if self.env_package.is_some() {
+            let image = instance.image_ref();
+            if let Some(tar) = self.image_tar_for(instance_id, &image) {
+                let factory = ImageCacheFactory::from_env(self.runtime);
+                if let Err(err) = factory.ensure_image_with_tar(&image, Some(&tar)) {
+                    tracing::warn!(
+                        instance_id = %instance_id,
+                        image = %image,
+                        tar = %tar.display(),
+                        error = %err,
+                        msg = "swe_env_package_image_load_failed"
+                    );
+                }
+            }
+        }
+
         // M2-4：叠加池级 seccomp profile 目录（call-site 仅决定 mode）。
         let policy = self.apply_seccomp(policy);
         let session_id = format!("sess-{}-{}", sanitize(instance_id), self.seq.fetch_add(1, Ordering::SeqCst));
@@ -189,7 +225,9 @@ impl SweInstancePool {
                 continue;
             };
             let image = inst.image_ref();
-            match factory.ensure_image(&image) {
+            // M4：优先从 Hub 预制镜像 tar 载入（离线/local_only 场景），无 tar 才按策略回退 pull。
+            let tar = self.image_tar_for(id, &image);
+            match factory.ensure_image_with_tar(&image, tar.as_deref()) {
                 Ok(state) => {
                     ok += 1;
                     // M4-3：可选 warm tag 写回（失败仅告警，不影响镜像就绪计数）。

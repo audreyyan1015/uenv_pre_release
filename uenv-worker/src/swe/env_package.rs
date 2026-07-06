@@ -22,6 +22,9 @@ pub struct ImageEntry {
     pub image: String,
     /// `sha256:...` digest, or empty when the package did not pin one.
     pub digest: String,
+    /// Consumer-relative path to a hosted image tarball (`docker load` input),
+    /// e.g. `images/<instance>.tar`, when the Hub pre-stored the image bytes.
+    pub tar: Option<String>,
 }
 
 /// A locally-synced EnvPackage directory.
@@ -101,6 +104,47 @@ impl EnvPackageDir {
         })
     }
 
+    /// Absolute path to the hosted image tarball for a given instance id, if the
+    /// package pinned one and the file exists in the synced dir.
+    pub fn image_tar_for_instance(&self, instance_id: &str) -> Option<PathBuf> {
+        let rel = self.images.get(instance_id)?.tar.as_ref()?;
+        let abs = self.dir.join(rel);
+        abs.is_file().then_some(abs)
+    }
+
+    /// Absolute path to the hosted image tarball whose entry references `image`,
+    /// if any. Lets the provisioner resolve a tar from the image ref alone.
+    pub fn image_tar_for_ref(&self, image: &str) -> Option<PathBuf> {
+        for e in self.images.values() {
+            if e.image == image {
+                if let Some(rel) = &e.tar {
+                    let abs = self.dir.join(rel);
+                    if abs.is_file() {
+                        return Some(abs);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// All hosted image tarball paths present in this package (for bulk preload).
+    pub fn image_tars(&self) -> Vec<PathBuf> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for e in self.images.values() {
+            if let Some(rel) = &e.tar {
+                if seen.insert(rel.clone()) {
+                    let abs = self.dir.join(rel);
+                    if abs.is_file() {
+                        out.push(abs);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Read `.synced` marker if present.
     pub fn read_synced_marker(dir: &Path) -> Option<SyncedPackageMarker> {
         let raw = std::fs::read_to_string(dir.join(".synced")).ok()?;
@@ -150,6 +194,11 @@ fn load_images_manifest(path: &Path) -> HashMap<String, ImageEntry> {
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
                             .to_string(),
+                        tar: e
+                            .get("tar")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string()),
                     },
                 );
             }
@@ -179,9 +228,12 @@ mod tests {
         std::fs::write(dir.join("catalog.json"), "{}").unwrap();
         std::fs::write(
             dir.join("images.manifest.json"),
-            r#"{"images":[{"instance_id":"swe-pro__example-go-1","image":"registry.example.com/x:y","digest":"sha256:abc"}]}"#,
+            r#"{"images":[{"instance_id":"swe-pro__example-go-1","image":"registry.example.com/x:y","digest":"sha256:abc","tar":"images/swe-pro__example-go-1.tar"}]}"#,
         )
         .unwrap();
+        // Stage the referenced tarball so the *_for_* lookups resolve.
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        std::fs::write(dir.join("images/swe-pro__example-go-1.tar"), b"dummy").unwrap();
 
         assert!(EnvPackageDir::is_synced(&dir));
         let pkg = EnvPackageDir::load(&dir).unwrap();
@@ -190,6 +242,12 @@ mod tests {
         assert_eq!(pkg.variant.as_deref(), Some("pro"));
         assert_eq!(pkg.image_pull_policy, Some(ImagePullPolicy::LocalOnly));
         assert_eq!(pkg.images.get("swe-pro__example-go-1").unwrap().digest, "sha256:abc");
+
+        // Hosted image tarball resolves by instance id and by image ref.
+        assert!(pkg.image_tar_for_instance("swe-pro__example-go-1").is_some());
+        assert!(pkg.image_tar_for_ref("registry.example.com/x:y").is_some());
+        assert_eq!(pkg.image_tars().len(), 1);
+        assert!(pkg.image_tar_for_instance("missing").is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

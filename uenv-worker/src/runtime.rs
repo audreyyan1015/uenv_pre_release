@@ -236,10 +236,26 @@ impl WorkerRuntime {
         let swe_capacity = self.gateway_capacity.max(self.max_concurrent).max(1) as usize;
         // M2-4：池级 seccomp profile 目录（默认 None，配置后按 command_mode 注入）。
         let swe_seccomp_dir = self.swe_seccomp_dir.as_ref().map(PathBuf::from);
+        // M4：加载本地已同步的 Hub EnvPackage（含预制镜像 tar），使池优先从 Hub tar
+        // `docker load` 镜像而非公网 pull（「Hub 批发镜像给 Worker」落地）。
+        let swe_env_package = load_env_package_dir(self.swe_env_package_dir.as_deref());
+        if let Some(pkg) = &swe_env_package {
+            let tars = pkg.image_tars().len();
+            tracing::info!(
+                trace_id = "runtime",
+                worker_id = "worker",
+                episode_id = "-",
+                package_id = %pkg.package_id,
+                version = %pkg.version,
+                hosted_image_tars = tars,
+                msg = "swe_env_package_ready_for_image_load"
+            );
+        }
         let swe_pool = Arc::new(
             crate::swe::instance_pool::SweInstancePool::new(swe_store.clone(), swe_runtime, swe_capacity)
                 .with_metrics(metrics.clone())
                 .with_seccomp_dir(swe_seccomp_dir)
+                .with_env_package(swe_env_package)
                 .with_trajectory_meta(
                     worker_id,
                     gateway_public_url(&self.gateway_listen),
@@ -338,6 +354,29 @@ fn gateway_public_url(listen: &str) -> String {
         listen.to_string()
     } else {
         format!("http://{listen}")
+    }
+}
+
+/// Load the synced Hub EnvPackage directory (for hosted image-tar preload), if
+/// configured via arg or `UENV_SWE_ENV_PACKAGE` and actually synced.
+fn load_env_package_dir(
+    env_package_dir: Option<&str>,
+) -> Option<std::sync::Arc<crate::swe::env_package::EnvPackageDir>> {
+    use crate::swe::env_package::EnvPackageDir;
+    let dir = env_package_dir
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("UENV_SWE_ENV_PACKAGE").ok())
+        .filter(|s| !s.trim().is_empty())?;
+    let path = std::path::Path::new(&dir);
+    if !EnvPackageDir::is_synced(path) {
+        return None;
+    }
+    match EnvPackageDir::load(path) {
+        Ok(pkg) => Some(std::sync::Arc::new(pkg)),
+        Err(err) => {
+            tracing::warn!(dir = %dir, error = %err, msg = "swe_env_package_load_failed_for_image_preload");
+            None
+        }
     }
 }
 

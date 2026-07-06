@@ -2165,6 +2165,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "snafu",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

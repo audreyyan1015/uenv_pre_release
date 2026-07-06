@@ -466,7 +466,48 @@ Worker  → 异步 upload trajectory（平台能力 + package 默认策略）
 | **P1** | `uenv-agent-openhands` 独立包发布 | 从 `integrations/openhands` 抽发布物 |
 | **P1** | Server `AgentJob` 字段冻结 | `gateway_url`、`agent_bridge` 版本 |
 | **P2** | Agent 基础镜像流水线 | OpenHands pin + bridge sync 一层镜像 |
-| **P2** | Hub 制品存储（S3/MinIO 或 registry API） | 大文件不走 SQLite |
+| **P2** | ~~Hub 制品存储（镜像 tar 托管）~~ ✅ **已实现**（见 §12A） | 镜像 tar 流式入库/下发；S3/MinIO/OCI registry 仍为后续可选后端 |
+
+---
+
+## 12A. 已实施：Hub 直接托管镜像字节（P2 落地）
+
+> **状态**：**已实现并通过单测 + e2e**（2026-07-06）。原 P2「Hub 制品存储」中的**镜像 tar 托管**已落地，Hub 不再只做索引，可**预制存储镜像并批发给 Worker**；Agent 框架代码此前已由 EnvPackage inline 分发（本次一并打通镜像同款路径）。
+
+### 12A.1 目标态
+
+```text
+运维在 Hub 主机一次性预制                Worker/部署模块从 Hub 拉取（零第三方）
+  docker save <image> > x.tar     ──▶   uenv env sync <pkg> --docker-load
+  uenv env publish-image <pkg> ...      或 UENV_SWE_ENV_PACKAGE 目录，池 provision/prewarm 时自动 docker load
+        │                                         ▲
+        └── Hub: 流式入库(sha256) + images.manifest.tar 索引 ──── 流式下发(ETag=digest, Content-Length)
+```
+
+### 12A.2 接口与数据（新增 / 变更）
+
+| 层 | 变更 | 说明 |
+|----|------|------|
+| **types** | `PublishPackageRequest.file_artifacts: Vec<FileArtifact>` | 大文件从 **Hub 主机本地路径** `local_path` 声明；不走 base64/JSON body |
+| **hub-core** | `stage_file_streaming` / `sha256_hex_file` / `verify_artifact_file` | 1 MiB 分块**边写边算 sha256**，多 GB tar 不驻留内存；`image_tar` 默认落 `images/<name>` |
+| **hub-server** | `GET .../artifacts/:name` 改为**流式下发**（`ReaderStream`）+ `ETag=digest` + `Content-Length`；`?verify=true` 强制整文件重算校验 | 16 GiB Hub 服务 GB 级 tar 不 OOM |
+| **CLI** | `uenv env publish-image <pkg> --tar <path>...`；`uenv env sync ... --docker-load` | 发布/消费；sync 对全部制品**流式落盘 + 校验**，`image_tar` 可自动 `docker load` |
+| **seed** | `UENV_HUB_SWE_IMAGE_DIR`（默认 `<catalog_dir>/images`）扫描 `<instance_id>.tar` 自动 host；`images.manifest.json` 每项增 `tar` 字段 | 运维放好 tar → 启动即 host |
+| **worker** | `ImageCacheFactory::{load_args,load_image_tar,ensure_image_with_tar}`；`EnvPackageDir::{image_tar_for_instance,image_tar_for_ref,image_tars}`；`SweInstancePool::with_env_package` | provision/prewarm **优先** Hub tar `docker load`，无 tar 才按策略回退公网 pull |
+| **运维** | `scripts/hub-stage-image-package.sh` | `docker save` → `uenv env publish-image` 一键预制 |
+
+### 12A.3 约束与安全
+
+- `file_artifacts.local_path` 在 **Hub 主机**解析，仅 Publisher token 可发布；`name` 禁含 `/`、`..`；`rel_path` 传输/读取均拒绝 `..`。
+- `image_pull_policy=local_only`（组合包默认 overlay）下，Worker miss 且无 Hub tar → **明确报错**（提示 sync/预置），不静默公网 pull。
+- Hub 磁盘有限（8.130.95.176 约 88 GB 可用）：**按需/按批**预制热点实例镜像，不强制全量 500 镜像入 Hub；机制不设数量上限，容量由运维按盘规划。
+
+### 12A.4 验证
+
+- 单测：`uenv-hub-core` 流式入库/校验/发布（含 >1 MiB 合成 tar）；`uenv-worker` `load_args` / `ensure_image_with_tar` / `EnvPackageDir` tar lookups。
+- e2e：`hub-server` `hub_hosts_image_tarball_and_streams_it_to_worker`（发布 file_artifact → 流式下载校验 → sync-plan 标注 → 篡改 digest 被拒）。
+- 容器化：`uenv-worker` `#[ignore]` `ensure_image_with_tar_loads_from_hosted_tar`（`docker save`→删本地→从 tar `docker load`），docker CI `--ignored` 运行。
+- 联调：live Hub（`http://8.130.95.176:8088`）healthz/version、鉴权、`/packages`、sync-plan、artifact `ETag=digest`+`Content-Length` 均验证通过；新镜像托管特性需在 Hub 主机（x86_64）按 §5 重编部署后以上述 e2e 等价 smoke 复验。
 
 ---
 
@@ -476,3 +517,4 @@ Worker  → 异步 upload trajectory（平台能力 + package 默认策略）
 |------|------|------|
 | v1.0 | 2026-06-29 | 首版：组合包边界、纳入/不纳入清单、SWE/Agent 双包、三层分离 |
 | v1.1 | 2026-06-29 | §4.4：Agent 集成层与 Worker 轨迹采集专项拆分 |
+| v1.2 | 2026-07-06 | §12A：Hub 直接托管镜像字节落地（file_artifacts + 流式入库/下发 + `env publish-image`/`sync --docker-load` + worker `docker load` 预制路径）；P2 镜像 tar 托管标记完成 |
