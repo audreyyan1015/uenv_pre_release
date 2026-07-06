@@ -8,6 +8,7 @@ import "uenv/v1/episode.proto";
 service WorkerGrpcService {
     rpc DispatchEpisode(DispatchEpisodeRequest) returns (stream uenv.v1.StreamReport);
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc CancelEpisode(CancelWorkerEpisodeRequest) returns (CancelWorkerEpisodeResponse);
 }
 
 message DispatchEpisodeRequest {
@@ -19,4 +20,18 @@ message HealthCheckRequest {}
 message HealthCheckResponse {
     bool ok = 1;
     string status = 2;
+}
+
+
+message CancelWorkerEpisodeRequest {
+    string episode_id = 1;
+    uint32 attempt_id = 2;
+    string dispatch_lease_id = 3;
+    bytes dispatch_token = 4;
+}
+
+message CancelWorkerEpisodeResponse {
+    bool accepted = 1;
+    string code = 2;
+    string message = 3;
 }

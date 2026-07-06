@@ -190,11 +190,23 @@ fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> b
 
 impl Scheduler for RoundRobinScheduler {
     /// 注册一个新 worker，或更新已有 worker 的信息。
-    /// 如果 worker_id 已存在，先删除旧记录再插入新记录（实现重新注册/信息更新）。
+    /// ????? worker?????? worker ????
+    /// ??? ID ? worker ?? active lease???????? worker ?? draining?
     fn register_worker(&mut self, info: WorkerInfo) {
         tracing::info!(worker_id = %info.worker_id, endpoint = %info.endpoint, "worker registered");
-        // retain：保留所有 worker_id 不等于新 worker 的元素（即删除同 ID 的旧记录）
-        // 重新注册时，draining 状态由新 info 决定（注册的 worker 默认 draining=false）
+        if let Some(existing) = self
+            .workers
+            .iter_mut()
+            .find(|w| w.worker_id == info.worker_id && effective_load(w) > 0)
+        {
+            existing.draining = true;
+            tracing::warn!(
+                worker_id = %existing.worker_id,
+                active_load = effective_load(existing),
+                "worker_reregister_rejected_active_lease"
+            );
+            return;
+        }
         self.workers.retain(|w| w.worker_id != info.worker_id);
         self.workers.push(info);
     }
@@ -338,5 +350,42 @@ impl Scheduler for RoundRobinScheduler {
         }
         self.workers
             .retain(|w| !(w.worker_id == worker_id && w.draining && effective_load(w) == 0));
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::traits::Scheduler;
+
+    fn worker(id: &str, endpoint: &str, reserved_load: u32, draining: bool) -> WorkerInfo {
+        WorkerInfo {
+            worker_id: id.to_string(),
+            endpoint: endpoint.to_string(),
+            supported_env_types: vec!["math".to_string()],
+            capacity: 2,
+            current_load: reserved_load,
+            reserved_load,
+            reported_load: 0,
+            resource: None,
+            draining,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: String::new(),
+            synced_env_packages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reregister_with_active_lease_is_rejected() {
+        let mut scheduler = RoundRobinScheduler::new(60, 60);
+        scheduler.register_worker(worker("w1", "old:1", 1, false));
+        scheduler.register_worker(worker("w1", "new:1", 0, false));
+        let workers = scheduler.list_workers();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].endpoint, "old:1");
+        assert!(workers[0].draining);
+        assert_eq!(workers[0].reserved_load, 1);
     }
 }

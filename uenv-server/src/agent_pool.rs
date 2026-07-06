@@ -154,12 +154,25 @@ impl AgentRegistry {
             let add = (target - entry.granted) as usize;
             entry.sem.add_permits(add);
             entry.granted = target;
+        } else if target < entry.granted {
+            let reduce = entry.granted - target;
+            entry.granted = target;
+            let sem = Arc::clone(&entry.sem);
+            tokio::spawn(async move {
+                if let Ok(permit) = sem.acquire_many(reduce).await {
+                    permit.forget();
+                }
+            });
         }
     }
 
     /// 获取某池的 admission 信号量句柄（submit 侧用于 acquire）。
     /// 池未知时惰性建一个容量 0 的信号量——在有 Agent 注册前不放行任何 episode。
     pub fn pool_semaphore(&self, pool_id: &str) -> Arc<Semaphore> {
+        {
+            let agents = self.agents.read();
+            self.sync_pool_admission_locked(pool_id, &agents);
+        }
         self.pool_admission
             .entry(pool_id.to_string())
             .or_insert_with(|| PoolAdmission {
@@ -190,8 +203,15 @@ impl AgentRegistry {
     /// 注销一个 Agent。
     pub fn unregister(&self, agent_id: &str) {
         let mut agents = self.agents.write();
+        let pool_id = agents
+            .iter()
+            .find(|a| a.agent_id == agent_id)
+            .map(|a| a.agent_pool_id.clone());
         agents.retain(|a| a.agent_id != agent_id);
         tracing::info!(agent_id, "agent_unregistered");
+        if let Some(pool_id) = pool_id {
+            self.sync_pool_admission_locked(&pool_id, &agents);
+        }
     }
 
     /// 心跳：刷新时间并用 Agent 自报的 active_jobs 校准负载。
@@ -644,6 +664,7 @@ impl AgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn mk(id: &str, pool: &str, bridge_ver: &str, max: u32) -> AgentInfo {
         mk_labeled(id, pool, bridge_ver, max, Default::default())
@@ -770,6 +791,27 @@ mod tests {
         reg.register(mk("a2", "openhands-default", "1.0.0", 2));
         assert_eq!(reg.pool_capacity("openhands-default"), 5);
         assert_eq!(reg.pool_semaphore("openhands-default").available_permits(), 5);
+    }
+
+    #[tokio::test]
+    async fn pool_semaphore_shrinks_when_agent_unregisters() {
+        let reg = AgentRegistry::new(60);
+        reg.register(mk("a1", "openhands-default", "1.0.0", 3));
+        reg.register(mk("a2", "openhands-default", "1.0.0", 2));
+        let sem = reg.pool_semaphore("openhands-default");
+        assert_eq!(sem.available_permits(), 5);
+
+        reg.unregister("a2");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if sem.available_permits() == 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("semaphore should shrink");
     }
 
     #[test]

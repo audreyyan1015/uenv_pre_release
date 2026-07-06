@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use crate::control_plane::client::ControlPlane;
@@ -13,7 +14,10 @@ use crate::metrics::MetricsExporter;
 use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::v1::{EpisodeResult, StreamReport};
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcService;
-use crate::proto::worker::v1::{DispatchEpisodeRequest, HealthCheckRequest, HealthCheckResponse};
+use crate::proto::worker::v1::{
+    CancelWorkerEpisodeRequest, CancelWorkerEpisodeResponse, DispatchEpisodeRequest,
+    HealthCheckRequest, HealthCheckResponse,
+};
 use crate::wal::WalWriter;
 
 const DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS: u64 = 30;
@@ -25,6 +29,13 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
         .unwrap_or(default)
+}
+
+#[derive(Clone)]
+struct ActiveWorkerEpisode {
+    dispatch_lease_id: String,
+    dispatch_token: Vec<u8>,
+    cancel_token: CancellationToken,
 }
 
 struct ActiveEpisodeGuard {
@@ -59,6 +70,7 @@ pub struct WorkerGrpcServiceImpl {
     semaphore: Arc<Semaphore>,
     max_concurrent: u32,
     active_leases: Arc<Mutex<HashMap<(String, u32), String>>>,
+    active_cancellations: Arc<Mutex<HashMap<(String, u32), ActiveWorkerEpisode>>>,
     completed: Arc<Mutex<HashSet<(String, u32)>>>,
     wal: WalWriter,
     disconnect_policy: DisconnectDispatchPolicy,
@@ -82,6 +94,7 @@ impl WorkerGrpcServiceImpl {
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             max_concurrent,
             active_leases: Arc::new(Mutex::new(HashMap::new())),
+            active_cancellations: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashSet::new())),
             wal,
             disconnect_policy,
@@ -138,7 +151,7 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                 return Ok(Response::new(ReceiverStream::new(rx)));
             }
         }
-        {
+        let cancel_token = {
             let mut leases = self.active_leases.lock().await;
             if let Some(existing) = leases.get(&key) {
                 if existing != &episode.dispatch_lease_id {
@@ -147,35 +160,62 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             } else {
                 leases.insert(key.clone(), episode.dispatch_lease_id.clone());
             }
-        }
-
-        let permit = match tokio::time::timeout(
-            Duration::from_secs(env_u64(
-                "UENV_WORKER_DISPATCH_ACQUIRE_TIMEOUT_SECS",
-                DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS,
-            )),
-            self.semaphore.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => {
-                clear_active_lease(&self.active_leases, &key).await;
-                return Err(Status::resource_exhausted("max_concurrency_reached"));
-            }
-            Err(_) => {
-                clear_active_lease(&self.active_leases, &key).await;
-                tracing::warn!(
-                    trace_id = %trace_id,
-                    episode_id = %episode.episode_id,
-                    worker_id = %worker_id,
-                    attempt_id = episode.attempt_id,
-                    phase = "dispatch_acquire_timeout",
-                    msg = "dispatch"
+            let mut cancellations = self.active_cancellations.lock().await;
+            if let Some(active) = cancellations.get(&key) {
+                if active.dispatch_lease_id != episode.dispatch_lease_id
+                    || active.dispatch_token != episode.dispatch_token
+                {
+                    return Err(Status::failed_precondition("lease_conflict"));
+                }
+                active.cancel_token.clone()
+            } else {
+                let token = CancellationToken::new();
+                cancellations.insert(
+                    key.clone(),
+                    ActiveWorkerEpisode {
+                        dispatch_lease_id: episode.dispatch_lease_id.clone(),
+                        dispatch_token: episode.dispatch_token.clone(),
+                        cancel_token: token.clone(),
+                    },
                 );
-                return Err(Status::resource_exhausted(
-                    "max_concurrency_acquire_timeout",
-                ));
+                token
+            }
+        };
+
+        let acquire_timeout = Duration::from_secs(env_u64(
+            "UENV_WORKER_DISPATCH_ACQUIRE_TIMEOUT_SECS",
+            DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS,
+        ));
+        let permit = tokio::select! {
+            result = tokio::time::timeout(acquire_timeout, self.semaphore.clone().acquire_owned()) => {
+                match result {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => {
+                        clear_active_lease(&self.active_leases, &key).await;
+                        self.active_cancellations.lock().await.remove(&key);
+                        return Err(Status::resource_exhausted("max_concurrency_reached"));
+                    }
+                    Err(_) => {
+                        clear_active_lease(&self.active_leases, &key).await;
+                        self.active_cancellations.lock().await.remove(&key);
+                        tracing::warn!(
+                            trace_id = %trace_id,
+                            episode_id = %episode.episode_id,
+                            worker_id = %worker_id,
+                            attempt_id = episode.attempt_id,
+                            phase = "dispatch_acquire_timeout",
+                            msg = "dispatch"
+                        );
+                        return Err(Status::resource_exhausted(
+                            "max_concurrency_acquire_timeout",
+                        ));
+                    }
+                }
+            }
+            _ = cancel_token.cancelled() => {
+                clear_active_lease(&self.active_leases, &key).await;
+                self.active_cancellations.lock().await.remove(&key);
+                return Err(Status::cancelled("episode_cancelled"));
             }
         };
 
@@ -202,37 +242,54 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             "UENV_WORKER_EPISODE_TIMEOUT_SECS",
             DEFAULT_EPISODE_TIMEOUT_SECS,
         ));
-        let exec = match tokio::time::timeout(
-            episode_timeout,
-            self.executor.execute_episode(&episode, &exec_ctx),
-        )
-        .await
-        {
-            Ok(Ok(exec)) => exec,
-            Ok(Err(err)) => {
-                clear_active_lease(&self.active_leases, &key).await;
-                tracing::warn!(
-                    trace_id = %trace_id,
-                    episode_id = %episode.episode_id,
-                    worker_id = %worker_id,
-                    attempt_id = episode.attempt_id,
-                    error = %err,
-                    phase = "dispatch_failed",
-                    msg = "dispatch"
-                );
-                return Err(Status::internal(format!("execute_episode_failed: {err}")));
+        let exec = tokio::select! {
+            result = tokio::time::timeout(
+                episode_timeout,
+                self.executor.execute_episode(&episode, &exec_ctx),
+            ) => {
+                match result {
+                    Ok(Ok(exec)) => exec,
+                    Ok(Err(err)) => {
+                        clear_active_lease(&self.active_leases, &key).await;
+                        self.active_cancellations.lock().await.remove(&key);
+                        tracing::warn!(
+                            trace_id = %trace_id,
+                            episode_id = %episode.episode_id,
+                            worker_id = %worker_id,
+                            attempt_id = episode.attempt_id,
+                            error = %err,
+                            phase = "dispatch_failed",
+                            msg = "dispatch"
+                        );
+                        return Err(Status::internal(format!("execute_episode_failed: {err}")));
+                    }
+                    Err(_) => {
+                        clear_active_lease(&self.active_leases, &key).await;
+                        self.active_cancellations.lock().await.remove(&key);
+                        tracing::warn!(
+                            trace_id = %trace_id,
+                            episode_id = %episode.episode_id,
+                            worker_id = %worker_id,
+                            attempt_id = episode.attempt_id,
+                            phase = "episode_timeout",
+                            msg = "dispatch"
+                        );
+                        return Err(Status::deadline_exceeded("episode_timeout"));
+                    }
+                }
             }
-            Err(_) => {
+            _ = cancel_token.cancelled() => {
                 clear_active_lease(&self.active_leases, &key).await;
-                tracing::warn!(
+                self.active_cancellations.lock().await.remove(&key);
+                tracing::info!(
                     trace_id = %trace_id,
                     episode_id = %episode.episode_id,
                     worker_id = %worker_id,
                     attempt_id = episode.attempt_id,
-                    phase = "episode_timeout",
+                    phase = "episode_cancelled",
                     msg = "dispatch"
                 );
-                return Err(Status::deadline_exceeded("episode_timeout"));
+                return Err(Status::cancelled("episode_cancelled"));
             }
         };
         self.metrics.observe_episode(
@@ -272,6 +329,7 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
         let episode_for_wal = episode.clone();
         let completed = self.completed.clone();
         let active = self.active_leases.clone();
+        let cancellations = self.active_cancellations.clone();
         let wal = self.wal.clone();
         let metrics = self.metrics.clone();
         tokio::spawn(async move {
@@ -285,7 +343,8 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             );
             if let Err(err) = persisted {
                 tracing::error!(error = %err, msg = "wal_persist_failed");
-                active.lock().await.remove(&(episode_id, attempt_id));
+                active.lock().await.remove(&(episode_id.clone(), attempt_id));
+                cancellations.lock().await.remove(&(episode_id, attempt_id));
                 return;
             }
             metrics.set_wal_pending_records(wal.pending_count());
@@ -313,13 +372,42 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                 .lock()
                 .await
                 .insert((episode_for_wal.episode_id.clone(), attempt_id));
-            active
-                .lock()
-                .await
-                .remove(&(episode_for_wal.episode_id, attempt_id));
+            let cleanup_key = (episode_for_wal.episode_id, attempt_id);
+            active.lock().await.remove(&cleanup_key);
+            cancellations.lock().await.remove(&cleanup_key);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn cancel_episode(
+        &self,
+        request: Request<CancelWorkerEpisodeRequest>,
+    ) -> Result<Response<CancelWorkerEpisodeResponse>, Status> {
+        let req = request.into_inner();
+        let key = (req.episode_id.clone(), req.attempt_id);
+        let Some(active) = self.active_cancellations.lock().await.get(&key).cloned() else {
+            return Ok(Response::new(CancelWorkerEpisodeResponse {
+                accepted: false,
+                code: "UNKNOWN_EPISODE".to_string(),
+                message: "episode is not active on this worker".to_string(),
+            }));
+        };
+        if active.dispatch_lease_id != req.dispatch_lease_id
+            || active.dispatch_token != req.dispatch_token
+        {
+            return Ok(Response::new(CancelWorkerEpisodeResponse {
+                accepted: false,
+                code: "LEASE_MISMATCH".to_string(),
+                message: "dispatch lease/token mismatch".to_string(),
+            }));
+        }
+        active.cancel_token.cancel();
+        Ok(Response::new(CancelWorkerEpisodeResponse {
+            accepted: true,
+            code: "ACCEPTED".to_string(),
+            message: "cancel signalled".to_string(),
+        }))
     }
 
     async fn health_check(

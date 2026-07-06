@@ -31,6 +31,7 @@ async-trait = "0.1"
 futures = "0.3"
 bytes = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 tower = "0.5"
 sha2 = "0.10"

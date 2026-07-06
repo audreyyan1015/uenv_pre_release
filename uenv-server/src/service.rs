@@ -16,10 +16,12 @@ use crate::proto::v1::{
 use crate::proto::v1::AgentJob;
 use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
 use crate::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
-use crate::proto::worker::v1::DispatchEpisodeRequest;
+use crate::proto::worker::v1::{CancelWorkerEpisodeRequest, DispatchEpisodeRequest};
 use crate::proto::v1::admin_service_server::AdminService;
 use crate::scheduler::traits::{ScheduleError, Scheduler, WorkerAssignment};
-use crate::state::{ActiveEpisode, CompletedAsyncResult, ServerState};
+use crate::state::{
+    ActiveEpisode, CompletedAsyncResult, EpisodeHandle, NativeDispatchInfo, ServerState,
+};
 
 // =============================================================================
 // UEnvEpisodeService
@@ -58,6 +60,8 @@ struct EpisodeAdmissionGuard {
 impl Drop for EpisodeAdmissionGuard {
     fn drop(&mut self) {
         self.state.active_episodes.remove(&self.episode_id);
+        self.state.active_episode_handles.remove(&self.episode_id);
+        self.state.cancelled_episodes.remove(&self.episode_id);
     }
 }
 
@@ -96,10 +100,61 @@ impl Drop for GatewaySessionGuard {
     }
 }
 
-async fn wait_for_cancel(state: Arc<ServerState>, episode_id: String) {
-    while !state.cancelled_episodes.contains_key(&episode_id) {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+fn record_cancel_outcome(state: &ServerState, episode_id: &str) {
+    state.cancel_outcomes.insert(
+        episode_id.to_string(),
+        crate::state::TimedOutcome {
+            expires_at: Instant::now()
+                + Duration::from_secs(state.report_result_idempotency_ttl_secs.max(1)),
+            code: "LATE_AFTER_CANCEL".to_string(),
+            message: "episode cancelled".to_string(),
+        },
+    );
+}
+
+async fn notify_worker_cancel(info: NativeDispatchInfo) {
+    let Ok(mut client) = WorkerGrpcServiceClient::connect(format!("http://{}", info.endpoint)).await else {
+        tracing::warn!(episode_id = %info.episode_id, worker_endpoint = %info.endpoint, "worker_cancel_connect_failed");
+        return;
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        client.cancel_episode(CancelWorkerEpisodeRequest {
+            episode_id: info.episode_id.clone(),
+            attempt_id: info.attempt_id,
+            dispatch_lease_id: info.dispatch_lease_id.clone(),
+            dispatch_token: info.dispatch_token.clone(),
+        }),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            let resp = resp.into_inner();
+            tracing::info!(
+                episode_id = %info.episode_id,
+                attempt_id = info.attempt_id,
+                accepted = resp.accepted,
+                code = %resp.code,
+                message = %resp.message,
+                "worker_cancel_reported"
+            );
+        }
+        Ok(Err(e)) => tracing::warn!(episode_id = %info.episode_id, error = %e, "worker_cancel_rpc_failed"),
+        Err(_) => tracing::warn!(episode_id = %info.episode_id, "worker_cancel_rpc_timeout"),
     }
+}
+
+async fn notify_handle_worker_cancel(handle: &Arc<EpisodeHandle>) {
+    if let Some(info) = handle.native_dispatch() {
+        notify_worker_cancel(info).await;
+    }
+}
+
+fn broadcast_cancelled(state: &ServerState, episode_id: &str, attempt_id: u32) -> EpisodeResult {
+    record_cancel_outcome(state, episode_id);
+    let result = cancelled_result(episode_id, attempt_id);
+    let _ = state.episode_broadcast.send(result.clone());
+    result
 }
 
 fn cancelled_result(episode_id: &str, attempt_id: u32) -> EpisodeResult {
@@ -193,6 +248,7 @@ impl UEnvEpisodeService {
 
         let episode_id = req.episode_id.clone();
         self.state.cancelled_episodes.remove(&episode_id);
+        let handle = Arc::new(EpisodeHandle::new(episode_id.clone(), req.attempt_id));
         let _episode_admission = match self.state.active_episodes.entry(episode_id.clone()) {
             Entry::Occupied(_) => anyhow::bail!("episode {episode_id} is already active"),
             Entry::Vacant(v) => {
@@ -203,6 +259,9 @@ impl UEnvEpisodeService {
                     started_at: Instant::now(),
                     batch_id: req.correlation_id.clone(),
                 });
+                self.state
+                    .active_episode_handles
+                    .insert(episode_id.clone(), Arc::clone(&handle));
                 EpisodeAdmissionGuard {
                     state: Arc::clone(&self.state),
                     episode_id: episode_id.clone(),
@@ -220,11 +279,20 @@ impl UEnvEpisodeService {
         // 当 in-flight 数达到上限时，新 episode 在此等待（队列语义），
         // 直到有 slot 空出或 deadline 超时。permit 在函数返回时自动释放。
         let _queue_permit = if let Some(ref sem) = self.state.episode_semaphore {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let permit = tokio::time::timeout(remaining, sem.clone().acquire_owned())
-                .await
-                .map_err(|_| anyhow::anyhow!("episode {episode_id} timeout waiting in queue"))?
-                .map_err(|_| anyhow::anyhow!("episode queue semaphore closed"))?;
+            let deadline_sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+            tokio::pin!(deadline_sleep);
+            let permit = tokio::select! {
+                _ = handle.cancel_token.cancelled() => {
+                    let result = broadcast_cancelled(&self.state, &episode_id, req.attempt_id);
+                    return Ok(result);
+                }
+                _ = &mut deadline_sleep => {
+                    anyhow::bail!("episode {episode_id} timeout waiting in queue");
+                }
+                permit = sem.clone().acquire_owned() => {
+                    permit.map_err(|_| anyhow::anyhow!("episode queue semaphore closed"))?
+                }
+            };
             tracing::debug!(episode_id = %episode_id, "episode_queue_admitted");
             Some(permit)
         } else {
@@ -233,7 +301,7 @@ impl UEnvEpisodeService {
 
         if req.env_type == "swe" {
             if let Some(spec) = SweAgentSpec::from_payload(&req) {
-                return self.submit_swe_agent_episode(req, spec, deadline).await;
+                return self.submit_swe_agent_episode(req, spec, deadline, Arc::clone(&handle)).await;
             }
         }
 
@@ -259,7 +327,13 @@ impl UEnvEpisodeService {
                         if Instant::now() > deadline {
                             anyhow::bail!("no worker available: {e}");
                         }
-                        tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)).await;
+                        tokio::select! {
+                            _ = handle.cancel_token.cancelled() => {
+                                let result = broadcast_cancelled(&self.state, &episode_id, attempt_id);
+                                return Ok(result);
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)) => {}
+                        }
                     }
                 }
             };
@@ -269,6 +343,13 @@ impl UEnvEpisodeService {
             req.dispatch_lease_id = self.state.next_lease_id();
             req.dispatch_token = Uuid::new_v4().as_bytes().to_vec();
             req.scheduler_epoch = self.state.epoch();
+            handle.set_native_dispatch(NativeDispatchInfo {
+                endpoint: assignment.endpoint.clone(),
+                episode_id: episode_id.clone(),
+                attempt_id,
+                dispatch_lease_id: req.dispatch_lease_id.clone(),
+                dispatch_token: req.dispatch_token.clone(),
+            });
             let remaining_secs = deadline
                 .saturating_duration_since(Instant::now())
                 .as_secs()
@@ -330,13 +411,10 @@ impl UEnvEpisodeService {
                     anyhow::bail!("episode execution timeout");
                 }
 
-                _ = wait_for_cancel(Arc::clone(&self.state), episode_id.clone()) => {
+                _ = handle.cancel_token.cancelled() => {
+                    notify_handle_worker_cancel(&handle).await;
                     self.state.pending_results.remove(&pending_key);
-                    self.state.cancel_outcomes.insert(episode_id.clone(), crate::state::TimedOutcome {
-                        expires_at: Instant::now() + Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1)),
-                        code: "LATE_AFTER_CANCEL".to_string(),
-                        message: "episode cancelled".to_string(),
-                    });
+                    record_cancel_outcome(&self.state, &episode_id);
                     self.state.active_episodes.remove(&episode_id);
                     worker_lease.release();
                     let result = cancelled_result(&episode_id, attempt_id);
@@ -360,7 +438,7 @@ impl UEnvEpisodeService {
                         }
                         Err(_) => {
                             self.state.pending_results.remove(&pending_key);
-                            if self.state.cancelled_episodes.contains_key(&episode_id) {
+                            if handle.cancel_token.is_cancelled() {
                                 let result = cancelled_result(&episode_id, attempt_id);
                                 let _ = self.state.episode_broadcast.send(result.clone());
                                 return Ok(result);
@@ -380,34 +458,45 @@ impl UEnvEpisodeService {
                         }
                         Ok(()) => {
                             // Dispatch stream ??????? episode terminal????? WorkerLease ? ReportResult?
-                            match tokio::time::timeout(
-                                deadline.saturating_duration_since(Instant::now()),
-                                rx,
-                            ).await {
-                                Ok(Ok(result)) => {
+                            tokio::select! {
+                                _ = handle.cancel_token.cancelled() => {
+                                    notify_handle_worker_cancel(&handle).await;
+                                    self.state.pending_results.remove(&pending_key);
+                                    record_cancel_outcome(&self.state, &episode_id);
                                     self.state.active_episodes.remove(&episode_id);
                                     worker_lease.release();
-                                    tracing::info!(
-                                        episode_id = %episode_id,
-                                        batch_id = %req.correlation_id,
-                                        worker_id = %assignment.worker_id,
-                                        "episode_completed"
-                                    );
+                                    let result = cancelled_result(&episode_id, attempt_id);
                                     let _ = self.state.episode_broadcast.send(result.clone());
                                     return Ok(result);
                                 }
-                                Ok(Err(_)) => {
-                                    self.state.pending_results.remove(&pending_key);
-                                    self.state.active_episodes.remove(&episode_id);
-                                    worker_lease.release();
-                                    if self.state.cancelled_episodes.contains_key(&episode_id) {
-                                        let result = cancelled_result(&episode_id, attempt_id);
-                                        let _ = self.state.episode_broadcast.send(result.clone());
-                                        return Ok(result);
+                                result = &mut rx => {
+                                    match result {
+                                        Ok(result) => {
+                                            self.state.active_episodes.remove(&episode_id);
+                                            worker_lease.release();
+                                            tracing::info!(
+                                                episode_id = %episode_id,
+                                                batch_id = %req.correlation_id,
+                                                worker_id = %assignment.worker_id,
+                                                "episode_completed"
+                                            );
+                                            let _ = self.state.episode_broadcast.send(result.clone());
+                                            return Ok(result);
+                                        }
+                                        Err(_) => {
+                                            self.state.pending_results.remove(&pending_key);
+                                            self.state.active_episodes.remove(&episode_id);
+                                            worker_lease.release();
+                                            if handle.cancel_token.is_cancelled() {
+                                                let result = cancelled_result(&episode_id, attempt_id);
+                                                let _ = self.state.episode_broadcast.send(result.clone());
+                                                return Ok(result);
+                                            }
+                                            Some("worker_channel_closed".to_string())
+                                        }
                                     }
-                                    Some("worker_channel_closed".to_string())
                                 }
-                                Err(_) => {
+                                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                                     self.state.pending_results.remove(&pending_key);
                                     self.state.result_outcomes.insert(pending_key.clone(), crate::state::TimedOutcome {
                                         expires_at: Instant::now() + Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1)),
@@ -460,6 +549,7 @@ impl UEnvEpisodeService {
         req: EpisodeRequest,
         spec: SweAgentSpec,
         deadline: Instant,
+        handle: Arc<EpisodeHandle>,
     ) -> anyhow::Result<EpisodeResult> {
         let episode_id = req.episode_id.clone();
         // run_id 由 Server 统一生成并贯穿 session/AgentJob/轨迹（替代 driver 自生成）。
@@ -492,6 +582,10 @@ impl UEnvEpisodeService {
         let sem = self.state.agent_registry.pool_semaphore(&pool_id);
 
         let (assignment, _admission) = loop {
+            if handle.cancel_token.is_cancelled() {
+                let result = broadcast_cancelled(&self.state, &episode_id, req.attempt_id);
+                return Ok(result);
+            }
             if Instant::now() > deadline {
                 anyhow::bail!(
                     "swe agent episode {episode_id} timeout acquiring agent+worker slot"
@@ -501,10 +595,13 @@ impl UEnvEpisodeService {
             let permit = match sem.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    tokio::time::sleep(Duration::from_millis(
-                        self.state.schedule_retry_interval_ms,
-                    ))
-                    .await;
+                    tokio::select! {
+                        _ = handle.cancel_token.cancelled() => {
+                            let result = broadcast_cancelled(&self.state, &episode_id, req.attempt_id);
+                            return Ok(result);
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)) => {}
+                    }
                     continue;
                 }
             };
@@ -544,10 +641,13 @@ impl UEnvEpisodeService {
                         );
                         anyhow::bail!("select worker failed: {e}");
                     }
-                    tokio::time::sleep(Duration::from_millis(
-                        self.state.schedule_retry_interval_ms,
-                    ))
-                    .await;
+                    tokio::select! {
+                        _ = handle.cancel_token.cancelled() => {
+                            let result = broadcast_cancelled(&self.state, &episode_id, req.attempt_id);
+                            return Ok(result);
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)) => {}
+                    }
                 }
             }
         };
@@ -601,54 +701,61 @@ impl UEnvEpisodeService {
             instance_id = %spec.instance_id,
             "gateway_session_create_start"
         );
-        let session = match tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            create_session_for_episode(
-                &assignment.gateway_public_url,
-                &spec,
-                &episode_id,
-                &run_id,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(s)) => {
-                tracing::info!(
-                    episode_id = %episode_id,
-                    run_id = %run_id,
-                    worker_id = %assignment.worker_id,
-                    gateway_public_url = %assignment.gateway_public_url,
-                    gateway_url = %s.gateway_url,
-                    session_id = %s.session_id,
-                    instance_id = %spec.instance_id,
-                    "gateway_session_create_done"
-                );
-                s
-            }
-            Ok(Err(e)) => {
+        let session = tokio::select! {
+            _ = handle.cancel_token.cancelled() => {
                 cleanup_episode(&self.state, &mut worker_lease, &episode_id);
-                tracing::warn!(
-                    episode_id = %episode_id,
-                    run_id = %run_id,
-                    worker_id = %assignment.worker_id,
-                    gateway_public_url = %assignment.gateway_public_url,
-                    instance_id = %spec.instance_id,
-                    error = %e,
-                    "gateway_session_create_failed"
-                );
-                anyhow::bail!("for-episode failed on worker {}: {e}", assignment.worker_id);
+                let result = broadcast_cancelled(&self.state, &episode_id, req.attempt_id);
+                return Ok(result);
             }
-            Err(_) => {
-                cleanup_episode(&self.state, &mut worker_lease, &episode_id);
-                tracing::warn!(
-                    episode_id = %episode_id,
-                    run_id = %run_id,
-                    worker_id = %assignment.worker_id,
-                    gateway_public_url = %assignment.gateway_public_url,
-                    instance_id = %spec.instance_id,
-                    "gateway_session_create_timeout"
-                );
-                anyhow::bail!("for-episode timeout on worker {}", assignment.worker_id);
+            session = tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                create_session_for_episode(
+                    &assignment.gateway_public_url,
+                    &spec,
+                    &episode_id,
+                    &run_id,
+                ),
+            ) => {
+                match session {
+                    Ok(Ok(s)) => {
+                        tracing::info!(
+                            episode_id = %episode_id,
+                            run_id = %run_id,
+                            worker_id = %assignment.worker_id,
+                            gateway_public_url = %assignment.gateway_public_url,
+                            gateway_url = %s.gateway_url,
+                            session_id = %s.session_id,
+                            instance_id = %spec.instance_id,
+                            "gateway_session_create_done"
+                        );
+                        s
+                    }
+                    Ok(Err(e)) => {
+                        cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                        tracing::warn!(
+                            episode_id = %episode_id,
+                            run_id = %run_id,
+                            worker_id = %assignment.worker_id,
+                            gateway_public_url = %assignment.gateway_public_url,
+                            instance_id = %spec.instance_id,
+                            error = %e,
+                            "gateway_session_create_failed"
+                        );
+                        anyhow::bail!("for-episode failed on worker {}: {e}", assignment.worker_id);
+                    }
+                    Err(_) => {
+                        cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                        tracing::warn!(
+                            episode_id = %episode_id,
+                            run_id = %run_id,
+                            worker_id = %assignment.worker_id,
+                            gateway_public_url = %assignment.gateway_public_url,
+                            instance_id = %spec.instance_id,
+                            "gateway_session_create_timeout"
+                        );
+                        anyhow::bail!("for-episode timeout on worker {}", assignment.worker_id);
+                    }
+                }
             }
         };
 
@@ -683,6 +790,7 @@ impl UEnvEpisodeService {
             mode: spec.mode.clone(),
         };
         let mut rx = self.state.agent_job_queue.enqueue(&pool_id, job);
+        handle.set_agent_job(pool_id.clone(), job_id.clone());
 
         info!(
             episode_id = %episode_id,
@@ -718,11 +826,11 @@ impl UEnvEpisodeService {
                         anyhow::bail!("swe agent episode {episode_id} timeout waiting for agent pickup");
                     }
                 }
-                _ = wait_for_cancel(Arc::clone(&self.state), episode_id.clone()) => {
+                _ = handle.cancel_token.cancelled() => {
                     cleanup_episode(&self.state, &mut worker_lease, &episode_id);
                     self.state.agent_job_queue.abandon(&pool_id, &job_id);
                     session_guard.close_now().await;
-                    let result = cancelled_result(&episode_id, req.attempt_id);
+                    let result = broadcast_cancelled(&self.state, &episode_id, req.attempt_id);
                     break result;
                 }
                 done = &mut rx => {
@@ -1180,17 +1288,25 @@ impl AdminService for AdminServiceImpl {
         request: Request<CancelEpisodeRequest>,
     ) -> Result<Response<CancelEpisodeResponse>, Status> {
         let req = request.into_inner();
-        self.state.cancelled_episodes.insert(req.episode_id.clone(), ());
-        self.state.cancel_outcomes.insert(req.episode_id.clone(), crate::state::TimedOutcome {
-            expires_at: Instant::now() + Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1)),
-            code: "LATE_AFTER_CANCEL".to_string(),
-            message: "episode cancelled".to_string(),
-        });
-        let active_removed = self
+        record_cancel_outcome(&self.state, &req.episode_id);
+
+        let handle = self
             .state
-            .active_episodes
-            .remove(&req.episode_id)
-            .is_some();
+            .active_episode_handles
+            .get(&req.episode_id)
+            .map(|h| Arc::clone(h.value()));
+        if let Some(handle) = &handle {
+            if req.attempt_id == 0 || req.attempt_id == handle.attempt_id {
+                handle.cancel();
+                if let Some(info) = handle.native_dispatch() {
+                    tokio::spawn(notify_worker_cancel(info));
+                }
+                if let Some(job) = handle.agent_job() {
+                    self.state.agent_job_queue.abandon(&job.pool_id, &job.job_id);
+                }
+            }
+        }
+
         let keys: Vec<_> = self
             .state
             .pending_results
@@ -1206,7 +1322,7 @@ impl AdminService for AdminServiceImpl {
             self.state.pending_results.remove(&key);
         }
         Ok(Response::new(CancelEpisodeResponse {
-            cancelled: active_removed || pending_removed,
+            cancelled: handle.is_some() || pending_removed,
         }))
     }
 

@@ -1,15 +1,17 @@
 use crate::proto::v1::EpisodeResult;
 use crate::scheduler::RoundRobinScheduler;
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, oneshot, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 pub struct ServerState {
     pub scheduler: Arc<RwLock<RoundRobinScheduler>>,
     pub active_episodes: DashMap<String, ActiveEpisode>,
+    pub active_episode_handles: DashMap<String, Arc<EpisodeHandle>>,
     pub server_epoch: AtomicU64,
     pub next_lease_seq: AtomicU64,
     pub pending_results: DashMap<PendingKey, PendingResult>,
@@ -40,6 +42,66 @@ pub struct ServerState {
     pub agent_registry: Arc<crate::agent_pool::AgentRegistry>,
     /// SWE+Agent 编排：AgentJob 待领队列 + in-flight 表。
     pub agent_job_queue: Arc<crate::agent_job::AgentJobQueue>,
+}
+
+
+#[derive(Clone)]
+pub struct NativeDispatchInfo {
+    pub endpoint: String,
+    pub episode_id: String,
+    pub attempt_id: u32,
+    pub dispatch_lease_id: String,
+    pub dispatch_token: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub struct AgentJobRef {
+    pub pool_id: String,
+    pub job_id: String,
+}
+
+pub struct EpisodeHandle {
+    pub episode_id: String,
+    pub attempt_id: u32,
+    pub cancel_token: CancellationToken,
+    native_dispatch: Mutex<Option<NativeDispatchInfo>>,
+    agent_job: Mutex<Option<AgentJobRef>>,
+}
+
+impl EpisodeHandle {
+    pub fn new(episode_id: String, attempt_id: u32) -> Self {
+        Self {
+            episode_id,
+            attempt_id,
+            cancel_token: CancellationToken::new(),
+            native_dispatch: Mutex::new(None),
+            agent_job: Mutex::new(None),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
+
+    pub fn set_native_dispatch(&self, info: NativeDispatchInfo) {
+        *self.native_dispatch.lock() = Some(info);
+    }
+
+    pub fn native_dispatch(&self) -> Option<NativeDispatchInfo> {
+        self.native_dispatch.lock().clone()
+    }
+
+    pub fn clear_native_dispatch(&self) {
+        *self.native_dispatch.lock() = None;
+    }
+
+    pub fn set_agent_job(&self, pool_id: String, job_id: String) {
+        *self.agent_job.lock() = Some(AgentJobRef { pool_id, job_id });
+    }
+
+    pub fn agent_job(&self) -> Option<AgentJobRef> {
+        self.agent_job.lock().clone()
+    }
 }
 
 pub struct ActiveEpisode {
@@ -101,6 +163,7 @@ impl ServerState {
         Self {
             scheduler,
             active_episodes: DashMap::new(),
+            active_episode_handles: DashMap::new(),
             // 用启动时刻的 Unix 秒作为 epoch 初始值。
             // 每次重启时间不同 → epoch 不同，使 worker 能借此感知 server 实例已切换。
             // 两次重启之间需要至少相差 1 秒才能保证 epoch 唯一，实际部署中完全满足。
@@ -150,5 +213,31 @@ impl ServerState {
     pub fn next_lease_id(&self) -> String {
         let seq = self.next_lease_seq.fetch_add(1, Ordering::Relaxed);
         format!("lease-{seq}")
+    }
+
+    pub fn sweep_ttl_caches(&self) {
+        let now = Instant::now();
+        self.idempotency_cache.retain(|_, record| record.expires_at > now);
+        self.result_outcomes.retain(|_, outcome| outcome.expires_at > now);
+        self.cancel_outcomes.retain(|_, outcome| outcome.expires_at > now);
+        self.cancelled_episodes
+            .retain(|episode_id, _| self.active_episode_handles.contains_key(episode_id));
+        if self.completed_async_ttl_secs > 0 {
+            let ttl = Duration::from_secs(self.completed_async_ttl_secs);
+            self.completed_async
+                .retain(|_, result| result.completed_at.elapsed() <= ttl);
+        }
+    }
+}
+
+pub fn spawn_ttl_sweeper(state: Arc<ServerState>) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                state.sweep_ttl_caches();
+            }
+        });
     }
 }

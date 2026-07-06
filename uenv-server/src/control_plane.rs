@@ -272,16 +272,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             })
         };
 
-        let now = Instant::now();
-        self.state
-            .idempotency_cache
-            .retain(|_, record| record.expires_at > now);
-        self.state
-            .result_outcomes
-            .retain(|_, outcome| outcome.expires_at > now);
-        self.state
-            .cancel_outcomes
-            .retain(|_, outcome| outcome.expires_at > now);
+        self.state.sweep_ttl_caches();
 
         if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
             warn!(
@@ -376,10 +367,15 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         });
         let Some((_, pending)) = removed else {
             let (code, message) = if let Some(outcome) = self.state.result_outcomes.get(&pending_key) {
-                (outcome.code.clone(), outcome.message.clone())
-            } else if self.state.cancelled_episodes.contains_key(&episode_id)
-                || self.state.cancel_outcomes.contains_key(&episode_id)
-            {
+                if outcome.code == "ACCEPTED" {
+                    (
+                        "ALREADY_COMPLETED".to_string(),
+                        "result already accepted for this lease".to_string(),
+                    )
+                } else {
+                    (outcome.code.clone(), outcome.message.clone())
+                }
+            } else if self.state.cancel_outcomes.contains_key(&episode_id) {
                 ("LATE_AFTER_CANCEL".to_string(), "episode was cancelled".to_string())
             } else {
                 ("UNKNOWN_PENDING".to_string(), "pending result not found".to_string())
@@ -470,5 +466,71 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             })
             .collect();
         Ok(Response::new(ListWorkersResponse { workers }))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::scheduler::v1::control_plane_service_server::ControlPlaneService;
+    use crate::proto::scheduler::v1::ReportResultRequest;
+    use crate::proto::v1::EpisodeResult;
+
+    fn report_req(idempotency_key: &str) -> ReportResultRequest {
+        ReportResultRequest {
+            idempotency_key: idempotency_key.to_string(),
+            worker_id: "w1".to_string(),
+            server_epoch: 0,
+            result: Some(EpisodeResult {
+                episode_id: "ep1".to_string(),
+                attempt_id: 1,
+                status: "completed".to_string(),
+                ..Default::default()
+            }),
+            dispatch_lease_id: "lease-1".to_string(),
+            dispatch_token: b"token-1".to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn different_idempotency_after_accepted_returns_already_completed() {
+        let state = crate::create_default_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.pending_results.insert(
+            ("ep1".to_string(), 1, "lease-1".to_string()),
+            crate::state::PendingResult {
+                tx,
+                worker_id: "w1".to_string(),
+                dispatch_lease_id: "lease-1".to_string(),
+                dispatch_token: b"token-1".to_vec(),
+            },
+        );
+        let svc = ControlPlaneServiceImpl { state };
+        let first = svc
+            .report_result(Request::new(report_req("key-1")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.ack);
+        assert_eq!(first.code, "ACCEPTED");
+
+        let retry = svc
+            .report_result(Request::new(report_req("key-1")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(retry.ack);
+        assert!(retry.duplicate);
+        assert_eq!(retry.code, "DUPLICATE_ACCEPTED");
+
+        let second_key = svc
+            .report_result(Request::new(report_req("key-2")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!second_key.ack);
+        assert!(!second_key.duplicate);
+        assert_eq!(second_key.code, "ALREADY_COMPLETED");
     }
 }
