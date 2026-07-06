@@ -70,12 +70,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = std::env::var("UENV_CONFIG_PATH")
         .unwrap_or_else(|_| "config/server.yaml".to_string());
-    let config = uenv_server::ServerConfig::load_or_default(&config_path);
+    let config = if std::env::var("UENV_SERVER_CONFIG_STRICT")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+    {
+        uenv_server::ServerConfig::load(&config_path)?
+    } else {
+        uenv_server::ServerConfig::load_or_default(&config_path)
+    };
     tracing::info!(
         config_path = %config_path,
         scheduler_heartbeat_interval_ms = config.scheduler.heartbeat_interval_ms,
         scheduler_heartbeat_timeout_secs = config.scheduler.heartbeat_timeout_secs,
         admin_http_port = config.admin_http_port,
+        admin_http_bind = %config.admin_http_bind,
+        admin_http_token_configured = !config.admin_http_token.is_empty(),
         "server_config_loaded"
     );
     let state = uenv_server::create_state_with_config(&config);
@@ -100,8 +109,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.admin_http_port > 0 {
         let admin_state = Arc::clone(&state);
         let admin_port = config.admin_http_port;
-        tokio::spawn(uenv_server::admin_http::serve(admin_state, admin_port));
-        tracing::info!(port = admin_port, "admin_http_spawned");
+        let admin_bind = config.admin_http_bind.clone();
+        let admin_token = config.admin_http_token.clone();
+        tokio::spawn(uenv_server::admin_http::serve(
+            admin_state,
+            admin_bind.clone(),
+            admin_port,
+            admin_token,
+        ));
+        tracing::info!(bind = %admin_bind, port = admin_port, "admin_http_spawned");
     }
 
     let core = AdapterCore::new(UEnvEpisodeService::new(Arc::clone(&state)));

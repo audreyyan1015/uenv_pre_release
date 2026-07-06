@@ -62,6 +62,8 @@ message ReportResultRequest {
     string worker_id = 2;
     uint64 server_epoch = 3;
     uenv.v1.EpisodeResult result = 4;
+    string dispatch_lease_id = 5;
+    bytes dispatch_token = 6;
 }
 
 message ReportResultResponse {

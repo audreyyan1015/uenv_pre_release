@@ -24,6 +24,7 @@ message WalRecord {
     bytes protobuf_payload = 9;
     google.protobuf.Timestamp created_at = 10;
     ReplayState replay_state = 11;
+    bytes dispatch_token = 12;
 }
 
 // idempotency_key = episode_id + attempt_id + worker_id

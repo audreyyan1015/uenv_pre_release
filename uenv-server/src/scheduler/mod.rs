@@ -26,6 +26,8 @@ pub struct WorkerSnapshot {
     pub supported_env_types: Vec<String>,
     pub capacity: u32,
     pub current_load: u32,
+    pub reserved_load: u32,
+    pub reported_load: u32,
     pub draining: bool,
     pub last_report_at: Option<std::time::Instant>,
     pub last_heartbeat_at: Option<std::time::Instant>,
@@ -68,7 +70,9 @@ impl RoundRobinScheduler {
                 endpoint: w.endpoint.clone(),
                 supported_env_types: w.supported_env_types.clone(),
                 capacity: w.capacity,
-                current_load: w.current_load,
+                current_load: effective_load(w),
+                reserved_load: w.reserved_load,
+                reported_load: w.reported_load,
                 draining: w.draining,
                 last_report_at: w.last_report_at,
                 last_heartbeat_at: w.last_heartbeat_at,
@@ -95,8 +99,13 @@ impl RoundRobinScheduler {
     /// 以防止调度器把过多 episode 分配给同一个 worker。
     /// saturating_add：加法溢出时停在 u32::MAX，而不是回绕到 0（防止负载计数异常）。
     pub fn increment_load(&mut self, worker_id: &str) {
+        self.reserve_load(worker_id);
+    }
+
+    fn reserve_load(&mut self, worker_id: &str) {
         if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
-            w.current_load = w.current_load.saturating_add(1);
+            w.reserved_load = w.reserved_load.saturating_add(1);
+            w.current_load = effective_load(w);
         }
     }
 
@@ -104,9 +113,7 @@ impl RoundRobinScheduler {
     /// 在 service.rs 中，episode 执行完成（无论成功还是失败）后调用。
     /// saturating_sub：减法结果为负时停在 0，而不是回绕到 u32::MAX。
     pub fn decrement_load(&mut self, worker_id: &str) {
-        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
-            w.current_load = w.current_load.saturating_sub(1);
-        }
+        self.release(worker_id);
     }
 
     /// 将指定 worker 标记为 draining 状态，使其不再参与新的调度。
@@ -124,7 +131,8 @@ impl RoundRobinScheduler {
     /// 如果心跳中的 max_load > 0，同时更新容量（capacity）字段。
     pub fn update_worker_load(&mut self, worker_id: &str, load: u32, max_load: u32) {
         if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
-            w.current_load = load;
+            w.reported_load = load;
+            w.current_load = effective_load(w);
             if max_load > 0 {
                 w.capacity = max_load;
             }
@@ -154,13 +162,17 @@ fn is_worker_degraded(w: &WorkerInfo, threshold_secs: u64, heartbeat_timeout_sec
         }
     }
     // 维度2：业务假活 → 有 load 但长时间无 episode 完成
-    if w.current_load == 0 {
+    if effective_load(w) == 0 {
         return false;
     }
     match w.last_report_at {
         None => false,
         Some(t) => t.elapsed().as_secs() > threshold_secs,
     }
+}
+
+fn effective_load(w: &WorkerInfo) -> u32 {
+    w.reserved_load.max(w.reported_load)
 }
 
 fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> bool {
@@ -225,7 +237,7 @@ impl Scheduler for RoundRobinScheduler {
                 !w.draining
                     && !is_worker_degraded(w, threshold, hb_timeout)
                     && w.supported_env_types.contains(&request.env_type)
-                    && w.current_load < w.capacity
+                    && effective_load(w) < w.capacity
                     && resource_fits(&w.resource, &request.resource_spec)
                     && pkg_matches(w)
             })
@@ -267,5 +279,57 @@ impl Scheduler for RoundRobinScheduler {
             endpoint: w.endpoint.clone(),
             gateway_public_url: w.gateway_public_url.clone(),
         })
+    }
+
+    fn reserve(&mut self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError> {
+        let threshold = self.degraded_threshold_secs;
+        let hb_timeout = self.heartbeat_timeout_secs;
+        let require_pkg = !request.env_package_id.is_empty();
+        let pkg_matches = |w: &WorkerInfo| -> bool {
+            if !require_pkg {
+                return true;
+            }
+            w.synced_env_packages.iter().any(|p| {
+                p.package_id == request.env_package_id
+                    && (request.env_package_version.is_empty()
+                        || p.version == request.env_package_version)
+            })
+        };
+        let candidates: Vec<usize> = self
+            .workers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, w)| {
+                (!w.draining
+                    && !is_worker_degraded(w, threshold, hb_timeout)
+                    && w.supported_env_types.contains(&request.env_type)
+                    && effective_load(w) < w.capacity
+                    && resource_fits(&w.resource, &request.resource_spec)
+                    && pkg_matches(w))
+                .then_some(idx)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return self.schedule(request);
+        }
+
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % candidates.len();
+        let worker_index = candidates[idx];
+        let w = &mut self.workers[worker_index];
+        w.reserved_load = w.reserved_load.saturating_add(1);
+        w.current_load = effective_load(w);
+        Ok(WorkerAssignment {
+            worker_id: w.worker_id.clone(),
+            endpoint: w.endpoint.clone(),
+            gateway_public_url: w.gateway_public_url.clone(),
+        })
+    }
+
+    fn release(&mut self, worker_id: &str) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.reserved_load = w.reserved_load.saturating_sub(1);
+            w.current_load = effective_load(w);
+        }
     }
 }

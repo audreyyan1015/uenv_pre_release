@@ -64,6 +64,8 @@ async fn swe_agent_episode_full_orchestration() {
         supported_env_types: vec!["swe".to_string()],
         capacity: 4,
         current_load: 0,
+        reserved_load: 0,
+        reported_load: 0,
         resource: None,
         draining: false,
         last_report_at: Some(std::time::Instant::now()),
@@ -162,6 +164,7 @@ async fn swe_agent_episode_full_orchestration() {
             reward: 1.0,
             trajectory_id: "trj-xyz".to_string(),
             error_message: String::new(),
+                        agent_id: "a-20877".to_string(),
         }))
         .await
         .unwrap();
@@ -194,6 +197,8 @@ async fn swe_agent_rejects_unsynced_env_package() {
         supported_env_types: vec!["swe".to_string()],
         capacity: 1,
         current_load: 0,
+        reserved_load: 0,
+        reported_load: 0,
         resource: None,
         draining: false,
         last_report_at: Some(std::time::Instant::now()),
@@ -255,6 +260,8 @@ async fn swe_agent_timeout_cleans_up() {
         supported_env_types: vec!["swe".to_string()],
         capacity: 2,
         current_load: 0,
+        reserved_load: 0,
+        reported_load: 0,
         resource: None,
         draining: false,
         last_report_at: Some(std::time::Instant::now()),
@@ -329,6 +336,8 @@ async fn swe_agent_admission_caps_concurrency() {
         supported_env_types: vec!["swe".to_string()],
         capacity: 100, // Worker 容量充足，瓶颈只在 agent 池
         current_load: 0,
+        reserved_load: 0,
+        reported_load: 0,
         resource: None,
         draining: false,
         last_report_at: Some(std::time::Instant::now()),
@@ -429,6 +438,8 @@ async fn workers_more_than_agents_no_worker_oversubscription() {
         supported_env_types: vec!["swe".to_string()],
         capacity: 1,
         current_load: 0,
+        reserved_load: 0,
+        reported_load: 0,
         resource: None,
         draining: false,
         last_report_at: Some(std::time::Instant::now()),
@@ -530,6 +541,8 @@ async fn agents_more_than_workers_no_permit_hostage() {
         supported_env_types: vec!["swe".to_string()],
         capacity: 1,
         current_load: 0,
+        reserved_load: 0,
+        reported_load: 0,
         resource: None,
         draining: false,
         last_report_at: Some(std::time::Instant::now()),
@@ -650,6 +663,8 @@ async fn swe_agent_batch_all_complete() {
         supported_env_types: vec!["swe".to_string()],
         capacity: 8,
         current_load: 0,
+        reserved_load: 0,
+        reported_load: 0,
         resource: None,
         draining: false,
         last_report_at: Some(std::time::Instant::now()),
@@ -725,6 +740,7 @@ async fn swe_agent_batch_all_complete() {
                         reward: 1.0,
                         trajectory_id: format!("trj-{}", job.instance_id),
                         error_message: String::new(),
+                        agent_id: "a1".to_string(),
                     }))
                     .await
                     .unwrap();

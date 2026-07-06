@@ -290,7 +290,12 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             }
             metrics.set_wal_pending_records(wal.pending_count());
             if cp
-                .report_result(idempotency_key.clone(), result_for_report)
+                .report_result(
+                    idempotency_key.clone(),
+                    result_for_report,
+                    episode_for_wal.dispatch_lease_id.clone(),
+                    episode_for_wal.dispatch_token.clone(),
+                )
                 .await
                 .is_ok()
             {
@@ -360,6 +365,8 @@ mod tests {
             &self,
             _idempotency_key: String,
             _result: EpisodeResult,
+            _dispatch_lease_id: String,
+            _dispatch_token: Vec<u8>,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(())
         }

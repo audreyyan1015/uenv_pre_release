@@ -78,6 +78,8 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 1
             },
             current_load: 0,  // 初始负载为 0
+            reserved_load: 0,
+            reported_load: 0,
             resource: req.resource.clone(),
             draining: false,
             last_report_at: Some(std::time::Instant::now()),  // 从注册时刻起算5min超时，防止 None 导致永不降级
@@ -245,9 +247,6 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
     ) -> Result<Response<ReportResultResponse>, Status> {
         let req = request.into_inner();
 
-        // epoch 校验：server_epoch 非零时必须与当前 epoch 匹配。
-        // 不匹配说明结果来自旧的 server 实例（server 已重启），应拒绝，避免把过期结果
-        // 路由到新 server 实例上等待中的 episode（两者的 pending_results 不互通）。
         if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
             warn!(
                 worker_id = %req.worker_id,
@@ -255,94 +254,109 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 current_epoch = self.state.epoch(),
                 "report_result_stale_epoch_rejected"
             );
-            return Ok(Response::new(ReportResultResponse {
-                ack: false,
-                duplicate: false,
-            }));
+            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+        }
+        if req.idempotency_key.is_empty() {
+            warn!(worker_id = %req.worker_id, "report_result_empty_idempotency_key_rejected");
+            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+        }
+        let Some(result) = req.result else {
+            warn!(worker_id = %req.worker_id, "report_result_missing_result_rejected");
+            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+        };
+        if req.dispatch_lease_id.is_empty() || req.dispatch_token.is_empty() {
+            warn!(
+                worker_id = %req.worker_id,
+                episode_id = %result.episode_id,
+                attempt_id = result.attempt_id,
+                "report_result_missing_dispatch_lease_rejected"
+            );
+            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
         }
 
-        // 幂等性检查：把 idempotency_key 插入已处理集合。
-        // HashSet::insert 返回 true 表示插入成功（key 是新的），false 表示已存在（重复请求）。
-        // 取反后：duplicate=true 表示这是重复上报，应跳过处理。
-        let duplicate = {
-            let mut seen = self.state.seen_idempotency.lock();
-            !seen.insert(req.idempotency_key.clone())
-        };
-
-        // 从结果中提取 episode_id 和 attempt_id，用于查找对应的等待 channel
-        let episode_id = req
-            .result
-            .as_ref()
-            .map(|r| r.episode_id.clone())
-            .unwrap_or_default();
-        let attempt_id = req.result.as_ref().map(|r| r.attempt_id).unwrap_or(0);
+        let episode_id = result.episode_id.clone();
+        let attempt_id = result.attempt_id;
+        let pending_key = (episode_id.clone(), attempt_id, req.dispatch_lease_id.clone());
 
         info!(
             worker_id = %req.worker_id,
             episode_id = %episode_id,
             attempt_id = attempt_id,
-            duplicate = duplicate,
+            dispatch_lease_id = %req.dispatch_lease_id,
             "control_plane_report_result"
         );
 
-        // 只有非重复的结果才进行处理；重复结果直接返回 duplicate=true 告知 worker
-        if !duplicate {
-            if let Some(result) = req.result {
-                self.state.scheduler.write().touch_worker_report(&req.worker_id);
-                // v2.2：ack 后持久化 episode_results（native 路径控制面摘要 + trajectory_id 关联）。
-                if let Some(store) = self.state.trajectory_store.get() {
-                    let summary = result.summary.as_ref();
-                    let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
-                    let row = crate::trajectory::EpisodeResultRow {
-                        episode_id: result.episode_id.clone(),
-                        attempt_id: result.attempt_id,
-                        worker_id: req.worker_id.clone(),
-                        status: result.status.clone(),
-                        total_reward: summary.map(|s| s.total_reward),
-                        total_steps: summary.map(|s| s.total_steps as i64),
-                        trajectory_id: opt(&result.trajectory_id),
-                        trajectory_storage_url: opt(&result.trajectory_storage_url),
-                        result_checksum: req.idempotency_key.clone(),
-                        // native 路径不带 env_package/agent_bridge 语义。
-                        env_package_id: None,
-                        agent_bridge_version: None,
-                    };
-                    let store = store.clone();
-                    tokio::task::spawn_blocking(move || {
-                        if let Err(e) = store.upsert_episode_result(&row) {
-                            warn!(error = %e, "episode_results_upsert_failed");
-                        }
-                    });
-                }
-                // 从 pending_results 中取出并删除对应条目（同时获得 channel 的发送端）
-                if let Some((_, pending)) = self
-                    .state
-                    .pending_results
-                    .remove(&(episode_id.clone(), attempt_id))
-                {
-                    // 通过 oneshot channel 把结果发送给 service.rs 中等待的 rx.await。
-                    // let _ = 表示忽略发送失败：接收端可能已超时被丢弃，这种情况不算错误。
-                    let _ = pending.tx.send(result);
-                }
-            }
+        let Some(pending_ref) = self.state.pending_results.get(&pending_key) else {
+            warn!(
+                worker_id = %req.worker_id,
+                episode_id = %episode_id,
+                attempt_id = attempt_id,
+                dispatch_lease_id = %req.dispatch_lease_id,
+                "report_result_no_pending_rejected"
+            );
+            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+        };
+        if pending_ref.worker_id != req.worker_id {
+            warn!(
+                worker_id = %req.worker_id,
+                expected_worker_id = %pending_ref.worker_id,
+                episode_id = %episode_id,
+                attempt_id = attempt_id,
+                "report_result_worker_mismatch_rejected"
+            );
+            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
         }
+        if pending_ref.dispatch_token != req.dispatch_token {
+            warn!(
+                worker_id = %req.worker_id,
+                episode_id = %episode_id,
+                attempt_id = attempt_id,
+                dispatch_lease_id = %req.dispatch_lease_id,
+                "report_result_token_mismatch_rejected"
+            );
+            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+        }
+        drop(pending_ref);
 
-        // 结果已处理完毕，从幂等集合中删除该 key，避免长期运行内存无限增长。
-        // 此时重复上报的窗口已关闭：pending_results 已移除，channel 已关闭，
-        // 即使 worker 再次重发同一 key，也只会拿到空的 pending_results 而无副作用。
-        {
+        let duplicate = {
             let mut seen = self.state.seen_idempotency.lock();
-            seen.remove(&req.idempotency_key);
+            !seen.insert(req.idempotency_key.clone())
+        };
+        if duplicate {
+            return Ok(Response::new(ReportResultResponse { ack: true, duplicate: true }));
         }
 
-        Ok(Response::new(ReportResultResponse {
-            ack: true,
-            duplicate,
-        }))
+        self.state.scheduler.write().touch_worker_report(&req.worker_id);
+        if let Some(store) = self.state.trajectory_store.get() {
+            let summary = result.summary.as_ref();
+            let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
+            let row = crate::trajectory::EpisodeResultRow {
+                episode_id: result.episode_id.clone(),
+                attempt_id: result.attempt_id,
+                worker_id: req.worker_id.clone(),
+                status: result.status.clone(),
+                total_reward: summary.map(|s| s.total_reward),
+                total_steps: summary.map(|s| s.total_steps as i64),
+                trajectory_id: opt(&result.trajectory_id),
+                trajectory_storage_url: opt(&result.trajectory_storage_url),
+                result_checksum: req.idempotency_key.clone(),
+                env_package_id: None,
+                agent_bridge_version: None,
+            };
+            let store = store.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = store.upsert_episode_result(&row) {
+                    warn!(error = %e, "episode_results_upsert_failed");
+                }
+            });
+        }
+        if let Some((_, pending)) = self.state.pending_results.remove(&pending_key) {
+            let _ = pending.tx.send(result);
+        }
+
+        Ok(Response::new(ReportResultResponse { ack: true, duplicate: false }))
     }
 
-    /// 查询已注册的 worker 列表（控制平面版本，支持按环境类型过滤）。
-    /// 如果请求中的 env_types 列表为空，返回所有 worker；
     /// 否则只返回支持其中至少一种环境类型的 worker。
     async fn list_workers(
         &self,

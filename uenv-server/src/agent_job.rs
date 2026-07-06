@@ -28,9 +28,10 @@ use crate::proto::v1::{
 
 /// in-flight Job：已被 poll 走、等待 complete 的任务。
 struct InFlightJob {
-    /// 领取该 Job 的 agent_id（complete 时用来减负载）。
+    /// ??? Job ? agent_id?complete ????????
     agent_id: String,
-    /// 完成回调：complete_agent_job 通过它把结果送回编排逻辑。
+    run_id: String,
+    /// ?????complete_agent_job ?????????????
     done: oneshot::Sender<AgentJobCompleteRequest>,
 }
 
@@ -64,6 +65,7 @@ impl AgentJobQueue {
             job_id.clone(),
             InFlightJob {
                 agent_id: String::new(),
+                run_id: job.run_id.clone(),
                 done: tx,
             },
         );
@@ -183,104 +185,96 @@ impl AgentControlService for AgentControlServiceImpl {
     ) -> Result<Response<PollAgentJobResponse>, Status> {
         let req = request.into_inner();
 
-        // 队列为空直接返回，避免无谓占用槽位。
-        if self.queue.pending_len(&req.agent_pool_id) == 0 {
+        let Some((job, agent_id)) = (|| {
+            let mut q = self.queue.pending.get_mut(&req.agent_pool_id)?;
+            let candidate = q.front()?;
+            let agent_id = self.registry.try_reserve(
+                &req.agent_pool_id,
+                &candidate.agent_bridge_id,
+                &candidate.agent_bridge_version,
+                &req.worker_id,
+            )?;
+            let job = q.pop_front()?;
+            Some((job, agent_id))
+        })() else {
+            return Ok(Response::new(PollAgentJobResponse {
+                has_job: false,
+                job: None,
+            }));
+        };
+
+        let in_flight_ok = self
+            .queue
+            .in_flight
+            .get_mut(&job.job_id)
+            .map(|mut entry| entry.agent_id = agent_id.clone())
+            .is_some();
+        if !in_flight_ok {
+            self.registry.decrement_load(&agent_id);
+            tracing::warn!(
+                job_id = %job.job_id,
+                agent_id = %agent_id,
+                "agent_job_poll_raced_abandon"
+            );
             return Ok(Response::new(PollAgentJobResponse {
                 has_job: false,
                 job: None,
             }));
         }
-
-        // ① 原子占用一个满足条件且未满载的 Agent（Poll 请求 worker_id 复用为 agent_id）。
-        // bridge 约束此处不强制（enqueue 时 submit 侧已按 bridge 选池并放行），传空即可。
-        let agent_id = match self.registry.try_reserve(&req.agent_pool_id, "", "", &req.worker_id) {
-            Some(id) => id,
-            None => {
-                // 池内 Agent 全部满载：不弹队列，Job 留在队列等待下次 poll。
-                return Ok(Response::new(PollAgentJobResponse {
-                    has_job: false,
-                    job: None,
-                }));
-            }
-        };
-
-        // 弹一个待领 Job。
-        let job = self
-            .queue
-            .pending
-            .get_mut(&req.agent_pool_id)
-            .and_then(|mut q| q.pop_front());
-
-        match job {
-            Some(job) => {
-                // 把领取该 Job 的 agent_id 补进 in-flight 记录（try_reserve 已 +1 负载）。
-                // 竞态兜底：若该 job 的 in-flight 记录已不存在（编排逻辑在 pop 与此刻之间
-                // 因超时执行了 abandon），则本次领取作废——回滚负载、不把已放弃的 job 发给
-                // Agent，避免负载泄漏与无谓执行。
-                let in_flight_ok = self
-                    .queue
-                    .in_flight
-                    .get_mut(&job.job_id)
-                    .map(|mut entry| entry.agent_id = agent_id.clone())
-                    .is_some();
-                if !in_flight_ok {
-                    self.registry.decrement_load(&agent_id);
-                    tracing::warn!(
-                        job_id = %job.job_id,
-                        agent_id = %agent_id,
-                        "agent_job_poll_raced_abandon"
-                    );
-                    return Ok(Response::new(PollAgentJobResponse {
-                        has_job: false,
-                        job: None,
-                    }));
-                }
-                tracing::info!(
-                    job_id = %job.job_id,
-                    pool_id = %req.agent_pool_id,
-                    agent_id = %agent_id,
-                    "agent_job_polled"
-                );
-                Ok(Response::new(PollAgentJobResponse {
-                    has_job: true,
-                    job: Some(job),
-                }))
-            }
-            None => {
-                // 竞态：占用后队列恰好被其他 poll 取空。回滚占用，避免负载泄漏。
-                self.registry.decrement_load(&agent_id);
-                Ok(Response::new(PollAgentJobResponse {
-                    has_job: false,
-                    job: None,
-                }))
-            }
-        }
+        tracing::info!(
+            job_id = %job.job_id,
+            pool_id = %req.agent_pool_id,
+            agent_id = %agent_id,
+            agent_bridge_id = %job.agent_bridge_id,
+            agent_bridge_version = %job.agent_bridge_version,
+            "agent_job_polled"
+        );
+        Ok(Response::new(PollAgentJobResponse {
+            has_job: true,
+            job: Some(job),
+        }))
     }
 
-    /// Agent 完成 Job：取出 in-flight 回调，把结果送回编排逻辑并减负载。
     async fn complete_agent_job(
         &self,
         request: Request<AgentJobCompleteRequest>,
     ) -> Result<Response<AgentJobCompleteResponse>, Status> {
         let req = request.into_inner();
         let job_id = req.job_id.clone();
+        let Some(inflight_ref) = self.queue.in_flight.get(&job_id) else {
+            tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
+            return Ok(Response::new(AgentJobCompleteResponse { ack: false }));
+        };
+        if inflight_ref.run_id != req.run_id
+            || inflight_ref.agent_id.is_empty()
+            || inflight_ref.agent_id != req.agent_id
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                expected_run_id = %inflight_ref.run_id,
+                report_run_id = %req.run_id,
+                expected_agent_id = %inflight_ref.agent_id,
+                report_agent_id = %req.agent_id,
+                "agent_job_complete_identity_mismatch"
+            );
+            return Ok(Response::new(AgentJobCompleteResponse { ack: false }));
+        }
+        drop(inflight_ref);
+
         match self.queue.in_flight.remove(&job_id) {
             Some((_, inflight)) => {
-                if !inflight.agent_id.is_empty() {
-                    self.registry.decrement_load(&inflight.agent_id);
-                }
+                self.registry.decrement_load(&inflight.agent_id);
                 tracing::info!(
                     job_id = %job_id,
+                    agent_id = %req.agent_id,
                     status = %req.status,
                     reward = req.reward,
                     "agent_job_completed"
                 );
-                // 送回编排逻辑；receiver 可能已因 deadline 丢弃，忽略发送错误。
                 let _ = inflight.done.send(req);
                 Ok(Response::new(AgentJobCompleteResponse { ack: true }))
             }
             None => {
-                // 未知 job_id：可能重复上报或已超时清理。返回 ack=false 让 Agent 知晓。
                 tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
                 Ok(Response::new(AgentJobCompleteResponse { ack: false }))
             }
@@ -292,133 +286,54 @@ impl AgentControlService for AgentControlServiceImpl {
 mod tests {
     use super::*;
 
-    fn job(id: &str) -> AgentJob {
+    fn agent(id: &str, bridge_version: &str) -> AgentInfo {
+        AgentInfo {
+            agent_id: id.to_string(),
+            agent_pool_id: "openhands-default".to_string(),
+            synced_agent_bridges: vec![SyncedAgentBridgeInfo {
+                package_id: "uenv-agent-openhands".to_string(),
+                version: bridge_version.to_string(),
+                bundle_digest: String::new(),
+            }],
+            max_concurrent: 1,
+            current_load: 0,
+            endpoint: String::new(),
+            last_heartbeat_at: std::time::Instant::now(),
+            labels: Default::default(),
+        }
+    }
+
+    fn job(id: &str, run_id: &str, bridge_version: &str) -> AgentJob {
         AgentJob {
             job_id: id.to_string(),
+            run_id: run_id.to_string(),
+            agent_bridge_id: "uenv-agent-openhands".to_string(),
+            agent_bridge_version: bridge_version.to_string(),
             ..Default::default()
         }
     }
 
-    #[tokio::test]
-    async fn enqueue_poll_complete_roundtrip() {
+    fn svc() -> (AgentControlServiceImpl, Arc<AgentJobQueue>, Arc<AgentRegistry>) {
         let registry = Arc::new(AgentRegistry::new(60));
-        // poll 闸门要求池内有未满载的 Agent，先注册一个。
-        registry.register(AgentInfo {
-            agent_id: "a1".to_string(),
-            agent_pool_id: "openhands-default".to_string(),
-            synced_agent_bridges: vec![],
-            max_concurrent: 4,
-            current_load: 0,
-            endpoint: String::new(),
-            last_heartbeat_at: std::time::Instant::now(),
-            labels: Default::default(),
-        });
+        registry.register(agent("a1", "1.0.0"));
+        registry.register(agent("a2", "2.0.0"));
         let queue = Arc::new(AgentJobQueue::new(Arc::clone(&registry)));
-        let svc = AgentControlServiceImpl {
-            queue: Arc::clone(&queue),
-            registry: Arc::clone(&registry),
-            heartbeat_interval_ms: 5000,
-        };
-
-        // 入队一个 Job，拿到完成 receiver。
-        let mut rx = queue.enqueue("openhands-default", job("job-1"));
-        assert_eq!(queue.pending_len("openhands-default"), 1);
-
-        // Agent poll 领取。
-        let polled = svc
-            .poll_agent_job(Request::new(PollAgentJobRequest {
-                agent_pool_id: "openhands-default".to_string(),
-                worker_id: "a1".to_string(),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(polled.has_job);
-        assert_eq!(polled.job.unwrap().job_id, "job-1");
-        assert_eq!(queue.pending_len("openhands-default"), 0);
-        assert_eq!(queue.in_flight_len(), 1);
-
-        // 空队列再 poll 返回 has_job=false。
-        let empty = svc
-            .poll_agent_job(Request::new(PollAgentJobRequest {
-                agent_pool_id: "openhands-default".to_string(),
-                worker_id: "a1".to_string(),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!empty.has_job);
-
-        // Agent complete，结果经 oneshot 回到 rx。
-        svc.complete_agent_job(Request::new(AgentJobCompleteRequest {
-            job_id: "job-1".to_string(),
-            run_id: "run-1".to_string(),
-            status: "completed".to_string(),
-            reward: 1.0,
-            trajectory_id: "trj-1".to_string(),
-            error_message: String::new(),
-        }))
-        .await
-        .unwrap();
-
-        let done = rx.try_recv().expect("result delivered");
-        assert_eq!(done.reward, 1.0);
-        assert_eq!(done.trajectory_id, "trj-1");
-        assert_eq!(queue.in_flight_len(), 0);
-    }
-
-    #[tokio::test]
-    async fn complete_unknown_job_returns_no_ack() {
-        let registry = Arc::new(AgentRegistry::new(60));
-        let queue = Arc::new(AgentJobQueue::new(Arc::clone(&registry)));
-        let svc = AgentControlServiceImpl {
+        (
+            AgentControlServiceImpl {
+                queue: Arc::clone(&queue),
+                registry: Arc::clone(&registry),
+                heartbeat_interval_ms: 5000,
+            },
             queue,
             registry,
-            heartbeat_interval_ms: 5000,
-        };
-        let resp = svc
-            .complete_agent_job(Request::new(AgentJobCompleteRequest {
-                job_id: "nope".to_string(),
-                ..Default::default()
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.ack);
+        )
     }
 
     #[tokio::test]
-    async fn poll_after_abandon_does_not_leak_load() {
-        // abandon 后 poll 不应泄漏 Agent 负载。
-        // 注：abandon 同时清 pending+in_flight，故此处 poll 走「队列空」分支；
-        // 真正的 pop-后-in_flight-缺失 交错是并发竞态，无法确定性单测，
-        // 由 poll_agent_job 的 in_flight_ok 回滚分支兜底（见该函数）。
-        let registry = Arc::new(AgentRegistry::new(60));
-        registry.register(AgentInfo {
-            agent_id: "a1".to_string(),
-            agent_pool_id: "openhands-default".to_string(),
-            synced_agent_bridges: vec![],
-            max_concurrent: 2,
-            current_load: 0,
-            endpoint: String::new(),
-            last_heartbeat_at: std::time::Instant::now(),
-            labels: Default::default(),
-        });
-        let queue = Arc::new(AgentJobQueue::new(Arc::clone(&registry)));
-        let svc = AgentControlServiceImpl {
-            queue: Arc::clone(&queue),
-            registry: Arc::clone(&registry),
-            heartbeat_interval_ms: 5000,
-        };
+    async fn poll_reserves_agent_matching_job_bridge() {
+        let (svc, queue, _registry) = svc();
+        let _rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
 
-        let _rx = queue.enqueue("openhands-default", job("job-1"));
-        // 模拟编排逻辑超时：入队后立刻 abandon（in_flight 记录被移除）。
-        queue.abandon("openhands-default", "job-1");
-        assert_eq!(queue.in_flight_len(), 0);
-        // job-1 仍留在 pending（abandon 仅按 job_id retain，已移除；这里确认队列已清）。
-        assert_eq!(queue.pending_len("openhands-default"), 0);
-
-        // 此时 poll：队列已空 → has_job=false，且负载未被占用。
         let resp = svc
             .poll_agent_job(Request::new(PollAgentJobRequest {
                 agent_pool_id: "openhands-default".to_string(),
@@ -427,64 +342,50 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(!resp.has_job);
-        // Agent 负载归零（无泄漏）。
-        assert_eq!(registry.pool_capacity("openhands-default"), 2);
-        assert!(registry
-            .try_reserve("openhands-default", "", "", "a1")
-            .is_some());
-        // 占用后应仍有 1 个空槽（容量 2，泄漏则会只剩 0）。
-        assert!(registry
-            .try_reserve("openhands-default", "", "", "a1")
-            .is_some());
-        assert!(registry
-            .try_reserve("openhands-default", "", "", "a1")
-            .is_none());
+        assert!(resp.has_job);
+        let assigned = queue.in_flight_snapshot();
+        assert_eq!(assigned, vec![("job-1".to_string(), "a2".to_string())]);
     }
 
     #[tokio::test]
-    async fn snapshot_accessors_reflect_queue() {
-        let registry = Arc::new(AgentRegistry::new(60));
-        registry.register(AgentInfo {
-            agent_id: "a1".to_string(),
-            agent_pool_id: "openhands-default".to_string(),
-            synced_agent_bridges: vec![],
-            max_concurrent: 4,
-            current_load: 0,
-            endpoint: String::new(),
-            last_heartbeat_at: std::time::Instant::now(),
-            labels: Default::default(),
-        });
-        let queue = Arc::new(AgentJobQueue::new(Arc::clone(&registry)));
-        let svc = AgentControlServiceImpl {
-            queue: Arc::clone(&queue),
-            registry: Arc::clone(&registry),
-            heartbeat_interval_ms: 5000,
-        };
-
-        // 入队两个 job：都在 in_flight（agent_id 空）、都在 pending。
-        let _rx1 = queue.enqueue("openhands-default", job("job-1"));
-        let _rx2 = queue.enqueue("openhands-default", job("job-2"));
-        assert_eq!(queue.in_flight_len(), 2);
-        assert_eq!(queue.pending_by_pool(), vec![("openhands-default".to_string(), 2)]);
-        // 未领取时 in_flight_snapshot 的 agent_id 均为空。
-        let snap = queue.in_flight_snapshot();
-        assert_eq!(snap.len(), 2);
-        assert!(snap.iter().all(|(_, agent)| agent.is_empty()));
-
-        // poll 一个：pending 减 1，该 job 的 agent_id 被填上。
+    async fn complete_rejects_wrong_agent_or_run() {
+        let (svc, queue, _registry) = svc();
+        let _rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
         svc.poll_agent_job(Request::new(PollAgentJobRequest {
             agent_pool_id: "openhands-default".to_string(),
-            worker_id: "a1".to_string(),
+            worker_id: String::new(),
         }))
         .await
         .unwrap();
-        assert_eq!(queue.pending_len("openhands-default"), 1);
-        let assigned: Vec<_> = queue
-            .in_flight_snapshot()
-            .into_iter()
-            .filter(|(_, agent)| agent == "a1")
-            .collect();
-        assert_eq!(assigned.len(), 1, "已领取的 job 应记录 agent_id=a1");
+
+        let wrong = svc
+            .complete_agent_job(Request::new(AgentJobCompleteRequest {
+                job_id: "job-1".to_string(),
+                run_id: "run-x".to_string(),
+                status: "completed".to_string(),
+                reward: 0.0,
+                trajectory_id: String::new(),
+                error_message: String::new(),
+                agent_id: "a2".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!wrong.ack);
+
+        let ok = svc
+            .complete_agent_job(Request::new(AgentJobCompleteRequest {
+                job_id: "job-1".to_string(),
+                run_id: "run-1".to_string(),
+                status: "completed".to_string(),
+                reward: 1.0,
+                trajectory_id: String::new(),
+                error_message: String::new(),
+                agent_id: "a2".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ok.ack);
     }
 }

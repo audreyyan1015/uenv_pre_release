@@ -45,6 +45,8 @@ pub trait ControlPlane: Send + Sync {
         &self,
         idempotency_key: String,
         result: EpisodeResult,
+        dispatch_lease_id: String,
+        dispatch_token: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     fn identity(&self) -> Arc<RwLock<RuntimeIdentity>>;
     async fn worker_id(&self) -> String;
@@ -246,18 +248,26 @@ impl SchedulerControlPlaneClient {
         &self,
         idempotency_key: String,
         result: EpisodeResult,
+        dispatch_lease_id: String,
+        dispatch_token: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await.clone();
         let worker_id_for_log = identity.worker_id.clone();
-        let _ = client
+        let response = client
             .report_result(ReportResultRequest {
                 idempotency_key,
                 worker_id: identity.worker_id,
                 server_epoch: identity.server_epoch,
                 result: Some(result),
+                dispatch_lease_id,
+                dispatch_token,
             })
-            .await?;
+            .await?
+            .into_inner();
+        if !response.ack {
+            return Err("report_result_not_acknowledged".into());
+        }
         self.connected.store(true, Ordering::Relaxed);
         tracing::info!(
             trace_id = "control_plane",
@@ -283,7 +293,12 @@ impl SchedulerControlPlaneClient {
                 let mut any_failed = false;
                 for rec in pending {
                     match this
-                        .report_result_once(rec.idempotency_key.clone(), rec.result.clone())
+                        .report_result_once(
+                            rec.idempotency_key.clone(),
+                            rec.result.clone(),
+                            rec.dispatch_lease_id.clone(),
+                            rec.dispatch_token.clone(),
+                        )
                         .await
                     {
                         Ok(_) => {
@@ -338,8 +353,17 @@ impl ControlPlane for SchedulerControlPlaneClient {
         &self,
         idempotency_key: String,
         result: EpisodeResult,
+        dispatch_lease_id: String,
+        dispatch_token: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        SchedulerControlPlaneClient::report_result_once(self, idempotency_key, result).await
+        SchedulerControlPlaneClient::report_result_once(
+            self,
+            idempotency_key,
+            result,
+            dispatch_lease_id,
+            dispatch_token,
+        )
+        .await
     }
 
     fn identity(&self) -> Arc<RwLock<RuntimeIdentity>> {

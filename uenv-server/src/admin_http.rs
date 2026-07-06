@@ -21,11 +21,11 @@ use crate::state::ServerState;
 
 /// 启动 admin HTTP 服务，绑定到 `0.0.0.0:{port}`。
 /// port=0 时不启动（配置禁用）。
-pub async fn serve(state: Arc<ServerState>, port: u16) {
+pub async fn serve(state: Arc<ServerState>, bind_addr: String, port: u16, admin_token: String) {
     if port == 0 {
         return;
     }
-    let addr = format!("0.0.0.0:{port}");
+    let addr = format!("{bind_addr}:{port}");
     let listener = match TcpListener::bind(&addr).await {
         Ok(l) => {
             tracing::info!(addr = %addr, "admin_http_listening");
@@ -41,6 +41,7 @@ pub async fn serve(state: Arc<ServerState>, port: u16) {
             continue;
         };
         let state = Arc::clone(&state);
+        let admin_token = admin_token.clone();
         tokio::spawn(async move {
             // 读取请求（最多 2 KiB），只解析第一行获取路径
             let mut buf = [0u8; 2048];
@@ -52,14 +53,26 @@ pub async fn serve(state: Arc<ServerState>, port: u16) {
                 .and_then(|l| l.split_whitespace().nth(1))
                 .unwrap_or("/");
 
-            let (content_type, body) = match path.trim_end_matches('/') {
-                "/health" => ("text/plain", "ok".to_string()),
-                "/agents" => ("application/json", agents_json(&state).to_string()),
-                _         => ("application/json", status_json(&state).to_string()),
+            let path = path.trim_end_matches('/');
+            let authorized = admin_token.is_empty()
+                || path == "/health"
+                || req.lines().any(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower == format!("authorization: bearer {}", admin_token).to_ascii_lowercase()
+                        || lower == format!("x-admin-token: {}", admin_token).to_ascii_lowercase()
+                });
+            let (status, content_type, body) = if !authorized {
+                ("401 Unauthorized", "text/plain", "unauthorized".to_string())
+            } else {
+                match path {
+                    "/health" => ("200 OK", "text/plain", "ok".to_string()),
+                    "/agents" => ("200 OK", "application/json", agents_json(&state).to_string()),
+                    _ => ("200 OK", "application/json", status_json(&state).to_string()),
+                }
             };
 
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n\r\n{body}",
                 len = body.len(),
             );
             let _ = stream.write_all(response.as_bytes()).await;

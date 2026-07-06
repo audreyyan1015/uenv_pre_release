@@ -76,6 +76,7 @@ message AgentJobCompleteRequest {
     double reward = 4;
     string trajectory_id = 5;
     string error_message = 6;
+    string agent_id = 7;
 }
 
 message AgentJobCompleteResponse {

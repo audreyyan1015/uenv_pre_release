@@ -39,8 +39,13 @@ pub trait Scheduler: Send + 'static {
     /// - Err(ScheduleError)：没有合适的 worker 可用（具体原因见 ScheduleError）
     ///
     /// &self 表示只读访问：调度本身不修改 worker 的状态。
-    /// 负载计数的修改由 service.rs 的 increment_load/decrement_load 单独完成。
     fn schedule(&self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError>;
+
+    /// ?? Worker admission?????????????????? reservation?
+    fn reserve(&mut self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError>;
+
+    /// ???? server-side reservation?
+    fn release(&mut self, worker_id: &str);
 }
 
 /// WorkerInfo：一个已注册 worker 的完整信息。
@@ -57,8 +62,12 @@ pub struct WorkerInfo {
     /// 该 worker 最多同时执行的 episode 数（容量上限）
     pub capacity: u32,
     /// 该 worker 当前正在执行的 episode 数（当前负载）
-    /// current_load >= capacity 时，该 worker 不会被分配新 episode
+    /// ?????/??????????????????? reported_load?
     pub current_load: u32,
+    /// server ?????? terminal ? reservation ??
+    pub reserved_load: u32,
+    /// worker ???????????
+    pub reported_load: u32,
     /// Worker 机器实际拥有的资源规格（注册时由 worker 上报，None 表示未上报）
     pub resource: Option<ResourceSpec>,
     /// 是否正在 drain：true 时不再接受新 episode，等待当前任务执行完毕
@@ -86,7 +95,7 @@ pub struct SyncedEnvPackageInfo {
 }
 
 /// WorkerAssignment：调度结果，表示一个 episode 应该分发给哪个 worker。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WorkerAssignment {
     /// 被选中的 worker 的 ID（用于更新负载计数等操作）
     pub worker_id: String,

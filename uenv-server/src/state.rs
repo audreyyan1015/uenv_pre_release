@@ -12,15 +12,18 @@ pub struct ServerState {
     pub active_episodes: DashMap<String, ActiveEpisode>,
     pub server_epoch: AtomicU64,
     pub next_lease_seq: AtomicU64,
-    pub pending_results: DashMap<(String, u32), PendingResult>,
+    pub pending_results: DashMap<PendingKey, PendingResult>,
+    pub cancelled_episodes: DashMap<String, ()>,
     pub seen_idempotency: parking_lot::Mutex<std::collections::HashSet<String>>,
-    pub completed_async: DashMap<String, EpisodeResult>,
+    pub completed_async: DashMap<String, CompletedAsyncResult>,
     pub episode_broadcast: broadcast::Sender<EpisodeResult>,
     pub max_attempts: u32,
     pub default_episode_timeout_secs: u64,
     pub stale_warning_secs: u64,
     pub schedule_retry_interval_ms: u64,
     pub heartbeat_interval_ms: u64,
+    pub completed_async_ttl_secs: u64,
+    pub completed_async_max_entries: usize,
     /// adapter 层并发 semaphore：限制最多同时 in-flight 的 episode 数。
     /// None 表示不限制（queue_max_in_flight=0 且 queue_dynamic=false）。
     /// 动态模式下从 0 个 permit 开始，随 worker 注册/注销自动增减。
@@ -44,9 +47,18 @@ pub struct ActiveEpisode {
     pub batch_id: String,
 }
 
+pub type PendingKey = (String, u32, String);
+
 pub struct PendingResult {
     pub tx: oneshot::Sender<EpisodeResult>,
     pub worker_id: String,
+    pub dispatch_lease_id: String,
+    pub dispatch_token: Vec<u8>,
+}
+
+pub struct CompletedAsyncResult {
+    pub result: EpisodeResult,
+    pub completed_at: Instant,
 }
 
 impl ServerState {
@@ -78,6 +90,7 @@ impl ServerState {
             ),
             next_lease_seq: AtomicU64::new(1),
             pending_results: DashMap::new(),
+            cancelled_episodes: DashMap::new(),
             seen_idempotency: parking_lot::Mutex::new(std::collections::HashSet::new()),
             completed_async: DashMap::new(),
             episode_broadcast,
@@ -86,6 +99,8 @@ impl ServerState {
             stale_warning_secs: config.episode.stale_warning_secs,
             schedule_retry_interval_ms: config.scheduler.schedule_retry_interval_ms,
             heartbeat_interval_ms: config.scheduler.heartbeat_interval_ms,
+            completed_async_ttl_secs: config.episode.completed_async_ttl_secs,
+            completed_async_max_entries: config.episode.completed_async_max_entries,
             episode_semaphore: if config.episode.queue_dynamic {
                 // 动态模式：从 0 开始，worker 注册时 add_permits
                 Some(Arc::new(Semaphore::new(0)))
