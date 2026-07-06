@@ -50,6 +50,8 @@ pub struct AgentInfo {
     pub max_concurrent: u32,
     /// 当前 in-flight 的 AgentJob 数（poll 时 +1，complete 时 -1）。
     pub current_load: u32,
+    pub reserved_load: u32,
+    pub reported_load: u32,
     /// 可选回连地址（Poll 模式下通常为空）。
     pub endpoint: String,
     /// 上次心跳/注册时刻，用于健康判定。
@@ -72,6 +74,8 @@ pub struct AgentSnapshot {
     pub agent_pool_id: String,
     pub max_concurrent: u32,
     pub current_load: u32,
+    pub reserved_load: u32,
+    pub reported_load: u32,
     pub stale: bool,
     pub last_heartbeat_secs: u64,
     pub bridges: Vec<String>,
@@ -195,21 +199,24 @@ impl AgentRegistry {
         let mut agents = self.agents.write();
         if let Some(a) = agents.iter_mut().find(|a| a.agent_id == agent_id) {
             a.last_heartbeat_at = Instant::now();
-            a.current_load = active_jobs;
+            a.reported_load = active_jobs;
+            a.current_load = Self::effective_load(a);
         }
     }
 
     pub fn increment_load(&self, agent_id: &str) {
         let mut agents = self.agents.write();
         if let Some(a) = agents.iter_mut().find(|a| a.agent_id == agent_id) {
-            a.current_load = a.current_load.saturating_add(1);
+            a.reserved_load = a.reserved_load.saturating_add(1);
+            a.current_load = Self::effective_load(a);
         }
     }
 
     pub fn decrement_load(&self, agent_id: &str) {
         let mut agents = self.agents.write();
         if let Some(a) = agents.iter_mut().find(|a| a.agent_id == agent_id) {
-            a.current_load = a.current_load.saturating_sub(1);
+            a.reserved_load = a.reserved_load.saturating_sub(1);
+            a.current_load = Self::effective_load(a);
         }
     }
 
@@ -226,7 +233,9 @@ impl AgentRegistry {
                 agent_id: a.agent_id.clone(),
                 agent_pool_id: a.agent_pool_id.clone(),
                 max_concurrent: Self::capacity_of(a),
-                current_load: a.current_load,
+                current_load: Self::effective_load(a),
+                reserved_load: a.reserved_load,
+                reported_load: a.reported_load,
                 stale: self.is_stale(a),
                 last_heartbeat_secs: a.last_heartbeat_at.elapsed().as_secs(),
                 bridges: a
@@ -250,6 +259,10 @@ impl AgentRegistry {
         } else {
             1
         }
+    }
+
+    fn effective_load(a: &AgentInfo) -> u32 {
+        a.reserved_load.max(a.reported_load)
     }
 
     fn bridge_matches(a: &AgentInfo, bridge_id: &str, bridge_version: &str) -> bool {
@@ -287,7 +300,7 @@ impl AgentRegistry {
                 in_pool(a)
                     && !self.is_stale(a)
                     && Self::bridge_matches(a, bridge_id, bridge_version)
-                    && a.current_load < Self::capacity_of(a)
+                    && Self::effective_load(a) < Self::capacity_of(a)
             })
             .collect();
 
@@ -514,7 +527,7 @@ impl AgentRegistry {
         agents
             .iter()
             .filter(|a| a.agent_pool_id == pool_id && !self.is_stale(a))
-            .map(|a| Self::capacity_of(a).saturating_sub(a.current_load))
+            .map(|a| Self::capacity_of(a).saturating_sub(Self::effective_load(a)))
             .sum()
     }
 
@@ -558,7 +571,7 @@ impl AgentRegistry {
             (pool_id.is_empty() || a.agent_pool_id == pool_id)
                 && !self.is_stale(a)
                 && Self::bridge_matches(a, bridge_id, bridge_version)
-                && a.current_load < Self::capacity_of(a)
+                && Self::effective_load(a) < Self::capacity_of(a)
         };
 
         // 优先命中自报 agent_id（若可用）。
@@ -567,7 +580,8 @@ impl AgentRegistry {
                 .iter_mut()
                 .find(|a| a.agent_id == preferred_agent_id && eligible(a))
             {
-                a.current_load = a.current_load.saturating_add(1);
+                a.reserved_load = a.reserved_load.saturating_add(1);
+                a.current_load = Self::effective_load(a);
                 return Some(a.agent_id.clone());
             }
         }
@@ -577,11 +591,53 @@ impl AgentRegistry {
         for k in 0..n {
             let idx = (start.wrapping_add(k)) % n;
             if eligible(&agents[idx]) {
-                agents[idx].current_load = agents[idx].current_load.saturating_add(1);
+                agents[idx].reserved_load = agents[idx].reserved_load.saturating_add(1);
+                agents[idx].current_load = Self::effective_load(&agents[idx]);
                 return Some(agents[idx].agent_id.clone());
             }
         }
         None
+    }
+
+    pub fn can_agent_run(
+        &self,
+        agent_id: &str,
+        pool_id: &str,
+        bridge_id: &str,
+        bridge_version: &str,
+    ) -> bool {
+        let agents = self.agents.read();
+        agents.iter().any(|a| {
+            a.agent_id == agent_id
+                && (pool_id.is_empty() || a.agent_pool_id == pool_id)
+                && !self.is_stale(a)
+                && Self::bridge_matches(a, bridge_id, bridge_version)
+                && Self::effective_load(a) < Self::capacity_of(a)
+        })
+    }
+
+    pub fn try_reserve_exact_agent(
+        &self,
+        agent_id: &str,
+        pool_id: &str,
+        bridge_id: &str,
+        bridge_version: &str,
+    ) -> bool {
+        let mut agents = self.agents.write();
+        let Some(a) = agents.iter_mut().find(|a| a.agent_id == agent_id) else {
+            return false;
+        };
+        if (pool_id.is_empty() || a.agent_pool_id == pool_id)
+            && !self.is_stale(a)
+            && Self::bridge_matches(a, bridge_id, bridge_version)
+            && Self::effective_load(a) < Self::capacity_of(a)
+        {
+            a.reserved_load = a.reserved_load.saturating_add(1);
+            a.current_load = Self::effective_load(a);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -610,6 +666,8 @@ mod tests {
             }],
             max_concurrent: max,
             current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
             endpoint: String::new(),
             last_heartbeat_at: Instant::now(),
             labels,

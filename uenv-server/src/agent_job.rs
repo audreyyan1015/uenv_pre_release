@@ -79,6 +79,13 @@ impl AgentJobQueue {
         self.pending.get(pool_id).map(|q| q.len()).unwrap_or(0)
     }
 
+    pub fn is_pending(&self, pool_id: &str, job_id: &str) -> bool {
+        self.pending
+            .get(pool_id)
+            .map(|q| q.iter().any(|j| j.job_id == job_id))
+            .unwrap_or(false)
+    }
+
     pub fn in_flight_len(&self) -> usize {
         self.in_flight.len()
     }
@@ -150,6 +157,8 @@ impl AgentControlService for AgentControlServiceImpl {
                 .collect(),
             max_concurrent: req.max_concurrent_jobs,
             current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
             endpoint: req.endpoint,
             last_heartbeat_at: std::time::Instant::now(),
             labels: req.labels,
@@ -185,23 +194,43 @@ impl AgentControlService for AgentControlServiceImpl {
     ) -> Result<Response<PollAgentJobResponse>, Status> {
         let req = request.into_inner();
 
-        let Some((job, agent_id)) = (|| {
+        let polling_agent_id = req.worker_id.clone();
+        if polling_agent_id.is_empty() {
+            return Ok(Response::new(PollAgentJobResponse {
+                has_job: false,
+                job: None,
+            }));
+        }
+
+        let Some(job) = (|| {
             let mut q = self.queue.pending.get_mut(&req.agent_pool_id)?;
-            let candidate = q.front()?;
-            let agent_id = self.registry.try_reserve(
+            let pos = q.iter().position(|candidate| {
+                self.registry.can_agent_run(
+                    &polling_agent_id,
+                    &req.agent_pool_id,
+                    &candidate.agent_bridge_id,
+                    &candidate.agent_bridge_version,
+                )
+            })?;
+            let job = q.remove(pos)?;
+            if self.registry.try_reserve_exact_agent(
+                &polling_agent_id,
                 &req.agent_pool_id,
-                &candidate.agent_bridge_id,
-                &candidate.agent_bridge_version,
-                &req.worker_id,
-            )?;
-            let job = q.pop_front()?;
-            Some((job, agent_id))
+                &job.agent_bridge_id,
+                &job.agent_bridge_version,
+            ) {
+                Some(job)
+            } else {
+                q.insert(pos, job);
+                None
+            }
         })() else {
             return Ok(Response::new(PollAgentJobResponse {
                 has_job: false,
                 job: None,
             }));
         };
+        let agent_id = polling_agent_id;
 
         let in_flight_ok = self
             .queue
@@ -243,7 +272,7 @@ impl AgentControlService for AgentControlServiceImpl {
         let job_id = req.job_id.clone();
         let Some(inflight_ref) = self.queue.in_flight.get(&job_id) else {
             tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
-            return Ok(Response::new(AgentJobCompleteResponse { ack: false }));
+            return Ok(Response::new(AgentJobCompleteResponse { ack: false, code: "UNKNOWN_JOB".to_string(), message: "unknown job".to_string() }));
         };
         if inflight_ref.run_id != req.run_id
             || inflight_ref.agent_id.is_empty()
@@ -257,7 +286,16 @@ impl AgentControlService for AgentControlServiceImpl {
                 report_agent_id = %req.agent_id,
                 "agent_job_complete_identity_mismatch"
             );
-            return Ok(Response::new(AgentJobCompleteResponse { ack: false }));
+            let code = if inflight_ref.run_id != req.run_id {
+                "RUN_MISMATCH"
+            } else {
+                "AGENT_MISMATCH"
+            };
+            return Ok(Response::new(AgentJobCompleteResponse {
+                ack: false,
+                code: code.to_string(),
+                message: "agent_id or run_id mismatch".to_string(),
+            }));
         }
         drop(inflight_ref);
 
@@ -272,11 +310,11 @@ impl AgentControlService for AgentControlServiceImpl {
                     "agent_job_completed"
                 );
                 let _ = inflight.done.send(req);
-                Ok(Response::new(AgentJobCompleteResponse { ack: true }))
+                Ok(Response::new(AgentJobCompleteResponse { ack: true, code: "ACCEPTED".to_string(), message: String::new() }))
             }
             None => {
                 tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
-                Ok(Response::new(AgentJobCompleteResponse { ack: false }))
+                Ok(Response::new(AgentJobCompleteResponse { ack: false, code: "UNKNOWN_JOB".to_string(), message: "unknown job".to_string() }))
             }
         }
     }
@@ -297,6 +335,8 @@ mod tests {
             }],
             max_concurrent: 1,
             current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
             endpoint: String::new(),
             last_heartbeat_at: std::time::Instant::now(),
             labels: Default::default(),
@@ -330,7 +370,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_reserves_agent_matching_job_bridge() {
+    async fn poll_only_assigns_jobs_to_the_polling_agent() {
         let (svc, queue, _registry) = svc();
         let _rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
 
@@ -338,6 +378,17 @@ mod tests {
             .poll_agent_job(Request::new(PollAgentJobRequest {
                 agent_pool_id: "openhands-default".to_string(),
                 worker_id: "a1".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resp.has_job);
+        assert_eq!(queue.in_flight_snapshot(), vec![("job-1".to_string(), String::new())]);
+
+        let resp = svc
+            .poll_agent_job(Request::new(PollAgentJobRequest {
+                agent_pool_id: "openhands-default".to_string(),
+                worker_id: "a2".to_string(),
             }))
             .await
             .unwrap()
@@ -353,7 +404,7 @@ mod tests {
         let _rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
         svc.poll_agent_job(Request::new(PollAgentJobRequest {
             agent_pool_id: "openhands-default".to_string(),
-            worker_id: String::new(),
+            worker_id: "a2".to_string(),
         }))
         .await
         .unwrap();

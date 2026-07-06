@@ -59,6 +59,7 @@ pub struct EpisodeConfig {
     pub completed_async_ttl_secs: u64,
     /// async result ??????0 ????? async result?
     pub completed_async_max_entries: usize,
+    pub agent_job_pickup_timeout_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -98,6 +99,7 @@ impl Default for EpisodeConfig {
             queue_dynamic: false,
             completed_async_ttl_secs: 3600,
             completed_async_max_entries: 10000,
+            agent_job_pickup_timeout_secs: 30,
         }
     }
 }
@@ -151,6 +153,7 @@ episode:
   broadcast_capacity: 2048
   completed_async_ttl_secs: 60
   completed_async_max_entries: 128
+  agent_job_pickup_timeout_secs: 7
 "#;
 
     #[test]
@@ -168,6 +171,7 @@ episode:
         assert_eq!(cfg.admin_http_token, "");
         assert_eq!(cfg.episode.completed_async_ttl_secs, 3600);
         assert_eq!(cfg.episode.completed_async_max_entries, 10000);
+        assert_eq!(cfg.episode.agent_job_pickup_timeout_secs, 30);
     }
 
     #[test]
@@ -186,6 +190,7 @@ episode:
         assert_eq!(cfg.admin_http_token, "test-token");
         assert_eq!(cfg.episode.completed_async_ttl_secs, 60);
         assert_eq!(cfg.episode.completed_async_max_entries, 128);
+        assert_eq!(cfg.episode.agent_job_pickup_timeout_secs, 7);
     }
 
     #[test]
@@ -208,6 +213,7 @@ episode:
         assert_eq!(state.heartbeat_interval_ms, 3000);
         assert_eq!(state.completed_async_ttl_secs, 60);
         assert_eq!(state.completed_async_max_entries, 128);
+        assert_eq!(state.agent_job_pickup_timeout_secs, 7);
     }
 
     #[test]

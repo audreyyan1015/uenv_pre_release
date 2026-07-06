@@ -129,31 +129,32 @@ impl RoundRobinScheduler {
     /// 心跳由 worker 主动上报，反映 worker 自己观察到的实际负载情况，
     /// 比服务器侧的计数更准确（例如 worker 重启后负载归零）。
     /// 如果心跳中的 max_load > 0，同时更新容量（capacity）字段。
-    pub fn update_worker_load(&mut self, worker_id: &str, load: u32, max_load: u32) {
+    pub fn update_worker_load(&mut self, worker_id: &str, load: u32, max_load: u32) -> Option<(u32, u32)> {
         if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            let old_capacity = w.capacity;
             w.reported_load = load;
-            w.current_load = effective_load(w);
             if max_load > 0 {
                 w.capacity = max_load;
             }
-            // 每次心跳都刷新 last_heartbeat_at，用于检测连接是否断开
+            w.current_load = effective_load(w);
             w.last_heartbeat_at = Some(std::time::Instant::now());
-            // idle heartbeat（load=0）说明 Worker 健康且无 in-flight，
-            // 刷新 last_report_at 避免长时间空闲后再次调度被误判为 degraded
             if load == 0 {
                 w.last_report_at = Some(std::time::Instant::now());
             }
+            Some((old_capacity, w.capacity))
+        } else {
+            None
         }
     }
 }
 
-/// 资源匹配检查：worker 实际资源是否满足 episode 请求的最低要求。
+/// ???????worker ???????? episode ????????
 ///
-/// 规则：
-/// - 若请求未指定 resource_spec（None）或所有字段均为 0，则无限制，直接通过。
-/// - 若 worker 未上报资源（resource 为 None），但请求有非零要求，则不匹配。
-/// - cpu_cores / memory_mb / gpu_count 为 0 表示该维度无要求。
-/// - gpu_type 为空字符串表示不限型号。
+/// ???
+/// - ?????? resource_spec?None???????? 0???????????
+/// - ? worker ??????resource ? None????????????????
+/// - cpu_cores / memory_mb / gpu_count ? 0 ?????????
+/// - gpu_type ????????????
 fn is_worker_degraded(w: &WorkerInfo, threshold_secs: u64, heartbeat_timeout_secs: u64) -> bool {
     // 维度1：心跳超时 → 连接断开，无论 load 多少都降级
     if let Some(t) = w.last_heartbeat_at {
@@ -200,8 +201,12 @@ impl Scheduler for RoundRobinScheduler {
 
     /// 注销指定的 worker，将其从列表中移除。
     fn unregister_worker(&mut self, worker_id: &str) {
-        tracing::info!(worker_id, "worker unregistered");
-        self.workers.retain(|w| w.worker_id != worker_id);
+        tracing::info!(worker_id, "worker unregister requested");
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.draining = true;
+        }
+        self.workers
+            .retain(|w| w.worker_id != worker_id || effective_load(w) > 0);
     }
 
     /// 轮询调度：从满足条件的 worker 中按顺序选择一个。
@@ -331,5 +336,7 @@ impl Scheduler for RoundRobinScheduler {
             w.reserved_load = w.reserved_load.saturating_sub(1);
             w.current_load = effective_load(w);
         }
+        self.workers
+            .retain(|w| !(w.worker_id == worker_id && w.draining && effective_load(w) == 0));
     }
 }

@@ -266,7 +266,13 @@ impl SchedulerControlPlaneClient {
             .await?
             .into_inner();
         if !response.ack {
-            return Err("report_result_not_acknowledged".into());
+            tracing::warn!(
+                code = %response.code,
+                message = %response.message,
+                duplicate = response.duplicate,
+                "report_result_not_acknowledged"
+            );
+            return Err(format!("report_result_not_acknowledged:{}", response.code).into());
         }
         self.connected.store(true, Ordering::Relaxed);
         tracing::info!(

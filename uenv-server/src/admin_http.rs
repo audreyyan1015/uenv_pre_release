@@ -176,6 +176,8 @@ fn agents_json(state: &ServerState) -> Value {
                 "agent_pool_id":       a.agent_pool_id,
                 "max_concurrent":      a.max_concurrent,
                 "current_load":        a.current_load,
+                "reserved_load":       a.reserved_load,
+                "reported_load":       a.reported_load,
                 "stale":               a.stale,
                 "last_heartbeat_secs": a.last_heartbeat_secs,
                 "bridges":             a.bridges,

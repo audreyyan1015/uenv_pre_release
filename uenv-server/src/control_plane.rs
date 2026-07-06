@@ -20,7 +20,7 @@
 //     |                          |                   客户端收到结果|
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -194,11 +194,28 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                         // 用心跳中的负载数据更新调度器里该 worker 的状态。
                         // max(0)：proto 中 load/max_load 是有符号 i32，
                         // 确保不会把负数转成 u32（负数转 u32 会溢出成超大值）。
-                        state.scheduler.write().update_worker_load(
+                        let capacity_change = state.scheduler.write().update_worker_load(
                             &heartbeat.worker_id,
                             heartbeat.load.max(0) as u32,
                             heartbeat.max_load.max(0) as u32,
                         );
+                        if state.queue_dynamic {
+                            if let (Some((old_capacity, new_capacity)), Some(sem)) =
+                                (capacity_change, state.episode_semaphore.as_ref())
+                            {
+                                if new_capacity > old_capacity {
+                                    sem.add_permits((new_capacity - old_capacity) as usize);
+                                } else if old_capacity > new_capacity {
+                                    let reduce = old_capacity - new_capacity;
+                                    let sem = Arc::clone(sem);
+                                    tokio::spawn(async move {
+                                        if let Ok(permit) = sem.acquire_many(reduce).await {
+                                            permit.forget();
+                                        }
+                                    });
+                                }
+                            }
+                        }
 
                         info!(
                             worker_id = %heartbeat.worker_id,
@@ -246,6 +263,25 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         request: Request<ReportResultRequest>,
     ) -> Result<Response<ReportResultResponse>, Status> {
         let req = request.into_inner();
+        let response = |ack: bool, duplicate: bool, code: &str, message: &str| {
+            Response::new(ReportResultResponse {
+                ack,
+                duplicate,
+                code: code.to_string(),
+                message: message.to_string(),
+            })
+        };
+
+        let now = Instant::now();
+        self.state
+            .idempotency_cache
+            .retain(|_, record| record.expires_at > now);
+        self.state
+            .result_outcomes
+            .retain(|_, outcome| outcome.expires_at > now);
+        self.state
+            .cancel_outcomes
+            .retain(|_, outcome| outcome.expires_at > now);
 
         if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
             warn!(
@@ -254,15 +290,23 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 current_epoch = self.state.epoch(),
                 "report_result_stale_epoch_rejected"
             );
-            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+            return Ok(response(false, false, "STALE_EPOCH", "server epoch mismatch"));
         }
         if req.idempotency_key.is_empty() {
             warn!(worker_id = %req.worker_id, "report_result_empty_idempotency_key_rejected");
-            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+            return Ok(response(false, false, "INVALID_REQUEST", "empty idempotency_key"));
+        }
+        if let Some(record) = self.state.idempotency_cache.get(&req.idempotency_key) {
+            let code = if record.ack {
+                "DUPLICATE_ACCEPTED"
+            } else {
+                "DUPLICATE_REJECTED"
+            };
+            return Ok(response(record.ack, true, code, &record.message));
         }
         let Some(result) = req.result else {
             warn!(worker_id = %req.worker_id, "report_result_missing_result_rejected");
-            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+            return Ok(response(false, false, "INVALID_REQUEST", "missing result"));
         };
         if req.dispatch_lease_id.is_empty() || req.dispatch_token.is_empty() {
             warn!(
@@ -271,12 +315,28 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 attempt_id = result.attempt_id,
                 "report_result_missing_dispatch_lease_rejected"
             );
-            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+            return Ok(response(false, false, "INVALID_REQUEST", "missing dispatch lease or token"));
         }
 
         let episode_id = result.episode_id.clone();
         let attempt_id = result.attempt_id;
         let pending_key = (episode_id.clone(), attempt_id, req.dispatch_lease_id.clone());
+        let ttl = Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1));
+        let expires_at = Instant::now() + ttl;
+        let remember = |ack: bool, code: &str, message: &str| {
+            self.state.idempotency_cache.insert(
+                req.idempotency_key.clone(),
+                crate::state::IdempotencyRecord {
+                    expires_at,
+                    episode_id: episode_id.clone(),
+                    attempt_id,
+                    dispatch_lease_id: req.dispatch_lease_id.clone(),
+                    ack,
+                    code: code.to_string(),
+                    message: message.to_string(),
+                },
+            );
+        };
 
         info!(
             worker_id = %req.worker_id,
@@ -286,46 +346,65 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             "control_plane_report_result"
         );
 
-        let Some(pending_ref) = self.state.pending_results.get(&pending_key) else {
+        if let Some(pending_ref) = self.state.pending_results.get(&pending_key) {
+            if pending_ref.worker_id != req.worker_id {
+                warn!(
+                    worker_id = %req.worker_id,
+                    expected_worker_id = %pending_ref.worker_id,
+                    episode_id = %episode_id,
+                    attempt_id = attempt_id,
+                    "report_result_worker_mismatch_rejected"
+                );
+                remember(false, "WORKER_MISMATCH", "worker_id does not own this dispatch lease");
+                return Ok(response(false, false, "WORKER_MISMATCH", "worker_id does not own this dispatch lease"));
+            }
+            if pending_ref.dispatch_token != req.dispatch_token {
+                warn!(
+                    worker_id = %req.worker_id,
+                    episode_id = %episode_id,
+                    attempt_id = attempt_id,
+                    dispatch_lease_id = %req.dispatch_lease_id,
+                    "report_result_token_mismatch_rejected"
+                );
+                remember(false, "TOKEN_MISMATCH", "dispatch token mismatch");
+                return Ok(response(false, false, "TOKEN_MISMATCH", "dispatch token mismatch"));
+            }
+        }
+
+        let removed = self.state.pending_results.remove_if(&pending_key, |_, pending| {
+            pending.worker_id == req.worker_id && pending.dispatch_token == req.dispatch_token
+        });
+        let Some((_, pending)) = removed else {
+            let (code, message) = if let Some(outcome) = self.state.result_outcomes.get(&pending_key) {
+                (outcome.code.clone(), outcome.message.clone())
+            } else if self.state.cancelled_episodes.contains_key(&episode_id)
+                || self.state.cancel_outcomes.contains_key(&episode_id)
+            {
+                ("LATE_AFTER_CANCEL".to_string(), "episode was cancelled".to_string())
+            } else {
+                ("UNKNOWN_PENDING".to_string(), "pending result not found".to_string())
+            };
             warn!(
                 worker_id = %req.worker_id,
                 episode_id = %episode_id,
                 attempt_id = attempt_id,
                 dispatch_lease_id = %req.dispatch_lease_id,
-                "report_result_no_pending_rejected"
+                code = %code,
+                "report_result_pending_absent_rejected"
             );
-            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
+            remember(false, &code, &message);
+            return Ok(response(false, false, &code, &message));
         };
-        if pending_ref.worker_id != req.worker_id {
-            warn!(
-                worker_id = %req.worker_id,
-                expected_worker_id = %pending_ref.worker_id,
-                episode_id = %episode_id,
-                attempt_id = attempt_id,
-                "report_result_worker_mismatch_rejected"
-            );
-            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
-        }
-        if pending_ref.dispatch_token != req.dispatch_token {
-            warn!(
-                worker_id = %req.worker_id,
-                episode_id = %episode_id,
-                attempt_id = attempt_id,
-                dispatch_lease_id = %req.dispatch_lease_id,
-                "report_result_token_mismatch_rejected"
-            );
-            return Ok(Response::new(ReportResultResponse { ack: false, duplicate: false }));
-        }
-        drop(pending_ref);
 
-        let duplicate = {
-            let mut seen = self.state.seen_idempotency.lock();
-            !seen.insert(req.idempotency_key.clone())
-        };
-        if duplicate {
-            return Ok(Response::new(ReportResultResponse { ack: true, duplicate: true }));
-        }
-
+        self.state.result_outcomes.insert(
+            pending_key.clone(),
+            crate::state::TimedOutcome {
+                expires_at,
+                code: "ACCEPTED".to_string(),
+                message: String::new(),
+            },
+        );
+        remember(true, "ACCEPTED", "accepted");
         self.state.scheduler.write().touch_worker_report(&req.worker_id);
         if let Some(store) = self.state.trajectory_store.get() {
             let summary = result.summary.as_ref();
@@ -350,14 +429,11 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 }
             });
         }
-        if let Some((_, pending)) = self.state.pending_results.remove(&pending_key) {
-            let _ = pending.tx.send(result);
-        }
+        let _ = pending.tx.send(result);
 
-        Ok(Response::new(ReportResultResponse { ack: true, duplicate: false }))
+        Ok(response(true, false, "ACCEPTED", "accepted"))
     }
 
-    /// 否则只返回支持其中至少一种环境类型的 worker。
     async fn list_workers(
         &self,
         request: Request<ListWorkersRequest>,

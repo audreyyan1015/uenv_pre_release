@@ -14,7 +14,9 @@ pub struct ServerState {
     pub next_lease_seq: AtomicU64,
     pub pending_results: DashMap<PendingKey, PendingResult>,
     pub cancelled_episodes: DashMap<String, ()>,
-    pub seen_idempotency: parking_lot::Mutex<std::collections::HashSet<String>>,
+    pub cancel_outcomes: DashMap<String, TimedOutcome>,
+    pub idempotency_cache: DashMap<String, IdempotencyRecord>,
+    pub result_outcomes: DashMap<PendingKey, TimedOutcome>,
     pub completed_async: DashMap<String, CompletedAsyncResult>,
     pub episode_broadcast: broadcast::Sender<EpisodeResult>,
     pub max_attempts: u32,
@@ -24,6 +26,8 @@ pub struct ServerState {
     pub heartbeat_interval_ms: u64,
     pub completed_async_ttl_secs: u64,
     pub completed_async_max_entries: usize,
+    pub report_result_idempotency_ttl_secs: u64,
+    pub agent_job_pickup_timeout_secs: u64,
     /// adapter 层并发 semaphore：限制最多同时 in-flight 的 episode 数。
     /// None 表示不限制（queue_max_in_flight=0 且 queue_dynamic=false）。
     /// 动态模式下从 0 个 permit 开始，随 worker 注册/注销自动增减。
@@ -54,6 +58,24 @@ pub struct PendingResult {
     pub worker_id: String,
     pub dispatch_lease_id: String,
     pub dispatch_token: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub struct IdempotencyRecord {
+    pub expires_at: Instant,
+    pub episode_id: String,
+    pub attempt_id: u32,
+    pub dispatch_lease_id: String,
+    pub ack: bool,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone)]
+pub struct TimedOutcome {
+    pub expires_at: Instant,
+    pub code: String,
+    pub message: String,
 }
 
 pub struct CompletedAsyncResult {
@@ -91,7 +113,9 @@ impl ServerState {
             next_lease_seq: AtomicU64::new(1),
             pending_results: DashMap::new(),
             cancelled_episodes: DashMap::new(),
-            seen_idempotency: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            cancel_outcomes: DashMap::new(),
+            idempotency_cache: DashMap::new(),
+            result_outcomes: DashMap::new(),
             completed_async: DashMap::new(),
             episode_broadcast,
             max_attempts: config.episode.max_attempts,
@@ -101,6 +125,8 @@ impl ServerState {
             heartbeat_interval_ms: config.scheduler.heartbeat_interval_ms,
             completed_async_ttl_secs: config.episode.completed_async_ttl_secs,
             completed_async_max_entries: config.episode.completed_async_max_entries,
+            report_result_idempotency_ttl_secs: std::cmp::max(config.episode.default_timeout_secs.saturating_mul(2), 3600),
+            agent_job_pickup_timeout_secs: config.episode.agent_job_pickup_timeout_secs,
             episode_semaphore: if config.episode.queue_dynamic {
                 // 动态模式：从 0 开始，worker 注册时 add_permits
                 Some(Arc::new(Semaphore::new(0)))

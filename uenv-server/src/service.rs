@@ -1,4 +1,5 @@
 use std::future::Future;
+use dashmap::mapref::entry::Entry;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -49,6 +50,52 @@ impl Drop for WorkerLease {
     }
 }
 
+struct EpisodeAdmissionGuard {
+    state: Arc<ServerState>,
+    episode_id: String,
+}
+
+impl Drop for EpisodeAdmissionGuard {
+    fn drop(&mut self) {
+        self.state.active_episodes.remove(&self.episode_id);
+    }
+}
+
+struct GatewaySessionGuard {
+    gateway_public_url: String,
+    session_id: String,
+    disarmed: bool,
+}
+
+impl GatewaySessionGuard {
+    fn new(gateway_public_url: String, session_id: String) -> Self {
+        Self { gateway_public_url, session_id, disarmed: false }
+    }
+
+    async fn close_now(&mut self) {
+        if self.disarmed || self.session_id.is_empty() {
+            return;
+        }
+        let gw = self.gateway_public_url.clone();
+        let sid = self.session_id.clone();
+        self.disarmed = true;
+        let _ = tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &sid)).await;
+    }
+}
+
+impl Drop for GatewaySessionGuard {
+    fn drop(&mut self) {
+        if self.disarmed || self.session_id.is_empty() {
+            return;
+        }
+        let gw = self.gateway_public_url.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &sid)).await;
+        });
+    }
+}
+
 async fn wait_for_cancel(state: Arc<ServerState>, episode_id: String) {
     while !state.cancelled_episodes.contains_key(&episode_id) {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -77,6 +124,10 @@ fn normalize_episode_request(req: &mut EpisodeRequest) {
     if req.attempt_id == 0 {
         req.attempt_id = 1;
     }
+}
+
+fn is_retryable_schedule_error(error: &ScheduleError) -> bool {
+    matches!(error, ScheduleError::NoWorkerAvailable | ScheduleError::AllWorkersAtCapacity)
 }
 
 fn sweep_completed_async(state: &ServerState) {
@@ -142,9 +193,22 @@ impl UEnvEpisodeService {
 
         let episode_id = req.episode_id.clone();
         self.state.cancelled_episodes.remove(&episode_id);
-        if self.state.active_episodes.contains_key(&episode_id) {
-            anyhow::bail!("episode {episode_id} is already active");
-        }
+        let _episode_admission = match self.state.active_episodes.entry(episode_id.clone()) {
+            Entry::Occupied(_) => anyhow::bail!("episode {episode_id} is already active"),
+            Entry::Vacant(v) => {
+                v.insert(ActiveEpisode {
+                    episode_id: episode_id.clone(),
+                    attempt_id: req.attempt_id,
+                    worker_id: String::new(),
+                    started_at: Instant::now(),
+                    batch_id: req.correlation_id.clone(),
+                });
+                EpisodeAdmissionGuard {
+                    state: Arc::clone(&self.state),
+                    episode_id: episode_id.clone(),
+                }
+            }
+        };
         let timeout_secs = if req.timeout_seconds > 0 {
             req.timeout_seconds as u64
         } else {
@@ -189,6 +253,9 @@ impl UEnvEpisodeService {
                 match result {
                     Ok(a) => break a,
                     Err(e) => {
+                        if !is_retryable_schedule_error(&e) {
+                            anyhow::bail!("select worker failed: {e}");
+                        }
                         if Instant::now() > deadline {
                             anyhow::bail!("no worker available: {e}");
                         }
@@ -253,6 +320,11 @@ impl UEnvEpisodeService {
             let retry_reason: Option<String> = tokio::select! {
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     self.state.pending_results.remove(&pending_key);
+                    self.state.result_outcomes.insert(pending_key.clone(), crate::state::TimedOutcome {
+                        expires_at: Instant::now() + Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1)),
+                        code: "LATE_AFTER_TIMEOUT".to_string(),
+                        message: "episode execution timeout".to_string(),
+                    });
                     self.state.active_episodes.remove(&episode_id);
                     worker_lease.release();
                     anyhow::bail!("episode execution timeout");
@@ -260,6 +332,11 @@ impl UEnvEpisodeService {
 
                 _ = wait_for_cancel(Arc::clone(&self.state), episode_id.clone()) => {
                     self.state.pending_results.remove(&pending_key);
+                    self.state.cancel_outcomes.insert(episode_id.clone(), crate::state::TimedOutcome {
+                        expires_at: Instant::now() + Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1)),
+                        code: "LATE_AFTER_CANCEL".to_string(),
+                        message: "episode cancelled".to_string(),
+                    });
                     self.state.active_episodes.remove(&episode_id);
                     worker_lease.release();
                     let result = cancelled_result(&episode_id, attempt_id);
@@ -332,6 +409,11 @@ impl UEnvEpisodeService {
                                 }
                                 Err(_) => {
                                     self.state.pending_results.remove(&pending_key);
+                                    self.state.result_outcomes.insert(pending_key.clone(), crate::state::TimedOutcome {
+                                        expires_at: Instant::now() + Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1)),
+                                        code: "LATE_AFTER_TIMEOUT".to_string(),
+                                        message: "episode execution timeout".to_string(),
+                                    });
                                     self.state.active_episodes.remove(&episode_id);
                                     worker_lease.release();
                                     anyhow::bail!("episode execution timeout");
@@ -436,7 +518,7 @@ impl UEnvEpisodeService {
                     // Worker capacity is transient, but env/package mismatches are persistent.
                     // Release the Agent permit before either retrying or returning the error.
                     drop(permit);
-                    if !matches!(e, ScheduleError::AllWorkersAtCapacity) {
+                    if !is_retryable_schedule_error(&e) {
                         tracing::warn!(
                             episode_id = %episode_id,
                             batch_id = %req.correlation_id,
@@ -571,6 +653,10 @@ impl UEnvEpisodeService {
         };
 
         let gateway_session_id = session.session_id.clone();
+        let mut session_guard = GatewaySessionGuard::new(
+            assignment.gateway_public_url.clone(),
+            session.session_id.clone(),
+        );
         let worker_id_for_row = assignment.worker_id.clone();
         let agent_bridge_version = spec.agent_bridge_version.clone();
 
@@ -596,7 +682,7 @@ impl UEnvEpisodeService {
             llm_config_path: spec.llm_config_path.clone(),
             mode: spec.mode.clone(),
         };
-        let rx = self.state.agent_job_queue.enqueue(&pool_id, job);
+        let mut rx = self.state.agent_job_queue.enqueue(&pool_id, job);
 
         info!(
             episode_id = %episode_id,
@@ -609,113 +695,118 @@ impl UEnvEpisodeService {
             "swe_agent_job_dispatched"
         );
 
-        // ③ 等 CompleteAgentJob 或 deadline。
-        let result = tokio::select! {
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                cleanup_episode(&self.state, &mut worker_lease, &episode_id);
-                self.state.agent_job_queue.abandon(&pool_id, &job_id);
-                // 超时兜底：best-effort 关掉 Worker 上预建的 session，避免会话泄漏。
-                // fire-and-forget：失败仅记日志，不影响 episode 结果。
-                let gw = assignment.gateway_public_url.clone();
-                let sid = session.session_id.clone();
-                tokio::spawn(async move {
-                    destroy_session(&gw, &sid).await;
-                });
-                anyhow::bail!("swe agent episode {episode_id} timeout waiting for agent completion");
-            }
-            _ = wait_for_cancel(Arc::clone(&self.state), episode_id.clone()) => {
-                cleanup_episode(&self.state, &mut worker_lease, &episode_id);
-                self.state.agent_job_queue.abandon(&pool_id, &job_id);
-                let gw = assignment.gateway_public_url.clone();
-                let sid = session.session_id.clone();
-                tokio::spawn(async move {
-                    destroy_session(&gw, &sid).await;
-                });
-                let result = cancelled_result(&episode_id, req.attempt_id);
-                result
-            }
-            done = rx => {
-                cleanup_episode(&self.state, &mut worker_lease, &episode_id);
-                match done {
-                    Ok(complete) => {
-                        let status = if complete.status.is_empty() {
-                            "completed".to_string()
-                        } else {
-                            complete.status.clone()
-                        };
-                        let mut result = EpisodeResult {
-                            episode_id: episode_id.clone(),
-                            attempt_id: req.attempt_id,
-                            status: status.clone(),
-                            error_message: complete.error_message.clone(),
-                            trajectory_id: complete.trajectory_id.clone(),
-                            gateway_session_id: gateway_session_id.clone(),
-                            ..Default::default()
-                        };
-                        result.summary = Some(crate::proto::v1::episode_result::Summary {
-                            total_reward: complete.reward,
-                            ..Default::default()
-                        });
-                        // P1：把 SWE+Agent 结果写入 episode_results 表，使轨迹能按
-                        // episode_id 关联（与 native 路径 control_plane ack 写入对称）。
-                        if let Some(store) = self.state.trajectory_store.get() {
-                            let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
-                            let row = crate::trajectory::EpisodeResultRow {
+        let mut deadline_sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)));
+        let pickup_deadline = Instant::now()
+            + Duration::from_secs(self.state.agent_job_pickup_timeout_secs.max(1));
+        let mut pickup_sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(pickup_deadline)));
+        let mut pickup_checked = false;
+
+        let result = loop {
+            tokio::select! {
+                _ = &mut deadline_sleep => {
+                    cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                    self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                    session_guard.close_now().await;
+                    anyhow::bail!("swe agent episode {episode_id} timeout waiting for agent completion");
+                }
+                _ = &mut pickup_sleep, if !pickup_checked => {
+                    pickup_checked = true;
+                    if self.state.agent_job_queue.is_pending(&pool_id, &job_id) {
+                        cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                        self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                        session_guard.close_now().await;
+                        anyhow::bail!("swe agent episode {episode_id} timeout waiting for agent pickup");
+                    }
+                }
+                _ = wait_for_cancel(Arc::clone(&self.state), episode_id.clone()) => {
+                    cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                    self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                    session_guard.close_now().await;
+                    let result = cancelled_result(&episode_id, req.attempt_id);
+                    break result;
+                }
+                done = &mut rx => {
+                    cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                    let result = match done {
+                        Ok(complete) => {
+                            let status = if complete.status.is_empty() {
+                                "completed".to_string()
+                            } else {
+                                complete.status.clone()
+                            };
+                            let mut result = EpisodeResult {
                                 episode_id: episode_id.clone(),
                                 attempt_id: req.attempt_id,
-                                worker_id: worker_id_for_row.clone(),
                                 status: status.clone(),
-                                total_reward: Some(complete.reward),
-                                total_steps: None,
-                                trajectory_id: opt(&complete.trajectory_id),
-                                trajectory_storage_url: None,
-                                result_checksum: complete.job_id.clone(),
-                                env_package_id: opt(&req.env_package_id),
-                                agent_bridge_version: opt(&agent_bridge_version),
+                                error_message: complete.error_message.clone(),
+                                trajectory_id: complete.trajectory_id.clone(),
+                                gateway_session_id: gateway_session_id.clone(),
+                                ..Default::default()
                             };
-                            let store = store.clone();
-                            tokio::task::spawn_blocking(move || {
-                                if let Err(e) = store.upsert_episode_result(&row) {
-                                    tracing::warn!(error = %e, "swe_agent_episode_results_upsert_failed");
-                                }
+                            result.summary = Some(crate::proto::v1::episode_result::Summary {
+                                total_reward: complete.reward,
+                                ..Default::default()
                             });
-                        }
-                        if status == "failed" || !complete.error_message.is_empty() {
-                            tracing::warn!(
+                            if let Some(store) = self.state.trajectory_store.get() {
+                                let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
+                                let row = crate::trajectory::EpisodeResultRow {
+                                    episode_id: episode_id.clone(),
+                                    attempt_id: req.attempt_id,
+                                    worker_id: worker_id_for_row.clone(),
+                                    status: status.clone(),
+                                    total_reward: Some(complete.reward),
+                                    total_steps: None,
+                                    trajectory_id: opt(&complete.trajectory_id),
+                                    trajectory_storage_url: None,
+                                    result_checksum: complete.job_id.clone(),
+                                    env_package_id: opt(&req.env_package_id),
+                                    agent_bridge_version: opt(&agent_bridge_version),
+                                };
+                                let store = store.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    if let Err(e) = store.upsert_episode_result(&row) {
+                                        tracing::warn!(error = %e, "swe_agent_episode_results_upsert_failed");
+                                    }
+                                });
+                            }
+                            if status == "failed" || !complete.error_message.is_empty() {
+                                tracing::warn!(
+                                    episode_id = %episode_id,
+                                    run_id = %run_id,
+                                    job_id = %complete.job_id,
+                                    worker_id = %worker_id_for_row,
+                                    pool_id = %pool_id,
+                                    status = %status,
+                                    error_message = %complete.error_message,
+                                    reward = complete.reward,
+                                    trajectory_id = %complete.trajectory_id,
+                                    "swe_agent_episode_failed"
+                                );
+                            }
+                            info!(
                                 episode_id = %episode_id,
                                 run_id = %run_id,
                                 job_id = %complete.job_id,
                                 worker_id = %worker_id_for_row,
                                 pool_id = %pool_id,
                                 status = %status,
-                                error_message = %complete.error_message,
                                 reward = complete.reward,
                                 trajectory_id = %complete.trajectory_id,
-                                "swe_agent_episode_failed"
+                                "swe_agent_episode_completed"
                             );
+                            result
                         }
-                        info!(
-                            episode_id = %episode_id,
-                            run_id = %run_id,
-                            job_id = %complete.job_id,
-                            worker_id = %worker_id_for_row,
-                            pool_id = %pool_id,
-                            status = %status,
-                            reward = complete.reward,
-                            trajectory_id = %complete.trajectory_id,
-                            "swe_agent_episode_completed"
-                        );
-                        result
-                    }
-                    Err(_) => {
-                        // Sender 被丢弃（异常）——极少见。
-                        anyhow::bail!("swe agent episode {episode_id} completion channel closed");
-                    }
+                        Err(_) => {
+                            session_guard.close_now().await;
+                            anyhow::bail!("swe agent episode {episode_id} completion channel closed");
+                        }
+                    };
+                    break result;
                 }
             }
         };
+        session_guard.close_now().await;
 
-        // 广播给 watcher（与 native 路径成功分支一致）。
         let _ = self.state.episode_broadcast.send(result.clone());
         Ok(result)
     }
@@ -964,25 +1055,23 @@ async fn create_session_for_episode(
 
 /// best-effort 关闭 Worker 上的 session（`DELETE /runtime/v1/sessions/{id}`）。
 /// 用于 episode 超时兜底，失败仅记日志——绝不影响 episode 结果。
-async fn destroy_session(gateway_public_url: &str, session_id: &str) {
+async fn destroy_session(gateway_public_url: &str, session_id: &str) -> anyhow::Result<()> {
     if session_id.is_empty() {
-        return;
+        return Ok(());
     }
     let url = format!(
         "{}/runtime/v1/sessions/{}",
         gateway_public_url.trim_end_matches('/'),
         session_id
     );
-    match reqwest::Client::new().delete(&url).send().await {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                tracing::warn!(session_id, status = %resp.status(), "destroy_session_non_success");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(session_id, error = %e, "destroy_session_failed");
-        }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let resp = tokio::time::timeout(Duration::from_secs(5), client.delete(&url).send()).await??;
+    if !resp.status().is_success() {
+        tracing::warn!(session_id, status = %resp.status(), "destroy_session_non_success");
     }
+    Ok(())
 }
 
 // =============================================================================
@@ -1092,6 +1181,11 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<CancelEpisodeResponse>, Status> {
         let req = request.into_inner();
         self.state.cancelled_episodes.insert(req.episode_id.clone(), ());
+        self.state.cancel_outcomes.insert(req.episode_id.clone(), crate::state::TimedOutcome {
+            expires_at: Instant::now() + Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1)),
+            code: "LATE_AFTER_CANCEL".to_string(),
+            message: "episode cancelled".to_string(),
+        });
         let active_removed = self
             .state
             .active_episodes

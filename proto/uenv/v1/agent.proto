@@ -81,6 +81,8 @@ message AgentJobCompleteRequest {
 
 message AgentJobCompleteResponse {
     bool ack = 1;
+    string code = 2;
+    string message = 3;
 }
 
 service AgentControlService {
