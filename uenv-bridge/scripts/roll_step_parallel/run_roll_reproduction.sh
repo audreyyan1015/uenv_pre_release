@@ -26,6 +26,7 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 fi
 
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}
+source "${REPO_DIR}/scripts/lib/common.sh"
 ROLL_SRC=${ROLL_SRC:-/data/zhangzhiyuan/codes/ROLL-main}
 IMAGE=${IMAGE:-localhost/uenv-bridge-verl:layer4-build}
 ROLL_MODE=${ROLL_MODE:-sync}
@@ -107,48 +108,6 @@ esac
 
 DEFAULT_CUDA_VISIBLE_DEVICES_IN_CONTAINER=${DEFAULT_CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0,1,2,3,4,5,6,7}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-${DEFAULT_CUDA_VISIBLE_DEVICES_IN_CONTAINER}}
-
-build_podman_gpu_args() {
-  local value="$1"
-  if [ -z "${value}" ]; then
-    printf '%s\n' "--device nvidia.com/gpu=all"
-    return 0
-  fi
-  case "${value}" in
-    --device*|--gpus*)
-      printf '%s\n' "${value}"
-      return 0
-      ;;
-    all|nvidia.com/gpu=all)
-      printf '%s\n' "--device nvidia.com/gpu=all"
-      return 0
-      ;;
-    nvidia.com/gpu=*)
-      value="${value#nvidia.com/gpu=}"
-      ;;
-  esac
-
-  local output=""
-  local old_ifs="${IFS}"
-  IFS=','
-  for gpu_id in ${value}; do
-    gpu_id="$(printf '%s' "${gpu_id}" | tr -d '[:space:]')"
-    if [ -n "${gpu_id}" ]; then
-      output="${output} --device nvidia.com/gpu=${gpu_id}"
-    fi
-  done
-  IFS="${old_ifs}"
-  printf '%s\n' "${output# }"
-}
-
-ensure_path() {
-  local path="$1"
-  local message="$2"
-  if [ ! -e "${path}" ]; then
-    echo "${message}: ${path}" >&2
-    exit 1
-  fi
-}
 
 ensure_path "${ROLL_SRC}/roll" "ROLL source not found"
 ensure_path "${MODEL_PATH}/config.json" "Model config not found"

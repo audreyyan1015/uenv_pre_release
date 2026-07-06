@@ -158,6 +158,7 @@ class UEnvAgentLoopConfig:
     model_gateway_port: int = 18080
     model_gateway_public_url: str = ""
     model_gateway_log_path: str = ""
+    parallel_mode: str = "sync"
 
 
 @register("uenv_agent")
@@ -199,6 +200,7 @@ class UEnvAgentLoop(AgentLoopBase):
         model_gateway_port: int | None = None,
         model_gateway_public_url: str = "",
         model_gateway_log_path: str = "",
+        parallel_mode: str = "sync",
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -228,6 +230,7 @@ class UEnvAgentLoop(AgentLoopBase):
             model_gateway_port=_int_value(model_gateway_port, 18080),
             model_gateway_public_url=_optional_string(model_gateway_public_url) or "",
             model_gateway_log_path=_optional_string(model_gateway_log_path) or "",
+            parallel_mode=_optional_string(parallel_mode) or "sync",
         )
         self.model_gateway = ModelGateway(
             ModelGatewayConfig(
@@ -309,6 +312,7 @@ class UEnvAgentLoop(AgentLoopBase):
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=agent_metrics,
             extra_fields={
+                **self._fully_async_extra_fields_from_result(request, result),
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
@@ -390,10 +394,33 @@ class UEnvAgentLoop(AgentLoopBase):
     async def _submit_episode_chunk(self, requests: list[EpisodeRequest]) -> list[EpisodeResult]:
         self._record_episode_requests(requests, phase="submit_batch")
         results = await asyncio.to_thread(lambda: list(self.client.submit_episode_stream(requests)))
+        results = self._results_in_request_order(requests, results)
         self._record_episode_results(results, requests, phase="result_batch")
         if len(results) != len(requests):
             raise RuntimeError(f"UEnv pre-rollout batch returned {len(results)} results for {len(requests)} requests")
         return results
+
+    def _results_in_request_order(
+        self,
+        requests: list[EpisodeRequest],
+        results: list[EpisodeResult],
+    ) -> list[EpisodeResult]:
+        if len(results) != len(requests):
+            return results
+
+        by_request_id: dict[str, EpisodeResult] = {}
+        for result in results:
+            if result.request_id in by_request_id:
+                raise RuntimeError(f"UEnv pre-rollout batch returned duplicate result for request_id={result.request_id}")
+            by_request_id[result.request_id] = result
+
+        ordered = []
+        for request in requests:
+            result = by_request_id.get(request.request_id)
+            if result is None:
+                raise RuntimeError(f"UEnv pre-rollout batch returned no result for request_id={request.request_id}")
+            ordered.append(result)
+        return ordered
 
     def _should_split_retry(self, requests: list[EpisodeRequest], results: list[EpisodeResult]) -> bool:
         if len(requests) <= 1 or len(results) != len(requests):
@@ -443,6 +470,7 @@ class UEnvAgentLoop(AgentLoopBase):
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=AgentLoopMetrics(generate_sequences=0.0, tool_calls=0.0, compute_score=0.0, num_preempted=-1),
             extra_fields={
+                **self._fully_async_extra_fields_from_result(request, result),
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
@@ -460,6 +488,81 @@ class UEnvAgentLoop(AgentLoopBase):
         )
         prompt_ids = initial_observation.get("prompt_ids") if isinstance(initial_observation, dict) else []
         return [int(item) for item in prompt_ids] if isinstance(prompt_ids, list) else []
+
+    def _fully_async_extra_fields_from_result(self, request: EpisodeRequest, result: EpisodeResult) -> dict[str, Any]:
+        result_metadata = self._model_version_from_result(result)
+        fallback_step = self._global_step_from_payload(request)
+        max_step = self._int_from_mapping(
+            result_metadata,
+            ("max_global_steps", "max_rollout_param_version", "rollout_max_param_version", "rollout_param_version"),
+            fallback_step,
+        )
+        min_step = self._int_from_mapping(
+            result_metadata,
+            ("min_global_steps", "min_rollout_param_version", "rollout_min_param_version", "rollout_param_version"),
+            max_step,
+        )
+        return {
+            "global_steps": max_step,
+            "min_global_steps": min_step,
+            "max_global_steps": max_step,
+        }
+
+    def _global_step_from_payload(self, request: EpisodeRequest) -> int:
+        payload = self._payload_dict(request)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        global_steps = metadata.get("global_steps")
+        if global_steps is None:
+            global_steps = metadata.get("global_step")
+        try:
+            return int(self._python_value(global_steps))
+        except Exception:
+            return 0
+
+    def _model_version_from_result(self, result: EpisodeResult) -> dict[str, Any]:
+        output: dict[str, Any] = {}
+        for step in result.trajectory.steps:
+            info = step.info if isinstance(step.info, dict) else {}
+            nested = self._json_object_from_info(info.get("uenv_model_version"))
+            if nested:
+                output.update(nested)
+            for key in (
+                "model_upstream",
+                "rollout_param_version",
+                "rollout_policy_version",
+                "min_global_steps",
+                "max_global_steps",
+                "min_rollout_param_version",
+                "max_rollout_param_version",
+                "rollout_min_param_version",
+                "rollout_max_param_version",
+            ):
+                value = info.get(key)
+                if value not in (None, ""):
+                    output[key] = value
+        return output
+
+    def _json_object_from_info(self, raw: Any) -> dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
+        if raw in (None, ""):
+            return {}
+        try:
+            value = json.loads(str(raw))
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _int_from_mapping(self, data: dict[str, Any], keys: tuple[str, ...], default: int) -> int:
+        for key in keys:
+            value = data.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return int(self._python_value(value))
+            except Exception:
+                continue
+        return default
 
     def build_episode_request(
         self,
@@ -493,7 +596,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "task_name": task_name,
             "data_source": data_source,
             "ability": self._string_or_none(sample_kwargs.get("ability")),
-            "extra_info": self._jsonable(sample_kwargs.get("extra_info") or {}),
+            "extra_info": self._metadata_extra_info(sample_kwargs, prompt_as_text),
             "rollout_n": self._value_from_extra_info(sample_kwargs, "rollout_n", None),
             "global_steps": self._value_from_extra_info(sample_kwargs, "global_steps", None),
             "model_gateway_upstreams": model_upstream_overrides or [],
@@ -504,8 +607,10 @@ class UEnvAgentLoop(AgentLoopBase):
                 "reward",
                 "trajectory",
                 "finish_reason",
+                "metadata",
             ],
         }
+        metadata.update(self._parallel_metadata(sample_kwargs))
         generation_config = {
             "temperature": sampling_params.get("temperature"),
             "top_p": sampling_params.get("top_p"),
@@ -629,6 +734,7 @@ class UEnvAgentLoop(AgentLoopBase):
                     "error_message": result.error_message,
                     "batch_id": metadata.get("batch_id"),
                     "sample_index": metadata.get("sample_index"),
+                    "request_metadata": metadata,
                     "request_model_endpoint": model_endpoint.get("url"),
                     "request_model_name": model_endpoint.get("model_name"),
                     "reward": result.summary.total_reward,
@@ -677,6 +783,20 @@ class UEnvAgentLoop(AgentLoopBase):
         return [{"role": "user", "content": "" if value is None else str(value)}]
 
     def _response_ids_from_result(self, result: EpisodeResult) -> list[int]:
+        ids: list[int] = []
+        fallback_text = ""
+        for step in result.trajectory.steps:
+            step_ids = self._ids_from_info(step.info, "response_ids")
+            if step_ids:
+                ids.extend(step_ids)
+                continue
+            text = step.info.get("response_text") or step.action.decode("utf-8", errors="replace")
+            if text:
+                fallback_text += text
+        if ids:
+            return ids
+        if fallback_text:
+            return self._encode_response_text(fallback_text)
         for step in reversed(result.trajectory.steps):
             ids = self._ids_from_info(step.info, "response_ids")
             if ids:
@@ -688,10 +808,13 @@ class UEnvAgentLoop(AgentLoopBase):
         return self._encode_response_text("")
 
     def _response_mask_from_result(self, result: EpisodeResult, fallback_len: int) -> list[int]:
-        for step in reversed(result.trajectory.steps):
-            mask = self._ids_from_info(step.info, "response_mask")
-            if mask:
-                return [1 if item else 0 for item in mask]
+        masks: list[int] = []
+        for step in result.trajectory.steps:
+            step_mask = self._ids_from_info(step.info, "response_mask")
+            if step_mask:
+                masks.extend(1 if item else 0 for item in step_mask)
+        if masks:
+            return masks
         return [1] * fallback_len
 
     def _ids_from_info(self, info: dict[str, str], key: str) -> list[int]:
@@ -770,6 +893,67 @@ class UEnvAgentLoop(AgentLoopBase):
             or self.config_for_uenv.default_model_name
         )
         return str(model_name)
+
+    def _parallel_metadata(self, sample_kwargs: dict[str, Any]) -> dict[str, Any]:
+        mode = str(
+            self._value_from_extra_info(sample_kwargs, "parallel_mode", self.config_for_uenv.parallel_mode) or "sync"
+        )
+        output: dict[str, Any] = {"parallel_mode": mode}
+        global_step = self._value_from_extra_info(sample_kwargs, "global_step", None)
+        if global_step is None:
+            global_step = self._value_from_extra_info(sample_kwargs, "global_steps", None)
+        if global_step is not None:
+            output["global_step"] = self._jsonable(global_step)
+        if mode != "one_step_off_policy":
+            return output
+
+        generation_step = self._value_from_extra_info(sample_kwargs, "generation_step", global_step)
+        target_train_step = self._value_from_extra_info(
+            sample_kwargs,
+            "target_train_step",
+            self._step_plus_one(generation_step),
+        )
+        rollout_step = self._value_from_extra_info(sample_kwargs, "rollout_step", generation_step)
+        consume_step = self._value_from_extra_info(sample_kwargs, "consume_step", target_train_step)
+        policy_version = self._value_from_extra_info(
+            sample_kwargs,
+            "policy_version",
+            self._policy_version_from_step(generation_step),
+        )
+        output.update(
+            {
+                "generation_step": self._jsonable(generation_step),
+                "target_train_step": self._jsonable(target_train_step),
+                "rollout_step": self._jsonable(rollout_step),
+                "consume_step": self._jsonable(consume_step),
+                "policy_version": self._jsonable(policy_version),
+                "rollout_policy_version": self._jsonable(
+                    self._value_from_extra_info(sample_kwargs, "rollout_policy_version", policy_version)
+                ),
+                "parameter_sync_id": self._jsonable(
+                    self._value_from_extra_info(sample_kwargs, "parameter_sync_id", self._sync_id_from_step(generation_step))
+                ),
+            }
+        )
+        return output
+
+    def _step_plus_one(self, value: Any) -> Any:
+        try:
+            return int(self._python_value(value)) + 1
+        except Exception:
+            return value
+
+    def _policy_version_from_step(self, value: Any) -> str:
+        step = self._python_value(value)
+        if step is None:
+            return "unknown"
+        return f"actor-step-{step}"
+
+    def _sync_id_from_step(self, value: Any) -> str:
+        step = self._python_value(value)
+        if step is None:
+            return "unknown"
+        return f"sync-{step}"
 
     async def _runtime_model_endpoint(
         self,
@@ -922,6 +1106,18 @@ class UEnvAgentLoop(AgentLoopBase):
         if key in sample_kwargs:
             return sample_kwargs[key]
         return default
+
+    def _metadata_extra_info(self, sample_kwargs: dict[str, Any], prompt_as_text: str) -> dict[str, Any]:
+        extra_info = self._python_value(sample_kwargs.get("extra_info") or {})
+        output = dict(extra_info) if isinstance(extra_info, dict) else {}
+        output.setdefault("question", self._question_from_prompt_text(prompt_as_text))
+        return self._jsonable(output)
+
+    def _question_from_prompt_text(self, prompt_as_text: str) -> str:
+        prefix = "user: "
+        if prompt_as_text.startswith(prefix):
+            return prompt_as_text[len(prefix) :]
+        return prompt_as_text
 
     def _trajectory_to_jsonable(self, result: EpisodeResult) -> list[dict[str, Any]]:
         output = []

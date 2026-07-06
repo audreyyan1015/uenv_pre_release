@@ -3,11 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run native VeRL GRPO with one-step off-policy scheduling inside the VeRL podman image.
+Run VeRL one-step off-policy GRPO through UEnv pre-rollout AgentLoop.
 
-This script is for comparing VeRL's native one-step off-policy training path
-against the current synchronous Layer 4 baseline. It does not connect to
-UEnv Server/Worker, and it does not enable UEnvAgentLoop.
+This is the adapter-side one-step entrypoint. VeRL still owns the one-step
+off-policy scheduling; UEnvAgentLoop only takes the pre-rollout batch out to
+Rust adapter core / Server / Worker and writes one-step metadata into each
+EpisodeRequest.
 
 Most data/model/training/vLLM defaults intentionally match
 scripts/run_layer4_distributed.sh. The main intentional difference is resource
@@ -15,7 +16,8 @@ layout: one-step off-policy needs separate training and rollout GPU pools so it
 can overlap rollout for the next step with actor update for the current step.
 
 Usage:
-  ./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy.sh
+  SERVER_ADAPTER_CORE_ENDPOINT=<server-core-host:port> \
+  ./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh
 
 Common overrides:
   IMAGE                         Default: localhost/uenv-bridge-verl:layer4-build
@@ -34,15 +36,31 @@ Common overrides:
   TRAINING_GPUS_PER_NODE        GPUs used by trainer/actor. Default: NGPUS_PER_NODE - ROLLOUT_GPUS_PER_NODE
   ROLLOUT_GPUS_PER_NODE         GPUs used by async rollout server. Default: 1, or 2 when NGPUS_PER_NODE >= 8
   CHECKPOINT_ENGINE_BACKEND     Weight sync backend. Default: nccl
+  ROLLOUT_CORRECTION_BYPASS_MODE
+                                Default: False. UEnv results currently do not
+                                carry token-level rollout_log_probs, so VeRL
+                                recomputes old_log_probs on the training side.
   PODMAN_GPU_ARGS               Default: nvidia.com/gpu=all
   PODMAN_EXTRA_ARGS             Extra podman run args. Default maps hostname to host IP.
   CUDA_VISIBLE_DEVICES_IN_CONTAINER Default: 0,1
   RAY_NUM_CPUS                  Default: 10 + NGPUS_PER_NODE * 4
   RAY_NOSET_CUDA_VISIBLE_DEVICES Default: empty; leave empty for Ray per-actor GPU isolation.
+  UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES
+                                Default: 1; prevents CPU Ray actors from failing
+                                transformer_engine import with Invalid device id.
+  UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK
+                                Default: 1; lets CPU Ray actors import VeRL CUDA
+                                constants while Ray hides GPUs from them.
   LOG_ROOT                      Default: <repo>/temp/logs
+  SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core endpoint. Default: 8.130.75.157:8088
+  UENV_ADAPTER_CORE_STREAMING   Use Python -> Rust ExecuteBatchStream. Default: 0
+  UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
+  UENV_MODEL_GATEWAY_ENABLED    Start adapter-side model gateway and send its URL to Worker. Default: 0
+  UENV_MODEL_GATEWAY_PUBLIC_URL Worker-visible gateway URL. Default: http://10.10.20.142:<port>/v1
   EXTRA_VERL_ARGS               Extra Hydra args appended to main_ppo.
 
 Layer4-aligned 4-GPU comparison example:
+  SERVER_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
   TRAINING_STEPS=10 \
   TRAIN_BATCH_SIZE=4 \
   PPO_MINI_BATCH_SIZE=4 \
@@ -57,9 +75,10 @@ Layer4-aligned 4-GPU comparison example:
   ROLLOUT_GPUS_PER_NODE=1 \
   ROLLOUT_TP=1 \
   AGENT_NUM_WORKERS=1 \
-  ./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy.sh
+  ./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh
 
-Previously verified 8-GPU smoke:
+8-GPU smoke:
+  SERVER_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
   TRAINING_STEPS=1 \
   TRAIN_BATCH_SIZE=6 \
   PPO_MINI_BATCH_SIZE=6 \
@@ -76,7 +95,7 @@ Previously verified 8-GPU smoke:
   ROLLOUT_GPUS_PER_NODE=2 \
   ROLLOUT_TP=2 \
   AGENT_NUM_WORKERS=1 \
-  ./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy.sh
+  ./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh
 EOF
 }
 
@@ -89,6 +108,11 @@ REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}
 source "${REPO_DIR}/scripts/lib/common.sh"
 VERL_WORKSPACE=${VERL_WORKSPACE:-/data/podman/verl/workspace}
 IMAGE=${IMAGE:-localhost/uenv-bridge-verl:layer4-build}
+SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.75.157:8088}
+if [ -z "${SERVER_ADAPTER_CORE_ENDPOINT}" ]; then
+  echo "SERVER_ADAPTER_CORE_ENDPOINT is required." >&2
+  exit 1
+fi
 
 DEFAULT_HOST_MODEL_PATH=/data/ronghao/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
 DEFAULT_CONTAINER_MODEL_PATH=/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
@@ -140,6 +164,7 @@ ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
 ROLLOUT_LAYERED_SUMMON=${ROLLOUT_LAYERED_SUMMON:-True}
 CHECKPOINT_ENGINE_BACKEND=${CHECKPOINT_ENGINE_BACKEND:-nccl}
+ROLLOUT_CORRECTION_BYPASS_MODE=${ROLLOUT_CORRECTION_BYPASS_MODE:-False}
 
 ACTOR_LR=${ACTOR_LR:-1e-6}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
@@ -152,14 +177,33 @@ RUN_ID=${RUN_ID:-onestep_offpolicy_$(date +%Y%m%d_%H%M%S)}
 
 LOG_ROOT=${LOG_ROOT:-${REPO_DIR}/temp/logs}
 CONTAINER_LOG_ROOT=${CONTAINER_LOG_ROOT:-/uenv/uenv-bridge/temp/logs}
-LOG_DIR=${LOG_DIR:-${LOG_ROOT}/verl_onestep_offpolicy}
+LOG_DIR=${LOG_DIR:-${LOG_ROOT}/verl_onestep_offpolicy_uenv}
 LOG_FILE=${LOG_FILE:-${LOG_DIR}/${RUN_ID}.log}
+SERVICE_DIR=${SERVICE_DIR:-${LOG_ROOT}/onestep_offpolicy_uenv/${RUN_ID}}
+CONTAINER_SERVICE_DIR=${CONTAINER_LOG_ROOT}/onestep_offpolicy_uenv/${RUN_ID}
+AGENT_LOOP_REQUEST_RECORD_PATH=${AGENT_LOOP_REQUEST_RECORD_PATH:-${CONTAINER_SERVICE_DIR}/agent-loop-requests.jsonl}
+AGENT_LOOP_RESULT_RECORD_PATH=${AGENT_LOOP_RESULT_RECORD_PATH:-${CONTAINER_SERVICE_DIR}/agent-loop-results.jsonl}
+MODEL_GATEWAY_LOG_PATH=${MODEL_GATEWAY_LOG_PATH:-${CONTAINER_SERVICE_DIR}/model-gateway.jsonl}
 
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
+UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES=${UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES:-1}
+UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK:-1}
+UENV_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_VERL_DEVICE_CAPABILITY_FALLBACK:-8,0}
+UENV_ADAPTER_CORE_STREAMING=${UENV_ADAPTER_CORE_STREAMING:-0}
+UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH:-1}
+UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
+UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
+UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
+UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-1800}
+UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-one_step_off_policy}
+UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED:-0}
+UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST:-0.0.0.0}
+UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18080}
+UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL:-http://10.10.20.142:${UENV_MODEL_GATEWAY_PORT}/v1}
 EXTRA_VERL_ARGS=${EXTRA_VERL_ARGS:-}
 
-mkdir -p "${LOG_DIR}"
+mkdir -p "${LOG_DIR}" "${SERVICE_DIR}"
 
 ensure_valid_resource_split() {
   ensure_positive_int NGPUS_PER_NODE "${NGPUS_PER_NODE}"
@@ -201,13 +245,16 @@ ensure_valid_resource_split() {
 
 PODMAN_GPU_RUN_ARGS=$(build_podman_gpu_args "${PODMAN_GPU_ARGS}")
 
+wait_for_addr "server-side adapter core" "${SERVER_ADAPTER_CORE_ENDPOINT}" 20
 ensure_policy_model_exists
 ensure_file_exists "${DATA_DIR}/train.parquet" "Missing train parquet"
 ensure_file_exists "${DATA_DIR}/test.parquet" "Missing test parquet"
 ensure_valid_resource_split
 
-echo "Running VeRL one-step off-policy GRPO; log: ${LOG_FILE}"
+echo "Running VeRL one-step off-policy GRPO with UEnv AgentLoop; log: ${LOG_FILE}"
 echo "GPU split: training=${TRAINING_GPUS_PER_NODE}, rollout=${ROLLOUT_GPUS_PER_NODE}, visible=${NGPUS_PER_NODE}"
+echo "AgentLoop request records: ${SERVICE_DIR}/agent-loop-requests.jsonl"
+echo "AgentLoop result records: ${SERVICE_DIR}/agent-loop-results.jsonl"
 
 set +e
 podman run --rm \
@@ -243,11 +290,34 @@ export MKL_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
 export UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER}
 export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN}
-export UENV_AGENT_LOOP_BATCH=0
+export UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES=${UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES}
+export UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK}
+export UENV_VERL_DEVICE_CAPABILITY_FALLBACK=${UENV_VERL_DEVICE_CAPABILITY_FALLBACK}
+export UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH}
+export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
+export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
+export UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS}
+export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE}
+export UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS}
+export UENV_AGENT_LOOP_CLIENT=rust_core
+export UENV_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT}
+export UENV_ADAPTER_CORE_AUTO_START=0
+export UENV_ADAPTER_CORE_STREAMING=${UENV_ADAPTER_CORE_STREAMING}
+export UENV_ADAPTER_CORE_BINARY=/uenv/uenv-bridge/core/target/debug/uenv-adapter-core
+export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
+export UENV_ADAPTER_CORE_BACKEND=server
+export UENV_AGENT_LOOP_REQUEST_RECORD_PATH=\"${AGENT_LOOP_REQUEST_RECORD_PATH}\"
+export UENV_AGENT_LOOP_RESULT_RECORD_PATH=\"${AGENT_LOOP_RESULT_RECORD_PATH}\"
+export UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED}
+export UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST}
+export UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT}
+export UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL}
+export UENV_MODEL_GATEWAY_LOG_PATH=\"${MODEL_GATEWAY_LOG_PATH}\"
 python3 -m verl.experimental.one_step_off_policy.main_ppo \\
-  hydra.run.dir=${CONTAINER_LOG_ROOT}/verl_onestep_offpolicy/hydra_${RUN_ID} \\
+  hydra.run.dir=${CONTAINER_LOG_ROOT}/verl_onestep_offpolicy_uenv/hydra_${RUN_ID} \\
   algorithm.adv_estimator=grpo \\
   algorithm.use_kl_in_reward=False \\
+  algorithm.rollout_correction.bypass_mode=${ROLLOUT_CORRECTION_BYPASS_MODE} \\
   data.train_files=${CONTAINER_DATA_DIR}/train.parquet \\
   data.val_files=${CONTAINER_DATA_DIR}/test.parquet \\
   data.train_batch_size=${TRAIN_BATCH_SIZE} \\
@@ -282,6 +352,8 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \\
   actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION} \\
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \\
   actor_rollout_ref.rollout.agent.num_workers=${AGENT_NUM_WORKERS} \\
+  actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent \\
+  actor_rollout_ref.rollout.agent.agent_loop_config_path=/uenv/uenv-bridge/configs/uenv-agent-loop.yaml \\
   actor_rollout_ref.rollout.load_format=safetensors \\
   actor_rollout_ref.rollout.layered_summon=${ROLLOUT_LAYERED_SUMMON} \\
   actor_rollout_ref.rollout.checkpoint_engine.backend=${CHECKPOINT_ENGINE_BACKEND} \\
@@ -312,7 +384,7 @@ python3 -m verl.experimental.one_step_off_policy.main_ppo \\
   trainer.total_training_steps=${TRAINING_STEPS} \\
   trainer.total_epochs=${TOTAL_EPOCHS} \\
   trainer.resume_mode=disable \\
-  trainer.default_local_dir=/uenv/uenv-bridge/tmp/verl_onestep_offpolicy_ckpt \\
+  trainer.default_local_dir=/uenv/uenv-bridge/tmp/verl_onestep_offpolicy_uenv_ckpt \\
   rollout.nnodes=1 \\
   rollout.n_gpus_per_node=${ROLLOUT_GPUS_PER_NODE} \\
   ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS} \\
@@ -323,11 +395,58 @@ run_status=${PIPESTATUS[0]}
 set -e
 
 if [ "${run_status}" -ne 0 ]; then
-  echo "VeRL one-step off-policy run failed. Log: ${LOG_FILE}" >&2
+  echo "VeRL one-step off-policy UEnv run failed. Log: ${LOG_FILE}" >&2
   tail -120 "${LOG_FILE}" >&2 2>/dev/null || true
   exit "${run_status}"
 fi
 
-echo "VeRL one-step off-policy run completed."
+summarize_agent_loop_records() {
+  python3 - "${SERVICE_DIR}" <<'PY'
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+service_dir = Path(sys.argv[1])
+for filename in ("agent-loop-requests.jsonl", "agent-loop-results.jsonl", "model-gateway.jsonl"):
+    path = service_dir / filename
+    print(f"{filename}: {path}")
+    if not path.exists():
+        print("  missing")
+        continue
+
+    records = []
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+
+    phases = Counter(record.get("phase") for record in records)
+    batch_ids = Counter(record.get("batch_id") for record in records)
+    parallel_modes = Counter(
+        ((record.get("payload") or {}).get("metadata") or {}).get("parallel_mode")
+        for record in records
+        if isinstance(record.get("payload"), dict)
+    )
+    generation_steps = Counter(
+        ((record.get("payload") or {}).get("metadata") or {}).get("generation_step")
+        for record in records
+        if isinstance(record.get("payload"), dict)
+    )
+    print(f"  lines: {len(records)}")
+    if phases:
+        print(f"  phases: {dict(phases)}")
+    if batch_ids:
+        print(f"  batch_ids: {dict(batch_ids)}")
+    if parallel_modes:
+        print(f"  parallel_modes: {dict(parallel_modes)}")
+    if generation_steps:
+        print(f"  generation_steps: {dict(generation_steps)}")
+PY
+}
+
+echo "VeRL one-step off-policy UEnv run completed."
 echo "Log: ${LOG_FILE}"
 grep -E "Training Progress: 100%|step:[0-9]+ -|critic/rewards/mean|actor/loss|total time:" "${LOG_FILE}" | tail -20 || true
+summarize_agent_loop_records

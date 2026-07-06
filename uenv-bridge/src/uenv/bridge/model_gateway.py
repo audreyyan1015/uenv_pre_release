@@ -122,7 +122,7 @@ class ModelGateway:
                 try:
                     upstream_index, upstream = gateway.choose_upstream()
                     body = self.rfile.read(int(self.headers.get("Content-Length", "0") or "0"))
-                    response_body, status_code, response_headers = gateway._forward(
+                    response_body, status_code, response_headers, model_version = gateway._forward(
                         method=self.command,
                         path=self.path,
                         headers=self.headers,
@@ -134,11 +134,13 @@ class ModelGateway:
                         if key.lower() in {"connection", "content-length", "transfer-encoding", "content-encoding"}:
                             continue
                         self.send_header(key, value)
+                    gateway._send_model_version_headers(self.send_header, model_version)
                     self.send_header("Content-Length", str(len(response_body)))
                     self.end_headers()
                     self.wfile.write(response_body)
                 except Exception as exc:
                     error = str(exc)
+                    model_version = {}
                     response_body = json.dumps({"error": {"message": error, "type": "uenv_model_gateway_error"}}).encode("utf-8")
                     self.send_response(status_code)
                     self.send_header("Content-Type", "application/json")
@@ -156,6 +158,7 @@ class ModelGateway:
                             "status_code": status_code,
                             "latency_ms": round((time.time() - started) * 1000, 3),
                             "request_bytes": len(body),
+                            "model_version": model_version,
                             "error": error,
                         }
                     )
@@ -170,7 +173,7 @@ class ModelGateway:
         headers: Any,
         body: bytes,
         upstream: str,
-    ) -> tuple[bytes, int, dict[str, str]]:
+    ) -> tuple[bytes, int, dict[str, str], dict[str, Any]]:
         upstream_url = self._upstream_url(upstream, path)
         request_headers = {}
         for key, value in headers.items():
@@ -180,9 +183,23 @@ class ModelGateway:
         request = urllib.request.Request(upstream_url, data=body if method != "GET" else None, headers=request_headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds) as response:
-                return response.read(), int(response.status), dict(response.headers.items())
+                response_headers = dict(response.headers.items())
+                raw_body = response.read()
+                response_body, model_version = self._response_with_model_version(
+                    raw_body,
+                    upstream=upstream,
+                    response_headers=response_headers,
+                )
+                return response_body, int(response.status), response_headers, model_version
         except urllib.error.HTTPError as exc:
-            return exc.read(), int(exc.code), dict(exc.headers.items())
+            response_headers = dict(exc.headers.items())
+            raw_body = exc.read()
+            response_body, model_version = self._response_with_model_version(
+                raw_body,
+                upstream=upstream,
+                response_headers=response_headers,
+            )
+            return response_body, int(exc.code), response_headers, model_version
 
     def _upstream_url(self, upstream: str, path: str) -> str:
         parsed = urllib.parse.urlsplit(path)
@@ -195,6 +212,159 @@ class ModelGateway:
             route = route[2:]
         query = f"?{parsed.query}" if parsed.query else ""
         return f"{upstream}{route}{query}"
+
+    def _response_with_model_version(
+        self,
+        response_body: bytes,
+        *,
+        upstream: str,
+        response_headers: dict[str, str],
+    ) -> tuple[bytes, dict[str, Any]]:
+        model_version = self._extract_response_model_version(
+            response_body,
+            upstream=upstream,
+            response_headers=response_headers,
+        )
+        if not self._has_bound_model_version(model_version):
+            return response_body, {}
+        return self._attach_model_version(response_body, upstream=upstream, model_version=model_version), model_version
+
+    def _extract_response_model_version(
+        self,
+        response_body: bytes,
+        *,
+        upstream: str,
+        response_headers: dict[str, str],
+    ) -> dict[str, Any]:
+        data = self._json_object(response_body)
+        nested = data.get("uenv_model_version") if data else None
+        if isinstance(nested, dict):
+            normalized = self._normalize_model_version(
+                nested,
+                upstream=upstream,
+                source="generation_response_body",
+                include_raw=False,
+            )
+            if self._has_bound_model_version(normalized):
+                return normalized
+
+        normalized = self._normalize_model_version(
+            {str(key).lower(): value for key, value in response_headers.items()},
+            upstream=upstream,
+            source="generation_response_header",
+            include_raw=False,
+        )
+        if self._has_bound_model_version(normalized):
+            return normalized
+        return {"model_upstream": upstream}
+
+    def _normalize_model_version(
+        self,
+        data: dict[str, Any],
+        *,
+        upstream: str,
+        source: str,
+        include_raw: bool,
+    ) -> dict[str, Any]:
+        param_version = self._first_value(
+            data,
+            "rollout_param_version",
+            "X-UEnv-Rollout-Param-Version",
+            "x-uenv-rollout-param-version",
+            "param_version",
+            "current_param_version",
+            "global_step",
+            "global_steps",
+        )
+        policy_version = self._first_value(
+            data,
+            "rollout_policy_version",
+            "X-UEnv-Rollout-Policy-Version",
+            "x-uenv-rollout-policy-version",
+            "policy_version",
+        )
+        parameter_sync_id = self._first_value(
+            data,
+            "parameter_sync_id",
+            "X-UEnv-Parameter-Sync-Id",
+            "x-uenv-parameter-sync-id",
+        )
+        model_upstream = self._first_value(
+            data,
+            "model_upstream",
+            "X-UEnv-Model-Upstream",
+            "x-uenv-model-upstream",
+        )
+        normalized = {
+            "model_upstream": str(model_upstream) if model_upstream is not None else upstream,
+            "model_version_source": source,
+            "model_version_source_kind": source,
+        }
+        if include_raw:
+            normalized["model_version_raw"] = data
+        if param_version is not None:
+            normalized["rollout_param_version"] = param_version
+        if policy_version is not None:
+            normalized["rollout_policy_version"] = str(policy_version)
+        elif param_version is not None:
+            normalized["rollout_policy_version"] = f"actor-step-{param_version}"
+        if parameter_sync_id is not None:
+            normalized["parameter_sync_id"] = str(parameter_sync_id)
+        return normalized
+
+    def _attach_model_version(self, response_body: bytes, *, upstream: str, model_version: dict[str, Any]) -> bytes:
+        if not model_version:
+            return response_body
+        try:
+            data = json.loads(response_body.decode("utf-8"))
+        except Exception:
+            return response_body
+        if not isinstance(data, dict):
+            return response_body
+        version_payload = {
+            "model_upstream": upstream,
+            **{key: value for key, value in model_version.items() if key != "model_version_raw"},
+        }
+        existing = data.get("uenv_model_version")
+        if isinstance(existing, dict):
+            for key, value in version_payload.items():
+                existing.setdefault(key, value)
+        else:
+            data["uenv_model_version"] = version_payload
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    def _send_model_version_headers(self, send_header: Any, model_version: dict[str, Any]) -> None:
+        if not model_version:
+            return
+        header_map = {
+            "model_upstream": "X-UEnv-Model-Upstream",
+            "rollout_param_version": "X-UEnv-Rollout-Param-Version",
+            "rollout_policy_version": "X-UEnv-Rollout-Policy-Version",
+            "parameter_sync_id": "X-UEnv-Parameter-Sync-Id",
+        }
+        for key, header in header_map.items():
+            value = model_version.get(key)
+            if value is not None:
+                send_header(header, str(value))
+
+    def _first_value(self, data: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            value = data.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _json_object(self, response_body: bytes) -> dict[str, Any]:
+        try:
+            data = json.loads(response_body.decode("utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _has_bound_model_version(self, model_version: dict[str, Any]) -> bool:
+        return model_version.get("rollout_param_version") not in (None, "") or model_version.get(
+            "rollout_policy_version"
+        ) not in (None, "")
 
     def _record(self, record: dict[str, Any]) -> None:
         if not self.config.log_path:

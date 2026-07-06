@@ -9,6 +9,46 @@ from __future__ import annotations
 import os
 
 
+def _run_when_module_imported(module_name: str, callback) -> None:
+    """Run ``callback`` after ``module_name`` is imported, without importing it now."""
+
+    import builtins
+    import sys
+
+    if module_name in sys.modules:
+        callback()
+        return
+
+    import_attr = "_uenv_import_hook_callbacks"
+    callbacks = getattr(builtins, import_attr, None)
+    if callbacks is None:
+        callbacks = {}
+        setattr(builtins, import_attr, callbacks)
+
+        original_import = builtins.__import__
+
+        def hooked_import(name, globals=None, locals=None, fromlist=(), level=0):
+            module = original_import(name, globals, locals, fromlist, level)
+            for target_name, target_callbacks in list(callbacks.items()):
+                if target_name in sys.modules:
+                    callbacks.pop(target_name, None)
+                    pending_callbacks = []
+                    for target_callback in target_callbacks:
+                        try:
+                            target_callback()
+                        except AttributeError:
+                            pending_callbacks.append(target_callback)
+                    if pending_callbacks:
+                        callbacks[target_name] = pending_callbacks
+            if not callbacks:
+                builtins.__import__ = original_import
+            return module
+
+        builtins.__import__ = hooked_import
+
+    callbacks.setdefault(module_name, []).append(callback)
+
+
 def _patch_resource_tracker_duplicate_unregister() -> None:
     """Tolerate duplicate shared-memory UNREGISTER messages in Python 3.12.
 
@@ -98,10 +138,15 @@ def _patch_transformers_pad_return_tensors() -> None:
     requested.
     """
 
-    import torch
-    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+    import sys
 
-    cls = PreTrainedTokenizerBase
+    module = sys.modules.get("transformers.tokenization_utils_base")
+    cls = getattr(module, "PreTrainedTokenizerBase", None)
+    if cls is None:
+        raise AttributeError("transformers.tokenization_utils_base is not fully initialized")
+
+    import torch
+
     if getattr(cls, "_uenv_pad_return_tensors_patch_applied", False):
         return
 
@@ -123,7 +168,7 @@ def _patch_transformers_pad_return_tensors() -> None:
 
 
 if os.environ.get("UENV_PATCH_TRANSFORMERS_PAD_RETURN_TENSORS") == "1":
-    _patch_transformers_pad_return_tensors()
+    _run_when_module_imported("transformers.tokenization_utils_base", _patch_transformers_pad_return_tensors)
 
 
 def _patch_verl_agent_loop_empty_response() -> None:
@@ -167,7 +212,55 @@ def _patch_verl_agent_loop_empty_response() -> None:
 
 
 if os.environ.get("UENV_PATCH_VERL_AGENT_LOOP_EMPTY_RESPONSE") == "1":
-    _patch_verl_agent_loop_empty_response()
+    _run_when_module_imported("verl.experimental.agent_loop.agent_loop", _patch_verl_agent_loop_empty_response)
+
+
+def _patch_verl_model_version_response() -> None:
+    """Attach rollout parameter version to VeRL vLLM OpenAI responses."""
+
+    from uenv.bridge.verl_model_version_patch import apply_verl_vllm_model_version_patch
+
+    apply_verl_vllm_model_version_patch()
+
+
+if os.environ.get("UENV_PATCH_VERL_MODEL_VERSION_RESPONSE") in {"1", "true", "True", "enabled"}:
+    _run_when_module_imported("verl.workers.rollout.vllm_rollout.vllm_async_server", _patch_verl_model_version_response)
+
+
+def _patch_torch_cuda_is_available_no_devices() -> None:
+    """Treat Ray CPU actors with zero visible GPUs as CUDA-unavailable.
+
+    In VeRL's one-step off-policy path, Ray creates temporary CPU actors that
+    import transformer_engine before any training worker is placed. On this
+    host those actors can report ``torch.cuda.is_available() == True`` while
+    ``torch.cuda.device_count() == 0`` because Ray hides GPUs for the actor.
+    transformer_engine then calls ``get_device_properties(0)`` and aborts with
+    ``AssertionError: Invalid device id``. Returning False only in the zero
+    visible-device case keeps normal GPU workers unchanged.
+    """
+
+    import torch
+
+    cuda = torch.cuda
+    if getattr(cuda, "_uenv_is_available_no_devices_patch_applied", False):
+        return
+
+    original_is_available = cuda.is_available
+
+    def is_available() -> bool:
+        if not original_is_available():
+            return False
+        try:
+            return cuda.device_count() > 0
+        except Exception:
+            return False
+
+    cuda.is_available = is_available
+    cuda._uenv_is_available_no_devices_patch_applied = True
+
+
+if os.environ.get("UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES") == "1":
+    _run_when_module_imported("torch", _patch_torch_cuda_is_available_no_devices)
 
 
 def _patch_verl_device_capability_fallback() -> None:
@@ -198,11 +291,12 @@ def _patch_verl_device_capability_fallback() -> None:
     def get_device_capability(device_id: int = 0):
         try:
             return original_get_device_capability(device_id)
-        except RuntimeError as exc:
+        except (AssertionError, RuntimeError) as exc:
             message = str(exc).lower()
             cuda_unavailable = (
                 "no cuda gpus are available" in message
                 or "cuda error" in message
+                or "invalid device id" in message
                 or "invalid device ordinal" in message
             )
             if not cuda_unavailable:
@@ -214,7 +308,7 @@ def _patch_verl_device_capability_fallback() -> None:
 
 
 if os.environ.get("UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK") == "1":
-    _patch_verl_device_capability_fallback()
+    _run_when_module_imported("verl.utils.device", _patch_verl_device_capability_fallback)
 
 
 def _patch_verl_agent_loop_batch() -> None:
@@ -224,4 +318,4 @@ def _patch_verl_agent_loop_batch() -> None:
 
 
 if os.environ.get("UENV_AGENT_LOOP_BATCH", "0").strip().lower() in {"1", "true", "yes", "on"}:
-    _patch_verl_agent_loop_batch()
+    _run_when_module_imported("verl.experimental.agent_loop.agent_loop", _patch_verl_agent_loop_batch)

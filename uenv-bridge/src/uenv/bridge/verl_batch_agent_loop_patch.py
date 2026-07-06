@@ -96,7 +96,7 @@ def apply_verl_agent_loop_batch_patch() -> None:
             if callable(close):
                 close()
         internal_outputs = [
-            await self._agent_loop_postprocess(output, validate, **kwargs)
+            await self._agent_loop_postprocess(_normalize_agent_loop_output(output), validate, **kwargs)
             for output, kwargs in zip(outputs, sample_kwargs_by_sample, strict=True)
         ]
         return self._postprocess(
@@ -132,6 +132,13 @@ def _apply_greedy_sampling_params(params: dict[str, Any]) -> None:
     params["top_p"] = 1.0
     params["top_k"] = -1
     params["temperature"] = 0
+
+
+def _normalize_agent_loop_output(output: Any) -> Any:
+    metrics = getattr(output, "metrics", None)
+    if hasattr(metrics, "model_dump"):
+        output.metrics = metrics.model_dump()
+    return output
 
 
 def _with_batch_extra_info(

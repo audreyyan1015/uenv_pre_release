@@ -37,12 +37,13 @@ Common environment overrides:
   DATA_MAX_RESPONSE_LENGTH      Default: 1024
   UENV_AGENT_LOOP_BATCH         Batch episodes before Python -> Rust core RPC. Default: 1
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
+  UENV_AGENT_LOOP_PARALLEL_MODE Adapter metadata parallel mode. Default: sync
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
   UENV_MODEL_GATEWAY_ENABLED    Start adapter-side model gateway and send its URL to Worker. Default: 0
   UENV_MODEL_GATEWAY_PORT       Adapter-side model gateway port. Default: 18080
   UENV_MODEL_GATEWAY_PUBLIC_URL Worker-visible gateway URL. Default: http://10.10.20.142:<port>/v1
   RAY_NUM_CPUS                  Default: NGPUS_PER_NODE * 4
-  SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.86.71:8088
+  SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.75.157:8088
   LOG_ROOT                      Host directory for run logs. Default: <repo>/temp/logs
   CONTAINER_LOG_ROOT            Container directory for run logs. Default: /uenv/uenv-bridge/temp/logs
 
@@ -56,7 +57,7 @@ Example:
   REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=1 \
   TRAIN_BATCH_SIZE=4 \
   TEST_FREQ=-1 \
-  PODMAN_GPU_ARGS="nvidia.com/gpu=2,5,6,7" \
+  PODMAN_GPU_ARGS="nvidia.com/gpu=4,5,6,7" \
   CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3 \
   NGPUS_PER_NODE=4 \
   ./scripts/run_layer4_distributed.sh
@@ -98,10 +99,11 @@ fi
 
 # 路径配置。REPO_DIR 指向 uenv-bridge，VERL_WORKSPACE 指向挂载进容器的 VeRL 工作区。
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
+source "${REPO_DIR}/scripts/lib/common.sh"
 VERL_WORKSPACE=${VERL_WORKSPACE:-/data/podman/verl/workspace}
 
 # Server 侧已经启动的 Rust adapter core 地址
-SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.86.71:8088}
+SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.75.157:8088}
 if [ -z "${SERVER_ADAPTER_CORE_ENDPOINT}" ]; then
   echo "SERVER_ADAPTER_CORE_ENDPOINT is required." >&2
   exit 1
@@ -146,10 +148,12 @@ RAY_NOSET_CUDA_VISIBLE_DEVICES=${RAY_NOSET_CUDA_VISIBLE_DEVICES:-$([ "${NGPUS_PE
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
+UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE:-1}
 UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH:-1}
 UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
 UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
 UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
+UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
 UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-1800}
 UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED:-0}
 UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST:-0.0.0.0}
@@ -176,102 +180,7 @@ MODEL_GATEWAY_LOG_PATH=${MODEL_GATEWAY_LOG_PATH:-${CONTAINER_SERVICE_DIR}/model-
 
 mkdir -p "${DATA_DIR}" "${LOG_DIR}" "${SERVICE_DIR}"
 
-build_podman_gpu_args() {
-  local value="$1"
-  if [ -z "${value}" ]; then
-    printf '%s\n' "--device nvidia.com/gpu=all"
-    return 0
-  fi
-
-  case "${value}" in
-    --device*|--gpus*)
-      printf '%s\n' "${value}"
-      return 0
-      ;;
-    all|nvidia.com/gpu=all)
-      printf '%s\n' "--device nvidia.com/gpu=all"
-      return 0
-      ;;
-    nvidia.com/gpu=*)
-      value="${value#nvidia.com/gpu=}"
-      ;;
-  esac
-
-  local output=""
-  local old_ifs="${IFS}"
-  IFS=','
-  for gpu_id in ${value}; do
-    gpu_id="$(printf '%s' "${gpu_id}" | tr -d '[:space:]')"
-    if [ -n "${gpu_id}" ]; then
-      output="${output} --device nvidia.com/gpu=${gpu_id}"
-    fi
-  done
-  IFS="${old_ifs}"
-  printf '%s\n' "${output# }"
-}
-
 PODMAN_GPU_RUN_ARGS=$(build_podman_gpu_args "${PODMAN_GPU_ARGS}")
-
-split_host() {
-  local addr="$1"
-  printf '%s\n' "${addr%:*}"
-}
-
-split_port() {
-  local addr="$1"
-  printf '%s\n' "${addr##*:}"
-}
-
-port_open() {
-  local host="$1"
-  local port="$2"
-  python3 - "$host" "$port" >/dev/null 2>&1 <<'PYNET'
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-sock = socket.socket()
-sock.settimeout(0.5)
-try:
-    sock.connect((host, port))
-except OSError:
-    sys.exit(1)
-else:
-    sys.exit(0)
-finally:
-    sock.close()
-PYNET
-}
-
-wait_for_addr() {
-  local name="$1"
-  local addr="$2"
-  local timeout_seconds="$3"
-  local host
-  local port
-  host="$(split_host "$addr")"
-  port="$(split_port "$addr")"
-  for _ in $(seq 1 "$timeout_seconds"); do
-    if port_open "$host" "$port"; then
-      echo "${name} is listening on ${addr}"
-      return 0
-    fi
-    sleep 1
-  done
-  echo "Timed out waiting for ${name} on ${addr}" >&2
-  return 1
-}
-
-ensure_policy_model_exists() {
-  if [ -f "${MODEL_PATH}/config.json" ] && compgen -G "${MODEL_PATH}/*.safetensors" >/dev/null; then
-    return 0
-  fi
-
-  echo "Policy model not found at ${MODEL_PATH}." >&2
-  echo "Prepare the policy model there, or override MODEL_PATH/CONTAINER_MODEL_PATH." >&2
-  exit 1
-}
 
 run_verl_training() {
   if [ "${TRAINING_STEPS}" != "null" ] && [ "${TRAINING_STEPS}" -gt 0 ]; then
@@ -309,10 +218,12 @@ export MKL_NUM_THREADS=1
 export TORCHINDUCTOR_COMPILE_THREADS=1
 export UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER}
 export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN}
+export UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE}
 export UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH}
 export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
 export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
 export UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS}
+export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE}
 export UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS}
 export UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED}
 export UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST}
@@ -328,7 +239,7 @@ export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
 export UENV_ADAPTER_CORE_BACKEND=server
 export UENV_AGENT_LOOP_REQUEST_RECORD_PATH=\"${AGENT_LOOP_REQUEST_RECORD_PATH}\"
 export UENV_AGENT_LOOP_RESULT_RECORD_PATH=\"${AGENT_LOOP_RESULT_RECORD_PATH}\"
-python3 -m verl.trainer.main_ppo \\
+python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   hydra.run.dir=${CONTAINER_LOG_ROOT}/verl_layer4_agent_loop/hydra_${RUN_ID} \\
   algorithm.adv_estimator=grpo \\
   algorithm.use_kl_in_reward=False \\
@@ -395,6 +306,8 @@ python3 -m verl.trainer.main_ppo \\
   trainer.default_local_dir=/uenv/uenv-bridge/tmp/verl_layer4_agent_loop_ckpt \\
   ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS} \\
   +ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=enabled \\
   +ray_kwargs.ray_init.include_dashboard=False" 2>&1 | tee "${LOG_FILE}"
 }
 

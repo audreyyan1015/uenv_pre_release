@@ -48,11 +48,12 @@ fi
 # 解析仓库路径。REPO_DIR 指向 uenv-bridge，WORKSPACE_ROOT 指向上一级
 # uenv 工作区。
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
+source "${REPO_DIR}/scripts/lib/common.sh"
 WORKSPACE_ROOT=${WORKSPACE_ROOT:-"$(cd "${REPO_DIR}/.." && pwd)"}
 
 # 配置 server 侧已经启动的 Rust adapter core 地址。Python/VeRL 只连接
 # 这个 endpoint，不在 adapter 侧启动 core。
-SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-${UENV_AGENT_LOOP_ENDPOINT:-8.130.86.71:8088}}
+SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-${UENV_AGENT_LOOP_ENDPOINT:-8.130.75.157:8088}}
 if [ -z "${SERVER_ADAPTER_CORE_ENDPOINT}" ]; then
   echo "SERVER_ADAPTER_CORE_ENDPOINT is required." >&2
   exit 1
@@ -110,76 +111,6 @@ mkdir -p "${SERVICE_DIR}"
 
 # 记录本脚本启动的本地服务进程 id，退出时统一清理。
 PIDS=()
-
-# 从 host:port 地址中取出 host 部分。
-split_host() {
-  local addr="$1"
-  printf '%s\n' "${addr%:*}"
-}
-
-# 从 host:port 地址中取出 port 部分。
-split_port() {
-  local addr="$1"
-  printf '%s\n' "${addr##*:}"
-}
-
-# 检查 TCP 地址是否已经可以建立连接；可以连接则返回成功。
-port_open() {
-  local host="$1"
-  local port="$2"
-  python3 - "$host" "$port" >/dev/null 2>&1 <<'PYNET'
-import socket
-import sys
-
-host = sys.argv[1]
-port = int(sys.argv[2])
-sock = socket.socket()
-sock.settimeout(0.5)
-try:
-    sock.connect((host, port))
-except OSError:
-    sys.exit(1)
-else:
-    sys.exit(0)
-finally:
-    sock.close()
-PYNET
-}
-
-# 如果服务地址已经被占用，则提前失败。
-require_free_addr() {
-  local name="$1"
-  local addr="$2"
-  local host
-  local port
-  host="$(split_host "$addr")"
-  port="$(split_port "$addr")"
-  if port_open "$host" "$port"; then
-    echo "${name} address ${addr} is already in use" >&2
-    echo "Stop the process on ${addr}, or override the address before running this script." >&2
-    exit 1
-  fi
-}
-
-# 等待服务开始监听端口。
-wait_for_addr() {
-  local name="$1"
-  local addr="$2"
-  local timeout_seconds="$3"
-  local host
-  local port
-  host="$(split_host "$addr")"
-  port="$(split_port "$addr")"
-  for _ in $(seq 1 "$timeout_seconds"); do
-    if port_open "$host" "$port"; then
-      echo "${name} is listening on ${addr}"
-      return 0
-    fi
-    sleep 1
-  done
-  echo "Timed out waiting for ${name} on ${addr}" >&2
-  return 1
-}
 
 # 除非设置 KEEP_SERVICES=1 用于调试，否则退出时停止本脚本启动的
 # mock model。
