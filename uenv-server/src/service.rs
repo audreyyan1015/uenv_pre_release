@@ -445,6 +445,109 @@ pub(crate) fn finalize_or_protocol_failed(
     }
 }
 
+
+fn optional_result_field(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn optional_context_field(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub(crate) struct ResultPersistenceContext {
+    worker_id: String,
+    result_checksum: String,
+    env_package_id: Option<String>,
+    agent_bridge_version: Option<String>,
+}
+
+impl ResultPersistenceContext {
+    pub(crate) fn native(worker_id: impl Into<String>, idempotency_key: impl Into<String>) -> Self {
+        Self {
+            worker_id: worker_id.into(),
+            result_checksum: idempotency_key.into(),
+            env_package_id: None,
+            agent_bridge_version: None,
+        }
+    }
+
+    pub(crate) fn swe_agent(
+        worker_id: impl Into<String>,
+        job_id: impl Into<String>,
+        env_package_id: impl Into<String>,
+        agent_bridge_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            worker_id: worker_id.into(),
+            result_checksum: job_id.into(),
+            env_package_id: optional_context_field(env_package_id.into()),
+            agent_bridge_version: optional_context_field(agent_bridge_version.into()),
+        }
+    }
+}
+
+pub(crate) fn persist_episode_result(
+    state: &ServerState,
+    result: &EpisodeResult,
+    context: ResultPersistenceContext,
+) {
+    let Some(store) = state.trajectory_store.get() else {
+        return;
+    };
+    let summary = result.summary.as_ref();
+    let row = crate::trajectory::EpisodeResultRow {
+        episode_id: result.episode_id.clone(),
+        attempt_id: result.attempt_id,
+        worker_id: context.worker_id,
+        status: result.status.clone(),
+        total_reward: summary.map(|s| s.total_reward),
+        total_steps: summary.map(|s| s.total_steps as i64),
+        trajectory_id: optional_result_field(&result.trajectory_id),
+        trajectory_storage_url: optional_result_field(&result.trajectory_storage_url),
+        result_checksum: context.result_checksum,
+        env_package_id: context.env_package_id,
+        agent_bridge_version: context.agent_bridge_version,
+    };
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = store.upsert_episode_result(&row) {
+            tracing::warn!(error = %e, "episode_results_upsert_failed");
+        }
+    });
+}
+
+pub(crate) fn publish_episode_result(state: &ServerState, result: EpisodeResult) -> EpisodeResult {
+    let _ = state.episode_broadcast.send(result.clone());
+    result
+}
+
+pub(crate) fn complete_episode_result(
+    state: &ServerState,
+    req: &EpisodeRequest,
+    result: EpisodeResult,
+    timing: Option<ResultTiming>,
+    persistence: Option<ResultPersistenceContext>,
+    publish: bool,
+) -> EpisodeResult {
+    let result = finalize_or_protocol_failed(req, result, timing);
+    if let Some(context) = persistence {
+        persist_episode_result(state, &result, context);
+    }
+    if publish {
+        publish_episode_result(state, result)
+    } else {
+        result
+    }
+}
+
 fn is_retryable_schedule_error(error: &ScheduleError) -> bool {
     matches!(
         error,
@@ -725,14 +828,7 @@ impl UEnvEpisodeService {
                                 worker_id = %assignment.worker_id,
                                 "episode_completed"
                             );
-                            let timing = ResultTiming {
-                                enqueue_at: async_context.enqueue_at,
-                                dispatch_at: Some(dispatch_at),
-                                enqueue_ts: async_context.enqueue_ts,
-                                dispatch_ts: Some(dispatch_ts),
-                            };
-                            let result = finalize_or_protocol_failed(&req, result, Some(timing));
-                            let _ = self.state.episode_broadcast.send(result.clone());
+                            let result = publish_episode_result(&self.state, result);
                             return Ok(result);
                         }
                         Err(_) => {
@@ -779,14 +875,7 @@ impl UEnvEpisodeService {
                                                 worker_id = %assignment.worker_id,
                                                 "episode_completed"
                                             );
-                                            let timing = ResultTiming {
-                                                enqueue_at: async_context.enqueue_at,
-                                                dispatch_at: Some(dispatch_at),
-                                                enqueue_ts: async_context.enqueue_ts,
-                                                dispatch_ts: Some(dispatch_ts),
-                                            };
-                                            let result = finalize_or_protocol_failed(&req, result, Some(timing));
-                                            let _ = self.state.episode_broadcast.send(result.clone());
+                                            let result = publish_episode_result(&self.state, result);
                                             return Ok(result);
                                         }
                                         Err(_) => {
@@ -1186,28 +1275,6 @@ impl UEnvEpisodeService {
                                 total_reward: complete.reward,
                                 ..Default::default()
                             });
-                            if let Some(store) = self.state.trajectory_store.get() {
-                                let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
-                                let row = crate::trajectory::EpisodeResultRow {
-                                    episode_id: episode_id.clone(),
-                                    attempt_id: req.attempt_id,
-                                    worker_id: worker_id_for_row.clone(),
-                                    status: status.clone(),
-                                    total_reward: Some(complete.reward),
-                                    total_steps: None,
-                                    trajectory_id: opt(&complete.trajectory_id),
-                                    trajectory_storage_url: None,
-                                    result_checksum: complete.job_id.clone(),
-                                    env_package_id: opt(&req.env_package_id),
-                                    agent_bridge_version: opt(&agent_bridge_version),
-                                };
-                                let store = store.clone();
-                                tokio::task::spawn_blocking(move || {
-                                    if let Err(e) = store.upsert_episode_result(&row) {
-                                        tracing::warn!(error = %e, "swe_agent_episode_results_upsert_failed");
-                                    }
-                                });
-                            }
                             if status == "failed" || !complete.error_message.is_empty() {
                                 tracing::warn!(
                                     episode_id = %episode_id,
@@ -1252,8 +1319,19 @@ impl UEnvEpisodeService {
             enqueue_ts: async_context.enqueue_ts,
             dispatch_ts: None,
         };
-        let result = finalize_or_protocol_failed(&req, result, Some(timing));
-        let _ = self.state.episode_broadcast.send(result.clone());
+        let result = complete_episode_result(
+            &self.state,
+            &req,
+            result,
+            Some(timing),
+            Some(ResultPersistenceContext::swe_agent(
+                worker_id_for_row.clone(),
+                job_id.clone(),
+                req.env_package_id.clone(),
+                agent_bridge_version.clone(),
+            )),
+            true,
+        );
         Ok(result)
     }
 

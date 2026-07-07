@@ -35,7 +35,7 @@ use crate::proto::scheduler::v1::{
     WorkerInfo,
 };
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
-use crate::service::{ResultTiming, finalize_or_protocol_failed};
+use crate::service::{complete_episode_result, ResultPersistenceContext, ResultTiming};
 use crate::state::ServerState;
 
 /// ControlPlaneService 的实现结构体，持有服务器全局状态的引用。
@@ -453,7 +453,17 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             enqueue_ts: pending.enqueue_ts,
             dispatch_ts: Some(pending.dispatch_ts),
         };
-        result = finalize_or_protocol_failed(&request_for_result, result, Some(timing));
+        result = complete_episode_result(
+            &self.state,
+            &request_for_result,
+            result,
+            Some(timing),
+            Some(ResultPersistenceContext::native(
+                req.worker_id.clone(),
+                req.idempotency_key.clone(),
+            )),
+            false,
+        );
 
         self.state.result_outcomes.insert(
             pending_key.clone(),
@@ -468,35 +478,6 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             .scheduler
             .write()
             .touch_worker_report(&req.worker_id);
-        if let Some(store) = self.state.trajectory_store.get() {
-            let summary = result.summary.as_ref();
-            let opt = |s: &str| {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.to_string())
-                }
-            };
-            let row = crate::trajectory::EpisodeResultRow {
-                episode_id: result.episode_id.clone(),
-                attempt_id: result.attempt_id,
-                worker_id: req.worker_id.clone(),
-                status: result.status.clone(),
-                total_reward: summary.map(|s| s.total_reward),
-                total_steps: summary.map(|s| s.total_steps as i64),
-                trajectory_id: opt(&result.trajectory_id),
-                trajectory_storage_url: opt(&result.trajectory_storage_url),
-                result_checksum: req.idempotency_key.clone(),
-                env_package_id: None,
-                agent_bridge_version: None,
-            };
-            let store = store.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = store.upsert_episode_result(&row) {
-                    warn!(error = %e, "episode_results_upsert_failed");
-                }
-            });
-        }
         let _ = pending.tx.send(result);
 
         Ok(response(true, false, "ACCEPTED", "accepted"))
