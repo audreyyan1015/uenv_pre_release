@@ -1,11 +1,25 @@
+use std::collections::HashMap;
+use std::time::Instant;
+
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
 
+use crate::episode::rollout_meta::{
+    extract_rollout_from_payload, parse_logprobs_from_chat_response,
+    parse_model_version_from_response, parse_response_ids_from_chat_response, AsyncRolloutError,
+    RolloutModelMeta,
+};
 use crate::llm::{
     chat_completions_url_for_endpoint, parse_payload_model_endpoint, LlmConfig,
 };
+
+#[derive(Debug, Clone)]
+pub struct ModelInferOutput {
+    pub action: Vec<u8>,
+    pub rollout_meta: Option<RolloutModelMeta>,
+}
 
 #[derive(Clone)]
 pub struct ModelClient {
@@ -37,6 +51,19 @@ impl ModelClient {
         reward_config: &[u8],
         step_index: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self
+            .infer_with_rollout_meta(payload, reward_config, step_index, false)
+            .await?
+            .action)
+    }
+
+    pub async fn infer_with_rollout_meta(
+        &self,
+        payload: &[u8],
+        reward_config: &[u8],
+        step_index: u32,
+        require_rollout_meta: bool,
+    ) -> Result<ModelInferOutput, Box<dyn std::error::Error + Send + Sync>> {
         let payload_json: Value = if payload.is_empty() {
             Value::Null
         } else {
@@ -47,7 +74,23 @@ impl ModelClient {
         if step_index <= 1 {
             if let Some(response) = payload_json.get("response_text").and_then(Value::as_str) {
                 if !response.is_empty() {
-                    return Ok(response.as_bytes().to_vec());
+                    let mut rollout_meta = if require_rollout_meta {
+                        Some(extract_rollout_from_payload(&payload_json))
+                    } else {
+                        None
+                    };
+                    if require_rollout_meta {
+                        if let Some(meta) = rollout_meta.as_mut() {
+                            if meta.response_mask.is_empty() && !meta.response_ids.is_empty() {
+                                meta.response_mask = vec![1; meta.response_ids.len()];
+                            }
+                            meta.validate_for_async().map_err(|err| err.message())?;
+                        }
+                    }
+                    return Ok(ModelInferOutput {
+                        action: response.as_bytes().to_vec(),
+                        rollout_meta,
+                    });
                 }
             }
         }
@@ -57,6 +100,12 @@ impl ModelClient {
         let question = payload_json
             .get("question")
             .and_then(Value::as_str)
+            .or_else(|| {
+                payload_json
+                    .pointer("/episode_config/initial_observation/prompt_text")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| payload_json.pointer("/env_config/raw_prompt").and_then(Value::as_str))
             .map(str::trim)
             .filter(|q| !q.is_empty());
 
@@ -69,7 +118,17 @@ impl ModelClient {
             };
             if reward_json.get("type").and_then(Value::as_str) == Some("rule_reward") {
                 if let Some(target) = reward_json.get("target").and_then(Value::as_str) {
-                    return Ok(target.as_bytes().to_vec());
+                    if require_rollout_meta {
+                        return Err(
+                            AsyncRolloutError::ModelLogprobsUnsupported
+                                .message()
+                                .into(),
+                        );
+                    }
+                    return Ok(ModelInferOutput {
+                        action: target.as_bytes().to_vec(),
+                        rollout_meta: None,
+                    });
                 }
             }
         }
@@ -91,6 +150,11 @@ impl ModelClient {
         let gen_cfg = payload_json
             .get("generation_config")
             .cloned()
+            .or_else(|| {
+                payload_json
+                    .pointer("/model_endpoint/generation_config")
+                    .cloned()
+            })
             .unwrap_or_else(|| json!({}));
 
         let temperature = gen_cfg
@@ -103,30 +167,70 @@ impl ModelClient {
             .or_else(|| gen_cfg.get("max_tokens").and_then(Value::as_i64))
             .unwrap_or(self.llm.max_tokens);
 
-        let request_body = json!({
+        let mut request_body = json!({
             "model": model_name,
             "messages": [{"role": "user", "content": question}],
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": false,
         });
+        if require_rollout_meta {
+            request_body["logprobs"] = json!(true);
+            request_body["top_logprobs"] = json!(0);
+        }
 
         let url = chat_completions_url_for_endpoint(&endpoint_base);
         let max_retries = self.llm.max_retries.max(1);
         let mut last_err = String::new();
         for attempt in 0..max_retries {
+            let model_start = Instant::now();
             let mut request = self.http.post(&url).json(&request_body.clone());
             request = self.apply_llm_headers(request)?;
             match request.send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
+                        let headers = response_headers(&resp);
                         let resp_json: Value = resp.json().await?;
                         let content = resp_json
                             .pointer("/choices/0/message/content")
                             .and_then(Value::as_str)
                             .ok_or("model client: response missing choices[0].message.content")?;
-                        return Ok(content.as_bytes().to_vec());
+                        let rollout_meta = if require_rollout_meta {
+                            let mut meta = RolloutModelMeta {
+                                model_latency_ms: model_start.elapsed().as_millis() as i64,
+                                ..Default::default()
+                            };
+                            let (param, policy) =
+                                parse_model_version_from_response(&resp_json, &headers);
+                            meta.rollout_param_version = param;
+                            meta.rollout_policy_version = policy.or_else(|| {
+                                meta.rollout_param_version
+                                    .map(|v| format!("actor-step-{v}"))
+                            });
+                            meta.rollout_log_probs =
+                                parse_logprobs_from_chat_response(&resp_json).map_err(|err| {
+                                    Box::<dyn std::error::Error + Send + Sync>::from(err.message())
+                                })?;
+                            meta.response_ids = parse_response_ids_from_chat_response(&resp_json);
+                            if meta.response_ids.is_empty() {
+                                let from_payload = extract_rollout_from_payload(&payload_json);
+                                meta.response_ids = from_payload.response_ids;
+                            }
+                            if meta.response_mask.is_empty() && !meta.response_ids.is_empty() {
+                                meta.response_mask = vec![1; meta.response_ids.len()];
+                            }
+                            meta.validate_for_async().map_err(|err| {
+                                Box::<dyn std::error::Error + Send + Sync>::from(err.message())
+                            })?;
+                            Some(meta)
+                        } else {
+                            None
+                        };
+                        return Ok(ModelInferOutput {
+                            action: content.as_bytes().to_vec(),
+                            rollout_meta,
+                        });
                     }
                     let body = resp.text().await.unwrap_or_default();
                     last_err = format!(
@@ -161,6 +265,18 @@ impl ModelClient {
     }
 }
 
+fn response_headers(resp: &reqwest::Response) -> HashMap<String, String> {
+    resp.headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
 fn build_http_client(timeout_secs: u64) -> Client {
     let connect_timeout = Duration::from_secs(timeout_secs.min(30).max(1));
     let request_timeout = Duration::from_secs(timeout_secs.max(1));
@@ -179,6 +295,13 @@ fn resolve_llm_target(payload: &Value, llm: &LlmConfig) -> (String, String) {
         let model_name = payload
             .get("model_name")
             .and_then(Value::as_str)
+            .or_else(|| {
+                payload
+                    .get("model_endpoint")
+                    .and_then(Value::as_object)
+                    .and_then(|m| m.get("model_name"))
+                    .and_then(Value::as_str)
+            })
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
@@ -196,6 +319,45 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn async_pre_rollout_extracts_rollout_meta_from_payload() {
+        let client = ModelClient::new();
+        let payload = r#"{
+            "response_text":"answer 42",
+            "response_ids":[101,102],
+            "response_mask":[1,1],
+            "rollout_log_probs":[-0.1,-0.2],
+            "metadata":{
+                "rollout_param_version":"11",
+                "rollout_policy_version":"actor-step-11"
+            }
+        }"#;
+        let output = client
+            .infer_with_rollout_meta(payload.as_bytes(), br#"{}"#, 1, true)
+            .await
+            .expect("infer");
+        assert_eq!(output.action, b"answer 42");
+        let meta = output.rollout_meta.expect("rollout meta");
+        assert_eq!(meta.rollout_param_version, Some(11));
+        assert_eq!(meta.rollout_log_probs.len(), 2);
+        assert_eq!(meta.response_ids, vec![101, 102]);
+    }
+
+    #[tokio::test]
+    async fn async_pre_rollout_fails_when_logprobs_missing() {
+        let client = ModelClient::new();
+        let payload = r#"{
+            "response_text":"answer 42",
+            "response_ids":[101],
+            "metadata":{"rollout_param_version":"11","rollout_policy_version":"actor-step-11"}
+        }"#;
+        let err = client
+            .infer_with_rollout_meta(payload.as_bytes(), br#"{}"#, 1, true)
+            .await
+            .expect_err("should fail");
+        assert!(err.to_string().contains("rollout_log_probs"));
+    }
 
     #[test]
     fn uses_valid_payload_model_endpoint_override() {
