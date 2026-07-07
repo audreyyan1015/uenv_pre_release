@@ -35,6 +35,7 @@ use crate::proto::scheduler::v1::{
     WorkerInfo,
 };
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
+use crate::service::{ResultTiming, finalize_or_protocol_failed};
 use crate::state::ServerState;
 
 /// ControlPlaneService 的实现结构体，持有服务器全局状态的引用。
@@ -77,13 +78,13 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             } else {
                 1
             },
-            current_load: 0,  // 初始负载为 0
+            current_load: 0, // 初始负载为 0
             reserved_load: 0,
             reported_load: 0,
             resource: req.resource.clone(),
             draining: false,
-            last_report_at: Some(std::time::Instant::now()),  // 从注册时刻起算5min超时，防止 None 导致永不降级
-            last_heartbeat_at: Some(std::time::Instant::now()),  // 注册即视为一次心跳，30s 内需发真实心跳续期
+            last_report_at: Some(std::time::Instant::now()), // 从注册时刻起算5min超时，防止 None 导致永不降级
+            last_heartbeat_at: Some(std::time::Instant::now()), // 注册即视为一次心跳，30s 内需发真实心跳续期
             // SWE+Agent 编排：保存 Gateway 对外 URL 与已 sync 的 EnvPackage（严格版本校验用）
             gateway_public_url: req.gateway_public_url.clone(),
             synced_env_packages: req
@@ -228,7 +229,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                         // 构造心跳响应，通知 worker 服务器一切正常
                         let resp = HeartbeatResponse {
                             ok: true,
-                            drain: None,  // None 表示不要求 worker 停止接受新任务
+                            drain: None, // None 表示不要求 worker 停止接受新任务
                             server_epoch: state.epoch(),
                             next_heartbeat_interval_ms: state.heartbeat_interval_ms as i32,
                         };
@@ -281,11 +282,21 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 current_epoch = self.state.epoch(),
                 "report_result_stale_epoch_rejected"
             );
-            return Ok(response(false, false, "STALE_EPOCH", "server epoch mismatch"));
+            return Ok(response(
+                false,
+                false,
+                "STALE_EPOCH",
+                "server epoch mismatch",
+            ));
         }
         if req.idempotency_key.is_empty() {
             warn!(worker_id = %req.worker_id, "report_result_empty_idempotency_key_rejected");
-            return Ok(response(false, false, "INVALID_REQUEST", "empty idempotency_key"));
+            return Ok(response(
+                false,
+                false,
+                "INVALID_REQUEST",
+                "empty idempotency_key",
+            ));
         }
         if let Some(record) = self.state.idempotency_cache.get(&req.idempotency_key) {
             let code = if record.ack {
@@ -295,7 +306,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             };
             return Ok(response(record.ack, true, code, &record.message));
         }
-        let Some(result) = req.result else {
+        let Some(mut result) = req.result else {
             warn!(worker_id = %req.worker_id, "report_result_missing_result_rejected");
             return Ok(response(false, false, "INVALID_REQUEST", "missing result"));
         };
@@ -306,12 +317,21 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 attempt_id = result.attempt_id,
                 "report_result_missing_dispatch_lease_rejected"
             );
-            return Ok(response(false, false, "INVALID_REQUEST", "missing dispatch lease or token"));
+            return Ok(response(
+                false,
+                false,
+                "INVALID_REQUEST",
+                "missing dispatch lease or token",
+            ));
         }
 
         let episode_id = result.episode_id.clone();
         let attempt_id = result.attempt_id;
-        let pending_key = (episode_id.clone(), attempt_id, req.dispatch_lease_id.clone());
+        let pending_key = (
+            episode_id.clone(),
+            attempt_id,
+            req.dispatch_lease_id.clone(),
+        );
         let ttl = Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1));
         let expires_at = Instant::now() + ttl;
         let remember = |ack: bool, code: &str, message: &str| {
@@ -346,8 +366,17 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                     attempt_id = attempt_id,
                     "report_result_worker_mismatch_rejected"
                 );
-                remember(false, "WORKER_MISMATCH", "worker_id does not own this dispatch lease");
-                return Ok(response(false, false, "WORKER_MISMATCH", "worker_id does not own this dispatch lease"));
+                remember(
+                    false,
+                    "WORKER_MISMATCH",
+                    "worker_id does not own this dispatch lease",
+                );
+                return Ok(response(
+                    false,
+                    false,
+                    "WORKER_MISMATCH",
+                    "worker_id does not own this dispatch lease",
+                ));
             }
             if pending_ref.dispatch_token != req.dispatch_token {
                 warn!(
@@ -358,28 +387,43 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                     "report_result_token_mismatch_rejected"
                 );
                 remember(false, "TOKEN_MISMATCH", "dispatch token mismatch");
-                return Ok(response(false, false, "TOKEN_MISMATCH", "dispatch token mismatch"));
+                return Ok(response(
+                    false,
+                    false,
+                    "TOKEN_MISMATCH",
+                    "dispatch token mismatch",
+                ));
             }
         }
 
-        let removed = self.state.pending_results.remove_if(&pending_key, |_, pending| {
-            pending.worker_id == req.worker_id && pending.dispatch_token == req.dispatch_token
-        });
+        let removed = self
+            .state
+            .pending_results
+            .remove_if(&pending_key, |_, pending| {
+                pending.worker_id == req.worker_id && pending.dispatch_token == req.dispatch_token
+            });
         let Some((_, pending)) = removed else {
-            let (code, message) = if let Some(outcome) = self.state.result_outcomes.get(&pending_key) {
-                if outcome.code == "ACCEPTED" {
+            let (code, message) =
+                if let Some(outcome) = self.state.result_outcomes.get(&pending_key) {
+                    if outcome.code == "ACCEPTED" {
+                        (
+                            "ALREADY_COMPLETED".to_string(),
+                            "result already accepted for this lease".to_string(),
+                        )
+                    } else {
+                        (outcome.code.clone(), outcome.message.clone())
+                    }
+                } else if self.state.cancel_outcomes.contains_key(&episode_id) {
                     (
-                        "ALREADY_COMPLETED".to_string(),
-                        "result already accepted for this lease".to_string(),
+                        "LATE_AFTER_CANCEL".to_string(),
+                        "episode was cancelled".to_string(),
                     )
                 } else {
-                    (outcome.code.clone(), outcome.message.clone())
-                }
-            } else if self.state.cancel_outcomes.contains_key(&episode_id) {
-                ("LATE_AFTER_CANCEL".to_string(), "episode was cancelled".to_string())
-            } else {
-                ("UNKNOWN_PENDING".to_string(), "pending result not found".to_string())
-            };
+                    (
+                        "UNKNOWN_PENDING".to_string(),
+                        "pending result not found".to_string(),
+                    )
+                };
             warn!(
                 worker_id = %req.worker_id,
                 episode_id = %episode_id,
@@ -392,6 +436,25 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             return Ok(response(false, false, &code, &message));
         };
 
+        let request_for_result = crate::proto::v1::EpisodeRequest {
+            episode_id: episode_id.clone(),
+            attempt_id,
+            parallel_mode: pending.parallel_mode.clone(),
+            enqueue_ts: Some(pending.enqueue_ts),
+            metadata: std::collections::HashMap::from([(
+                "parallel_mode".to_string(),
+                pending.parallel_mode.clone(),
+            )]),
+            ..Default::default()
+        };
+        let timing = ResultTiming {
+            enqueue_at: pending.enqueue_at,
+            dispatch_at: Some(pending.dispatch_at),
+            enqueue_ts: pending.enqueue_ts,
+            dispatch_ts: Some(pending.dispatch_ts),
+        };
+        result = finalize_or_protocol_failed(&request_for_result, result, Some(timing));
+
         self.state.result_outcomes.insert(
             pending_key.clone(),
             crate::state::TimedOutcome {
@@ -401,10 +464,19 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             },
         );
         remember(true, "ACCEPTED", "accepted");
-        self.state.scheduler.write().touch_worker_report(&req.worker_id);
+        self.state
+            .scheduler
+            .write()
+            .touch_worker_report(&req.worker_id);
         if let Some(store) = self.state.trajectory_store.get() {
             let summary = result.summary.as_ref();
-            let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
+            let opt = |s: &str| {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            };
             let row = crate::trajectory::EpisodeResultRow {
                 episode_id: result.episode_id.clone(),
                 attempt_id: result.attempt_id,
@@ -461,7 +533,8 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                     "degraded"
                 } else {
                     "ready"
-                }.to_string(),
+                }
+                .to_string(),
                 endpoint: w.endpoint,
             })
             .collect();
@@ -469,12 +542,11 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::scheduler::v1::control_plane_service_server::ControlPlaneService;
     use crate::proto::scheduler::v1::ReportResultRequest;
+    use crate::proto::scheduler::v1::control_plane_service_server::ControlPlaneService;
     use crate::proto::v1::EpisodeResult;
 
     fn report_req(idempotency_key: &str) -> ReportResultRequest {
@@ -504,6 +576,11 @@ mod tests {
                 worker_id: "w1".to_string(),
                 dispatch_lease_id: "lease-1".to_string(),
                 dispatch_token: b"token-1".to_vec(),
+                parallel_mode: "sync".to_string(),
+                enqueue_at: std::time::Instant::now(),
+                dispatch_at: std::time::Instant::now(),
+                enqueue_ts: 0.0,
+                dispatch_ts: 0.0,
             },
         );
         let svc = ControlPlaneServiceImpl { state };

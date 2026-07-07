@@ -2,10 +2,10 @@ use crate::proto::v1::EpisodeResult;
 use crate::scheduler::RoundRobinScheduler;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, oneshot, Semaphore};
+use tokio::sync::{Semaphore, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub struct ServerState {
@@ -43,7 +43,6 @@ pub struct ServerState {
     /// SWE+Agent 编排：AgentJob 待领队列 + in-flight 表。
     pub agent_job_queue: Arc<crate::agent_job::AgentJobQueue>,
 }
-
 
 #[derive(Clone)]
 pub struct NativeDispatchInfo {
@@ -109,6 +108,9 @@ pub struct ActiveEpisode {
     pub attempt_id: u32,
     pub worker_id: String,
     pub started_at: Instant,
+    pub parallel_mode: String,
+    pub enqueue_at: Instant,
+    pub enqueue_ts: f64,
     /// correlation_id 传入时通常等于 batch_id，用于跨层日志关联
     pub batch_id: String,
 }
@@ -120,6 +122,11 @@ pub struct PendingResult {
     pub worker_id: String,
     pub dispatch_lease_id: String,
     pub dispatch_token: Vec<u8>,
+    pub parallel_mode: String,
+    pub enqueue_at: Instant,
+    pub dispatch_at: Instant,
+    pub enqueue_ts: f64,
+    pub dispatch_ts: f64,
 }
 
 #[derive(Clone)]
@@ -146,7 +153,10 @@ pub struct CompletedAsyncResult {
 }
 
 impl ServerState {
-    pub fn new(scheduler: Arc<RwLock<RoundRobinScheduler>>, config: &crate::config::ServerConfig) -> Self {
+    pub fn new(
+        scheduler: Arc<RwLock<RoundRobinScheduler>>,
+        config: &crate::config::ServerConfig,
+    ) -> Self {
         let (episode_broadcast, _) = broadcast::channel(config.episode.broadcast_capacity.max(1));
         // SWE+Agent 编排资源：Agent 注册表复用 scheduler 的心跳超时阈值判定掉线，
         // 并注入多池路由配置（variant→pool 映射）。
@@ -188,7 +198,10 @@ impl ServerState {
             heartbeat_interval_ms: config.scheduler.heartbeat_interval_ms,
             completed_async_ttl_secs: config.episode.completed_async_ttl_secs,
             completed_async_max_entries: config.episode.completed_async_max_entries,
-            report_result_idempotency_ttl_secs: std::cmp::max(config.episode.default_timeout_secs.saturating_mul(2), 3600),
+            report_result_idempotency_ttl_secs: std::cmp::max(
+                config.episode.default_timeout_secs.saturating_mul(2),
+                3600,
+            ),
             agent_job_pickup_timeout_secs: config.episode.agent_job_pickup_timeout_secs,
             episode_semaphore: if config.episode.queue_dynamic {
                 // 动态模式：从 0 开始，worker 注册时 add_permits
@@ -217,9 +230,12 @@ impl ServerState {
 
     pub fn sweep_ttl_caches(&self) {
         let now = Instant::now();
-        self.idempotency_cache.retain(|_, record| record.expires_at > now);
-        self.result_outcomes.retain(|_, outcome| outcome.expires_at > now);
-        self.cancel_outcomes.retain(|_, outcome| outcome.expires_at > now);
+        self.idempotency_cache
+            .retain(|_, record| record.expires_at > now);
+        self.result_outcomes
+            .retain(|_, outcome| outcome.expires_at > now);
+        self.cancel_outcomes
+            .retain(|_, outcome| outcome.expires_at > now);
         self.cancelled_episodes
             .retain(|episode_id, _| self.active_episode_handles.contains_key(episode_id));
         if self.completed_async_ttl_secs > 0 {

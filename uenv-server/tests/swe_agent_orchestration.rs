@@ -167,6 +167,7 @@ async fn swe_agent_episode_full_orchestration() {
             trajectory_id: "trj-xyz".to_string(),
             error_message: String::new(),
                         agent_id: "a-20877".to_string(),
+                        ..Default::default()
         }))
         .await
         .unwrap();
@@ -755,6 +756,7 @@ async fn swe_agent_batch_all_complete() {
                         trajectory_id: format!("trj-{}", job.instance_id),
                         error_message: String::new(),
                         agent_id: "a1".to_string(),
+                        ..Default::default()
                     }))
                     .await
                     .unwrap();

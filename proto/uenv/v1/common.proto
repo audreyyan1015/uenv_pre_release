@@ -1,4 +1,4 @@
-syntax = "proto3";
+﻿syntax = "proto3";
 package uenv.v1;
 
 // ─── 错误码 ──────────────────────────────────────────────
@@ -10,6 +10,7 @@ enum ErrorCode {
     ERR_INVALID_REQUEST     = 1001;
     ERR_UNKNOWN_ENV_TYPE    = 1002;
     ERR_UNSUPPORTED_MODE    = 1003;
+    ERR_ASYNC_PROTOCOL_MISSING_FIELD = 1004;
 
     // 调度错误 (2xxx)
     ERR_NO_AVAILABLE_WORKER = 2001;
@@ -25,6 +26,9 @@ enum ErrorCode {
     ERR_ALREADY_COMPLETED   = 3006;
     ERR_LEASE_EXPIRED       = 3007;
     ERR_LEASE_SUPERSEDED    = 3008;
+    ERR_MODEL_VERSION_MISSING = 3009;
+    ERR_ROLLOUT_LOGPROBS_MISSING = 3010;
+    ERR_MODEL_LOGPROBS_UNSUPPORTED = 3011;
 
     // 内部错误 (5xxx)
     ERR_INTERNAL            = 5001;
@@ -46,3 +50,4 @@ enum ExecutionMode {
     MODE_MODEL_CALLBACK = 3;
     MODE_CUSTOM       = 4;
 }
+

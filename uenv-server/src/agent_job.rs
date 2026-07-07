@@ -56,7 +56,11 @@ impl AgentJobQueue {
 
     /// 入队一个 AgentJob，返回等待其完成的 receiver。
     /// 编排逻辑 await 该 receiver 拿 CompleteAgentJob（配合外层 deadline）。
-    pub fn enqueue(&self, pool_id: &str, job: AgentJob) -> oneshot::Receiver<AgentJobCompleteRequest> {
+    pub fn enqueue(
+        &self,
+        pool_id: &str,
+        job: AgentJob,
+    ) -> oneshot::Receiver<AgentJobCompleteRequest> {
         let (tx, rx) = oneshot::channel();
         let job_id = job.job_id.clone();
         // 先登记 in-flight 的回调（agent_id 在 poll 时才确定，此处留空占位）。
@@ -69,7 +73,10 @@ impl AgentJobQueue {
                 done: tx,
             },
         );
-        self.pending.entry(pool_id.to_string()).or_default().push_back(job);
+        self.pending
+            .entry(pool_id.to_string())
+            .or_default()
+            .push_back(job);
         tracing::info!(job_id = %job_id, pool_id = %pool_id, "agent_job_enqueued");
         rx
     }
@@ -272,7 +279,11 @@ impl AgentControlService for AgentControlServiceImpl {
         let job_id = req.job_id.clone();
         let Some(inflight_ref) = self.queue.in_flight.get(&job_id) else {
             tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
-            return Ok(Response::new(AgentJobCompleteResponse { ack: false, code: "UNKNOWN_JOB".to_string(), message: "unknown job".to_string() }));
+            return Ok(Response::new(AgentJobCompleteResponse {
+                ack: false,
+                code: "UNKNOWN_JOB".to_string(),
+                message: "unknown job".to_string(),
+            }));
         };
         if inflight_ref.run_id != req.run_id
             || inflight_ref.agent_id.is_empty()
@@ -310,11 +321,19 @@ impl AgentControlService for AgentControlServiceImpl {
                     "agent_job_completed"
                 );
                 let _ = inflight.done.send(req);
-                Ok(Response::new(AgentJobCompleteResponse { ack: true, code: "ACCEPTED".to_string(), message: String::new() }))
+                Ok(Response::new(AgentJobCompleteResponse {
+                    ack: true,
+                    code: "ACCEPTED".to_string(),
+                    message: String::new(),
+                }))
             }
             None => {
                 tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
-                Ok(Response::new(AgentJobCompleteResponse { ack: false, code: "UNKNOWN_JOB".to_string(), message: "unknown job".to_string() }))
+                Ok(Response::new(AgentJobCompleteResponse {
+                    ack: false,
+                    code: "UNKNOWN_JOB".to_string(),
+                    message: "unknown job".to_string(),
+                }))
             }
         }
     }
@@ -353,7 +372,11 @@ mod tests {
         }
     }
 
-    fn svc() -> (AgentControlServiceImpl, Arc<AgentJobQueue>, Arc<AgentRegistry>) {
+    fn svc() -> (
+        AgentControlServiceImpl,
+        Arc<AgentJobQueue>,
+        Arc<AgentRegistry>,
+    ) {
         let registry = Arc::new(AgentRegistry::new(60));
         registry.register(agent("a1", "1.0.0"));
         registry.register(agent("a2", "2.0.0"));
@@ -383,7 +406,10 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!resp.has_job);
-        assert_eq!(queue.in_flight_snapshot(), vec![("job-1".to_string(), String::new())]);
+        assert_eq!(
+            queue.in_flight_snapshot(),
+            vec![("job-1".to_string(), String::new())]
+        );
 
         let resp = svc
             .poll_agent_job(Request::new(PollAgentJobRequest {
@@ -418,6 +444,7 @@ mod tests {
                 trajectory_id: String::new(),
                 error_message: String::new(),
                 agent_id: "a2".to_string(),
+                ..Default::default()
             }))
             .await
             .unwrap()
@@ -433,6 +460,7 @@ mod tests {
                 trajectory_id: String::new(),
                 error_message: String::new(),
                 agent_id: "a2".to_string(),
+                ..Default::default()
             }))
             .await
             .unwrap()

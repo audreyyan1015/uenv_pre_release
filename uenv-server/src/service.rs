@@ -1,23 +1,25 @@
-use std::future::Future;
 use dashmap::mapref::entry::Entry;
+use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
 use prost_types::Timestamp;
+use serde_json::Value;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
+use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
+use crate::proto::v1::AgentJob;
+use crate::proto::v1::admin_service_server::AdminService;
 use crate::proto::v1::{
     CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest, DrainWorkerResponse,
-    EpisodeRequest, EpisodeResult, GetServerStatusRequest, ServerStatus,
+    EpisodeRequest, EpisodeResult, ErrorCode, GetServerStatusRequest, ServerStatus,
 };
-use crate::proto::v1::AgentJob;
-use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
 use crate::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
 use crate::proto::worker::v1::{CancelWorkerEpisodeRequest, DispatchEpisodeRequest};
-use crate::proto::v1::admin_service_server::AdminService;
 use crate::scheduler::traits::{ScheduleError, Scheduler, WorkerAssignment};
 use crate::state::{
     ActiveEpisode, CompletedAsyncResult, EpisodeHandle, NativeDispatchInfo, ServerState,
@@ -35,12 +37,19 @@ struct WorkerLease {
 
 impl WorkerLease {
     fn new(state: Arc<ServerState>, assignment: WorkerAssignment) -> Self {
-        Self { state, assignment, released: false }
+        Self {
+            state,
+            assignment,
+            released: false,
+        }
     }
 
     fn release(&mut self) {
         if !self.released {
-            self.state.scheduler.write().release(&self.assignment.worker_id);
+            self.state
+                .scheduler
+                .write()
+                .release(&self.assignment.worker_id);
             self.released = true;
         }
     }
@@ -74,7 +83,12 @@ struct GatewaySessionGuard {
 
 impl GatewaySessionGuard {
     fn new(gateway_public_url: String, gateway_api_key: String, session_id: String) -> Self {
-        Self { gateway_public_url, gateway_api_key, session_id, disarmed: false }
+        Self {
+            gateway_public_url,
+            gateway_api_key,
+            session_id,
+            disarmed: false,
+        }
     }
 
     async fn close_now(&mut self) {
@@ -85,7 +99,8 @@ impl GatewaySessionGuard {
         let key = self.gateway_api_key.clone();
         let sid = self.session_id.clone();
         self.disarmed = true;
-        let _ = tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid)).await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid)).await;
     }
 }
 
@@ -98,7 +113,8 @@ impl Drop for GatewaySessionGuard {
         let key = self.gateway_api_key.clone();
         let sid = self.session_id.clone();
         tokio::spawn(async move {
-            let _ = tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid)).await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid))
+                .await;
         });
     }
 }
@@ -116,7 +132,9 @@ fn record_cancel_outcome(state: &ServerState, episode_id: &str) {
 }
 
 async fn notify_worker_cancel(info: NativeDispatchInfo) {
-    let Ok(mut client) = WorkerGrpcServiceClient::connect(format!("http://{}", info.endpoint)).await else {
+    let Ok(mut client) =
+        WorkerGrpcServiceClient::connect(format!("http://{}", info.endpoint)).await
+    else {
         tracing::warn!(episode_id = %info.episode_id, worker_endpoint = %info.endpoint, "worker_cancel_connect_failed");
         return;
     };
@@ -142,7 +160,9 @@ async fn notify_worker_cancel(info: NativeDispatchInfo) {
                 "worker_cancel_reported"
             );
         }
-        Ok(Err(e)) => tracing::warn!(episode_id = %info.episode_id, error = %e, "worker_cancel_rpc_failed"),
+        Ok(Err(e)) => {
+            tracing::warn!(episode_id = %info.episode_id, error = %e, "worker_cancel_rpc_failed")
+        }
         Err(_) => tracing::warn!(episode_id = %info.episode_id, "worker_cancel_rpc_timeout"),
     }
 }
@@ -184,8 +204,252 @@ fn normalize_episode_request(req: &mut EpisodeRequest) {
     }
 }
 
+#[derive(Clone)]
+struct AsyncRequestContext {
+    parallel_mode: String,
+    enqueue_at: Instant,
+    enqueue_ts: f64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ResultTiming {
+    pub(crate) enqueue_at: Instant,
+    pub(crate) dispatch_at: Option<Instant>,
+    pub(crate) enqueue_ts: f64,
+    pub(crate) dispatch_ts: Option<f64>,
+}
+
+fn now_unix_seconds_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+fn normalize_parallel_mode(raw: &str) -> anyhow::Result<String> {
+    let mode = raw.trim();
+    if mode.is_empty() {
+        return Ok("sync".to_string());
+    }
+    match mode {
+        "sync" | "one_step_off_policy" | "fully_async" => Ok(mode.to_string()),
+        other => anyhow::bail!("unsupported parallel_mode: {other}"),
+    }
+}
+
+fn payload_metadata(req: &EpisodeRequest) -> HashMap<String, String> {
+    let Ok(Value::Object(root)) = serde_json::from_slice::<Value>(&req.payload) else {
+        return HashMap::new();
+    };
+    let Some(Value::Object(metadata)) = root.get("metadata") else {
+        return HashMap::new();
+    };
+    metadata
+        .iter()
+        .filter_map(|(key, value)| {
+            let value = match value {
+                Value::Null => String::new(),
+                Value::String(s) => s.clone(),
+                Value::Bool(v) => v.to_string(),
+                Value::Number(v) => v.to_string(),
+                _ => serde_json::to_string(value).unwrap_or_default(),
+            };
+            if value.is_empty() {
+                None
+            } else {
+                Some((key.clone(), value))
+            }
+        })
+        .collect()
+}
+
+fn extract_parallel_mode(req: &EpisodeRequest) -> anyhow::Result<String> {
+    if !req.parallel_mode.trim().is_empty() {
+        return normalize_parallel_mode(&req.parallel_mode);
+    }
+    if let Some(mode) = req.metadata.get("parallel_mode") {
+        return normalize_parallel_mode(mode);
+    }
+    let metadata = payload_metadata(req);
+    if let Some(mode) = metadata.get("parallel_mode") {
+        return normalize_parallel_mode(mode);
+    }
+    Ok("sync".to_string())
+}
+
+fn ensure_async_request_context(req: &mut EpisodeRequest) -> anyhow::Result<AsyncRequestContext> {
+    let parallel_mode = extract_parallel_mode(req)?;
+    req.parallel_mode = parallel_mode.clone();
+    req.metadata
+        .entry("parallel_mode".to_string())
+        .or_insert_with(|| parallel_mode.clone());
+    let payload_meta = payload_metadata(req);
+    for key in [
+        "rollout_param_version",
+        "rollout_policy_version",
+        "enqueue_ts",
+    ] {
+        if let Some(value) = payload_meta.get(key) {
+            req.metadata
+                .entry(key.to_string())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    let enqueue_ts = req.enqueue_ts.unwrap_or_else(now_unix_seconds_f64);
+    req.enqueue_ts = Some(enqueue_ts);
+    req.metadata
+        .entry("enqueue_ts".to_string())
+        .or_insert_with(|| format!("{enqueue_ts:.6}"));
+    Ok(AsyncRequestContext {
+        parallel_mode,
+        enqueue_at: Instant::now(),
+        enqueue_ts,
+    })
+}
+
+fn parse_i64_metadata(req: &EpisodeRequest, key: &str) -> Option<i64> {
+    req.metadata.get(key)?.parse::<i64>().ok()
+}
+
+fn failed_result_from_request(
+    req: &EpisodeRequest,
+    status: &str,
+    message: impl Into<String>,
+    error_code: ErrorCode,
+    timing: Option<ResultTiming>,
+) -> EpisodeResult {
+    let mut result = EpisodeResult {
+        episode_id: req.episode_id.clone(),
+        attempt_id: req.attempt_id,
+        status: status.to_string(),
+        error_code: Some(error_code as i32),
+        error_message: message.into(),
+        ..Default::default()
+    };
+    result.summary = Some(crate::proto::v1::episode_result::Summary {
+        terminate_reason: status.to_string(),
+        ..Default::default()
+    });
+    finalize_episode_result(req, result, timing)
+}
+
+fn finalize_episode_result(
+    req: &EpisodeRequest,
+    mut result: EpisodeResult,
+    timing: Option<ResultTiming>,
+) -> EpisodeResult {
+    if result.parallel_mode.is_empty() {
+        result.parallel_mode = req.parallel_mode.clone();
+    }
+    for (key, value) in &req.metadata {
+        result
+            .metadata
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    result
+        .metadata
+        .entry("parallel_mode".to_string())
+        .or_insert_with(|| result.parallel_mode.clone());
+    if result.rollout_param_version.is_none() {
+        result.rollout_param_version = parse_i64_metadata(req, "rollout_param_version");
+    }
+    if result
+        .rollout_policy_version
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        if let Some(value) = req.metadata.get("rollout_policy_version") {
+            result.rollout_policy_version = Some(value.clone());
+        }
+    }
+    let ready_ts = result.result_ready_ts.unwrap_or_else(now_unix_seconds_f64);
+    result.result_ready_ts = Some(ready_ts);
+    if let Some(timing) = timing {
+        if result.dispatch_ts.is_none() {
+            result.dispatch_ts = timing.dispatch_ts;
+        }
+        if result.server_latency_ms.is_none() {
+            result.server_latency_ms = Some(
+                timing
+                    .dispatch_at
+                    .unwrap_or(timing.enqueue_at)
+                    .elapsed()
+                    .as_millis() as i64,
+            );
+        }
+        result
+            .metadata
+            .entry("enqueue_ts".to_string())
+            .or_insert_with(|| format!("{:.6}", timing.enqueue_ts));
+    }
+    result
+        .metadata
+        .entry("result_ready_ts".to_string())
+        .or_insert_with(|| format!("{ready_ts:.6}"));
+    result
+}
+
+fn validate_verl_async_result(req: &EpisodeRequest, result: &EpisodeResult) -> Result<(), String> {
+    if result.status != "completed" {
+        return Ok(());
+    }
+    if req.parallel_mode != "one_step_off_policy" && req.parallel_mode != "fully_async" {
+        return Ok(());
+    }
+    if result.parallel_mode != req.parallel_mode {
+        return Err(format!(
+            "parallel_mode mismatch: request={}, result={}",
+            req.parallel_mode, result.parallel_mode
+        ));
+    }
+    if result.rollout_param_version.is_none() {
+        return Err("missing rollout_param_version".to_string());
+    }
+    if result
+        .rollout_policy_version
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err("missing rollout_policy_version".to_string());
+    }
+    if result.rollout_log_probs.is_empty() {
+        return Err("missing rollout_log_probs".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn finalize_or_protocol_failed(
+    req: &EpisodeRequest,
+    result: EpisodeResult,
+    timing: Option<ResultTiming>,
+) -> EpisodeResult {
+    let finalized = finalize_episode_result(req, result, timing);
+    match validate_verl_async_result(req, &finalized) {
+        Ok(()) => finalized,
+        Err(message) => {
+            let mut failed = failed_result_from_request(
+                req,
+                "failed",
+                message.clone(),
+                ErrorCode::ErrAsyncProtocolMissingField,
+                timing,
+            );
+            failed
+                .metadata
+                .insert("async_protocol_error".to_string(), message);
+            failed
+        }
+    }
+}
+
 fn is_retryable_schedule_error(error: &ScheduleError) -> bool {
-    matches!(error, ScheduleError::NoWorkerAvailable | ScheduleError::AllWorkersAtCapacity)
+    matches!(
+        error,
+        ScheduleError::NoWorkerAvailable | ScheduleError::AllWorkersAtCapacity
+    )
 }
 
 fn sweep_completed_async(state: &ServerState) {
@@ -201,14 +465,18 @@ fn sweep_completed_async(state: &ServerState) {
             state.completed_async.remove(&key);
         }
     }
-    if state.completed_async_max_entries > 0 && state.completed_async.len() > state.completed_async_max_entries {
+    if state.completed_async_max_entries > 0
+        && state.completed_async.len() > state.completed_async_max_entries
+    {
         let mut entries: Vec<_> = state
             .completed_async
             .iter()
             .map(|entry| (entry.key().clone(), entry.value().completed_at))
             .collect();
         entries.sort_by_key(|(_, completed_at)| *completed_at);
-        let overflow = entries.len().saturating_sub(state.completed_async_max_entries);
+        let overflow = entries
+            .len()
+            .saturating_sub(state.completed_async_max_entries);
         for (key, _) in entries.into_iter().take(overflow) {
             state.completed_async.remove(&key);
         }
@@ -243,11 +511,9 @@ impl UEnvEpisodeService {
         Arc::clone(&self.state)
     }
 
-    pub async fn submit_episode(
-        &self,
-        mut req: EpisodeRequest,
-    ) -> anyhow::Result<EpisodeResult> {
+    pub async fn submit_episode(&self, mut req: EpisodeRequest) -> anyhow::Result<EpisodeResult> {
         normalize_episode_request(&mut req);
+        let async_context = ensure_async_request_context(&mut req)?;
 
         let episode_id = req.episode_id.clone();
         self.state.cancelled_episodes.remove(&episode_id);
@@ -261,6 +527,9 @@ impl UEnvEpisodeService {
                     worker_id: String::new(),
                     started_at: Instant::now(),
                     batch_id: req.correlation_id.clone(),
+                    parallel_mode: async_context.parallel_mode.clone(),
+                    enqueue_at: async_context.enqueue_at,
+                    enqueue_ts: async_context.enqueue_ts,
                 });
                 self.state
                     .active_episode_handles
@@ -304,7 +573,15 @@ impl UEnvEpisodeService {
 
         if req.env_type == "swe" {
             if let Some(spec) = SweAgentSpec::from_payload(&req) {
-                return self.submit_swe_agent_episode(req, spec, deadline, Arc::clone(&handle)).await;
+                return self
+                    .submit_swe_agent_episode(
+                        req,
+                        spec,
+                        deadline,
+                        Arc::clone(&handle),
+                        async_context.clone(),
+                    )
+                    .await;
             }
         }
 
@@ -366,6 +643,10 @@ impl UEnvEpisodeService {
                 nanos: 0,
             });
 
+            let dispatch_at = Instant::now();
+            let dispatch_ts = now_unix_seconds_f64();
+            req.metadata
+                .insert("dispatch_ts".to_string(), format!("{dispatch_ts:.6}"));
             let pending_key = (
                 episode_id.clone(),
                 attempt_id,
@@ -379,6 +660,11 @@ impl UEnvEpisodeService {
                     worker_id: assignment.worker_id.clone(),
                     dispatch_lease_id: req.dispatch_lease_id.clone(),
                     dispatch_token: req.dispatch_token.clone(),
+                    parallel_mode: async_context.parallel_mode.clone(),
+                    enqueue_at: async_context.enqueue_at,
+                    dispatch_at,
+                    enqueue_ts: async_context.enqueue_ts,
+                    dispatch_ts,
                 },
             );
             self.state.active_episodes.insert(
@@ -389,6 +675,9 @@ impl UEnvEpisodeService {
                     worker_id: assignment.worker_id.clone(),
                     started_at: Instant::now(),
                     batch_id: req.correlation_id.clone(),
+                    parallel_mode: async_context.parallel_mode.clone(),
+                    enqueue_at: async_context.enqueue_at,
+                    enqueue_ts: async_context.enqueue_ts,
                 },
             );
 
@@ -420,7 +709,7 @@ impl UEnvEpisodeService {
                     record_cancel_outcome(&self.state, &episode_id);
                     self.state.active_episodes.remove(&episode_id);
                     worker_lease.release();
-                    let result = cancelled_result(&episode_id, attempt_id);
+                    let result = failed_result_from_request(&req, "cancelled", "episode cancelled", ErrorCode::ErrEpisodeTimeout, None);
                     let _ = self.state.episode_broadcast.send(result.clone());
                     return Ok(result);
                 }
@@ -436,6 +725,13 @@ impl UEnvEpisodeService {
                                 worker_id = %assignment.worker_id,
                                 "episode_completed"
                             );
+                            let timing = ResultTiming {
+                                enqueue_at: async_context.enqueue_at,
+                                dispatch_at: Some(dispatch_at),
+                                enqueue_ts: async_context.enqueue_ts,
+                                dispatch_ts: Some(dispatch_ts),
+                            };
+                            let result = finalize_or_protocol_failed(&req, result, Some(timing));
                             let _ = self.state.episode_broadcast.send(result.clone());
                             return Ok(result);
                         }
@@ -468,7 +764,7 @@ impl UEnvEpisodeService {
                                     record_cancel_outcome(&self.state, &episode_id);
                                     self.state.active_episodes.remove(&episode_id);
                                     worker_lease.release();
-                                    let result = cancelled_result(&episode_id, attempt_id);
+                                    let result = failed_result_from_request(&req, "cancelled", "episode cancelled", ErrorCode::ErrEpisodeTimeout, None);
                                     let _ = self.state.episode_broadcast.send(result.clone());
                                     return Ok(result);
                                 }
@@ -483,6 +779,13 @@ impl UEnvEpisodeService {
                                                 worker_id = %assignment.worker_id,
                                                 "episode_completed"
                                             );
+                                            let timing = ResultTiming {
+                                                enqueue_at: async_context.enqueue_at,
+                                                dispatch_at: Some(dispatch_at),
+                                                enqueue_ts: async_context.enqueue_ts,
+                                                dispatch_ts: Some(dispatch_ts),
+                                            };
+                                            let result = finalize_or_protocol_failed(&req, result, Some(timing));
                                             let _ = self.state.episode_broadcast.send(result.clone());
                                             return Ok(result);
                                         }
@@ -491,7 +794,7 @@ impl UEnvEpisodeService {
                                             self.state.active_episodes.remove(&episode_id);
                                             worker_lease.release();
                                             if handle.cancel_token.is_cancelled() {
-                                                let result = cancelled_result(&episode_id, attempt_id);
+                                                let result = failed_result_from_request(&req, "cancelled", "episode cancelled", ErrorCode::ErrEpisodeTimeout, None);
                                                 let _ = self.state.episode_broadcast.send(result.clone());
                                                 return Ok(result);
                                             }
@@ -526,7 +829,10 @@ impl UEnvEpisodeService {
                         worker_id = %assignment.worker_id,
                         "worker_slot_full_reschedule"
                     );
-                    tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)).await;
+                    tokio::time::sleep(Duration::from_millis(
+                        self.state.schedule_retry_interval_ms,
+                    ))
+                    .await;
                 } else {
                     tracing::warn!(
                         episode_id = %episode_id,
@@ -553,6 +859,7 @@ impl UEnvEpisodeService {
         spec: SweAgentSpec,
         deadline: Instant,
         handle: Arc<EpisodeHandle>,
+        async_context: AsyncRequestContext,
     ) -> anyhow::Result<EpisodeResult> {
         let episode_id = req.episode_id.clone();
         // run_id 由 Server 统一生成并贯穿 session/AgentJob/轨迹（替代 driver 自生成）。
@@ -590,9 +897,7 @@ impl UEnvEpisodeService {
                 return Ok(result);
             }
             if Instant::now() > deadline {
-                anyhow::bail!(
-                    "swe agent episode {episode_id} timeout acquiring agent+worker slot"
-                );
+                anyhow::bail!("swe agent episode {episode_id} timeout acquiring agent+worker slot");
             }
             // 1. try Agent permit（非阻塞）。池满 → 退避重试（回到循环顶检查 deadline）。
             let permit = match sem.clone().try_acquire_owned() {
@@ -692,6 +997,9 @@ impl UEnvEpisodeService {
                 attempt_id: req.attempt_id,
                 worker_id: assignment.worker_id.clone(),
                 started_at: Instant::now(),
+                parallel_mode: async_context.parallel_mode.clone(),
+                enqueue_at: async_context.enqueue_at,
+                enqueue_ts: async_context.enqueue_ts,
                 batch_id: req.correlation_id.clone(),
             },
         );
@@ -794,6 +1102,9 @@ impl UEnvEpisodeService {
             episode_id: episode_id.clone(),
             llm_config_path: spec.llm_config_path.clone(),
             mode: spec.mode.clone(),
+            parallel_mode: req.parallel_mode.clone(),
+            enqueue_ts: req.enqueue_ts,
+            metadata: req.metadata.clone(),
         };
         let mut rx = self.state.agent_job_queue.enqueue(&pool_id, job);
         handle.set_agent_job(pool_id.clone(), job_id.clone());
@@ -809,10 +1120,14 @@ impl UEnvEpisodeService {
             "swe_agent_job_dispatched"
         );
 
-        let mut deadline_sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)));
-        let pickup_deadline = Instant::now()
-            + Duration::from_secs(self.state.agent_job_pickup_timeout_secs.max(1));
-        let mut pickup_sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(pickup_deadline)));
+        let mut deadline_sleep = Box::pin(tokio::time::sleep_until(
+            tokio::time::Instant::from_std(deadline),
+        ));
+        let pickup_deadline =
+            Instant::now() + Duration::from_secs(self.state.agent_job_pickup_timeout_secs.max(1));
+        let mut pickup_sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+            pickup_deadline,
+        )));
         let mut pickup_checked = false;
 
         let result = loop {
@@ -855,6 +1170,16 @@ impl UEnvEpisodeService {
                                 error_message: complete.error_message.clone(),
                                 trajectory_id: complete.trajectory_id.clone(),
                                 gateway_session_id: gateway_session_id.clone(),
+                                parallel_mode: complete.parallel_mode.clone(),
+                                rollout_param_version: complete.rollout_param_version,
+                                rollout_policy_version: complete.rollout_policy_version.clone(),
+                                rollout_log_probs: complete.rollout_log_probs.clone(),
+                                worker_start_ts: complete.worker_start_ts,
+                                worker_finish_ts: complete.worker_finish_ts,
+                                result_ready_ts: complete.result_ready_ts,
+                                worker_latency_ms: complete.worker_latency_ms,
+                                model_latency_ms: complete.model_latency_ms,
+                                metadata: complete.metadata.clone(),
                                 ..Default::default()
                             };
                             result.summary = Some(crate::proto::v1::episode_result::Summary {
@@ -921,6 +1246,13 @@ impl UEnvEpisodeService {
         };
         session_guard.close_now().await;
 
+        let timing = ResultTiming {
+            enqueue_at: async_context.enqueue_at,
+            dispatch_at: None,
+            enqueue_ts: async_context.enqueue_ts,
+            dispatch_ts: None,
+        };
+        let result = finalize_or_protocol_failed(&req, result, Some(timing));
         let _ = self.state.episode_broadcast.send(result.clone());
         Ok(result)
     }
@@ -955,10 +1287,14 @@ impl UEnvEpisodeService {
     /// `get_result` 轮询；失败结果额外广播给 watcher（成功结果已由
     /// `submit_episode` 内部广播）。返回 episode_id（缺省时生成 UUID）。
     pub fn submit_episode_async(&self, mut req: EpisodeRequest) -> String {
-        if req.episode_id.is_empty() {
-            req.episode_id = Uuid::new_v4().to_string();
-        }
+        normalize_episode_request(&mut req);
         let episode_id = req.episode_id.clone();
+        self.state.sweep_ttl_caches();
+        if self.state.completed_async.contains_key(&episode_id)
+            || self.state.active_episode_handles.contains_key(&episode_id)
+        {
+            return episode_id;
+        }
         let state = Arc::clone(&self.state);
         let spawn_episode_id = episode_id.clone();
 
@@ -969,12 +1305,18 @@ impl UEnvEpisodeService {
                     store_completed_async(&state, result);
                 }
                 Err(e) => {
-                    let failed = EpisodeResult {
+                    let mut failed_req = EpisodeRequest {
                         episode_id: spawn_episode_id.clone(),
-                        status: "failed".to_string(),
-                        error_message: e.to_string(),
                         ..Default::default()
                     };
+                    let _ = ensure_async_request_context(&mut failed_req);
+                    let failed = failed_result_from_request(
+                        &failed_req,
+                        "failed",
+                        e.to_string(),
+                        ErrorCode::ErrInternal,
+                        None,
+                    );
                     // 失败不会经 submit_episode 广播，这里补发给 watcher。
                     let _ = state.episode_broadcast.send(failed.clone());
                     store_completed_async(&state, failed);
@@ -990,8 +1332,8 @@ impl UEnvEpisodeService {
         sweep_completed_async(&self.state);
         self.state
             .completed_async
-            .remove(episode_id)
-            .map(|(_, timed)| timed.result)
+            .get(episode_id)
+            .map(|timed| timed.result.clone())
     }
 
     /// 订阅所有完成 episode 的广播流（驱动 WatchEpisodes）。
@@ -1000,12 +1342,8 @@ impl UEnvEpisodeService {
     }
 }
 
-async fn dispatch_to_worker(
-    endpoint: &str,
-    request: EpisodeRequest,
-) -> anyhow::Result<()> {
-    let mut client =
-        WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
+async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::Result<()> {
+    let mut client = WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
     let dispatch = DispatchEpisodeRequest {
         episode: Some(request),
     };
@@ -1067,7 +1405,10 @@ impl SweAgentSpec {
     /// 仅当 payload 明确声明 execution_mode=agent 时返回 Some，否则 None（走 native）。
     fn from_payload(req: &EpisodeRequest) -> Option<Self> {
         let v: serde_json::Value = serde_json::from_slice(&req.payload).ok()?;
-        let exec_mode = v.get("execution_mode").and_then(|x| x.as_str()).unwrap_or("");
+        let exec_mode = v
+            .get("execution_mode")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         if exec_mode != "agent" {
             return None;
         }
@@ -1247,7 +1588,8 @@ impl AdminService for AdminServiceImpl {
                     "degraded"
                 } else {
                     "ready"
-                }.to_string(),
+                }
+                .to_string(),
             })
             .collect();
         Ok(Response::new(ListWorkersResponse { workers }))
@@ -1335,7 +1677,9 @@ impl AdminService for AdminServiceImpl {
                     tokio::spawn(notify_worker_cancel(info));
                 }
                 if let Some(job) = handle.agent_job() {
-                    self.state.agent_job_queue.abandon(&job.pool_id, &job.job_id);
+                    self.state
+                        .agent_job_queue
+                        .abandon(&job.pool_id, &job.job_id);
                 }
             }
         }
@@ -1402,12 +1746,20 @@ impl EpisodeService for UEnvEpisodeService {
             async move {
                 match (UEnvEpisodeService { state }).submit_episode(req).await {
                     Ok(result) => result,
-                    Err(e) => EpisodeResult {
-                        episode_id,
-                        status: "failed".to_string(),
-                        error_message: e.to_string(),
-                        ..Default::default()
-                    },
+                    Err(e) => {
+                        let mut failed_req = EpisodeRequest {
+                            episode_id,
+                            ..Default::default()
+                        };
+                        let _ = ensure_async_request_context(&mut failed_req);
+                        failed_result_from_request(
+                            &failed_req,
+                            "failed",
+                            e.to_string(),
+                            ErrorCode::ErrInternal,
+                            None,
+                        )
+                    }
                 }
             }
         });
