@@ -18,6 +18,8 @@ pub struct WalWriter {
 pub struct WalPendingRecord {
     pub idempotency_key: String,
     pub result: EpisodeResult,
+    pub dispatch_lease_id: String,
+    pub dispatch_token: Vec<u8>,
 }
 
 impl WalWriter {
@@ -47,6 +49,7 @@ impl WalWriter {
             protobuf_payload: result.encode_to_vec(),
             created_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
             replay_state: ReplayState::Pending as i32,
+            dispatch_token: episode.dispatch_token.clone(),
         };
         self.write_record(&idempotency_key, &wal)?;
         Ok(idempotency_key)
@@ -79,6 +82,8 @@ impl WalWriter {
                         Ok(result) => out.push(WalPendingRecord {
                             idempotency_key,
                             result,
+                            dispatch_lease_id: wal.dispatch_lease_id.clone(),
+                            dispatch_token: wal.dispatch_token.clone(),
                         }),
                         Err(err) => {
                             tracing::error!(path = %path.display(), error = %err, msg = "wal_decode_result_failed");
@@ -189,6 +194,8 @@ mod tests {
             dispatch_lease_id: "lease-1".to_string(),
             lease_expire_at: None,
             scheduler_epoch: 1,
+            env_package_id: String::new(),
+            env_package_version: String::new(),
         };
         let result = EpisodeResult {
             episode_id: "ep-1".to_string(),
@@ -200,6 +207,7 @@ mod tests {
             error_message: String::new(),
             trajectory_checksum: "x".to_string(),
             integrity_verified: true,
+            ..Default::default()
         };
         let key = wal
             .persist_pending(&ep, "worker-1", 1, &result)

@@ -1,0 +1,27 @@
+[Unit]
+Description=UEnv OpenHands Agent poller (208.77 -> Server AgentControlService)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Server 编排模式：注册到 Agent 池并循环领 AgentJob。gateway 由 Job 注入，无需 UENV_GATEWAY。
+Environment=OPENHANDS_AGENT_POLL=1
+Environment=UENV_SERVER_ENDPOINT=8.130.75.157:8088
+Environment=OPENHANDS_AGENT_POOL_ID=openhands-default
+Environment=OPENHANDS_AGENT_BRIDGE_ID=uenv-agent-openhands
+Environment=OPENHANDS_AGENT_BRIDGE_VERSION=1.0.0
+Environment=OPENHANDS_AGENT_MAX_CONCURRENT=1
+Environment=OPENHANDS_POLL_INTERVAL_SEC=3
+Environment=UENV_AGENT_BRIDGE_DIR=/root/UEnv/integrations/openhands
+Environment=OPENHANDS_RUN_SCRIPT=/root/UEnv/scripts/run-openhands-pro-20877.sh
+Environment=UENV_GATEWAY_LOCAL=http://127.0.0.1:28097
+Environment=UENV_GATEWAY_API_KEY=swe-pro-secret
+# 载入部署机私有环境（LLM 配置、SDK 路径、trajectory endpoint 等）。
+EnvironmentFile=-/root/.openhands-20877.env
+ExecStart=/usr/bin/env python3 /root/UEnv/scripts/openhands/openhands_runner.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

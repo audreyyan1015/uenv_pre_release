@@ -182,3 +182,94 @@ async fn templates_seeded_and_fetchable() {
     assert!(!bytes.is_empty());
     assert!(sha.is_some());
 }
+
+#[tokio::test]
+async fn env_package_publish_get_list_artifacts() {
+    use uenv_hub_core::package;
+    use uenv_hub_types::{InlineArtifact, PackageContracts, PackagePlatform, PublishPackageRequest};
+
+    let s = store().await;
+    let artifact_root = tempfile::tempdir().unwrap();
+
+    let req = PublishPackageRequest {
+        version: "1.2.0".into(),
+        publisher: Some("org-uenv-swe".into()),
+        description: Some("test package".into()),
+        changelog: Some("first".into()),
+        platform: PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["runtime_gateway".into()],
+        },
+        worker_overlay: serde_json::json!({"swe": {"benchmark_variant": "verified"}}),
+        agent_defaults: serde_json::json!({"workspace_dir": "/app"}),
+        contracts: PackageContracts {
+            runtime_gateway_api: Some("runtime/v1".into()),
+            trajectory_bundle_schema: Some("v2.2".into()),
+            tool_bridge_schema: None,
+        },
+        artifacts: vec![
+            InlineArtifact {
+                name: "catalog.json".into(),
+                kind: "catalog".into(),
+                sync_mode: "inline".into(),
+                media_type: Some("application/json".into()),
+                target_rel_path: Some("catalog.json".into()),
+                content: Some(r#"{"x__y-1":{"instance_id":"x__y-1"}}"#.into()),
+                content_b64: None,
+            },
+            InlineArtifact {
+                name: "images.manifest.json".into(),
+                kind: "images".into(),
+                sync_mode: "inline".into(),
+                media_type: Some("application/json".into()),
+                target_rel_path: Some("images.manifest.json".into()),
+                content: Some(r#"{"images":[]}"#.into()),
+                content_b64: None,
+            },
+        ],
+        file_artifacts: vec![],
+    };
+
+    let manifest = package::publish_inline_package(&s, artifact_root.path(), "demo-pkg", req, None)
+        .await
+        .unwrap();
+    assert_eq!(manifest.package_id, "demo-pkg");
+    assert_eq!(manifest.artifacts.len(), 2);
+    assert!(manifest.artifacts.iter().all(|a| a.digest.starts_with("sha256:")));
+
+    // latest resolves to the published version.
+    let latest = s.get_package_manifest("demo-pkg", "latest").await.unwrap();
+    assert_eq!(latest.version, "1.2.0");
+
+    // duplicate version rejected.
+    let dup = PublishPackageRequest {
+        version: "1.2.0".into(),
+        publisher: None,
+        description: None,
+        changelog: None,
+        platform: PackagePlatform { uenv_worker_min: "0.1.0".into(), uenv_server_min: None, features: vec![] },
+        worker_overlay: serde_json::Value::Null,
+        agent_defaults: serde_json::Value::Null,
+        contracts: PackageContracts::default(),
+        artifacts: vec![],
+        file_artifacts: vec![],
+    };
+    assert!(package::publish_inline_package(&s, artifact_root.path(), "demo-pkg", dup, None).await.is_err());
+
+    // list shows the package.
+    let page = s.list_packages(1, 20).await.unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].package_id, "demo-pkg");
+
+    // artifact meta + digest-verified read round-trips.
+    let meta = s.get_artifact_meta("demo-pkg", "latest", "catalog.json").await.unwrap();
+    let bytes = package::read_artifact_verified(artifact_root.path(), &meta.rel_path, &meta.digest).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("x__y-1"));
+
+    // sync plan is deterministic and carries a bundle digest.
+    let plan = package::sync_plan(&latest);
+    assert_eq!(plan.files.len(), 2);
+    assert!(plan.bundle_digest.starts_with("sha256:"));
+}
+

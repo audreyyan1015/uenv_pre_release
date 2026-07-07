@@ -1,0 +1,107 @@
+﻿syntax = "proto3";
+package uenv.v1;
+
+// Server → Agent pool job contract (design 260629 / 260701).
+// C-layer scheduling state: gateway_url, session_id, run_id are injected per job.
+
+message AgentJob {
+    string job_id = 1;
+    string run_id = 2;
+    string gateway_url = 3;
+    // Secret name or inline key ref for Agent runtime (not stored in Hub).
+    string gateway_api_key = 4;
+    string session_id = 5;
+    string instance_id = 6;
+    string benchmark_variant = 7;
+    string env_package_id = 8;
+    string env_package_version = 9;
+    string agent_bridge_id = 10;
+    string agent_bridge_version = 11;
+    string driver_entrypoint = 12;
+    string model_endpoint = 13;
+    int32 max_iterations = 14;
+    string workspace_dir = 15;
+    string episode_id = 16;
+    string llm_config_path = 17;
+    string mode = 18; // "llm" | "gold"
+    string parallel_mode = 19;
+    optional double enqueue_ts = 20;
+    map<string, string> metadata = 21;
+}
+
+// ─── Agent pool registration (symmetric with RegisterWorker; design 260701 §2.0.6) ─
+message SyncedAgentBridge {
+    string package_id = 1;   // uenv-agent-openhands
+    string version = 2;
+    string bundle_digest = 3;
+}
+
+message RegisterAgentRequest {
+    string agent_id = 1;
+    string agent_pool_id = 2;                        // e.g. "openhands-default"
+    repeated SyncedAgentBridge synced_agent_bridges = 3;
+    uint32 max_concurrent_jobs = 4;
+    string endpoint = 5;                             // optional; empty in Poll mode
+    map<string, string> labels = 6;                  // 路由标签，如 {region: bj, gpu: a100}
+}
+
+message RegisterAgentResponse {
+    bool accepted = 1;
+    string agent_id = 2;
+    string message = 3;
+}
+
+message AgentHeartbeatRequest {
+    string agent_id = 1;
+    uint32 active_jobs = 2;
+    int64 timestamp_ms = 3;
+}
+
+message AgentHeartbeatResponse {
+    bool ok = 1;
+    int32 next_heartbeat_interval_ms = 2;
+}
+
+message PollAgentJobRequest {
+    string agent_pool_id = 1;
+    string worker_id = 2;
+}
+
+message PollAgentJobResponse {
+    bool has_job = 1;
+    AgentJob job = 2;
+}
+
+message AgentJobCompleteRequest {
+    string job_id = 1;
+    string run_id = 2;
+    string status = 3; // "completed" | "failed" | "timeout"
+    double reward = 4;
+    string trajectory_id = 5;
+    string error_message = 6;
+    string agent_id = 7;
+    string parallel_mode = 8;
+    optional int64 rollout_param_version = 9;
+    optional string rollout_policy_version = 10;
+    repeated float rollout_log_probs = 11;
+    optional double worker_start_ts = 12;
+    optional double worker_finish_ts = 13;
+    optional double result_ready_ts = 14;
+    optional int64 worker_latency_ms = 15;
+    optional int64 model_latency_ms = 16;
+    map<string, string> metadata = 17;
+}
+
+message AgentJobCompleteResponse {
+    bool ack = 1;
+    string code = 2;
+    string message = 3;
+}
+
+service AgentControlService {
+    rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+    rpc AgentHeartbeat(AgentHeartbeatRequest) returns (AgentHeartbeatResponse);
+    rpc PollAgentJob(PollAgentJobRequest) returns (PollAgentJobResponse);
+    rpc CompleteAgentJob(AgentJobCompleteRequest) returns (AgentJobCompleteResponse);
+}
+

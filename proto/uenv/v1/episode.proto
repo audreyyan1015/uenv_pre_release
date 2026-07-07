@@ -1,4 +1,4 @@
-syntax = "proto3";
+﻿syntax = "proto3";
 package uenv.v1;
 
 import "uenv/v1/common.proto";
@@ -24,6 +24,15 @@ message EpisodeRequest {
     google.protobuf.Timestamp lease_expire_at = 14;
     uint64 scheduler_epoch = 15;
     bytes dispatch_token = 16;
+
+    // Hub EnvPackage reference (design 260629).
+    string env_package_id = 17;
+    string env_package_version = 18;
+
+    // VeRL async training mode: "sync" | "one_step_off_policy" | "fully_async".
+    string parallel_mode = 19;
+    optional double enqueue_ts = 20;
+    map<string, string> metadata = 21;
 }
 
 // ─── StepRecord ──────────────────────────────────────────────
@@ -63,6 +72,24 @@ message EpisodeResult {
     string error_message  = 7;
     string trajectory_checksum = 8;
     bool integrity_verified = 9;
+    // v2.2：轨迹指针（native 路径 ReportResult 关联 trajectory 库）。
+    string trajectory_id = 10;
+    string trajectory_storage_url = 11;
+    // SWE+Agent 路径：Server 预建的 Gateway session id（便于按 session 追踪）。
+    string gateway_session_id = 12;
+
+    string parallel_mode = 13;
+    optional int64 rollout_param_version = 14;
+    optional string rollout_policy_version = 15;
+    repeated float rollout_log_probs = 16;
+    map<string, string> metadata = 17;
+    optional double dispatch_ts = 18;
+    optional double worker_start_ts = 19;
+    optional double worker_finish_ts = 20;
+    optional double result_ready_ts = 21;
+    optional int64 server_latency_ms = 22;
+    optional int64 worker_latency_ms = 23;
+    optional int64 model_latency_ms = 24;
 }
 
 // ─── StreamReport ─────────────────────────────────────────────
@@ -96,3 +123,4 @@ message StreamReport {
     string correlation_id = 14;
     string worker_id      = 15;
 }
+

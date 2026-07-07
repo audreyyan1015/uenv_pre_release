@@ -19,9 +19,11 @@ use uenv_server::proto::v1::{
     EpisodeRequest, EpisodeResult, StepRecord, Trajectory,
 };
 use uenv_server::proto::scheduler::v1::control_plane_service_server::ControlPlaneServiceServer;
+use uenv_server::proto::v1::agent_control_service_server::AgentControlServiceServer;
 use uenv_server::control_plane::ControlPlaneServiceImpl;
+use uenv_server::agent_job::AgentControlServiceImpl;
 use uenv_server::service::AdminServiceImpl;
-use uenv_server::{create_default_state, EpisodeService, EpisodeServiceError, UEnvEpisodeService};
+use uenv_server::{EpisodeService, EpisodeServiceError, UEnvEpisodeService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,11 +37,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    let binary_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let package_version = env!("CARGO_PKG_VERSION");
+    let build_git_sha = option_env!("UENV_BUILD_GIT_SHA").unwrap_or("unknown");
+    let build_time = option_env!("UENV_BUILD_TIME").unwrap_or("unknown");
+
     tracing::info!(%addr, "uenv listening");
     println!("uenv listening on {addr}");
 
     let backend = std::env::var("UENV_ADAPTER_CORE_BACKEND")
         .unwrap_or_else(|_| "server".to_string());
+    tracing::info!(
+        addr = %addr,
+        backend = %backend,
+        binary_path = %binary_path,
+        package_version,
+        build_git_sha,
+        build_time,
+        "uenv_adapter_core_startup"
+    );
     if backend == "static_rollout" {
         let core = AdapterCore::new(StaticRolloutEpisodeService::from_env());
         let adapter_service = AdapterCoreServiceImpl::new(core);
@@ -52,16 +70,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = std::env::var("UENV_CONFIG_PATH")
         .unwrap_or_else(|_| "config/server.yaml".to_string());
-    let config = uenv_server::ServerConfig::load_or_default(&config_path);
-    tracing::info!(config_path = %config_path, "server_config_loaded");
+    let config = if std::env::var("UENV_SERVER_CONFIG_STRICT")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+    {
+        uenv_server::ServerConfig::load(&config_path)?
+    } else {
+        uenv_server::ServerConfig::load_or_default(&config_path)
+    };
+    tracing::info!(
+        config_path = %config_path,
+        scheduler_heartbeat_interval_ms = config.scheduler.heartbeat_interval_ms,
+        scheduler_heartbeat_timeout_secs = config.scheduler.heartbeat_timeout_secs,
+        admin_http_port = config.admin_http_port,
+        admin_http_bind = %config.admin_http_bind,
+        admin_http_token_configured = !config.admin_http_token.is_empty(),
+        "server_config_loaded"
+    );
     let state = uenv_server::create_state_with_config(&config);
+
+    // 轨迹聚合存储 HTTP（:8077，v2.2）：按环境变量启用。同一 store 同时供 HTTP 与 episode_results。
+    {
+        let trj_cfg = uenv_server::trajectory::TrajectoryConfig::from_env();
+        if trj_cfg.enabled {
+            if let Some(trj_store) = uenv_server::trajectory::open_shared(&trj_cfg) {
+                let _ = state.trajectory_store.set(trj_store.clone());
+                tracing::info!(
+                    listen = %trj_cfg.http_listen,
+                    data_dir = %trj_cfg.data_dir.display(),
+                    "trajectory_server_spawning"
+                );
+                tokio::spawn(uenv_server::trajectory::serve_with(trj_store, trj_cfg));
+            }
+        }
+    }
 
     // admin HTTP: start before serving gRPC so it's available immediately
     if config.admin_http_port > 0 {
         let admin_state = Arc::clone(&state);
         let admin_port = config.admin_http_port;
-        tokio::spawn(uenv_server::admin_http::serve(admin_state, admin_port));
-        tracing::info!(port = admin_port, "admin_http_spawned");
+        let admin_bind = config.admin_http_bind.clone();
+        let admin_token = config.admin_http_token.clone();
+        tokio::spawn(uenv_server::admin_http::serve(
+            admin_state,
+            admin_bind.clone(),
+            admin_port,
+            admin_token,
+        ));
+        tracing::info!(bind = %admin_bind, port = admin_port, "admin_http_spawned");
     }
 
     let core = AdapterCore::new(UEnvEpisodeService::new(Arc::clone(&state)));
@@ -71,6 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(AdapterCoreServiceServer::new(adapter_service))
         .add_service(ControlPlaneServiceServer::new(ControlPlaneServiceImpl {
             state: Arc::clone(&state),
+        }))
+        .add_service(AgentControlServiceServer::new(AgentControlServiceImpl {
+            queue: Arc::clone(&state.agent_job_queue),
+            registry: Arc::clone(&state.agent_registry),
+            heartbeat_interval_ms: config.scheduler.heartbeat_interval_ms as i32,
         }))
         .add_service(AdminServiceServer::new(AdminServiceImpl {
             state: state.clone(),

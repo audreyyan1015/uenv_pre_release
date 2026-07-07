@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "uenv-common",
     "uenv-worker",
     "uenv-server",
     "uenv-bridge/core",

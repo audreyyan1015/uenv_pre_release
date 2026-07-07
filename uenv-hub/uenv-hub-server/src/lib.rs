@@ -59,6 +59,19 @@ pub async fn build_state(config: Config) -> Result<AppState, Box<dyn std::error:
     // Idempotent: seeds the official templates and example envs (math/code/agent).
     uenv_hub_core::seed::seed_all(&store).await?;
 
+    // Idempotent: seed the example SWE EnvPackages (artifacts written under the
+    // configured artifact store). Non-fatal — a missing catalog or unwritable
+    // artifact dir is logged and skipped so the Hub still starts.
+    if config.packages.seed_examples {
+        let artifact_root = std::path::Path::new(&config.packages.artifact_dir);
+        let catalog_dir = std::path::Path::new(&config.packages.catalog_seed_dir);
+        if let Err(e) =
+            uenv_hub_core::seed::seed_packages(&store, artifact_root, catalog_dir).await
+        {
+            tracing::warn!(error = %e, "package seeding skipped");
+        }
+    }
+
     // Bootstrap: if requested and no tokens exist, create the admin token.
     if let Some(secret) = &config.auth.bootstrap_admin_token {
         if store.token_count().await? == 0 {

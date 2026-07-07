@@ -1,0 +1,16 @@
+{
+  "swe-pro__example-go-1": {
+    "instance_id": "swe-pro__example-go-1",
+    "repo": "example-org/example-go",
+    "version": "1.0",
+    "base_commit": "0000000000000000000000000000000000000000",
+    "benchmark_variant": "pro",
+    "image_cache_key": "registry.example.com/swe-pro/example-org_example-go:swe-pro__example-go-1",
+    "test_cmd": "go test ./... -run TestFix -v",
+    "problem_statement": "<problem_statement from SWE-bench Pro dataset>",
+    "patch": "",
+    "test_patch": "",
+    "FAIL_TO_PASS": ["TestFix"],
+    "PASS_TO_PASS": ["TestExisting"]
+  }
+}

@@ -2922,6 +2922,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "async-trait",
+ "base64",
  "flate2",
  "futures",
  "hex",
@@ -2961,6 +2962,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",

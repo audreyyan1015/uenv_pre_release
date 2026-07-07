@@ -4,6 +4,8 @@
 //! 由容器 capability policy（seccomp / cap_drop / network）兜底。`deny_patterns`
 //! **仅为 MVP 过渡**辅助手段，非长期安全边界，禁止架构上依赖其持续增长。
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// 默认 `step` 超时（秒）。
@@ -58,6 +60,12 @@ pub struct CommandPolicyConfig {
     /// ⚠️ MVP 过渡 only — 不作为长期安全边界（plan §1.4 文档冻结）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny_patterns: Option<Vec<String>>,
+
+    /// seccomp profile 所在目录（host 路径）。`Some` 时 provision 按 `mode` 选 profile
+    /// 文件并以 `--security-opt seccomp=<file>` 注入容器（M2-4）；`None` 时不强制
+    /// （保留运行时默认 seccomp，避免破坏 SWE-bench 对宽 syscall 的依赖）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile_dir: Option<PathBuf>,
 }
 
 fn default_timeout_sec() -> u32 {
@@ -75,6 +83,7 @@ impl Default for CommandPolicyConfig {
             timeout_sec: DEFAULT_TIMEOUT_SEC,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             deny_patterns: None,
+            seccomp_profile_dir: None,
         }
     }
 }
@@ -84,6 +93,23 @@ impl CommandPolicyConfig {
     pub fn with_mode(mut self, mode: CommandPolicy) -> Self {
         self.mode = mode;
         self
+    }
+
+    /// 设置 seccomp profile 目录（启用容器 security-opt 注入，M2-4）。
+    pub fn with_seccomp_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.seccomp_profile_dir = dir;
+        self
+    }
+
+    /// 解析当前模式对应的 seccomp profile 文件（存在才返回，供 `--security-opt`）。
+    pub fn resolve_seccomp_file(&self) -> Option<String> {
+        let dir = self.seccomp_profile_dir.as_ref()?;
+        let file = dir.join(self.mode.seccomp_profile_file());
+        if file.is_file() {
+            Some(file.display().to_string())
+        } else {
+            None
+        }
     }
 
     /// 统一执行入口：所有 shell command 经 `bash -lc "<command>"`（plan §1.4 / §4.2）。

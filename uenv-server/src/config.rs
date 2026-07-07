@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Server 全局配置，从 server.toml 加载。所有字段均有 serde default，
@@ -9,6 +10,10 @@ pub struct ServerConfig {
     pub port: u16,
     /// admin HTTP 端口（uenv-ctl 使用）。0 = 禁用，默认 50052。
     pub admin_http_port: u16,
+    /// admin HTTP ??????????????????????
+    pub admin_http_bind: String,
+    /// admin HTTP bearer / X-Admin-Token????????????????
+    pub admin_http_token: String,
     pub scheduler: SchedulerConfig,
     pub episode: EpisodeConfig,
 }
@@ -26,6 +31,9 @@ pub struct SchedulerConfig {
     pub heartbeat_interval_ms: u64,
     /// Worker 超过此秒数无心跳则认为连接断开（默认 30s，约 6 个心跳周期）
     pub heartbeat_timeout_secs: u64,
+    /// 多池路由：benchmark 变体 → Agent 池 的映射（如 {pro: openhands-pro}）。
+    /// 空表示不启用变体选池策略。请求不指定池时，Server 据此自动选池。
+    pub agent_pool_routing: HashMap<String, String>,
 }
 
 /// Episode 执行相关配置
@@ -47,6 +55,11 @@ pub struct EpisodeConfig {
     /// 启用后 adapter 层并发上限 = Σ(已注册 worker 的 max_concurrent)，
     /// 无需手动配置 queue_max_in_flight。
     pub queue_dynamic: bool,
+    /// async result ?????0 ???? TTL ???
+    pub completed_async_ttl_secs: u64,
+    /// async result ??????0 ????? async result?
+    pub completed_async_max_entries: usize,
+    pub agent_job_pickup_timeout_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -54,6 +67,8 @@ impl Default for ServerConfig {
         Self {
             port: 50051,
             admin_http_port: 50052,
+            admin_http_bind: "127.0.0.1".to_string(),
+            admin_http_token: String::new(),
             scheduler: SchedulerConfig::default(),
             episode: EpisodeConfig::default(),
         }
@@ -68,6 +83,7 @@ impl Default for SchedulerConfig {
             schedule_retry_interval_ms: 500,
             heartbeat_interval_ms: 5000,
             heartbeat_timeout_secs: 30,
+            agent_pool_routing: HashMap::new(),
         }
     }
 }
@@ -81,22 +97,39 @@ impl Default for EpisodeConfig {
             broadcast_capacity: 1024,
             queue_max_in_flight: 0,
             queue_dynamic: false,
+            completed_async_ttl_secs: 3600,
+            completed_async_max_entries: 10000,
+            agent_job_pickup_timeout_secs: 30,
         }
     }
 }
 
 impl ServerConfig {
-    /// 从指定路径加载配置，失败时打印 warn 并使用默认值。
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read server config {}: {e}", path.display()))?;
+        serde_yaml::from_str(&content)
+            .map_err(|e| format!("failed to parse server config {}: {e}", path.display()))
+    }
+
+    /// ?????????????????? fallback ??????
+    /// ?? UENV_SERVER_CONFIG_STRICT=1 ??????????? panic??????????
     pub fn load_or_default(path: impl AsRef<Path>) -> Self {
-        match std::fs::read_to_string(path.as_ref()) {
-            Ok(content) => serde_yaml::from_str(&content).unwrap_or_else(|e| {
-                eprintln!("warn: server config parse error ({e}), using defaults");
+        let strict = std::env::var("UENV_SERVER_CONFIG_STRICT")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        match Self::load(path.as_ref()) {
+            Ok(cfg) => cfg,
+            Err(e) if strict => panic!("{e}"),
+            Err(e) => {
+                eprintln!("warn: {e}; using defaults");
                 Self::default()
-            }),
-            Err(_) => Self::default(),
+            }
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -104,6 +137,8 @@ mod tests {
 
     const SAMPLE_YAML: &str = r#"
 port: 9999
+admin_http_bind: 127.0.0.1
+admin_http_token: test-token
 
 scheduler:
   strategy: round_robin
@@ -116,6 +151,9 @@ episode:
   stale_warning_secs: 400
   max_attempts: 5
   broadcast_capacity: 2048
+  completed_async_ttl_secs: 60
+  completed_async_max_entries: 128
+  agent_job_pickup_timeout_secs: 7
 "#;
 
     #[test]
@@ -129,6 +167,11 @@ episode:
         assert_eq!(cfg.episode.stale_warning_secs, 150);
         assert_eq!(cfg.episode.max_attempts, 3);
         assert_eq!(cfg.episode.broadcast_capacity, 1024);
+        assert_eq!(cfg.admin_http_bind, "127.0.0.1");
+        assert_eq!(cfg.admin_http_token, "");
+        assert_eq!(cfg.episode.completed_async_ttl_secs, 3600);
+        assert_eq!(cfg.episode.completed_async_max_entries, 10000);
+        assert_eq!(cfg.episode.agent_job_pickup_timeout_secs, 30);
     }
 
     #[test]
@@ -143,6 +186,11 @@ episode:
         assert_eq!(cfg.episode.stale_warning_secs, 400);
         assert_eq!(cfg.episode.max_attempts, 5);
         assert_eq!(cfg.episode.broadcast_capacity, 2048);
+        assert_eq!(cfg.admin_http_bind, "127.0.0.1");
+        assert_eq!(cfg.admin_http_token, "test-token");
+        assert_eq!(cfg.episode.completed_async_ttl_secs, 60);
+        assert_eq!(cfg.episode.completed_async_max_entries, 128);
+        assert_eq!(cfg.episode.agent_job_pickup_timeout_secs, 7);
     }
 
     #[test]
@@ -163,6 +211,9 @@ episode:
         assert_eq!(state.stale_warning_secs, 400);
         assert_eq!(state.schedule_retry_interval_ms, 250);
         assert_eq!(state.heartbeat_interval_ms, 3000);
+        assert_eq!(state.completed_async_ttl_secs, 60);
+        assert_eq!(state.completed_async_max_entries, 128);
+        assert_eq!(state.agent_job_pickup_timeout_secs, 7);
     }
 
     #[test]

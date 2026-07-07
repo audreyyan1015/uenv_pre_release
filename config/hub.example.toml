@@ -1,5 +1,0 @@
-port = 50053
-
-[storage]
-backend = "git"
-path = "./env-index"

@@ -1,4 +1,4 @@
-.PHONY: all proto build build-server build-worker build-mock-scheduler build-hub build-adapter-core test test-server test-worker test-mock-scheduler test-hub test-adapter-core clean
+.PHONY: all proto build build-server build-worker build-mock-scheduler build-hub build-adapter-core proto-agent-python test test-server test-worker test-mock-scheduler test-hub test-adapter-core clean
 
 all: proto build
 
@@ -20,6 +20,7 @@ proto-server:
 		$(PROTO_ROOT)/uenv/v1/scheduler.proto \
 		$(PROTO_WORKER) \
 		$(PROTO_ROOT)/uenv/v1/episode.proto \
+		$(PROTO_ROOT)/uenv/v1/agent.proto \
 		$(PROTO_ROOT)/uenv/v1/common.proto \
 		$(PROTO_ROOT)/uenv/v1/wal.proto \
 		--prost_out=uenv-server/src/gen \
@@ -30,6 +31,7 @@ proto-worker:
 		$(PROTO_WORKER) \
 		$(PROTO_SCHED) \
 		$(PROTO_ROOT)/uenv/v1/episode.proto \
+		$(PROTO_ROOT)/uenv/v1/agent.proto \
 		$(PROTO_ROOT)/uenv/v1/common.proto \
 		$(PROTO_ROOT)/uenv/v1/wal.proto \
 		--prost_out=uenv-worker/src/gen \
@@ -75,6 +77,17 @@ proto-adapter-core:
 		$(PROTO_ADAPTER_CORE) \
 		--python_out=uenv-bridge/src/uenv/bridge/gen \
 		--grpc_python_out=uenv-bridge/src/uenv/bridge/gen
+
+# Agent 池控制面 Python stub（208.77 OpenHands runner 连 Server 用）。
+# agent.proto 包名 uenv.v1、无 import，生成 agent_pb2.py / agent_pb2_grpc.py。
+proto-agent-python:
+	mkdir -p integrations/openhands/uenv_runtime/gen
+	touch integrations/openhands/uenv_runtime/gen/__init__.py
+	$(PYTHON) -m grpc_tools.protoc \
+		-I=$(PROTO_ROOT) \
+		$(PROTO_ROOT)/uenv/v1/agent.proto \
+		--python_out=integrations/openhands/uenv_runtime/gen \
+		--grpc_python_out=integrations/openhands/uenv_runtime/gen
 
 # ─── Build (每个 part 独立编译，target 在各自目录内) ──────────
 build: build-server build-worker build-mock-scheduler build-hub build-adapter-core

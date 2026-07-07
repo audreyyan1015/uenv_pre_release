@@ -53,29 +53,41 @@ pub async fn sync_env_types_from_hub(
     results
 }
 
-/// 从 Hub 拉取 SWE-bench 实例目录（plan §1.2 / §6 「Hub 下发 instance_specs/task_specs」）。
+/// 从 Hub 拉取 SWE-bench 实例目录（plan §1.2 / §6 / §5.4.3「分 catalog 发布」）。
 ///
-/// 约定端点：`GET {hub}/api/v1/swe/instances`，返回与本地 `swe_instances.json` 同构的
-/// `{ instance_id: {repo, base_commit, patch, test_patch, FAIL_TO_PASS, PASS_TO_PASS, ...} }`。
-/// 失败时调用方应回退本地目录（与 env manifest 的降级策略一致）。
+/// 端点按变体分桶（plan §5.4.3）：
+/// - Verified：`GET {hub}/api/v1/swe/verified/instances`（兼容回退 `/api/v1/swe/instances`）
+/// - Pro：`GET {hub}/api/v1/swe/pro/instances`
+///
+/// 返回与本地 `swe_instances.json` 同构的 `{ instance_id: {...} }`。失败时调用方回退本地目录。
 pub async fn pull_swe_catalog(
     hub_endpoint: &str,
     hub_token: Option<&str>,
+    variant: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let base = hub_endpoint.trim().trim_end_matches('/');
-    let url = format!("{base}/api/v1/swe/instances");
+    let v = variant.trim().to_ascii_lowercase();
+    // 候选路径：变体专属端点 + Verified 兼容旧路径。
+    let mut candidates = vec![format!("{base}/api/v1/swe/{v}/instances")];
+    if v == "verified" {
+        candidates.push(format!("{base}/api/v1/swe/instances"));
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
-    let mut request = client.get(&url);
-    if let Some(token) = hub_token.filter(|t| !t.is_empty()) {
-        request = request.bearer_auth(token);
+    let mut last_err = String::new();
+    for url in &candidates {
+        let mut request = client.get(url);
+        if let Some(token) = hub_token.filter(|t| !t.is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        match request.send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(resp.text().await?),
+            Ok(resp) => last_err = format!("hub GET {url} returned {}", resp.status()),
+            Err(e) => last_err = format!("hub GET {url} failed: {e}"),
+        }
     }
-    let response = request.send().await?;
-    if !response.status().is_success() {
-        return Err(format!("hub GET {url} returned {}", response.status()).into());
-    }
-    Ok(response.text().await?)
+    Err(last_err.into())
 }
 
 pub async fn pull_full_manifest(

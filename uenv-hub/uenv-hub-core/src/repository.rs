@@ -787,6 +787,233 @@ impl SqliteStore {
             None => Err(HubError::not_found("template", name)),
         }
     }
+
+    // -------------------------------------------------------- env packages
+
+    /// Find a package row by id (excluding soft-deleted).
+    pub async fn find_package_row(&self, package_id: &str) -> Result<Option<EnvPackageRow>> {
+        let row = sqlx::query_as::<_, EnvPackageRow>(
+            "SELECT * FROM env_packages WHERE package_id = ? AND is_deleted = 0",
+        )
+        .bind(package_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn require_package_row(&self, package_id: &str) -> Result<EnvPackageRow> {
+        self.find_package_row(package_id)
+            .await?
+            .ok_or_else(|| HubError::not_found("package", package_id))
+    }
+
+    /// Resolve `"latest"` (or a literal version) to a concrete version string.
+    async fn resolve_package_version(&self, pkg: &EnvPackageRow, version: &str) -> Result<String> {
+        if version == "latest" {
+            pkg.latest_version
+                .clone()
+                .ok_or_else(|| HubError::not_found("package version", format!("{}@latest", pkg.package_id)))
+        } else {
+            Ok(version.to_string())
+        }
+    }
+
+    /// Publish a new package version atomically (auto-creates the package row on
+    /// first publish; inserts version + artifacts; recomputes latest_version).
+    pub async fn publish_package(
+        &self,
+        package_id: &str,
+        publisher: Option<&str>,
+        description: Option<&str>,
+        nv: NewPackageVersion,
+    ) -> Result<dto::EnvPackageManifest> {
+        let normalized = ver::normalize(&nv.version)?;
+        let ts = now();
+        let mut tx = self.pool.begin().await?;
+
+        // Find-or-create the package row (atomic with the version insert).
+        let existing: Option<EnvPackageRow> = sqlx::query_as::<_, EnvPackageRow>(
+            "SELECT * FROM env_packages WHERE package_id = ? AND is_deleted = 0",
+        )
+        .bind(package_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let package_db_id = match existing {
+            Some(row) => {
+                // Reject duplicate version up-front for a clean error code.
+                let dup: Option<(i64,)> = sqlx::query_as(
+                    "SELECT id FROM env_package_versions WHERE package_db_id = ? AND version = ?",
+                )
+                .bind(row.id)
+                .bind(&nv.version)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if dup.is_some() {
+                    return Err(HubError::already_exists(
+                        "package version",
+                        format!("{package_id}@{}", nv.version),
+                    ));
+                }
+                row.id
+            }
+            None => {
+                let res = sqlx::query(
+                    "INSERT INTO env_packages (package_id, publisher, description, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(package_id)
+                .bind(publisher)
+                .bind(description)
+                .bind(ts)
+                .bind(ts)
+                .execute(&mut *tx)
+                .await?;
+                res.last_insert_rowid()
+            }
+        };
+
+        let res = sqlx::query(
+            "INSERT INTO env_package_versions \
+             (package_db_id, version, version_normalized, manifest_json, platform_json, \
+              worker_overlay_json, agent_defaults_json, contracts_json, changelog, \
+              published_by, published_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(package_db_id)
+        .bind(&nv.version)
+        .bind(&normalized)
+        .bind(&nv.manifest_json)
+        .bind(&nv.platform_json)
+        .bind(&nv.worker_overlay_json)
+        .bind(&nv.agent_defaults_json)
+        .bind(&nv.contracts_json)
+        .bind(&nv.changelog)
+        .bind(nv.published_by)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+        let version_id = res.last_insert_rowid();
+
+        for a in &nv.artifacts {
+            sqlx::query(
+                "INSERT INTO env_package_artifacts \
+                 (version_id, name, kind, rel_path, digest, size_bytes, sync_mode, media_type, \
+                  target_rel_path, url) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(version_id)
+            .bind(&a.name)
+            .bind(&a.kind)
+            .bind(&a.rel_path)
+            .bind(&a.digest)
+            .bind(a.size_bytes)
+            .bind(&a.sync_mode)
+            .bind(&a.media_type)
+            .bind(&a.target_rel_path)
+            .bind(&a.url)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        // Recompute latest among non-yanked versions (read inside the tx to avoid
+        // grabbing a second pool connection — see publish_version).
+        let all: Vec<(String,)> = sqlx::query_as(
+            "SELECT version FROM env_package_versions WHERE package_db_id = ? AND is_yanked = 0",
+        )
+        .bind(package_db_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let latest = ver::latest(all.iter().map(|(v,)| v.as_str()));
+        // Update latest + bump updated_at; refresh publisher/description when provided.
+        sqlx::query(
+            "UPDATE env_packages SET latest_version = ?, updated_at = ?, \
+             publisher = COALESCE(?, publisher), description = COALESCE(?, description) WHERE id = ?",
+        )
+        .bind(&latest)
+        .bind(ts)
+        .bind(publisher)
+        .bind(description)
+        .bind(package_db_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        self.get_package_manifest(package_id, &nv.version).await
+    }
+
+    /// Get a package version's full manifest (`"latest"` resolves to newest).
+    pub async fn get_package_manifest(
+        &self,
+        package_id: &str,
+        version: &str,
+    ) -> Result<dto::EnvPackageManifest> {
+        let pkg = self.require_package_row(package_id).await?;
+        let version = self.resolve_package_version(&pkg, version).await?;
+        let row = sqlx::query_as::<_, PackageVersionRow>(
+            "SELECT * FROM env_package_versions WHERE package_db_id = ? AND version = ?",
+        )
+        .bind(pkg.id)
+        .bind(&version)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| HubError::not_found("package version", format!("{package_id}@{version}")))?;
+        let manifest: dto::EnvPackageManifest = serde_json::from_str(&row.manifest_json)?;
+        Ok(manifest)
+    }
+
+    /// Paginated list of packages (newest-updated first).
+    pub async fn list_packages(
+        &self,
+        page: u32,
+        per_page: u32,
+    ) -> Result<dto::Page<dto::PackageSummary>> {
+        let per_page = per_page.clamp(1, 200);
+        let offset = (page.saturating_sub(1)) * per_page;
+        let total: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM env_packages WHERE is_deleted = 0")
+                .fetch_one(&self.pool)
+                .await?;
+        let rows = sqlx::query_as::<_, EnvPackageRow>(
+            "SELECT * FROM env_packages WHERE is_deleted = 0 ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        )
+        .bind(per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(dto::Page {
+            items: rows.iter().map(convert::package_summary).collect(),
+            page,
+            per_page,
+            total: total.0 as u64,
+        })
+    }
+
+    /// Fetch one artifact's metadata (storage path + digest) for serving.
+    pub async fn get_artifact_meta(
+        &self,
+        package_id: &str,
+        version: &str,
+        name: &str,
+    ) -> Result<PackageArtifactRow> {
+        let pkg = self.require_package_row(package_id).await?;
+        let version = self.resolve_package_version(&pkg, version).await?;
+        let vrow = sqlx::query_as::<_, PackageVersionRow>(
+            "SELECT * FROM env_package_versions WHERE package_db_id = ? AND version = ?",
+        )
+        .bind(pkg.id)
+        .bind(&version)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| HubError::not_found("package version", format!("{package_id}@{version}")))?;
+        sqlx::query_as::<_, PackageArtifactRow>(
+            "SELECT * FROM env_package_artifacts WHERE version_id = ? AND name = ?",
+        )
+        .bind(vrow.id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| HubError::not_found("package artifact", format!("{package_id}@{version}/{name}")))
+    }
 }
 
 // Alias so the long type name doesn't leak into signatures above.

@@ -9,8 +9,9 @@
   fake_reward: ${oc.env:UENV_AGENT_LOOP_FAKE_REWARD,1.0}
   fake_response_text: ${oc.env:UENV_AGENT_LOOP_FAKE_RESPONSE_TEXT,""}
   default_env_type: math
-  default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,https://openrouter.ai/api/v1}
-  default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,qwen/qwen-2.5-7b-instruct}
+  # 留空时 Worker 使用 config/uenv-worker-llm.env 默认 LLM；显式 override 时再设置
+  default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,}
+  default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,}
   default_max_steps: 10
   default_max_turns: 1
   seed_base: 42

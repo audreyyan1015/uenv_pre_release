@@ -45,8 +45,6 @@ uenv-worker health
 
 主示例：`config/uenv-worker.yaml`（或 `config/uenv-worker.json`）。
 
-`config/worker.example.toml` 已 **deprecated**，请迁移至 YAML/JSON。
-
 ## 环境插件与按需拉起
 
 Phase 0 环境：`plugins/math/`（`env_type=math`, `ipc=proto-uds`）；GSM8K 为 `payload.dataset=gsm8k`。

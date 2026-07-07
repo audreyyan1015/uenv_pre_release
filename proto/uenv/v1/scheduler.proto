@@ -13,12 +13,21 @@ service ControlPlaneService {
     rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
 }
 
+message SyncedEnvPackage {
+    string package_id = 1;
+    string version = 2;
+    string bundle_digest = 3;
+}
+
 message RegisterWorkerRequest {
     string worker_id = 1;
     repeated string supported_env_types = 2;
     uenv.v1.ResourceSpec resource = 3;
     string endpoint = 4;
     uint32 max_concurrent = 5;
+    // Runtime Gateway public URL for AgentJob injection (C-layer).
+    string gateway_public_url = 6;
+    repeated SyncedEnvPackage synced_env_packages = 7;
 }
 
 message RegisterWorkerResponse {
@@ -53,11 +62,15 @@ message ReportResultRequest {
     string worker_id = 2;
     uint64 server_epoch = 3;
     uenv.v1.EpisodeResult result = 4;
+    string dispatch_lease_id = 5;
+    bytes dispatch_token = 6;
 }
 
 message ReportResultResponse {
     bool ack = 1;
     bool duplicate = 2;
+    string code = 3;
+    string message = 4;
 }
 
 message ListWorkersRequest {

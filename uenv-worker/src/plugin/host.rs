@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Child;
 use tokio::sync::Mutex;
@@ -12,6 +13,8 @@ use tokio::sync::Mutex;
 use crate::backend::process::ProcessBackend;
 use crate::plugin::arpc::PluginRpcClient;
 use crate::plugin::instance::{PluginInstance, PluginInstanceState};
+
+static PLUGIN_INSTANCE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginManifest {
@@ -106,7 +109,8 @@ impl PluginHost {
                 return Err("manifest does not support process backend".into());
             }
             state.seq += 1;
-            let instance_id = format!("{}-{}", env_type, state.seq);
+            let global_seq = PLUGIN_INSTANCE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+            let instance_id = format!("{}-{}-{}", env_type, std::process::id(), global_seq);
             let uds_path = std::env::temp_dir().join(format!(
                 "uenv-{}-{}.sock",
                 instance_id,
@@ -116,8 +120,25 @@ impl PluginHost {
         };
 
         let entry = self.plugin_dir.join(env_type).join(manifest.entry);
-        let child = ProcessBackend::create(&entry, &uds_path)?;
+        let mut child = ProcessBackend::create(&entry, &uds_path)?;
         let pid = child.id().ok_or("failed to resolve plugin pid")?;
+        let started = tokio::time::Instant::now();
+        while tokio::fs::metadata(&uds_path).await.is_err() {
+            if let Some(status) = child.try_wait()? {
+                return Err(format!(
+                    "plugin process exited before UDS became ready: status={status}"
+                )
+                .into());
+            }
+            if started.elapsed() > Duration::from_secs(2) {
+                return Err(format!(
+                    "plugin UDS did not become ready within timeout: {}",
+                    uds_path.display()
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let instance = PluginInstance {
             instance_id: instance_id.clone(),
             env_type: env_type.to_string(),

@@ -20,7 +20,7 @@
 //     |                          |                   客户端收到结果|
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -35,6 +35,7 @@ use crate::proto::scheduler::v1::{
     WorkerInfo,
 };
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
+use crate::service::{complete_episode_result, ResultPersistenceContext, ResultTiming};
 use crate::state::ServerState;
 
 /// ControlPlaneService 的实现结构体，持有服务器全局状态的引用。
@@ -77,11 +78,24 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             } else {
                 1
             },
-            current_load: 0,  // 初始负载为 0
+            current_load: 0, // 初始负载为 0
+            reserved_load: 0,
+            reported_load: 0,
             resource: req.resource.clone(),
             draining: false,
-            last_report_at: Some(std::time::Instant::now()),  // 从注册时刻起算5min超时，防止 None 导致永不降级
-            last_heartbeat_at: Some(std::time::Instant::now()),  // 注册即视为一次心跳，30s 内需发真实心跳续期
+            last_report_at: Some(std::time::Instant::now()), // 从注册时刻起算5min超时，防止 None 导致永不降级
+            last_heartbeat_at: Some(std::time::Instant::now()), // 注册即视为一次心跳，30s 内需发真实心跳续期
+            // SWE+Agent 编排：保存 Gateway 对外 URL 与已 sync 的 EnvPackage（严格版本校验用）
+            gateway_public_url: req.gateway_public_url.clone(),
+            synced_env_packages: req
+                .synced_env_packages
+                .iter()
+                .map(|p| crate::scheduler::traits::SyncedEnvPackageInfo {
+                    package_id: p.package_id.clone(),
+                    version: p.version.clone(),
+                    bundle_digest: p.bundle_digest.clone(),
+                })
+                .collect(),
         };
 
         // 动态队列：注册前先取旧容量（重注册时计算 delta）
@@ -181,11 +195,28 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                         // 用心跳中的负载数据更新调度器里该 worker 的状态。
                         // max(0)：proto 中 load/max_load 是有符号 i32，
                         // 确保不会把负数转成 u32（负数转 u32 会溢出成超大值）。
-                        state.scheduler.write().update_worker_load(
+                        let capacity_change = state.scheduler.write().update_worker_load(
                             &heartbeat.worker_id,
                             heartbeat.load.max(0) as u32,
                             heartbeat.max_load.max(0) as u32,
                         );
+                        if state.queue_dynamic {
+                            if let (Some((old_capacity, new_capacity)), Some(sem)) =
+                                (capacity_change, state.episode_semaphore.as_ref())
+                            {
+                                if new_capacity > old_capacity {
+                                    sem.add_permits((new_capacity - old_capacity) as usize);
+                                } else if old_capacity > new_capacity {
+                                    let reduce = old_capacity - new_capacity;
+                                    let sem = Arc::clone(sem);
+                                    tokio::spawn(async move {
+                                        if let Ok(permit) = sem.acquire_many(reduce).await {
+                                            permit.forget();
+                                        }
+                                    });
+                                }
+                            }
+                        }
 
                         info!(
                             worker_id = %heartbeat.worker_id,
@@ -198,7 +229,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                         // 构造心跳响应，通知 worker 服务器一切正常
                         let resp = HeartbeatResponse {
                             ok: true,
-                            drain: None,  // None 表示不要求 worker 停止接受新任务
+                            drain: None, // None 表示不要求 worker 停止接受新任务
                             server_epoch: state.epoch(),
                             next_heartbeat_interval_ms: state.heartbeat_interval_ms as i32,
                         };
@@ -233,10 +264,17 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         request: Request<ReportResultRequest>,
     ) -> Result<Response<ReportResultResponse>, Status> {
         let req = request.into_inner();
+        let response = |ack: bool, duplicate: bool, code: &str, message: &str| {
+            Response::new(ReportResultResponse {
+                ack,
+                duplicate,
+                code: code.to_string(),
+                message: message.to_string(),
+            })
+        };
 
-        // epoch 校验：server_epoch 非零时必须与当前 epoch 匹配。
-        // 不匹配说明结果来自旧的 server 实例（server 已重启），应拒绝，避免把过期结果
-        // 路由到新 server 实例上等待中的 episode（两者的 pending_results 不互通）。
+        self.state.sweep_ttl_caches();
+
         if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
             warn!(
                 worker_id = %req.worker_id,
@@ -244,70 +282,207 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 current_epoch = self.state.epoch(),
                 "report_result_stale_epoch_rejected"
             );
-            return Ok(Response::new(ReportResultResponse {
-                ack: false,
-                duplicate: false,
-            }));
+            return Ok(response(
+                false,
+                false,
+                "STALE_EPOCH",
+                "server epoch mismatch",
+            ));
+        }
+        if req.idempotency_key.is_empty() {
+            warn!(worker_id = %req.worker_id, "report_result_empty_idempotency_key_rejected");
+            return Ok(response(
+                false,
+                false,
+                "INVALID_REQUEST",
+                "empty idempotency_key",
+            ));
+        }
+        if let Some(record) = self.state.idempotency_cache.get(&req.idempotency_key) {
+            let code = if record.ack {
+                "DUPLICATE_ACCEPTED"
+            } else {
+                "DUPLICATE_REJECTED"
+            };
+            return Ok(response(record.ack, true, code, &record.message));
+        }
+        let Some(mut result) = req.result else {
+            warn!(worker_id = %req.worker_id, "report_result_missing_result_rejected");
+            return Ok(response(false, false, "INVALID_REQUEST", "missing result"));
+        };
+        if req.dispatch_lease_id.is_empty() || req.dispatch_token.is_empty() {
+            warn!(
+                worker_id = %req.worker_id,
+                episode_id = %result.episode_id,
+                attempt_id = result.attempt_id,
+                "report_result_missing_dispatch_lease_rejected"
+            );
+            return Ok(response(
+                false,
+                false,
+                "INVALID_REQUEST",
+                "missing dispatch lease or token",
+            ));
         }
 
-        // 幂等性检查：把 idempotency_key 插入已处理集合。
-        // HashSet::insert 返回 true 表示插入成功（key 是新的），false 表示已存在（重复请求）。
-        // 取反后：duplicate=true 表示这是重复上报，应跳过处理。
-        let duplicate = {
-            let mut seen = self.state.seen_idempotency.lock();
-            !seen.insert(req.idempotency_key.clone())
+        let episode_id = result.episode_id.clone();
+        let attempt_id = result.attempt_id;
+        let pending_key = (
+            episode_id.clone(),
+            attempt_id,
+            req.dispatch_lease_id.clone(),
+        );
+        let ttl = Duration::from_secs(self.state.report_result_idempotency_ttl_secs.max(1));
+        let expires_at = Instant::now() + ttl;
+        let remember = |ack: bool, code: &str, message: &str| {
+            self.state.idempotency_cache.insert(
+                req.idempotency_key.clone(),
+                crate::state::IdempotencyRecord {
+                    expires_at,
+                    episode_id: episode_id.clone(),
+                    attempt_id,
+                    dispatch_lease_id: req.dispatch_lease_id.clone(),
+                    ack,
+                    code: code.to_string(),
+                    message: message.to_string(),
+                },
+            );
         };
-
-        // 从结果中提取 episode_id 和 attempt_id，用于查找对应的等待 channel
-        let episode_id = req
-            .result
-            .as_ref()
-            .map(|r| r.episode_id.clone())
-            .unwrap_or_default();
-        let attempt_id = req.result.as_ref().map(|r| r.attempt_id).unwrap_or(0);
 
         info!(
             worker_id = %req.worker_id,
             episode_id = %episode_id,
             attempt_id = attempt_id,
-            duplicate = duplicate,
+            dispatch_lease_id = %req.dispatch_lease_id,
             "control_plane_report_result"
         );
 
-        // 只有非重复的结果才进行处理；重复结果直接返回 duplicate=true 告知 worker
-        if !duplicate {
-            if let Some(result) = req.result {
-                self.state.scheduler.write().touch_worker_report(&req.worker_id);
-                // 从 pending_results 中取出并删除对应条目（同时获得 channel 的发送端）
-                if let Some((_, pending)) = self
-                    .state
-                    .pending_results
-                    .remove(&(episode_id.clone(), attempt_id))
-                {
-                    // 通过 oneshot channel 把结果发送给 service.rs 中等待的 rx.await。
-                    // let _ = 表示忽略发送失败：接收端可能已超时被丢弃，这种情况不算错误。
-                    let _ = pending.tx.send(result);
-                }
+        if let Some(pending_ref) = self.state.pending_results.get(&pending_key) {
+            if pending_ref.worker_id != req.worker_id {
+                warn!(
+                    worker_id = %req.worker_id,
+                    expected_worker_id = %pending_ref.worker_id,
+                    episode_id = %episode_id,
+                    attempt_id = attempt_id,
+                    "report_result_worker_mismatch_rejected"
+                );
+                remember(
+                    false,
+                    "WORKER_MISMATCH",
+                    "worker_id does not own this dispatch lease",
+                );
+                return Ok(response(
+                    false,
+                    false,
+                    "WORKER_MISMATCH",
+                    "worker_id does not own this dispatch lease",
+                ));
+            }
+            if pending_ref.dispatch_token != req.dispatch_token {
+                warn!(
+                    worker_id = %req.worker_id,
+                    episode_id = %episode_id,
+                    attempt_id = attempt_id,
+                    dispatch_lease_id = %req.dispatch_lease_id,
+                    "report_result_token_mismatch_rejected"
+                );
+                remember(false, "TOKEN_MISMATCH", "dispatch token mismatch");
+                return Ok(response(
+                    false,
+                    false,
+                    "TOKEN_MISMATCH",
+                    "dispatch token mismatch",
+                ));
             }
         }
 
-        // 结果已处理完毕，从幂等集合中删除该 key，避免长期运行内存无限增长。
-        // 此时重复上报的窗口已关闭：pending_results 已移除，channel 已关闭，
-        // 即使 worker 再次重发同一 key，也只会拿到空的 pending_results 而无副作用。
-        {
-            let mut seen = self.state.seen_idempotency.lock();
-            seen.remove(&req.idempotency_key);
-        }
+        let removed = self
+            .state
+            .pending_results
+            .remove_if(&pending_key, |_, pending| {
+                pending.worker_id == req.worker_id && pending.dispatch_token == req.dispatch_token
+            });
+        let Some((_, pending)) = removed else {
+            let (code, message) =
+                if let Some(outcome) = self.state.result_outcomes.get(&pending_key) {
+                    if outcome.code == "ACCEPTED" {
+                        (
+                            "ALREADY_COMPLETED".to_string(),
+                            "result already accepted for this lease".to_string(),
+                        )
+                    } else {
+                        (outcome.code.clone(), outcome.message.clone())
+                    }
+                } else if self.state.cancel_outcomes.contains_key(&episode_id) {
+                    (
+                        "LATE_AFTER_CANCEL".to_string(),
+                        "episode was cancelled".to_string(),
+                    )
+                } else {
+                    (
+                        "UNKNOWN_PENDING".to_string(),
+                        "pending result not found".to_string(),
+                    )
+                };
+            warn!(
+                worker_id = %req.worker_id,
+                episode_id = %episode_id,
+                attempt_id = attempt_id,
+                dispatch_lease_id = %req.dispatch_lease_id,
+                code = %code,
+                "report_result_pending_absent_rejected"
+            );
+            remember(false, &code, &message);
+            return Ok(response(false, false, &code, &message));
+        };
 
-        Ok(Response::new(ReportResultResponse {
-            ack: true,
-            duplicate,
-        }))
+        let request_for_result = crate::proto::v1::EpisodeRequest {
+            episode_id: episode_id.clone(),
+            attempt_id,
+            parallel_mode: pending.parallel_mode.clone(),
+            enqueue_ts: Some(pending.enqueue_ts),
+            metadata: std::collections::HashMap::from([(
+                "parallel_mode".to_string(),
+                pending.parallel_mode.clone(),
+            )]),
+            ..Default::default()
+        };
+        let timing = ResultTiming {
+            enqueue_at: pending.enqueue_at,
+            dispatch_at: Some(pending.dispatch_at),
+            enqueue_ts: pending.enqueue_ts,
+            dispatch_ts: Some(pending.dispatch_ts),
+        };
+        result = complete_episode_result(
+            &self.state,
+            &request_for_result,
+            result,
+            Some(timing),
+            Some(ResultPersistenceContext::native(
+                req.worker_id.clone(),
+                req.idempotency_key.clone(),
+            )),
+            false,
+        );
+
+        self.state.result_outcomes.insert(
+            pending_key.clone(),
+            crate::state::TimedOutcome {
+                expires_at,
+                code: "ACCEPTED".to_string(),
+                message: String::new(),
+            },
+        );
+        remember(true, "ACCEPTED", "accepted");
+        self.state
+            .scheduler
+            .write()
+            .touch_worker_report(&req.worker_id);
+        let _ = pending.tx.send(result);
+
+        Ok(response(true, false, "ACCEPTED", "accepted"))
     }
 
-    /// 查询已注册的 worker 列表（控制平面版本，支持按环境类型过滤）。
-    /// 如果请求中的 env_types 列表为空，返回所有 worker；
-    /// 否则只返回支持其中至少一种环境类型的 worker。
     async fn list_workers(
         &self,
         request: Request<ListWorkersRequest>,
@@ -339,10 +514,81 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                     "degraded"
                 } else {
                     "ready"
-                }.to_string(),
+                }
+                .to_string(),
                 endpoint: w.endpoint,
             })
             .collect();
         Ok(Response::new(ListWorkersResponse { workers }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::scheduler::v1::ReportResultRequest;
+    use crate::proto::scheduler::v1::control_plane_service_server::ControlPlaneService;
+    use crate::proto::v1::EpisodeResult;
+
+    fn report_req(idempotency_key: &str) -> ReportResultRequest {
+        ReportResultRequest {
+            idempotency_key: idempotency_key.to_string(),
+            worker_id: "w1".to_string(),
+            server_epoch: 0,
+            result: Some(EpisodeResult {
+                episode_id: "ep1".to_string(),
+                attempt_id: 1,
+                status: "completed".to_string(),
+                ..Default::default()
+            }),
+            dispatch_lease_id: "lease-1".to_string(),
+            dispatch_token: b"token-1".to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn different_idempotency_after_accepted_returns_already_completed() {
+        let state = crate::create_default_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.pending_results.insert(
+            ("ep1".to_string(), 1, "lease-1".to_string()),
+            crate::state::PendingResult {
+                tx,
+                worker_id: "w1".to_string(),
+                dispatch_lease_id: "lease-1".to_string(),
+                dispatch_token: b"token-1".to_vec(),
+                parallel_mode: "sync".to_string(),
+                enqueue_at: std::time::Instant::now(),
+                dispatch_at: std::time::Instant::now(),
+                enqueue_ts: 0.0,
+                dispatch_ts: 0.0,
+            },
+        );
+        let svc = ControlPlaneServiceImpl { state };
+        let first = svc
+            .report_result(Request::new(report_req("key-1")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first.ack);
+        assert_eq!(first.code, "ACCEPTED");
+
+        let retry = svc
+            .report_result(Request::new(report_req("key-1")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(retry.ack);
+        assert!(retry.duplicate);
+        assert_eq!(retry.code, "DUPLICATE_ACCEPTED");
+
+        let second_key = svc
+            .report_result(Request::new(report_req("key-2")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!second_key.ack);
+        assert!(!second_key.duplicate);
+        assert_eq!(second_key.code, "ALREADY_COMPLETED");
     }
 }

@@ -184,6 +184,7 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
     let model_endpoint = json_string(model_ep, "url").unwrap_or_default();
     let worker_payload = sample_to_worker_payload(&sample, &payload, model_ep, &model_endpoint);
     let worker_reward_config = sample_to_worker_reward_config(&payload);
+    let env_cfg = payload.get("env_config").unwrap_or(&Value::Null);
 
     Ok(ProtoEpisodeRequest {
         episode_id: sample.request_id,
@@ -198,6 +199,12 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
         seed: json_i32(episode_cfg, "seed"),
         timeout_seconds: json_i32(&payload, "timeout_seconds").unwrap_or(300),
         reward_config: serde_json::to_vec(&worker_reward_config).unwrap_or_default(),
+        env_package_id: json_string(env_cfg, "env_package_id")
+            .or_else(|| json_string(env_cfg, "package_id"))
+            .unwrap_or_default(),
+        env_package_version: json_string(env_cfg, "env_package_version")
+            .or_else(|| json_string(env_cfg, "package_version"))
+            .unwrap_or_default(),
         ..Default::default()
     })
 }
@@ -221,7 +228,7 @@ fn sample_to_worker_payload(
         .or_else(|| json_string(metadata, "data_source"))
         .unwrap_or_default();
 
-    json!({
+    let mut worker_payload = json!({
         "request_id": sample.request_id,
         "question": question,
         "dataset": dataset,
@@ -230,7 +237,42 @@ fn sample_to_worker_payload(
         "model_endpoint": model_endpoint,
         "model_name": json_string(model_ep, "model_name").unwrap_or_else(|| "policy-model".to_string()),
         "generation_config": model_ep.get("generation_config").cloned().unwrap_or_else(|| json!({})),
-    })
+    });
+    // SWE native: forward instance fields from env_config so the worker can locate the
+    // image and grade (the generic mapping above only carries question/dataset).
+    if sample.env_type == "swe" {
+        if let Some(obj) = worker_payload.as_object_mut() {
+            for key in ["instance_id", "benchmark_variant", "use_gold_patch", "command_mode"] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+            for key in ["env_package_id", "env_package_version"] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+            // SWE+Agent 编排（设计 260701 §2.0.5）：透传 agent 相关字段，供 Server 的
+            // submit_swe_agent_episode 从 payload 解析 SweAgentSpec。缺 execution_mode
+            // 时 Server 自动回退 native 路径，不影响既有 SWE native 行为。
+            for key in [
+                "execution_mode",
+                "mode",
+                "agent_bridge_id",
+                "agent_bridge_version",
+                "agent_pool_id",
+                "driver_entrypoint",
+                "workspace_dir",
+                "llm_config_path",
+                "max_iterations",
+            ] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+    }
+    worker_payload
 }
 
 fn sample_to_worker_reward_config(payload: &Value) -> Value {

@@ -1,0 +1,27 @@
+# 7142 模型网关 — DeepSeek-V3-0324-AWQ
+# 复制为 uenv-llm-gateway-7142.yaml 后按实机调整；API Key 走环境变量 UENV_LLM_GATEWAY_API_KEY
+listen: "0.0.0.0:18888"
+advertise_endpoint: "219.147.100.43:18888"
+
+observability:
+  health_listen: "0.0.0.0:18777"
+
+backend:
+  # base_url 不含 /v1；readiness_path 与 OpenAI 路由均为 /v1/...
+  base_url: "http://127.0.0.1:8000"
+  readiness_path: "/v1/models"
+  readiness_interval_sec: 5
+  readiness_timeout_sec: 900
+
+auth:
+  api_key_env: "UENV_LLM_GATEWAY_API_KEY"
+
+model:
+  id: "deepseek-v3-0324-awq"
+  enabled: true
+
+proxy:
+  timeout_sec: 600
+  max_body_bytes: 8388608
+
+log_file: "/var/log/uenv/uenv-llm-gateway.log"

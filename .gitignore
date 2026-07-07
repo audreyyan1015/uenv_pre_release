@@ -16,14 +16,42 @@ Thumbs.db
 /uenv-server/target
 secrets/*
 !secrets/README.md
-# scripts 默认忽略，显式保留几个常用脚本
+# scripts 默认忽略，显式保留运维交付脚本；_ 前缀为联调临时脚本，不入库
 /scripts/*
+/scripts/_*
+/scripts/integrations/
 !/scripts/connect-remote.sh
 !/scripts/gen-worker-proto.sh
+!/scripts/proto-gen.sh
+!/scripts/gen-gsm8k-fixture.sh
+!/scripts/gen-math-fixture.sh
 !/scripts/export_swe_instances.py
+!/scripts/export_swe_pro_instances.py
+!/scripts/deploy-pro-python-openhands-7143.sh
+!/scripts/pull-pro-image-7143.sh
+!/scripts/hub-stage-image-package.sh
+!/scripts/deploy-openhands-20877.sh
+!/scripts/run-openhands-pro-20877.sh
+!/scripts/restart-worker-gateway-28097-7143.sh
+!/scripts/deploy-adapter-core-75157.sh
+!/scripts/deploy-trajectory-chain.sh
+!/scripts/verify-openhands-trajectory-e2e-20877.sh
+!/scripts/gen-openhands-llm-config.py
+!/scripts/swe_gateway_demo.py
+!/scripts/deploy-uenv-llm-7142.sh
+!/scripts/stop-uenv-llm-7142.sh
+!/scripts/uenv-llm-gateway.py
+!/scripts/openhands/
+!/scripts/openhands/**
+!/scripts/uenv-llm-gateway/
+!/scripts/uenv-llm-gateway/**
 /logs
 /Docs/scripts
 /tmp
+# 含服务器账号密码的联调指南，严禁入库
+/Docs/README.md
+# 联调周报（本地产物，勿入库）
+/周报/
 
 # stress_test: 生成的 gRPC Python 框、临时的 proto 源文件及临时日志
 /uenv-server/stress_test/uenv/
@@ -32,6 +60,8 @@ secrets/*
 
 # SWE-bench数据集 parquet 原始文件（较大，可用 export 脚本重新生成）
 /fixtures/swe/*.parquet
-# SWE 工具/测试脚本目前在测
+# 联调临时合并目录（verified+pro，可再生，勿入库）
+/fixtures/swe/swe_instances_with_pro.json
+# SWE 本地/离线联调运行产物
 /swe-wal/
 swe-worker.log

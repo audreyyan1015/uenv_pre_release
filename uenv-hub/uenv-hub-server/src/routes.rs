@@ -2,7 +2,7 @@
 //! templates. Handlers stay thin — reads hit the store directly, writes go
 //! through the `service` orchestration layer.
 
-use crate::errors::ApiResult;
+use crate::errors::{ApiError, ApiResult};
 use crate::etag::json_with_etag;
 use crate::middleware::{ensure_role, Principal};
 use crate::service;
@@ -36,6 +36,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/envs/:env_type/versions/:version/yank", post(yank_version))
         .route("/envs/:env_type/resolve", get(resolve_version))
         .route("/search", get(search))
+        // SWE-bench instance catalog（M1-1 / M6-1）：worker 按变体拉取实例真值。
+        .route("/swe/:variant/instances", get(swe_instances))
+        // environment packages (EnvPackage): registry + content-addressed artifacts
+        .route("/packages", get(list_packages))
+        .route("/packages/:package_id/versions", post(publish_package))
+        .route("/packages/:package_id/versions/:version", get(get_package))
+        .route(
+            "/packages/:package_id/versions/:version/sync-plan",
+            get(get_package_sync_plan),
+        )
+        .route(
+            "/packages/:package_id/versions/:version/artifacts/:name",
+            get(get_package_artifact),
+        )
         // templates
         .route("/templates", get(list_templates))
         .route("/templates/:name/archive", get(template_archive))
@@ -255,6 +269,177 @@ async fn search(
     // Search results are intentionally not cached (per design doc §8).
     let resp = state.store.search(&q).await?;
     Ok(Json(resp))
+}
+
+// ---------------------------------------------------------------------------
+// SWE-bench instance catalog (M1-1 / M6-1)
+// ---------------------------------------------------------------------------
+
+/// Serve the SWE-bench instance catalog for a benchmark variant.
+///
+/// Reads `${UENV_HUB_SWE_CATALOG_DIR:-config/swe}/<variant>.json` (the same flat
+/// `instance_id -> row` map the worker's `InstanceStore::from_json` expects) and
+/// returns it verbatim. Decouples the data plane (catalog files / object store)
+/// from the control plane (env registry DB); worker pulls here with optional token.
+async fn swe_instances(
+    State(_state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path(variant): Path<String>,
+) -> ApiResult<Response> {
+    let variant = variant.to_ascii_lowercase();
+    if !matches!(variant.as_str(), "verified" | "lite" | "pro") {
+        return Err(crate::errors::ApiError::not_found(format!(
+            "unknown swe benchmark variant `{variant}` (expected verified|lite|pro)"
+        )));
+    }
+    let dir = std::env::var("UENV_HUB_SWE_CATALOG_DIR").unwrap_or_else(|_| "config/swe".to_string());
+    let path = std::path::Path::new(&dir).join(format!("{variant}.json"));
+    let body = std::fs::read_to_string(&path).map_err(|_| {
+        crate::errors::ApiError::not_found(format!(
+            "swe catalog for variant `{variant}` not seeded (looked in {})",
+            path.display()
+        ))
+    })?;
+    // Validate it parses as JSON so we never serve a corrupt catalog.
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        crate::errors::ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            uenv_hub_types::ErrorCode::InternalError,
+            format!("swe catalog `{variant}` is not valid JSON: {e}"),
+        )
+    })?;
+    Ok(json_with_etag(&headers, &value))
+}
+
+// ---------------------------------------------------------------------------
+// environment packages (EnvPackage)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct PageQuery {
+    #[serde(default = "one")]
+    page: u32,
+    #[serde(default = "twenty")]
+    per_page: u32,
+}
+
+/// `GET /packages` — paginated package list.
+async fn list_packages(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Response> {
+    let page = state.store.list_packages(q.page, q.per_page).await?;
+    Ok(json_with_etag(&headers, &page))
+}
+
+/// `POST /packages/{package_id}/versions` — publish a package version.
+async fn publish_package(
+    State(state): State<AppState>,
+    Principal(principal): Principal,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    Path(package_id): Path<String>,
+    Json(req): Json<dto::PublishPackageRequest>,
+) -> ApiResult<(StatusCode, Json<dto::PublishPackageResponse>)> {
+    ensure_role(&principal, Role::Publisher)?;
+    let artifact_root = std::path::PathBuf::from(&state.config.packages.artifact_dir);
+    let manifest = service::publish_package(
+        &state.store,
+        &principal,
+        client_ip(&connect_info),
+        &artifact_root,
+        &package_id,
+        req,
+    )
+    .await?;
+    let resp = dto::PublishPackageResponse {
+        package_id: manifest.package_id.clone(),
+        version: manifest.version.clone(),
+        published_at: manifest.published_at,
+        manifest_url: format!(
+            "/api/v1/packages/{}/versions/{}",
+            manifest.package_id, manifest.version
+        ),
+    };
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// `GET /packages/{package_id}/versions/{version}` — full manifest (`latest` ok).
+async fn get_package(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((package_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let manifest = state.store.get_package_manifest(&package_id, &version).await?;
+    Ok(json_with_etag(&headers, &manifest))
+}
+
+/// `GET /packages/{package_id}/versions/{version}/sync-plan` — fetch plan.
+async fn get_package_sync_plan(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((package_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let manifest = state.store.get_package_manifest(&package_id, &version).await?;
+    let plan = uenv_hub_core::package::sync_plan(&manifest);
+    Ok(json_with_etag(&headers, &plan))
+}
+
+/// Query for artifact downloads.
+#[derive(Debug, Deserialize)]
+struct ArtifactQuery {
+    /// Re-hash the file against the stored digest before serving (integrity
+    /// self-check). Off by default so multi-GB image tarballs aren't re-read on
+    /// every request; the digest is always exposed as the strong ETag regardless.
+    #[serde(default)]
+    verify: bool,
+}
+
+/// `GET /packages/{package_id}/versions/{version}/artifacts/{name}` — serve bytes.
+///
+/// The file is **streamed** from the artifact store (chunked, never buffered in
+/// RAM) so large hosted image tarballs don't exhaust the memory-constrained Hub.
+/// The stored digest is returned as the strong ETag; pass `?verify=true` to force
+/// a full re-hash before serving.
+async fn get_package_artifact(
+    State(state): State<AppState>,
+    _principal: Principal,
+    Path((package_id, version, name)): Path<(String, String, String)>,
+    Query(q): Query<ArtifactQuery>,
+) -> ApiResult<Response> {
+    let meta = state
+        .store
+        .get_artifact_meta(&package_id, &version, &name)
+        .await?;
+    let root = std::path::Path::new(&state.config.packages.artifact_dir);
+    let abs = uenv_hub_core::package::artifact_abs_path(root, &meta.rel_path)?;
+    if q.verify {
+        uenv_hub_core::package::verify_artifact_file(root, &meta.rel_path, &meta.digest)?;
+    }
+    let file = tokio::fs::File::open(&abs)
+        .await
+        .map_err(|e| ApiError::not_found(format!("package artifact bytes {}: {e}", abs.display())))?;
+    let len = file.metadata().await.ok().map(|m| m.len());
+    let content_type = meta
+        .media_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    let mut builder = Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ETAG, format!("\"{}\"", meta.digest));
+    if let Some(l) = len {
+        builder = builder.header(header::CONTENT_LENGTH, l);
+    }
+    builder
+        .body(body)
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, dto::ErrorCode::InternalError, format!("stream artifact: {e}")))
 }
 
 // ---------------------------------------------------------------------------

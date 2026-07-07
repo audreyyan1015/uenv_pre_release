@@ -1,0 +1,17 @@
+{
+  "package_id": "uenv-agent-openhands",
+  "version": "1.0.0",
+  "openhands_sdk_pin": "1.27.0",
+  "drivers": [
+    "run_swebenchpro_official.py",
+    "run_swebench.py",
+    "run_pro_agent.py"
+  ],
+  "uenv_runtime_modules": [
+    "client.py",
+    "workspace.py",
+    "gateway_tools.py",
+    "runtime.py",
+    "agent_job.py"
+  ]
+}

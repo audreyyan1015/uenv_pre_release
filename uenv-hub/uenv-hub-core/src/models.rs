@@ -309,3 +309,86 @@ pub struct NewTemplate {
     pub version: String,
     pub archive: Vec<u8>,
 }
+
+// ---------------------------------------------------------------------------
+// Environment packages (EnvPackage)
+// ---------------------------------------------------------------------------
+
+/// Row of the `env_packages` table.
+#[derive(Debug, Clone, FromRow)]
+pub struct EnvPackageRow {
+    pub id: i64,
+    pub package_id: String,
+    pub publisher: Option<String>,
+    pub description: Option<String>,
+    pub latest_version: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_deleted: i64,
+}
+
+/// Row of the `env_package_versions` table.
+#[derive(Debug, Clone, FromRow)]
+pub struct PackageVersionRow {
+    pub id: i64,
+    pub package_db_id: i64,
+    pub version: String,
+    pub version_normalized: String,
+    pub manifest_json: String,
+    pub platform_json: Option<String>,
+    pub worker_overlay_json: Option<String>,
+    pub agent_defaults_json: Option<String>,
+    pub contracts_json: Option<String>,
+    pub changelog: Option<String>,
+    pub is_yanked: i64,
+    pub yank_reason: Option<String>,
+    pub published_by: Option<i64>,
+    pub published_at: i64,
+}
+
+/// Row of the `env_package_artifacts` table.
+#[derive(Debug, Clone, FromRow)]
+pub struct PackageArtifactRow {
+    pub id: i64,
+    pub version_id: i64,
+    pub name: String,
+    pub kind: String,
+    pub rel_path: String,
+    pub digest: String,
+    pub size_bytes: Option<i64>,
+    pub sync_mode: String,
+    pub media_type: Option<String>,
+    pub target_rel_path: String,
+    pub url: String,
+}
+
+/// One artifact's persisted metadata, supplied by the service layer after it has
+/// written the bytes to the Hub artifact store and computed the digest.
+#[derive(Debug, Clone)]
+pub struct NewPackageArtifact {
+    pub name: String,
+    pub kind: String,
+    pub rel_path: String,
+    pub digest: String,
+    pub size_bytes: Option<i64>,
+    pub sync_mode: String,
+    pub media_type: Option<String>,
+    pub target_rel_path: String,
+    pub url: String,
+}
+
+/// Parameters to publish a new package version (manifest already assembled +
+/// validated, artifacts already persisted to disk by the service layer).
+#[derive(Debug, Clone)]
+pub struct NewPackageVersion {
+    pub version: String,
+    /// Authoritative serialized `EnvPackageManifest` (returned verbatim on GET).
+    pub manifest_json: String,
+    pub platform_json: Option<String>,
+    pub worker_overlay_json: Option<String>,
+    pub agent_defaults_json: Option<String>,
+    pub contracts_json: Option<String>,
+    pub changelog: Option<String>,
+    pub published_by: Option<i64>,
+    pub artifacts: Vec<NewPackageArtifact>,
+}

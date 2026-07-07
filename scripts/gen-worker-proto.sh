@@ -9,6 +9,7 @@ protoc -I="$ROOT/proto" -I="$ROOT/uenv-worker/proto" \
   "$ROOT/uenv-worker/proto/worker_service.proto" \
   "$ROOT/proto/uenv/v1/scheduler.proto" \
   "$ROOT/proto/uenv/v1/episode.proto" \
+  "$ROOT/proto/uenv/v1/agent.proto" \
   "$ROOT/proto/uenv/v1/common.proto" \
   "$ROOT/proto/uenv/v1/wal.proto" \
   --prost_out="$OUT" --tonic_out="$OUT"

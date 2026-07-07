@@ -4,8 +4,8 @@
 //! repository methods stay readable.
 
 use crate::models::{
-    AuditRow, ConfigRow, EnvRow, FullManifest as ModelManifest, ImageRow, TemplateRow, TokenRow,
-    VersionRow,
+    AuditRow, ConfigRow, EnvPackageRow, EnvRow, FullManifest as ModelManifest, ImageRow,
+    TemplateRow, TokenRow, VersionRow,
 };
 use serde_json::Value;
 use uenv_hub_types as dto;
@@ -151,6 +151,18 @@ pub fn template_summary(row: &TemplateRow) -> dto::TemplateSummary {
         description: row.description.clone(),
         version: row.version.clone(),
         archive_sha256: row.archive_sha256.clone(),
+        updated_at: row.updated_at,
+    }
+}
+
+/// Build a public [`dto::PackageSummary`] from an `env_packages` row.
+pub fn package_summary(row: &EnvPackageRow) -> dto::PackageSummary {
+    dto::PackageSummary {
+        package_id: row.package_id.clone(),
+        publisher: row.publisher.clone(),
+        description: row.description.clone(),
+        latest_version: row.latest_version.clone(),
+        created_at: row.created_at,
         updated_at: row.updated_at,
     }
 }

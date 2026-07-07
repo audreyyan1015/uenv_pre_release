@@ -1,0 +1,5 @@
+# 208.77 Agent 端 poll 模式依赖（Server 编排）：连 Server AgentControlService 的 gRPC。
+# 安装：pip install -r integrations/openhands/requirements-agent.txt
+grpcio>=1.60
+grpcio-tools>=1.60
+protobuf>=4.25

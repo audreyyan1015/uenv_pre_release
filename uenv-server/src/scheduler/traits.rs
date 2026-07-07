@@ -39,8 +39,13 @@ pub trait Scheduler: Send + 'static {
     /// - Err(ScheduleError)：没有合适的 worker 可用（具体原因见 ScheduleError）
     ///
     /// &self 表示只读访问：调度本身不修改 worker 的状态。
-    /// 负载计数的修改由 service.rs 的 increment_load/decrement_load 单独完成。
     fn schedule(&self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError>;
+
+    /// ?? Worker admission?????????????????? reservation?
+    fn reserve(&mut self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError>;
+
+    /// ???? server-side reservation?
+    fn release(&mut self, worker_id: &str);
 }
 
 /// WorkerInfo：一个已注册 worker 的完整信息。
@@ -57,27 +62,47 @@ pub struct WorkerInfo {
     /// 该 worker 最多同时执行的 episode 数（容量上限）
     pub capacity: u32,
     /// 该 worker 当前正在执行的 episode 数（当前负载）
-    /// current_load >= capacity 时，该 worker 不会被分配新 episode
+    /// ?????/??????????????????? reported_load?
     pub current_load: u32,
+    /// server ?????? terminal ? reservation ??
+    pub reserved_load: u32,
+    /// worker ???????????
+    pub reported_load: u32,
     /// Worker 机器实际拥有的资源规格（注册时由 worker 上报，None 表示未上报）
     pub resource: Option<ResourceSpec>,
     /// 是否正在 drain：true 时不再接受新 episode，等待当前任务执行完毕
     pub draining: bool,
     /// 上次成功上报 report_result 的时刻（None 表示从未上报）。
-    /// 用于检测 Worker 假活：load > 0 但长时间无上报时跳过调度。
+    /// 用于检测 Worker 假活：load > 0 但长时间无 episode 完成时跳过调度。
     pub last_report_at: Option<std::time::Instant>,
     /// 上次收到心跳包的时刻（注册时初始化为 Some(now)）。
     /// 超过 heartbeat_timeout_secs 无心跳则认为连接断开。
     pub last_heartbeat_at: Option<std::time::Instant>,
+    /// Runtime Gateway 对外可访问 URL（SWE+Agent 编排时写入 AgentJob.gateway_url）。
+    /// 由 RegisterWorker.gateway_public_url 上报；native 路径不使用。
+    pub gateway_public_url: String,
+    /// 该 worker 已 sync 的 EnvPackage 列表（严格版本校验用）。
+    /// SWE+Agent 调度时要求 synced_env_packages 含请求的 env_package@version。
+    pub synced_env_packages: Vec<SyncedEnvPackageInfo>,
+}
+
+/// Worker 已 sync 的 EnvPackage 记录（对应 proto SyncedEnvPackage）。
+#[derive(Clone)]
+pub struct SyncedEnvPackageInfo {
+    pub package_id: String,
+    pub version: String,
+    pub bundle_digest: String,
 }
 
 /// WorkerAssignment：调度结果，表示一个 episode 应该分发给哪个 worker。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WorkerAssignment {
     /// 被选中的 worker 的 ID（用于更新负载计数等操作）
     pub worker_id: String,
     /// 被选中的 worker 的 gRPC 地址（用于建立连接并下发 episode）
     pub endpoint: String,
+    /// 被选中的 worker 的 Runtime Gateway 对外 URL（SWE+Agent 编排注入 AgentJob）。
+    pub gateway_public_url: String,
 }
 
 /// 调度失败时的错误类型，描述失败的具体原因。
@@ -94,4 +119,7 @@ pub enum ScheduleError {
     /// 支持该 env_type 的 worker 都已满载（current_load >= capacity）
     #[error("all workers at capacity")]
     AllWorkersAtCapacity,
+    /// 有支持该 env_type 的 worker，但没有一个 sync 了请求的 env_package@version
+    #[error("no worker has synced the requested env_package")]
+    NoMatchingEnvPackage,
 }

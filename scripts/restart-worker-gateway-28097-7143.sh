@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# 7143：将 Runtime Gateway 切换至 :28097 并重启 Worker（在 7143 本机执行）
+set -euo pipefail
+cd /root/UEnv
+
+echo "== rebuild worker =="
+source ~/.cargo/env 2>/dev/null || true
+bash scripts/gen-worker-proto.sh
+cargo build -p uenv-worker --release 2>&1 | tail -5
+
+sudo mkdir -p /var/lib/uenv/swe-artifacts/spool/pending /var/lib/uenv/swe-artifacts/bodies /var/lib/uenv/swe-artifacts/index/by-id
+
+pkill -f 'uenv-worker.*serve' || true
+sleep 2
+fuser -k 28097/tcp 2>/dev/null || true
+sleep 2
+source /root/.uenv-worker.env 2>/dev/null || true
+source /root/.uenv-trajectory.env 2>/dev/null || true
+export UENV_WORKER_ALLOW_DEGRADED_START=1
+# VeRL math rollout：预热 math 插件池（与 deploy-7143-swe-pro.yaml pool 段一致）
+export UENV_WARMUP_POOL_SIZE="${UENV_WARMUP_POOL_SIZE:-4}"
+export UENV_PREWARM_ON_STARTUP="${UENV_PREWARM_ON_STARTUP:-true}"
+# Server/Agent 均经本机 28097 隧道访问 Gateway；勿用公网 28097（NAT 未通）
+export UENV_SWE_GATEWAY_PUBLIC_URL=http://127.0.0.1:28097
+export UENV_SWE_ARTIFACT_DIR="${UENV_SWE_ARTIFACT_DIR:-/var/lib/uenv/swe-artifacts}"
+export UENV_TRAJECTORY_ENDPOINT="${UENV_TRAJECTORY_ENDPOINT:-http://8.130.75.157:8077}"
+# EnvPackage sync dir (Phase A): set by deploy-phase-abc-e2e.sh or manually after `uenv env sync`
+export UENV_SWE_ENV_PACKAGE="${UENV_SWE_ENV_PACKAGE:-}"
+if [[ -z "$UENV_SWE_ENV_PACKAGE" && -d /var/lib/uenv/envs/swe-bench-pro/0.2.0 ]]; then
+  export UENV_SWE_ENV_PACKAGE=/var/lib/uenv/envs/swe-bench-pro/0.2.0
+fi
+# Legacy fallback when EnvPackage not synced
+export UENV_SWE_INSTANCES="${UENV_SWE_INSTANCES:-/root/UEnv/config/swe/pro.json}"
+export UENV_SWE_RUNTIME=docker
+export UENV_SWE_IMAGE_PULL=1
+
+nohup ./target/release/uenv-worker --config config/uenv-worker.deploy-7143-swe-pro.yaml serve \
+  >> /var/log/uenv/worker-swe-pro.log 2>&1 &
+sleep 6
+
+echo "== local gateway =="
+curl -sS -H 'X-API-Key: swe-pro-secret' http://127.0.0.1:28097/health; echo
+ss -tlnp | grep 28097 || true
+echo "Ensure A100 NAT maps public 219.147.100.43:28097 -> 10.10.20.143:28097"

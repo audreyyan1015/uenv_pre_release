@@ -420,6 +420,42 @@ curl -H "Authorization: Bearer $TOKEN" -o math.tar.gz \
 
 ---
 
+## 8b. Environment packages (EnvPackage)
+
+Versioned, content-addressed environment distribution units. See
+[`../../Docs/hub/uenv-hub环境标准化指南.md`](../../Docs/hub/uenv-hub环境标准化指南.md)
+for the full guide. Image bytes are referenced by digest (registry/tarball),
+never stored in the Hub DB.
+
+### 8b.1 `GET /api/v1/packages` — list packages (role: reader)
+
+Query: `page`, `per_page`. Returns `Page<PackageSummary>`.
+
+### 8b.2 `POST /api/v1/packages/{package_id}/versions` — publish (role: publisher)
+
+Body — `PublishPackageRequest`: `version`, `platform{uenv_worker_min,features}`,
+`worker_overlay`, `agent_defaults`, `contracts`, and `artifacts[]` (each inline
+via `content` text or `content_b64`). The server writes each artifact to the
+content-addressed store, computes its `sha256`, and returns
+`201 PublishPackageResponse`.
+
+### 8b.3 `GET /api/v1/packages/{package_id}/versions/{version}` — manifest (role: reader)
+
+`version` may be `latest`. Returns the full `EnvPackageManifest` (artifacts with
+URLs + digests, `worker_overlay`, `agent_defaults`, `contracts`).
+
+### 8b.4 `GET /api/v1/packages/{package_id}/versions/{version}/sync-plan` — fetch plan (role: reader)
+
+Returns `SyncPlan` (files + digests + combined `bundle_digest`). Drives
+`uenv env sync`.
+
+### 8b.5 `GET /api/v1/packages/{package_id}/versions/{version}/artifacts/{name}` — bytes (role: reader)
+
+Streams the artifact bytes; `ETag` is the artifact digest and the bytes are
+re-hashed against the stored digest on every read (integrity self-check).
+
+---
+
 ## 9. Admin (role: admin)
 
 ### 9.1 `POST /api/v1/admin/tokens` — create a token

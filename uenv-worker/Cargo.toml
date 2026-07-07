@@ -14,6 +14,7 @@ path = "src/bin/uenv-math-plugin.rs"
 
 [dependencies]
 uenv-math-env = { path = "../plugins/math" }
+uenv-common = { path = "../uenv-common" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
@@ -30,11 +31,18 @@ async-trait = "0.1"
 futures = "0.3"
 bytes = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
-reqwest = { version = "0.12", features = ["json"] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 tower = "0.5"
 sha2 = "0.10"
 axum = "0.8"
 crc32fast = "1"
+flate2 = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+
+[build-dependencies]
+tonic-prost-build = "0.14"

@@ -26,10 +26,14 @@ pub struct WorkerSnapshot {
     pub supported_env_types: Vec<String>,
     pub capacity: u32,
     pub current_load: u32,
+    pub reserved_load: u32,
+    pub reported_load: u32,
     pub draining: bool,
     pub last_report_at: Option<std::time::Instant>,
     pub last_heartbeat_at: Option<std::time::Instant>,
     pub degraded: bool,
+    pub gateway_public_url: String,
+    pub synced_env_packages: Vec<SyncedEnvPackageInfo>,
 }
 
 /// 轮询调度器。
@@ -66,11 +70,15 @@ impl RoundRobinScheduler {
                 endpoint: w.endpoint.clone(),
                 supported_env_types: w.supported_env_types.clone(),
                 capacity: w.capacity,
-                current_load: w.current_load,
+                current_load: effective_load(w),
+                reserved_load: w.reserved_load,
+                reported_load: w.reported_load,
                 draining: w.draining,
                 last_report_at: w.last_report_at,
                 last_heartbeat_at: w.last_heartbeat_at,
                 degraded: is_worker_degraded(w, self.degraded_threshold_secs, self.heartbeat_timeout_secs),
+                gateway_public_url: w.gateway_public_url.clone(),
+                synced_env_packages: w.synced_env_packages.clone(),
             })
             .collect()
     }
@@ -91,8 +99,13 @@ impl RoundRobinScheduler {
     /// 以防止调度器把过多 episode 分配给同一个 worker。
     /// saturating_add：加法溢出时停在 u32::MAX，而不是回绕到 0（防止负载计数异常）。
     pub fn increment_load(&mut self, worker_id: &str) {
+        self.reserve_load(worker_id);
+    }
+
+    fn reserve_load(&mut self, worker_id: &str) {
         if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
-            w.current_load = w.current_load.saturating_add(1);
+            w.reserved_load = w.reserved_load.saturating_add(1);
+            w.current_load = effective_load(w);
         }
     }
 
@@ -100,9 +113,7 @@ impl RoundRobinScheduler {
     /// 在 service.rs 中，episode 执行完成（无论成功还是失败）后调用。
     /// saturating_sub：减法结果为负时停在 0，而不是回绕到 u32::MAX。
     pub fn decrement_load(&mut self, worker_id: &str) {
-        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
-            w.current_load = w.current_load.saturating_sub(1);
-        }
+        self.release(worker_id);
     }
 
     /// 将指定 worker 标记为 draining 状态，使其不再参与新的调度。
@@ -118,30 +129,32 @@ impl RoundRobinScheduler {
     /// 心跳由 worker 主动上报，反映 worker 自己观察到的实际负载情况，
     /// 比服务器侧的计数更准确（例如 worker 重启后负载归零）。
     /// 如果心跳中的 max_load > 0，同时更新容量（capacity）字段。
-    pub fn update_worker_load(&mut self, worker_id: &str, load: u32, max_load: u32) {
+    pub fn update_worker_load(&mut self, worker_id: &str, load: u32, max_load: u32) -> Option<(u32, u32)> {
         if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
-            w.current_load = load;
+            let old_capacity = w.capacity;
+            w.reported_load = load;
             if max_load > 0 {
                 w.capacity = max_load;
             }
-            // 每次心跳都刷新 last_heartbeat_at，用于检测连接是否断开
+            w.current_load = effective_load(w);
             w.last_heartbeat_at = Some(std::time::Instant::now());
-            // idle heartbeat（load=0）说明 Worker 健康且无 in-flight，
-            // 刷新 last_report_at 避免长时间空闲后再次调度被误判为 degraded
             if load == 0 {
                 w.last_report_at = Some(std::time::Instant::now());
             }
+            Some((old_capacity, w.capacity))
+        } else {
+            None
         }
     }
 }
 
-/// 资源匹配检查：worker 实际资源是否满足 episode 请求的最低要求。
+/// ???????worker ???????? episode ????????
 ///
-/// 规则：
-/// - 若请求未指定 resource_spec（None）或所有字段均为 0，则无限制，直接通过。
-/// - 若 worker 未上报资源（resource 为 None），但请求有非零要求，则不匹配。
-/// - cpu_cores / memory_mb / gpu_count 为 0 表示该维度无要求。
-/// - gpu_type 为空字符串表示不限型号。
+/// ???
+/// - ?????? resource_spec?None???????? 0???????????
+/// - ? worker ??????resource ? None????????????????
+/// - cpu_cores / memory_mb / gpu_count ? 0 ?????????
+/// - gpu_type ????????????
 fn is_worker_degraded(w: &WorkerInfo, threshold_secs: u64, heartbeat_timeout_secs: u64) -> bool {
     // 维度1：心跳超时 → 连接断开，无论 load 多少都降级
     if let Some(t) = w.last_heartbeat_at {
@@ -150,13 +163,17 @@ fn is_worker_degraded(w: &WorkerInfo, threshold_secs: u64, heartbeat_timeout_sec
         }
     }
     // 维度2：业务假活 → 有 load 但长时间无 episode 完成
-    if w.current_load == 0 {
+    if effective_load(w) == 0 {
         return false;
     }
     match w.last_report_at {
         None => false,
         Some(t) => t.elapsed().as_secs() > threshold_secs,
     }
+}
+
+fn effective_load(w: &WorkerInfo) -> u32 {
+    w.reserved_load.max(w.reported_load)
 }
 
 fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> bool {
@@ -173,19 +190,35 @@ fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> b
 
 impl Scheduler for RoundRobinScheduler {
     /// 注册一个新 worker，或更新已有 worker 的信息。
-    /// 如果 worker_id 已存在，先删除旧记录再插入新记录（实现重新注册/信息更新）。
+    /// ????? worker?????? worker ????
+    /// ??? ID ? worker ?? active lease???????? worker ?? draining?
     fn register_worker(&mut self, info: WorkerInfo) {
         tracing::info!(worker_id = %info.worker_id, endpoint = %info.endpoint, "worker registered");
-        // retain：保留所有 worker_id 不等于新 worker 的元素（即删除同 ID 的旧记录）
-        // 重新注册时，draining 状态由新 info 决定（注册的 worker 默认 draining=false）
+        if let Some(existing) = self
+            .workers
+            .iter_mut()
+            .find(|w| w.worker_id == info.worker_id && effective_load(w) > 0)
+        {
+            existing.draining = true;
+            tracing::warn!(
+                worker_id = %existing.worker_id,
+                active_load = effective_load(existing),
+                "worker_reregister_rejected_active_lease"
+            );
+            return;
+        }
         self.workers.retain(|w| w.worker_id != info.worker_id);
         self.workers.push(info);
     }
 
     /// 注销指定的 worker，将其从列表中移除。
     fn unregister_worker(&mut self, worker_id: &str) {
-        tracing::info!(worker_id, "worker unregistered");
-        self.workers.retain(|w| w.worker_id != worker_id);
+        tracing::info!(worker_id, "worker unregister requested");
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.draining = true;
+        }
+        self.workers
+            .retain(|w| w.worker_id != worker_id || effective_load(w) > 0);
     }
 
     /// 轮询调度：从满足条件的 worker 中按顺序选择一个。
@@ -201,6 +234,19 @@ impl Scheduler for RoundRobinScheduler {
         //   条件 2：worker 当前负载 < 容量上限（还有空余）
         let threshold = self.degraded_threshold_secs;
         let hb_timeout = self.heartbeat_timeout_secs;
+        // SWE+Agent 路径会带 env_package_id/version；非空时要求 worker 已 sync 该包。
+        let require_pkg = !request.env_package_id.is_empty();
+        let pkg_matches = |w: &WorkerInfo| -> bool {
+            if !require_pkg {
+                return true;
+            }
+            w.synced_env_packages.iter().any(|p| {
+                p.package_id == request.env_package_id
+                    // version 为空表示不限定具体版本，仅要求 package_id 命中
+                    && (request.env_package_version.is_empty()
+                        || p.version == request.env_package_version)
+            })
+        };
         let candidates: Vec<_> = self
             .workers
             .iter()
@@ -208,8 +254,9 @@ impl Scheduler for RoundRobinScheduler {
                 !w.draining
                     && !is_worker_degraded(w, threshold, hb_timeout)
                     && w.supported_env_types.contains(&request.env_type)
-                    && w.current_load < w.capacity
+                    && effective_load(w) < w.capacity
                     && resource_fits(&w.resource, &request.resource_spec)
+                    && pkg_matches(w)
             })
             .collect();
 
@@ -227,7 +274,14 @@ impl Scheduler for RoundRobinScheduler {
                 // 情况 2：有 worker，但没有一个支持请求的 env_type
                 return Err(ScheduleError::NoMatchingEnvType);
             }
-            // 情况 3：有支持该 env_type 的 worker，但全都已满载
+            // 情况 3：有支持该 env_type 的 worker，区分「包不匹配」与「全满载」
+            if require_pkg
+                && !self.workers.iter().any(|w| {
+                    w.supported_env_types.contains(&request.env_type) && pkg_matches(w)
+                })
+            {
+                return Err(ScheduleError::NoMatchingEnvPackage);
+            }
             return Err(ScheduleError::AllWorkersAtCapacity);
         }
 
@@ -240,6 +294,98 @@ impl Scheduler for RoundRobinScheduler {
         Ok(WorkerAssignment {
             worker_id: w.worker_id.clone(),
             endpoint: w.endpoint.clone(),
+            gateway_public_url: w.gateway_public_url.clone(),
         })
+    }
+
+    fn reserve(&mut self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError> {
+        let threshold = self.degraded_threshold_secs;
+        let hb_timeout = self.heartbeat_timeout_secs;
+        let require_pkg = !request.env_package_id.is_empty();
+        let pkg_matches = |w: &WorkerInfo| -> bool {
+            if !require_pkg {
+                return true;
+            }
+            w.synced_env_packages.iter().any(|p| {
+                p.package_id == request.env_package_id
+                    && (request.env_package_version.is_empty()
+                        || p.version == request.env_package_version)
+            })
+        };
+        let candidates: Vec<usize> = self
+            .workers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, w)| {
+                (!w.draining
+                    && !is_worker_degraded(w, threshold, hb_timeout)
+                    && w.supported_env_types.contains(&request.env_type)
+                    && effective_load(w) < w.capacity
+                    && resource_fits(&w.resource, &request.resource_spec)
+                    && pkg_matches(w))
+                .then_some(idx)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return self.schedule(request);
+        }
+
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % candidates.len();
+        let worker_index = candidates[idx];
+        let w = &mut self.workers[worker_index];
+        w.reserved_load = w.reserved_load.saturating_add(1);
+        w.current_load = effective_load(w);
+        Ok(WorkerAssignment {
+            worker_id: w.worker_id.clone(),
+            endpoint: w.endpoint.clone(),
+            gateway_public_url: w.gateway_public_url.clone(),
+        })
+    }
+
+    fn release(&mut self, worker_id: &str) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            w.reserved_load = w.reserved_load.saturating_sub(1);
+            w.current_load = effective_load(w);
+        }
+        self.workers
+            .retain(|w| !(w.worker_id == worker_id && w.draining && effective_load(w) == 0));
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::traits::Scheduler;
+
+    fn worker(id: &str, endpoint: &str, reserved_load: u32, draining: bool) -> WorkerInfo {
+        WorkerInfo {
+            worker_id: id.to_string(),
+            endpoint: endpoint.to_string(),
+            supported_env_types: vec!["math".to_string()],
+            capacity: 2,
+            current_load: reserved_load,
+            reserved_load,
+            reported_load: 0,
+            resource: None,
+            draining,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: String::new(),
+            synced_env_packages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reregister_with_active_lease_is_rejected() {
+        let mut scheduler = RoundRobinScheduler::new(60, 60);
+        scheduler.register_worker(worker("w1", "old:1", 1, false));
+        scheduler.register_worker(worker("w1", "new:1", 0, false));
+        let workers = scheduler.list_workers();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].endpoint, "old:1");
+        assert!(workers[0].draining);
+        assert_eq!(workers[0].reserved_load, 1);
     }
 }

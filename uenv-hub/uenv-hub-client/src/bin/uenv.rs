@@ -27,6 +27,11 @@ enum TopCommand {
         #[command(subcommand)]
         command: EnvCommand,
     },
+    /// Agent framework bridge packages (OpenHands, etc.).
+    AgentBridge {
+        #[command(subcommand)]
+        command: AgentBridgeCommand,
+    },
     /// Hub session / configuration.
     Hub {
         #[command(subcommand)]
@@ -89,6 +94,68 @@ enum EnvCommand {
         version: String,
         #[arg(long)]
         reason: String,
+    },
+    /// Sync a published EnvPackage to a local directory (digest-verified).
+    ///
+    /// Downloads the manifest + every artifact into
+    /// `<target_dir>/envs/<package>/<version>/`, verifies each sha256, and writes
+    /// a `.synced` marker so a Worker/Agent node can pre-provision the
+    /// environment without re-pulling from third parties.
+    Sync {
+        /// Package id, e.g. `swe-bench-pro`.
+        package: String,
+        #[arg(long, default_value = "latest")]
+        version: String,
+        #[arg(long, default_value = "/var/lib/uenv")]
+        target_dir: PathBuf,
+        /// Only print the fetch plan; download nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// This node's `uenv-worker` version; checked against `platform.uenv_worker_min`.
+        #[arg(long)]
+        worker_version: Option<String>,
+        /// After syncing, `docker load` every hosted `image_tar` artifact so the
+        /// images are locally available without pulling a third-party registry.
+        #[arg(long)]
+        docker_load: bool,
+        /// Container engine used for `--docker-load` (docker|podman).
+        #[arg(long, default_value = "docker")]
+        engine: String,
+    },
+    /// Publish image tarball(s) already staged on the Hub host as a package
+    /// version, so Workers `docker load` them from the Hub (no third-party pull).
+    ///
+    /// Each `--tar PATH` is a `docker save …` archive resolvable on the **Hub
+    /// host**; its basename becomes the artifact name and lands at
+    /// `images/<basename>` in the synced package.
+    PublishImage {
+        /// Package id to publish under, e.g. `swe-bench-verified-images`.
+        package: String,
+        #[arg(long, default_value = "0.1.0")]
+        version: String,
+        /// One or more image tarball paths on the Hub host.
+        #[arg(long = "tar", value_name = "PATH", num_args = 1.., required = true)]
+        tars: Vec<PathBuf>,
+        /// Minimum consuming `uenv-worker` version.
+        #[arg(long, default_value = "0.1.0")]
+        worker_min: String,
+        #[arg(long)]
+        publisher: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentBridgeCommand {
+    /// Sync a published AgentBridgePackage to a local directory (digest-verified).
+    Sync {
+        /// Package id, e.g. `uenv-agent-openhands`.
+        package: String,
+        #[arg(long, default_value = "latest")]
+        version: String,
+        #[arg(long, default_value = "/opt/uenv/agent-bridges")]
+        target_dir: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -161,6 +228,7 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         TopCommand::Env { command } => run_env(command, cli.endpoint).await,
+        TopCommand::AgentBridge { command } => run_agent_bridge(command, cli.endpoint).await,
         TopCommand::Hub { command } => run_hub(command, cli.endpoint).await,
     }
 }
@@ -290,8 +358,266 @@ async fn run_env(
             client.yank_version(&env, &version, &reason).await?;
             println!("yanked {env}@{version}");
         }
+        EnvCommand::Sync {
+            package,
+            version,
+            target_dir,
+            dry_run,
+            worker_version,
+            docker_load,
+            engine,
+        } => {
+            run_env_sync(
+                &client,
+                &package,
+                &version,
+                &target_dir,
+                dry_run,
+                worker_version,
+                docker_load,
+                &engine,
+            )
+            .await?;
+        }
+        EnvCommand::PublishImage {
+            package,
+            version,
+            tars,
+            worker_min,
+            publisher,
+        } => {
+            run_publish_image(&client, &package, &version, &tars, &worker_min, publisher).await?;
+        }
     }
     Ok(())
+}
+
+/// `uenv env publish-image` — stage `docker save` tarballs (already on the Hub
+/// host) into a package version as `image_tar` artifacts.
+async fn run_publish_image(
+    client: &HttpClient,
+    package: &str,
+    version: &str,
+    tars: &[PathBuf],
+    worker_min: &str,
+    publisher: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_artifacts = Vec::with_capacity(tars.len());
+    for tar in tars {
+        let name = tar
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("invalid tar path {}", tar.display()))?
+            .to_string();
+        file_artifacts.push(uenv_hub_types::FileArtifact {
+            name: name.clone(),
+            kind: "image_tar".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/x-tar".into()),
+            target_rel_path: Some(format!("images/{name}")),
+            local_path: tar.to_string_lossy().into_owned(),
+        });
+    }
+    let req = uenv_hub_types::PublishPackageRequest {
+        version: version.to_string(),
+        publisher,
+        description: Some("image tarball bundle (docker load inputs hosted by Hub)".into()),
+        changelog: Some(format!("publish {} image tarball(s)", file_artifacts.len())),
+        platform: uenv_hub_types::PackagePlatform {
+            uenv_worker_min: worker_min.to_string(),
+            uenv_server_min: None,
+            features: vec![],
+        },
+        worker_overlay: serde_json::json!({ "swe": { "image_pull_policy": "local_only" } }),
+        agent_defaults: serde_json::Value::Null,
+        contracts: uenv_hub_types::PackageContracts::default(),
+        artifacts: vec![],
+        file_artifacts,
+    };
+    let resp = client.publish_package(package, &req).await?;
+    println!(
+        "published {}@{} with {} image tarball(s) -> {}",
+        resp.package_id,
+        resp.version,
+        tars.len(),
+        resp.manifest_url
+    );
+    println!("Workers can now: uenv env sync {} --docker-load", resp.package_id);
+    Ok(())
+}
+
+/// Compare two dotted-numeric versions; returns true when `a` < `b`.
+/// Tolerant: non-numeric / missing components are treated as 0.
+fn version_lt(a: &str, b: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim()
+            .split(['.', '-', '+'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (pa, pb) = (parts(a), parts(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// Shared package sync implementation (EnvPackage + AgentBridgePackage).
+#[allow(clippy::too_many_arguments)]
+async fn run_package_sync(
+    client: &HttpClient,
+    package: &str,
+    version: &str,
+    target_parent: &Path,
+    dry_run: bool,
+    worker_version: Option<String>,
+    docker_load: bool,
+    engine: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = client.get_package_manifest(package, version).await?;
+    let resolved = manifest.version.clone();
+
+    let min = manifest.platform.uenv_worker_min.trim();
+    if let Some(wv) = &worker_version {
+        if !min.is_empty() && version_lt(wv, min) {
+            return Err(format!(
+                "worker version {wv} is below package requirement uenv_worker_min={min}"
+            )
+            .into());
+        }
+    }
+
+    let dest = target_parent.join(package).join(&resolved);
+    println!("package {package}@{resolved}");
+    println!("  platform: uenv_worker_min={min} features={:?}", manifest.platform.features);
+    println!("  target:   {}", dest.display());
+    println!("  artifacts ({}):", manifest.artifacts.len());
+    for a in &manifest.artifacts {
+        println!(
+            "    - {:<22} kind={:<10} mode={:<8} {} -> {}",
+            a.name, a.kind, a.sync_mode, a.digest, a.target_rel_path
+        );
+    }
+    let bundle = uenv_hub_core::package::bundle_digest(&manifest.artifacts);
+    println!("  bundle_digest: {bundle}");
+
+    if dry_run {
+        println!("(dry-run: nothing downloaded)");
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dest)?;
+    let mut image_tars: Vec<PathBuf> = Vec::new();
+    for a in &manifest.artifacts {
+        if a.sync_mode != "inline" {
+            println!("  skip {} (sync_mode={}, fetched out-of-band)", a.name, a.sync_mode);
+            continue;
+        }
+        let out = dest.join(&a.target_rel_path);
+        // Stream every artifact to disk (hash-verified on the fly) so multi-GB
+        // image tarballs never buffer in RAM.
+        let written = client
+            .download_artifact_to_file(package, &resolved, &a.name, &out, &a.digest)
+            .await?;
+        println!("  wrote {} ({written} bytes)", out.display());
+        if a.kind == "image_tar" {
+            image_tars.push(out);
+        }
+    }
+
+    if docker_load && !image_tars.is_empty() {
+        for tar in &image_tars {
+            println!("  docker load -i {}", tar.display());
+            run_engine(engine, &["load", "-i", &tar.to_string_lossy()])?;
+        }
+        println!("  loaded {} image tarball(s) via {engine}", image_tars.len());
+    } else if !image_tars.is_empty() {
+        println!(
+            "  {} image tarball(s) synced; run with --docker-load or `{engine} load -i <file>` to import",
+            image_tars.len()
+        );
+    }
+
+    std::fs::write(dest.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
+    let marker = serde_json::json!({
+        "package_id": package,
+        "version": resolved,
+        "bundle_digest": bundle,
+        "synced_at": chrono_now_secs(),
+    });
+    std::fs::write(dest.join(".synced"), serde_json::to_vec_pretty(&marker)?)?;
+    println!("synced {package}@{resolved} -> {}", dest.display());
+    Ok(())
+}
+
+async fn run_agent_bridge(
+    command: AgentBridgeCommand,
+    endpoint: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (client, _cfg) = make_client(endpoint);
+    match command {
+        AgentBridgeCommand::Sync {
+            package,
+            version,
+            target_dir,
+            dry_run,
+        } => {
+            run_package_sync(&client, &package, &version, &target_dir, dry_run, None, false, "docker")
+                .await?;
+            let dest = target_dir.join(&package).join(
+                client
+                    .get_package_manifest(&package, &version)
+                    .await?
+                    .version,
+            );
+            println!("next: export UENV_AGENT_BRIDGE_DIR={}", dest.display());
+            Ok(())
+        }
+    }
+}
+
+/// `uenv env sync` — pull a package to `<target_dir>/envs/<pkg>/<ver>/`,
+/// digest-verifying every artifact, and write a `.synced` marker.
+#[allow(clippy::too_many_arguments)]
+async fn run_env_sync(
+    client: &HttpClient,
+    package: &str,
+    version: &str,
+    target_dir: &Path,
+    dry_run: bool,
+    worker_version: Option<String>,
+    docker_load: bool,
+    engine: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_package_sync(
+        client,
+        package,
+        version,
+        &target_dir.join("envs"),
+        dry_run,
+        worker_version,
+        docker_load,
+        engine,
+    )
+    .await?;
+    let manifest = client.get_package_manifest(package, version).await?;
+    let dest = target_dir
+        .join("envs")
+        .join(package)
+        .join(manifest.version);
+    println!("next: point the worker at it via UENV_SWE_ENV_PACKAGE={}", dest.display());
+    Ok(())
+}
+
+/// Seconds since the Unix epoch (avoids pulling in `chrono`).
+fn chrono_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 async fn publish_manifest(

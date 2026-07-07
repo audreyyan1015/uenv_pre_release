@@ -1,0 +1,60 @@
+{
+  "trajectory_id": "trj-worker-7143-pro-1783244550494-00001",
+  "run_id": "run-oh-20260705-pro-gold",
+  "batch_id": null,
+  "correlation_id": null,
+  "episode_id": null,
+  "session_id": "sess-instance-qutebrowser--qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c-1",
+  "instance_id": "instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c",
+  "benchmark_variant": "pro",
+  "worker_id": "worker-7143-pro",
+  "gateway_base_url": "http://127.0.0.1:28097",
+  "steps": [
+    {
+      "step_index": 0,
+      "action": {
+        "kind": "provision_reset",
+        "issue_text": "# Qt warning filtering tests moved to appropriate module\n\n..."
+      },
+      "observation": {
+        "stdout": "",
+        "stderr": "",
+        "truncated": false
+      },
+      "timestamp_ms": 1783244548000,
+      "duration_ms": 1200
+    },
+    {
+      "step_index": 1,
+      "action": {
+        "kind": "write",
+        "path": "/app/qutebrowser/qtlog.py",
+        "content": "--- a/qutebrowser/qtlog.py\n+++ b/qutebrowser/qtlog.py\n..."
+      },
+      "observation": {
+        "write_ok": true,
+        "truncated": false
+      },
+      "timestamp_ms": 1783244550000,
+      "duration_ms": 45
+    }
+  ],
+  "artifact": {
+    "episode_id": "sess-instance-qutebrowser--qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c-1",
+    "instance_id": "instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c",
+    "git_diff": "diff --git a/qutebrowser/qtlog.py b/qutebrowser/qtlog.py\n...",
+    "stdout_log": [],
+    "stderr_log": [],
+    "test_results": {
+      "passed": true,
+      "raw_output": "PASSED tests/test_qtlog.py::test_hide_qt_warning",
+      "per_test": [
+        ["tests/test_qtlog.py::test_hide_qt_warning", true]
+      ]
+    },
+    "reward": 1.0
+  },
+  "reward": 1.0,
+  "resolved": true,
+  "sealed_at_ms": 1783244550494
+}

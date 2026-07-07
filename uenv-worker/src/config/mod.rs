@@ -18,6 +18,97 @@ pub struct WorkerConfig {
     pub hub: HubConfig,
     #[serde(default)]
     pub llm: LlmConfigSection,
+    #[serde(default)]
+    pub runtime_gateway: RuntimeGatewayConfig,
+    #[serde(default)]
+    pub swe: SweSection,
+    #[serde(default)]
+    pub trajectory_upload: TrajectoryUploadConfig,
+}
+
+/// SWE 变体加载（plan §5.4.3）：M1–M4 默认 `["verified"]`，M6 可加 `"pro"`。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SweSection {
+    #[serde(default = "default_swe_variants")]
+    pub variants: Vec<String>,
+    /// 启动预热的 instance_id 列表（M2-1 / M4-4：仅预热镜像缓存）。
+    #[serde(default)]
+    pub prewarm: Vec<String>,
+    /// 预热时是否给镜像打 `cache/swe-<id>:warm` 本地 tag（M0-3 / M4-3）。
+    #[serde(default)]
+    pub warm_tag: bool,
+    /// seccomp profile 目录（host 路径，M2-4）：`Some` 时池内所有容器按 command_mode
+    /// 注入 `--security-opt seccomp=<dir>/<mode>.json`。默认 `None`（不强制，避免破坏
+    /// SWE-bench 对宽 syscall 的依赖；运维确认 profile 兼容后再开）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seccomp_profile_dir: Option<String>,
+    /// 本地已同步的 Hub EnvPackage 目录（`uenv env sync` 的产物，含 catalog.json /
+    /// images.manifest.json / worker.overlay.yaml）。`Some` 时 catalog 优先从此目录加载，
+    /// worker 不再从第三方重新拉取（EnvPackage 设计 §5.1 / §8.1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_package_dir: Option<String>,
+}
+
+fn default_swe_variants() -> Vec<String> {
+    vec!["verified".to_string()]
+}
+
+impl Default for SweSection {
+    fn default() -> Self {
+        Self {
+            variants: default_swe_variants(),
+            prewarm: Vec::new(),
+            warm_tag: false,
+            seccomp_profile_dir: None,
+            env_package_dir: None,
+        }
+    }
+}
+
+/// External Runtime Gateway（plan §5.3）：默认关闭，离线/OpenHands 联调时开启。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct RuntimeGatewayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_gateway_listen")]
+    pub listen: String,
+    /// 并发 session 上限。
+    #[serde(default = "default_gateway_capacity")]
+    pub capacity: u32,
+    /// 可选 `X-API-Key`（M5-5）：设置后所有非 health 路由强制校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+fn default_gateway_listen() -> String {
+    "0.0.0.0:28999".to_string()
+}
+
+fn default_gateway_capacity() -> u32 {
+    8
+}
+
+impl Default for RuntimeGatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_gateway_listen(),
+            capacity: default_gateway_capacity(),
+            api_key: None,
+        }
+    }
+}
+
+/// 轨迹上传旁路（260625 冻结方案 v2.2 §8.2）：yaml 声明 + UENV_TRAJECTORY_* 环境变量覆盖。
+/// endpoint 存在即启用上传；gzip/超时/重试等固定行为见 swe::trajectory_upload 模块常量。
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct TrajectoryUploadConfig {
+    /// Server 轨迹服务地址，如 `http://10.x.x.x:8077`；空则不上传。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// 上传 token（建议改用 UENV_TRAJECTORY_TOKEN 环境变量，勿提交真实 token 到 yaml）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -152,6 +243,9 @@ impl Default for WorkerConfig {
             observability: ObservabilityConfig::default(),
             hub: HubConfig::default(),
             llm: LlmConfigSection::default(),
+            runtime_gateway: RuntimeGatewayConfig::default(),
+            swe: SweSection::default(),
+            trajectory_upload: TrajectoryUploadConfig::default(),
         }
     }
 }
@@ -181,6 +275,7 @@ impl WorkerConfig {
         load_env_file_if_exists(&llm_env_path)?;
         cfg.apply_env();
         cfg.apply_cli(overrides);
+        cfg.export_trajectory_env();
         Ok(LoadedWorkerConfig {
             llm: LlmConfig::from_env(),
             worker: cfg,
@@ -282,6 +377,81 @@ impl WorkerConfig {
         if let Ok(v) = std::env::var("UENV_WORKER_LLM_ENV") {
             self.llm.env_file = v;
         }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_LISTEN") {
+            self.runtime_gateway.listen = v;
+            self.runtime_gateway.enabled = true;
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_ENABLED") {
+            self.runtime_gateway.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_CAPACITY") {
+            if let Ok(p) = v.parse::<u32>() {
+                self.runtime_gateway.capacity = p;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_API_KEY") {
+            if !v.trim().is_empty() {
+                self.runtime_gateway.api_key = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_PREWARM") {
+            let ids: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !ids.is_empty() {
+                self.swe.prewarm = ids;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_VARIANTS") {
+            let variants: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !variants.is_empty() {
+                self.swe.variants = variants;
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_WARM_TAG") {
+            self.swe.warm_tag = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_SECCOMP_DIR") {
+            if !v.trim().is_empty() {
+                self.swe.seccomp_profile_dir = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_ENV_PACKAGE") {
+            if !v.trim().is_empty() {
+                self.swe.env_package_dir = Some(v);
+            }
+        }
+    }
+
+    /// 把 trajectory_upload 的 yaml 解析值导出到进程环境（已设的环境变量不覆盖），
+    /// 供 `TrajectoryUploader::from_env()` 消费。env > yaml 优先级由"不覆盖已设"保证。
+    fn export_trajectory_env(&self) {
+        let t = &self.trajectory_upload;
+        if let Some(ep) = &t.endpoint {
+            if !ep.trim().is_empty() {
+                set_env_if_unset("UENV_TRAJECTORY_ENDPOINT", ep);
+            }
+        }
+        if let Some(tok) = &t.token {
+            if !tok.trim().is_empty() {
+                set_env_if_unset("UENV_TRAJECTORY_TOKEN", tok);
+            }
+        }
+    }
+}
+
+/// 仅在环境变量未设置时写入（保证 env > yaml 优先级）。
+fn set_env_if_unset(key: &str, val: &str) {
+    if std::env::var(key).is_err() {
+        unsafe {
+            std::env::set_var(key, val);
+        }
     }
 }
 
@@ -354,6 +524,28 @@ fn load_from_file(path: &Path) -> Result<WorkerConfig, Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trajectory_upload_yaml_parses() {
+        let d = TrajectoryUploadConfig::default();
+        assert!(d.endpoint.is_none());
+        assert!(d.token.is_none());
+
+        let yaml = r#"
+server: { endpoint: "localhost:50051" }
+worker: { id: "w", listen: "0.0.0.0:1", max_concurrent: 1 }
+scheduler: { mode: "remote" }
+env: { types: ["swe"], backend: "process", plugin_dir: "./p" }
+pool: { warmup_size: 0, max_idle_time: 1, cool_timeout: 1, max_episode_count: 1 }
+logging: { level: "INFO", file: "/tmp/w.log" }
+wal: { dir: "/tmp/wal" }
+trajectory_upload:
+  endpoint: "http://10.0.0.5:8077"
+"#;
+        let cfg: WorkerConfig = serde_yaml::from_str(yaml).expect("parse yaml");
+        assert_eq!(cfg.trajectory_upload.endpoint.as_deref(), Some("http://10.0.0.5:8077"));
+        assert!(cfg.trajectory_upload.token.is_none());
+    }
 
     #[test]
     fn env_mapping_overrides_loaded_config() {

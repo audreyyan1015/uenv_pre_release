@@ -7,15 +7,10 @@
 //! 容器运行时可选 docker | podman；本机 7143 的 500 个 SWE-bench 镜像在 **docker** 存储，
 //! 故默认 docker（plan 以 podman 为目标形态，此处运行时可配，flag 映射见 `backend::podman`）。
 
-use std::io::Write;
-use std::process::Command;
-use std::time::Instant;
-
-use crate::swe::artifact::{EpisodeArtifact, TestResults};
+use crate::swe::artifact::EpisodeArtifact;
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::SweInstance;
-use crate::swe::resettable::PodmanResettableInstance;
-use crate::swe::spec::{build_reset_observation, Workspace};
+use crate::swe::session::SweSession;
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
@@ -77,193 +72,32 @@ pub struct EpisodeOutcome {
     pub duration_ms: u64,
 }
 
-struct ExecResult {
-    stdout: String,
-    stderr: String,
-    code: i32,
-}
-
-/// 容器内 `bash -lc` 执行（统一入口，plan §1.4）。
-fn container_exec(runtime: ContainerRuntime, name: &str, script: &str) -> Result<ExecResult, DynErr> {
-    let out = Command::new(runtime.cli())
-        .args(["exec", name, "bash", "-lc", script])
-        .output()
-        .map_err(|e| format!("{} exec spawn failed: {e}", runtime.cli()))?;
-    Ok(ExecResult {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        code: out.status.code().unwrap_or(-1),
-    })
-}
-
-fn cp_into(runtime: ContainerRuntime, name: &str, local: &str, dest: &str) -> Result<(), DynErr> {
-    let out = Command::new(runtime.cli())
-        .args(["cp", local, &format!("{name}:{dest}")])
-        .output()
-        .map_err(|e| format!("{} cp spawn failed: {e}", runtime.cli()))?;
-    if !out.status.success() {
-        return Err(format!("{} cp failed: {}", runtime.cli(), String::from_utf8_lossy(&out.stderr)).into());
-    }
-    Ok(())
-}
-
-/// 写补丁到容器内并应用：`git apply -v` 失败回退 `patch --batch --fuzz=5 -p1`（对齐 harness）。
-fn apply_patch(runtime: ContainerRuntime, name: &str, patch: &str, label: &str) -> Result<(), DynErr> {
-    if patch.trim().is_empty() {
-        return Ok(());
-    }
-    let tmp = tempfile_path(label);
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(patch.as_bytes())?;
-    }
-    let dest = format!("/tmp/{label}.patch");
-    cp_into(runtime, name, &tmp, &dest)?;
-    let _ = std::fs::remove_file(&tmp);
-    let script = format!(
-        "cd {TESTBED} && (git apply -v {dest} || patch --batch --fuzz=5 -p1 < {dest})"
-    );
-    let r = container_exec(runtime, name, &script)?;
-    if r.code != 0 {
-        return Err(format!("apply {label} patch failed (code {}): {}\n{}", r.code, r.stdout, r.stderr).into());
-    }
-    Ok(())
-}
-
-fn tempfile_path(label: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir()
-        .join(format!("uenv-swe-{label}-{nanos}.patch"))
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// 执行单个 SWE-bench 实例直到产出 reward + EpisodeArtifact。
+///
+/// 经 `SweSession` 复用会话原语：provision（拉起+reset）→ 应用 gold patch（可选）
+/// → `evaluate`（内部应用 test_patch + 跑测试 + grader 评分）。顺序对齐官方 harness：
+/// model/gold patch → test patch → run。
 pub fn run_instance(
     instance: &SweInstance,
     episode_id: &str,
     opts: &RunOptions,
 ) -> Result<EpisodeOutcome, DynErr> {
-    let start = Instant::now();
-    let runtime = opts.runtime;
-    let image = instance.image_ref();
-    let container = format!("uenv-swe-{}-{}", sanitize(&instance.instance_id), std::process::id());
-
-    // 类型闭包：派生 InstanceSpec / TaskSpec / 瘦 Workspace。
-    let instance_spec = instance.to_instance_spec();
-    let task_spec = instance.to_task_spec();
-    let workspace = Workspace::from_instance_spec(&instance_spec, TESTBED);
-    let observation = build_reset_observation(&workspace, &task_spec);
-    tracing::info!(
-        episode_id = %episode_id,
-        instance_id = %instance.instance_id,
-        image = %image,
-        issue_chars = observation.issue_text.len(),
-        msg = "swe_reset_observation"
-    );
-
-    // 1) provision：从 Hub 实例镜像拉起容器。
-    let run_out = Command::new(runtime.cli())
-        .args(["run", "-d", "--name", &container, &image, "sleep", "infinity"])
-        .output()
-        .map_err(|e| format!("{} run spawn failed: {e}", runtime.cli()))?;
-    if !run_out.status.success() {
-        return Err(format!(
-            "{} run failed for {image}: {}",
-            runtime.cli(),
-            String::from_utf8_lossy(&run_out.stderr).trim()
-        )
-        .into());
+    let worker_id = std::env::var("UENV_WORKER_ID").unwrap_or_else(|_| "harness-local".to_string());
+    let gateway_base_url = std::env::var("UENV_SWE_GATEWAY_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:28999".to_string());
+    let (session, _observation) = SweSession::provision(
+        instance,
+        episode_id,
+        opts.runtime,
+        opts.policy.clone(),
+        opts.keep_container,
+        &worker_id,
+        &gateway_base_url,
+    )?;
+    if opts.use_gold_patch {
+        session.apply_patch(&instance.patch, "gold")?;
     }
-    let container_id = String::from_utf8_lossy(&run_out.stdout).trim().to_string();
-
-    // RAII：确保异常路径也清理容器。
-    let guard = ContainerGuard {
-        runtime,
-        name: container.clone(),
-        keep: opts.keep_container,
-    };
-
-    let result = (|| -> Result<EpisodeOutcome, DynErr> {
-        // 2) reset：净化沙箱到 base_commit（保留已编译扩展，不用 -x）。
-        let reset_script = PodmanResettableInstance::reset_script_keep_built(TESTBED, &instance.base_commit);
-        let r = container_exec(runtime, &container, &reset_script)?;
-        if r.code != 0 {
-            return Err(format!("reset failed (code {}): {}\n{}", r.code, r.stdout, r.stderr).into());
-        }
-
-        // 3) 应用 test_patch（评测前必应用）。
-        apply_patch(runtime, &container, &instance.test_patch, "test")?;
-
-        // 4) 应用 gold patch（use_gold_patch）。
-        if opts.use_gold_patch {
-            apply_patch(runtime, &container, &instance.patch, "gold")?;
-        }
-
-        // 5) 跑测试（conda testbed + bash -lc）。
-        let test_cmd = build_test_command(&instance.fail_to_pass, &instance.pass_to_pass);
-        // 经 CommandPolicy 统一 bash -lc（此处 wrap 后交由 container_exec 再包一层 bash -lc，等价）。
-        let _wrapped = opts.policy.wrap_command(&test_cmd);
-        let test_run = container_exec(runtime, &container, &test_cmd)?;
-        let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
-
-        // 6) 解析 + 评分。
-        let report = parse_pytest_report(&combined);
-        let (resolved, reward) = decide_reward(&report, &instance.fail_to_pass, &instance.pass_to_pass);
-
-        // git diff（产物）。
-        let diff = container_exec(runtime, &container, &format!("cd {TESTBED} && git diff"))
-            .map(|r| r.stdout)
-            .unwrap_or_default();
-
-        let per_test: Vec<(String, bool)> = instance
-            .fail_to_pass
-            .iter()
-            .chain(instance.pass_to_pass.iter())
-            .map(|id| (id.clone(), report.get(id).copied().unwrap_or(false)))
-            .collect();
-        let test_results = TestResults {
-            passed: resolved,
-            raw_output: truncate(&combined, opts.policy.max_output_bytes),
-            per_test,
-        };
-        let artifact = EpisodeArtifact::new(episode_id, &instance.instance_id)
-            .with_reward(reward)
-            .with_git_diff(diff)
-            .with_test_results(test_results);
-
-        Ok(EpisodeOutcome {
-            instance_id: instance.instance_id.clone(),
-            resolved,
-            reward,
-            artifact,
-            duration_ms: start.elapsed().as_millis() as u64,
-        })
-    })();
-
-    drop(guard);
-    let _ = container_id;
-    result
-}
-
-struct ContainerGuard {
-    runtime: ContainerRuntime,
-    name: String,
-    keep: bool,
-}
-
-impl Drop for ContainerGuard {
-    fn drop(&mut self) {
-        if self.keep {
-            return;
-        }
-        let _ = Command::new(self.runtime.cli())
-            .args(["rm", "-f", &self.name])
-            .output();
-    }
+    session.evaluate()
 }
 
 /// 构造 pytest 测试命令（纯函数）。FAIL_TO_PASS + PASS_TO_PASS 节点 id 单引号转义。
@@ -316,20 +150,6 @@ pub fn decide_reward(
 
 fn single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
-        .collect()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect()
-    }
 }
 
 #[cfg(test)]

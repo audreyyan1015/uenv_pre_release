@@ -1,7 +1,7 @@
 # VeRL 异步模式接入 UEnv 字段设计
 
-> 版本：v0.2  
-> 日期：2026-07-05  
+> 版本：v0.2
+> 日期：2026-07-05
 > 范围：VeRL one-step off-policy 与 fully async 接入 UEnv pre-rollout 链路时，需要新增或透传的字段，以及 Server / Worker 对这些字段的处理方式。
 
 ## 1. 背景
