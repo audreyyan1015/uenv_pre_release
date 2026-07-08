@@ -8,8 +8,13 @@ pub const PARALLEL_MODE_SYNC: &str = "sync";
 pub const PARALLEL_MODE_ONE_STEP: &str = "one_step_off_policy";
 pub const PARALLEL_MODE_FULLY_ASYNC: &str = "fully_async";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedParallelMode(pub String);
+
 /// 从 EpisodeRequest 读取 parallel_mode（与 Server 侧规则一致）。
-pub fn extract_parallel_mode(episode: &EpisodeRequest) -> Result<String, String> {
+pub fn extract_parallel_mode(
+    episode: &EpisodeRequest,
+) -> Result<String, UnsupportedParallelMode> {
     if !episode.parallel_mode.trim().is_empty() {
         return normalize_parallel_mode(&episode.parallel_mode);
     }
@@ -29,13 +34,13 @@ pub fn extract_parallel_mode(episode: &EpisodeRequest) -> Result<String, String>
     Ok(PARALLEL_MODE_SYNC.to_string())
 }
 
-pub fn normalize_parallel_mode(raw: &str) -> Result<String, String> {
+pub fn normalize_parallel_mode(raw: &str) -> Result<String, UnsupportedParallelMode> {
     match raw.trim() {
         PARALLEL_MODE_SYNC | PARALLEL_MODE_ONE_STEP | PARALLEL_MODE_FULLY_ASYNC => {
             Ok(raw.trim().to_string())
         }
         other if other.is_empty() => Ok(PARALLEL_MODE_SYNC.to_string()),
-        other => Err(format!("unsupported parallel_mode: {other}")),
+        other => Err(UnsupportedParallelMode(other.to_string())),
     }
 }
 
@@ -108,7 +113,10 @@ mod tests {
     #[test]
     fn rejects_unsupported_mode() {
         let ep = episode_with("invalid_mode", "", "");
-        assert!(extract_parallel_mode(&ep).is_err());
+        assert_eq!(
+            extract_parallel_mode(&ep).expect_err("unsupported"),
+            UnsupportedParallelMode("invalid_mode".to_string())
+        );
     }
 
     #[test]

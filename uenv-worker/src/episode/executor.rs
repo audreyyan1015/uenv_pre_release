@@ -3,8 +3,10 @@ use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
-use crate::episode::async_context::{extract_parallel_mode, is_async_mode, unix_ts_now};
-use crate::episode::model_client::ModelClient;
+use crate::episode::async_context::{
+    extract_parallel_mode, is_async_mode, unix_ts_now, UnsupportedParallelMode,
+};
+use crate::episode::model_client::{ModelClient, ModelInferError};
 use crate::episode::rollout_meta::{
     apply_async_to_result, build_failed_async_result, extract_rollout_from_payload,
     validate_async_completed, AsyncRolloutError, RolloutModelMeta,
@@ -95,13 +97,14 @@ impl EpisodeExecutor {
     ) -> Result<ExecuteOutput, Box<dyn std::error::Error + Send + Sync>> {
         let parallel_mode = match extract_parallel_mode(episode) {
             Ok(mode) => mode,
-            Err(err) => {
+            Err(UnsupportedParallelMode(raw)) => {
                 let worker_start = unix_ts_now();
+                let err = AsyncRolloutError::UnsupportedMode(raw.clone());
                 return Ok(failed_output(
                     episode,
                     ctx,
-                    "sync",
-                    &AsyncRolloutError::UnsupportedMode(err),
+                    &raw,
+                    &err,
                     worker_start,
                     0,
                     0,
@@ -162,13 +165,14 @@ impl EpisodeExecutor {
 
         for step_index in 1..=max_steps as i32 {
             let model_start = Instant::now();
+            let step_require_rollout = require_rollout && step_index == 1;
             let infer = self
                 .model_client
                 .infer_with_rollout_meta(
                     &episode.payload,
                     &episode.reward_config,
                     step_index as u32,
-                    require_rollout,
+                    step_require_rollout,
                 )
                 .await;
             let infer = match infer {
@@ -176,25 +180,31 @@ impl EpisodeExecutor {
                 Err(err) => {
                     let _ = self.warmup_pool.release(lease.clone()).await;
                     if require_rollout {
+                        let async_err = err.into_async_rollout();
                         return Ok(failed_output(
                             episode,
                             ctx,
                             &parallel_mode,
-                            &AsyncRolloutError::Other(err.to_string()),
+                            &async_err,
                             worker_start_ts,
                             start.elapsed().as_millis() as u64,
                             model_callback_duration_ms,
                             lease.warmup_hit,
                         ));
                     }
+                    let err_msg = match err {
+                        ModelInferError::Rollout(async_err) => async_err.message(),
+                        ModelInferError::Other(message) => message,
+                    };
+                    let boxed: Box<dyn std::error::Error + Send + Sync> = err_msg.into();
                     log_phase_error(
                         &trace_id,
                         &episode.episode_id,
                         "model_callback",
                         "ERR_MODEL_CALL_FAILED",
-                        &*err,
+                        &*boxed,
                     );
-                    return Err(err);
+                    return Err(boxed);
                 }
             };
             if let Some(meta) = infer.rollout_meta {

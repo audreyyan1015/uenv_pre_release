@@ -32,20 +32,45 @@ impl AsyncRolloutError {
             Self::ModelVersionMissing => ErrorCode::ErrModelVersionMissing,
             Self::RolloutLogprobsMissing => ErrorCode::ErrRolloutLogprobsMissing,
             Self::ModelLogprobsUnsupported => ErrorCode::ErrModelLogprobsUnsupported,
-            Self::LogprobsLengthMismatch { .. } | Self::Other(_) => ErrorCode::ErrModelCallFailed,
+            Self::LogprobsLengthMismatch { .. } => ErrorCode::ErrModelCallFailed,
+            Self::Other(_) => ErrorCode::ErrModelCallFailed,
         }
     }
 
     pub fn message(&self) -> String {
         match self {
             Self::UnsupportedMode(mode) => format!("unsupported parallel_mode: {mode}"),
-            Self::ModelVersionMissing => "missing rollout_param_version or rollout_policy_version".to_string(),
+            Self::ModelVersionMissing => {
+                "missing rollout_param_version or rollout_policy_version".to_string()
+            }
             Self::RolloutLogprobsMissing => "missing rollout_log_probs".to_string(),
             Self::ModelLogprobsUnsupported => "model endpoint does not support logprobs".to_string(),
             Self::LogprobsLengthMismatch { expected, actual } => {
                 format!("rollout_log_probs length mismatch: expected={expected}, actual={actual}")
             }
             Self::Other(msg) => msg.clone(),
+        }
+    }
+
+    /// 从 model_client 传播的错误消息还原精确错误码（兜底）。
+    pub fn from_message(message: &str) -> Self {
+        match message {
+            "missing rollout_param_version or rollout_policy_version" => Self::ModelVersionMissing,
+            "missing rollout_log_probs" => Self::RolloutLogprobsMissing,
+            "model endpoint does not support logprobs" => Self::ModelLogprobsUnsupported,
+            other if other.starts_with("unsupported parallel_mode:") => {
+                let mode = other
+                    .trim_start_matches("unsupported parallel_mode:")
+                    .trim();
+                Self::UnsupportedMode(mode.to_string())
+            }
+            other if other.starts_with("rollout_log_probs length mismatch:") => {
+                Self::LogprobsLengthMismatch {
+                    expected: 0,
+                    actual: 0,
+                }
+            }
+            other => Self::Other(other.to_string()),
         }
     }
 }
@@ -106,26 +131,17 @@ impl RolloutModelMeta {
 
 pub fn extract_rollout_from_payload(payload: &Value) -> RolloutModelMeta {
     let mut meta = RolloutModelMeta::default();
-    meta.response_ids = parse_i64_list(payload.get("response_ids"));
-    meta.response_mask = parse_i32_list(payload.get("response_mask"));
-    meta.rollout_log_probs = parse_f32_list(
-        payload
-            .get("rollout_log_probs")
-            .or_else(|| payload.get("response_logprobs"))
-            .or_else(|| payload.get("response_log_probs")),
-    );
-
-    let version_sources = [
-        payload.get("uenv_model_version"),
-        payload.get("metadata"),
-        payload
-            .get("metadata")
-            .and_then(|m| m.get("extra_info")),
-    ];
-    for source in version_sources {
-        if let Some(obj) = source.and_then(Value::as_object) {
-            apply_version_from_map(&mut meta, obj);
+    if let Some(obj) = payload.as_object() {
+        apply_rollout_fields_from_map(&mut meta, obj);
+    }
+    if let Some(metadata) = payload.get("metadata").and_then(Value::as_object) {
+        apply_rollout_fields_from_map(&mut meta, metadata);
+        if let Some(extra_info) = metadata.get("extra_info").and_then(Value::as_object) {
+            apply_rollout_fields_from_map(&mut meta, extra_info);
         }
+    }
+    if let Some(version) = payload.get("uenv_model_version").and_then(Value::as_object) {
+        apply_version_from_map(&mut meta, version);
     }
     meta
 }
@@ -157,24 +173,38 @@ pub fn parse_model_version_from_response(
 }
 
 pub fn parse_logprobs_from_chat_response(body: &Value) -> Result<Vec<f32>, AsyncRolloutError> {
-    let content = body
-        .pointer("/choices/0/logprobs/content")
-        .and_then(Value::as_array)
-        .ok_or(AsyncRolloutError::ModelLogprobsUnsupported)?;
+    if let Some(content) = body.pointer("/choices/0/logprobs/content").and_then(Value::as_array) {
+        if !content.is_empty() {
+            let mut logprobs = Vec::with_capacity(content.len());
+            for item in content {
+                let lp = item
+                    .get("logprob")
+                    .and_then(Value::as_f64)
+                    .ok_or(AsyncRolloutError::RolloutLogprobsMissing)?;
+                logprobs.push(lp as f32);
+            }
+            return Ok(logprobs);
+        }
+    }
 
-    if content.is_empty() {
+    // vLLM 部分版本返回 token_logprobs 数组而非 content 对象列表。
+    if let Some(token_logprobs) = body
+        .pointer("/choices/0/logprobs/token_logprobs")
+        .and_then(Value::as_array)
+    {
+        let logprobs: Vec<f32> = token_logprobs
+            .iter()
+            .filter_map(|value| value.as_f64().map(|n| n as f32))
+            .collect();
+        if !logprobs.is_empty() {
+            return Ok(logprobs);
+        }
+    }
+
+    if body.pointer("/choices/0/logprobs").is_some() {
         return Err(AsyncRolloutError::RolloutLogprobsMissing);
     }
-
-    let mut logprobs = Vec::with_capacity(content.len());
-    for item in content {
-        let lp = item
-            .get("logprob")
-            .and_then(Value::as_f64)
-            .ok_or(AsyncRolloutError::RolloutLogprobsMissing)?;
-        logprobs.push(lp as f32);
-    }
-    Ok(logprobs)
+    Err(AsyncRolloutError::ModelLogprobsUnsupported)
 }
 
 pub fn parse_response_ids_from_chat_response(body: &Value) -> Vec<i64> {
@@ -308,6 +338,23 @@ pub fn validate_async_completed(
     rollout.validate_for_async()
 }
 
+fn apply_rollout_fields_from_map(meta: &mut RolloutModelMeta, map: &serde_json::Map<String, Value>) {
+    if meta.response_ids.is_empty() {
+        meta.response_ids = parse_i64_list(map.get("response_ids"));
+    }
+    if meta.response_mask.is_empty() {
+        meta.response_mask = parse_i32_list(map.get("response_mask"));
+    }
+    if meta.rollout_log_probs.is_empty() {
+        meta.rollout_log_probs = parse_f32_list(
+            map.get("rollout_log_probs")
+                .or_else(|| map.get("response_logprobs"))
+                .or_else(|| map.get("response_log_probs")),
+        );
+    }
+    apply_version_from_map(meta, map);
+}
+
 fn apply_version_from_map(meta: &mut RolloutModelMeta, map: &serde_json::Map<String, Value>) {
     if meta.rollout_param_version.is_none() {
         meta.rollout_param_version = parse_i64_value(map.get("rollout_param_version"));
@@ -396,6 +443,51 @@ mod tests {
         assert_eq!(meta.rollout_log_probs.len(), 2);
         assert_eq!(meta.rollout_param_version, Some(11));
         assert_eq!(meta.rollout_policy_version.as_deref(), Some("actor-step-11"));
+    }
+
+    #[test]
+    fn extracts_rollout_from_extra_info() {
+        let payload = json!({
+            "response_text": "answer",
+            "metadata": {
+                "extra_info": {
+                    "response_ids": [201, 202],
+                    "response_mask": [1, 0],
+                    "rollout_log_probs": [-0.3, 0.0],
+                    "rollout_param_version": "12",
+                    "rollout_policy_version": "actor-step-12"
+                }
+            }
+        });
+        let meta = extract_rollout_from_payload(&payload);
+        assert_eq!(meta.response_ids, vec![201, 202]);
+        assert_eq!(meta.rollout_log_probs, vec![-0.3, 0.0]);
+        assert_eq!(meta.rollout_param_version, Some(12));
+    }
+
+    #[test]
+    fn from_message_restores_async_error_codes() {
+        assert_eq!(
+            AsyncRolloutError::from_message("missing rollout_log_probs"),
+            AsyncRolloutError::RolloutLogprobsMissing
+        );
+        assert_eq!(
+            AsyncRolloutError::from_message("missing rollout_param_version or rollout_policy_version"),
+            AsyncRolloutError::ModelVersionMissing
+        );
+    }
+
+    #[test]
+    fn parses_token_logprobs_fallback() {
+        let body = json!({
+            "choices": [{
+                "logprobs": {
+                    "token_logprobs": [-0.5, -0.2]
+                }
+            }]
+        });
+        let logprobs = parse_logprobs_from_chat_response(&body).expect("logprobs");
+        assert_eq!(logprobs, vec![-0.5, -0.2]);
     }
 
     #[test]

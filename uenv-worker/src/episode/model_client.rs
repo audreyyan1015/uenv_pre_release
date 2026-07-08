@@ -21,6 +21,27 @@ pub struct ModelInferOutput {
     pub rollout_meta: Option<RolloutModelMeta>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelInferError {
+    Rollout(AsyncRolloutError),
+    Other(String),
+}
+
+impl ModelInferError {
+    pub fn into_async_rollout(self) -> AsyncRolloutError {
+        match self {
+            Self::Rollout(err) => err,
+            Self::Other(message) => AsyncRolloutError::from_message(&message),
+        }
+    }
+}
+
+impl From<AsyncRolloutError> for ModelInferError {
+    fn from(value: AsyncRolloutError) -> Self {
+        Self::Rollout(value)
+    }
+}
+
 #[derive(Clone)]
 pub struct ModelClient {
     llm: LlmConfig,
@@ -51,10 +72,13 @@ impl ModelClient {
         reward_config: &[u8],
         step_index: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(self
-            .infer_with_rollout_meta(payload, reward_config, step_index, false)
-            .await?
-            .action)
+        self.infer_with_rollout_meta(payload, reward_config, step_index, false)
+            .await
+            .map(|output| output.action)
+            .map_err(|err| match err {
+                ModelInferError::Rollout(async_err) => async_err.message().into(),
+                ModelInferError::Other(message) => message.into(),
+            })
     }
 
     pub async fn infer_with_rollout_meta(
@@ -63,11 +87,12 @@ impl ModelClient {
         reward_config: &[u8],
         step_index: u32,
         require_rollout_meta: bool,
-    ) -> Result<ModelInferOutput, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<ModelInferOutput, ModelInferError> {
         let payload_json: Value = if payload.is_empty() {
             Value::Null
         } else {
-            serde_json::from_slice(payload)?
+            serde_json::from_slice(payload)
+                .map_err(|err| ModelInferError::Other(format!("invalid payload json: {err}")))?
         };
 
         // W-1: VeRL rollout answer takes priority on the first step.
@@ -84,7 +109,7 @@ impl ModelClient {
                             if meta.response_mask.is_empty() && !meta.response_ids.is_empty() {
                                 meta.response_mask = vec![1; meta.response_ids.len()];
                             }
-                            meta.validate_for_async().map_err(|err| err.message())?;
+                            meta.validate_for_async()?;
                         }
                     }
                     return Ok(ModelInferOutput {
@@ -114,16 +139,13 @@ impl ModelClient {
             let reward_json: Value = if reward_config.is_empty() {
                 Value::Null
             } else {
-                serde_json::from_slice(reward_config)?
+                serde_json::from_slice(reward_config)
+                    .map_err(|err| ModelInferError::Other(format!("invalid reward_config json: {err}")))?
             };
             if reward_json.get("type").and_then(Value::as_str) == Some("rule_reward") {
                 if let Some(target) = reward_json.get("target").and_then(Value::as_str) {
                     if require_rollout_meta {
-                        return Err(
-                            AsyncRolloutError::ModelLogprobsUnsupported
-                                .message()
-                                .into(),
-                        );
+                        return Err(AsyncRolloutError::ModelLogprobsUnsupported.into());
                     }
                     return Ok(ModelInferOutput {
                         action: target.as_bytes().to_vec(),
@@ -135,17 +157,19 @@ impl ModelClient {
 
         if !llm_ready {
             if LlmConfig::endpoint_requires_api_key(&endpoint_base) {
-                return Err(
+                return Err(ModelInferError::Other(
                     "model client: UENV_LLM_API_KEY is required for HTTPS LLM endpoint (config/uenv-worker-llm.env)"
-                        .into(),
-                );
+                        .to_string(),
+                ));
             }
-            return Err(
+            return Err(ModelInferError::Other(
                 "model client: default LLM is not configured (set UENV_LLM_ENDPOINT in config/uenv-worker-llm.env)"
-                    .into(),
-            );
+                    .to_string(),
+            ));
         }
-        let question = question.ok_or("model client: payload missing question")?;
+        let question = question.ok_or_else(|| {
+            ModelInferError::Other("model client: payload missing question".to_string())
+        })?;
 
         let gen_cfg = payload_json
             .get("generation_config")
@@ -191,11 +215,17 @@ impl ModelClient {
                     let status = resp.status();
                     if status.is_success() {
                         let headers = response_headers(&resp);
-                        let resp_json: Value = resp.json().await?;
+                        let resp_json: Value = resp.json().await.map_err(|err| {
+                            ModelInferError::Other(format!("model client: invalid response json: {err}"))
+                        })?;
                         let content = resp_json
                             .pointer("/choices/0/message/content")
                             .and_then(Value::as_str)
-                            .ok_or("model client: response missing choices[0].message.content")?;
+                            .ok_or_else(|| {
+                                ModelInferError::Other(
+                                    "model client: response missing choices[0].message.content".to_string(),
+                                )
+                            })?;
                         let rollout_meta = if require_rollout_meta {
                             let mut meta = RolloutModelMeta {
                                 model_latency_ms: model_start.elapsed().as_millis() as i64,
@@ -208,21 +238,15 @@ impl ModelClient {
                                 meta.rollout_param_version
                                     .map(|v| format!("actor-step-{v}"))
                             });
-                            meta.rollout_log_probs =
-                                parse_logprobs_from_chat_response(&resp_json).map_err(|err| {
-                                    Box::<dyn std::error::Error + Send + Sync>::from(err.message())
-                                })?;
+                            meta.rollout_log_probs = parse_logprobs_from_chat_response(&resp_json)?;
                             meta.response_ids = parse_response_ids_from_chat_response(&resp_json);
                             if meta.response_ids.is_empty() {
-                                let from_payload = extract_rollout_from_payload(&payload_json);
-                                meta.response_ids = from_payload.response_ids;
+                                meta.response_ids = extract_rollout_from_payload(&payload_json).response_ids;
                             }
                             if meta.response_mask.is_empty() && !meta.response_ids.is_empty() {
                                 meta.response_mask = vec![1; meta.response_ids.len()];
                             }
-                            meta.validate_for_async().map_err(|err| {
-                                Box::<dyn std::error::Error + Send + Sync>::from(err.message())
-                            })?;
+                            meta.validate_for_async()?;
                             Some(meta)
                         } else {
                             None
@@ -246,21 +270,22 @@ impl ModelClient {
             }
             sleep(Duration::from_secs(2)).await;
         }
-        Err(last_err.into())
+        Err(ModelInferError::Other(last_err))
     }
 
     fn apply_llm_headers(
         &self,
         request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<reqwest::RequestBuilder, ModelInferError> {
         if self.llm.api_key.trim().is_empty() {
             return Ok(request);
         }
         let auth = format!("Bearer {}", self.llm.api_key.trim());
         Ok(request.header(
             AUTHORIZATION,
-            HeaderValue::from_str(&auth)
-                .map_err(|err| format!("model client: invalid Authorization header: {err}"))?,
+            HeaderValue::from_str(&auth).map_err(|err| {
+                ModelInferError::Other(format!("model client: invalid Authorization header: {err}"))
+            })?,
         ))
     }
 }
@@ -313,7 +338,8 @@ fn resolve_llm_target(payload: &Value, llm: &LlmConfig) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_llm_target, ModelClient};
+    use super::{resolve_llm_target, ModelClient, ModelInferError};
+    use crate::episode::rollout_meta::AsyncRolloutError;
     use crate::llm::LlmConfig;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -356,7 +382,7 @@ mod tests {
             .infer_with_rollout_meta(payload.as_bytes(), br#"{}"#, 1, true)
             .await
             .expect_err("should fail");
-        assert!(err.to_string().contains("rollout_log_probs"));
+        assert_eq!(err, ModelInferError::Rollout(AsyncRolloutError::RolloutLogprobsMissing));
     }
 
     #[test]
