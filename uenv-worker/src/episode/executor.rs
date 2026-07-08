@@ -3,7 +3,14 @@ use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
-use crate::episode::model_client::ModelClient;
+use crate::episode::async_context::{
+    extract_parallel_mode, is_async_mode, unix_ts_now, UnsupportedParallelMode,
+};
+use crate::episode::model_client::{ModelClient, ModelInferError};
+use crate::episode::rollout_meta::{
+    apply_async_to_result, build_failed_async_result, extract_rollout_from_payload,
+    validate_async_completed, AsyncRolloutError, RolloutModelMeta,
+};
 use crate::llm::LlmConfig;
 use crate::episode::payload::build_reset_config;
 use crate::episode::reward_engine::RewardEngine;
@@ -88,14 +95,37 @@ impl EpisodeExecutor {
         episode: &EpisodeRequest,
         ctx: &ExecuteContext,
     ) -> Result<ExecuteOutput, Box<dyn std::error::Error + Send + Sync>> {
+        let parallel_mode = match extract_parallel_mode(episode) {
+            Ok(mode) => mode,
+            Err(UnsupportedParallelMode(raw)) => {
+                let worker_start = unix_ts_now();
+                let err = AsyncRolloutError::UnsupportedMode(raw.clone());
+                return Ok(failed_output(
+                    episode,
+                    ctx,
+                    &raw,
+                    &err,
+                    worker_start,
+                    0,
+                    0,
+                    false,
+                ));
+            }
+        };
+        let worker_start_ts = unix_ts_now();
+
         // SWE-bench 路由：从 Hub 实例镜像拉起容器跑评测，不经 plugin/LLM step 循环。
         if episode.env_type == SWE_ENV_TYPE {
-            return self.execute_swe_episode(episode, ctx).await;
+            return self
+                .execute_swe_episode(episode, ctx, &parallel_mode, worker_start_ts)
+                .await;
         }
 
         let start = Instant::now();
         let trace_id = episode.correlation_id.clone();
         let max_steps = episode.max_steps.max(1);
+        let require_rollout = is_async_mode(&parallel_mode);
+        let mut episode_rollout_meta = RolloutModelMeta::default();
         let lease = self
             .warmup_pool
             .acquire(&episode.env_type)
@@ -135,18 +165,52 @@ impl EpisodeExecutor {
 
         for step_index in 1..=max_steps as i32 {
             let model_start = Instant::now();
-            let action = self
+            let step_require_rollout = require_rollout && step_index == 1;
+            let infer = self
                 .model_client
-                .infer_action(
+                .infer_with_rollout_meta(
                     &episode.payload,
                     &episode.reward_config,
                     step_index as u32,
+                    step_require_rollout,
                 )
-                .await
-                .map_err(|err| {
-                    log_phase_error(&trace_id, &episode.episode_id, "model_callback", "ERR_MODEL_CALL_FAILED", &*err);
-                    err
-                })?;
+                .await;
+            let infer = match infer {
+                Ok(output) => output,
+                Err(err) => {
+                    let _ = self.warmup_pool.release(lease.clone()).await;
+                    if require_rollout {
+                        let async_err = err.into_async_rollout();
+                        return Ok(failed_output(
+                            episode,
+                            ctx,
+                            &parallel_mode,
+                            &async_err,
+                            worker_start_ts,
+                            start.elapsed().as_millis() as u64,
+                            model_callback_duration_ms,
+                            lease.warmup_hit,
+                        ));
+                    }
+                    let err_msg = match err {
+                        ModelInferError::Rollout(async_err) => async_err.message(),
+                        ModelInferError::Other(message) => message,
+                    };
+                    let boxed: Box<dyn std::error::Error + Send + Sync> = err_msg.into();
+                    log_phase_error(
+                        &trace_id,
+                        &episode.episode_id,
+                        "model_callback",
+                        "ERR_MODEL_CALL_FAILED",
+                        &*boxed,
+                    );
+                    return Err(boxed);
+                }
+            };
+            if let Some(meta) = infer.rollout_meta {
+                episode_rollout_meta.absorb(meta);
+            }
+            let action = infer.action;
             model_callback_duration_ms += model_start.elapsed().as_millis() as u64;
 
             let step_start = Instant::now();
@@ -235,7 +299,25 @@ impl EpisodeExecutor {
         };
         let checksum = checksum_trajectory(&trajectory)?;
         let duration_ms = start.elapsed().as_millis() as u64;
-        let result = EpisodeResult {
+        let worker_finish_ts = unix_ts_now();
+        let worker_latency_ms = ((worker_finish_ts - worker_start_ts) * 1000.0).round() as i64;
+
+        if require_rollout {
+            if let Err(err) = validate_async_completed(&parallel_mode, &episode_rollout_meta) {
+                return Ok(failed_output(
+                    episode,
+                    ctx,
+                    &parallel_mode,
+                    &err,
+                    worker_start_ts,
+                    duration_ms,
+                    model_callback_duration_ms,
+                    lease.warmup_hit,
+                ));
+            }
+        }
+
+        let mut result = EpisodeResult {
             episode_id: episode.episode_id.clone(),
             attempt_id: episode.attempt_id,
             status: "completed".to_string(),
@@ -252,6 +334,18 @@ impl EpisodeExecutor {
             integrity_verified: true,
             ..Default::default()
         };
+        if require_rollout {
+            result = apply_async_to_result(
+                result,
+                episode,
+                &parallel_mode,
+                Some(&episode_rollout_meta),
+                worker_start_ts,
+                worker_finish_ts,
+                worker_latency_ms,
+                episode_rollout_meta.model_latency_ms,
+            );
+        }
 
         if let Some(last) = stream_reports.last_mut() {
             last.phase = "episode_complete".to_string();
@@ -277,6 +371,8 @@ impl EpisodeExecutor {
         &self,
         episode: &EpisodeRequest,
         ctx: &ExecuteContext,
+        parallel_mode: &str,
+        worker_start_ts: f64,
     ) -> Result<ExecuteOutput, Box<dyn std::error::Error + Send + Sync>> {
         let start = Instant::now();
         let trace_id = episode.correlation_id.clone();
@@ -428,6 +524,75 @@ impl EpisodeExecutor {
         };
         let checksum = checksum_trajectory(&trajectory)?;
         let duration_ms = start.elapsed().as_millis() as u64;
+        let worker_finish_ts = unix_ts_now();
+        let worker_latency_ms = ((worker_finish_ts - worker_start_ts) * 1000.0).round() as i64;
+
+        if is_async_mode(parallel_mode) {
+            let rollout_meta = extract_rollout_from_payload(&payload);
+            if let Err(err) = validate_async_completed(parallel_mode, &rollout_meta) {
+                return Ok(failed_output(
+                    episode,
+                    ctx,
+                    parallel_mode,
+                    &err,
+                    worker_start_ts,
+                    duration_ms,
+                    0,
+                    false,
+                ));
+            }
+            let mut result = EpisodeResult {
+                episode_id: episode.episode_id.clone(),
+                attempt_id: episode.attempt_id,
+                status: "completed".to_string(),
+                trajectory: Some(trajectory),
+                summary: Some(crate::proto::v1::episode_result::Summary {
+                    total_reward: reward,
+                    total_steps: 1,
+                    total_duration_ms: duration_ms as i64,
+                    terminate_reason: "swe_evaluated".to_string(),
+                }),
+                error_code: None,
+                error_message: String::new(),
+                trajectory_checksum: checksum,
+                integrity_verified: true,
+                trajectory_id,
+                trajectory_storage_url,
+                gateway_session_id: String::new(),
+                ..Default::default()
+            };
+            result = apply_async_to_result(
+                result,
+                episode,
+                parallel_mode,
+                Some(&rollout_meta),
+                worker_start_ts,
+                worker_finish_ts,
+                worker_latency_ms,
+                rollout_meta.model_latency_ms,
+            );
+            let stream = build_swe_stream(episode, ctx, reward, &step, outcome.duration_ms);
+            tracing::info!(
+                trace_id = %trace_id,
+                episode_id = %episode.episode_id,
+                worker_id = %ctx.worker_id,
+                instance_id = %instance_id,
+                reward = reward,
+                resolved = outcome.resolved,
+                phase = "swe_complete",
+                msg = "episode_phase"
+            );
+            return Ok(ExecuteOutput {
+                stream_reports: vec![stream],
+                result,
+                reward,
+                duration_ms,
+                env_step_duration_ms: outcome.duration_ms,
+                model_callback_duration_ms: 0,
+                warmup_hit: false,
+            });
+        }
+
         let result = EpisodeResult {
             episode_id: episode.episode_id.clone(),
             attempt_id: episode.attempt_id,
@@ -446,24 +611,9 @@ impl EpisodeExecutor {
             trajectory_id,
             trajectory_storage_url,
             gateway_session_id: String::new(),
-        };
-        let stream = StreamReport {
-            episode_id: episode.episode_id.clone(),
-            attempt_id: episode.attempt_id,
-            current_step: 1,
-            total_steps: 1,
-            current_reward: reward,
-            phase: "episode_complete".to_string(),
-            last_step: Some(step),
-            report_type: ReportType::Progress as i32,
-            step_latency_ms: outcome.duration_ms as i64,
-            model_latency_ms: 0,
-            worker_active_episodes: ctx.active_episodes as i32,
-            worker_capacity: ctx.worker_capacity as i32,
-            correlation_id: episode.correlation_id.clone(),
-            worker_id: ctx.worker_id.clone(),
             ..Default::default()
         };
+        let stream = build_swe_stream(episode, ctx, reward, &step, outcome.duration_ms);
         tracing::info!(
             trace_id = %trace_id,
             episode_id = %episode.episode_id,
@@ -483,6 +633,67 @@ impl EpisodeExecutor {
             model_callback_duration_ms: 0,
             warmup_hit: false,
         })
+    }
+}
+
+fn failed_output(
+    episode: &EpisodeRequest,
+    ctx: &ExecuteContext,
+    parallel_mode: &str,
+    err: &AsyncRolloutError,
+    worker_start_ts: f64,
+    duration_ms: u64,
+    model_callback_duration_ms: u64,
+    warmup_hit: bool,
+) -> ExecuteOutput {
+    let result = build_failed_async_result(episode, parallel_mode, err, worker_start_ts);
+    ExecuteOutput {
+        stream_reports: vec![StreamReport {
+            episode_id: episode.episode_id.clone(),
+            attempt_id: episode.attempt_id,
+            current_step: 0,
+            total_steps: episode.max_steps.max(1),
+            current_reward: 0.0,
+            phase: "episode_failed".to_string(),
+            report_type: ReportType::Progress as i32,
+            worker_active_episodes: ctx.active_episodes as i32,
+            worker_capacity: ctx.worker_capacity as i32,
+            correlation_id: episode.correlation_id.clone(),
+            worker_id: ctx.worker_id.clone(),
+            ..Default::default()
+        }],
+        result,
+        reward: 0.0,
+        duration_ms,
+        env_step_duration_ms: 0,
+        model_callback_duration_ms,
+        warmup_hit,
+    }
+}
+
+fn build_swe_stream(
+    episode: &EpisodeRequest,
+    ctx: &ExecuteContext,
+    reward: f64,
+    step: &StepRecord,
+    step_duration_ms: u64,
+) -> StreamReport {
+    StreamReport {
+        episode_id: episode.episode_id.clone(),
+        attempt_id: episode.attempt_id,
+        current_step: 1,
+        total_steps: 1,
+        current_reward: reward,
+        phase: "episode_complete".to_string(),
+        last_step: Some(step.clone()),
+        report_type: ReportType::Progress as i32,
+        step_latency_ms: step_duration_ms as i64,
+        model_latency_ms: 0,
+        worker_active_episodes: ctx.active_episodes as i32,
+        worker_capacity: ctx.worker_capacity as i32,
+        correlation_id: episode.correlation_id.clone(),
+        worker_id: ctx.worker_id.clone(),
+        ..Default::default()
     }
 }
 

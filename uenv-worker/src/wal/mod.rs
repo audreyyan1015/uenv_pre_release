@@ -5,6 +5,7 @@ use crc32fast::Hasher;
 use prost::Message;
 use sha2::{Digest, Sha256};
 
+use crate::episode::async_context::build_idempotency_key;
 use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReplayState, WalRecord};
 
 const WAL_EXT: &str = "wal";
@@ -36,7 +37,12 @@ impl WalWriter {
         server_epoch: u64,
         result: &EpisodeResult,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let idempotency_key = format!("{}:{}:{}", episode.episode_id, episode.attempt_id, worker_id);
+        let idempotency_key = build_idempotency_key(
+            &episode.episode_id,
+            episode.attempt_id,
+            worker_id,
+            &episode.dispatch_lease_id,
+        );
         let wal = WalRecord {
             episode_id: episode.episode_id.clone(),
             attempt_id: episode.attempt_id,
@@ -196,6 +202,7 @@ mod tests {
             scheduler_epoch: 1,
             env_package_id: String::new(),
             env_package_version: String::new(),
+            ..Default::default()
         };
         let result = EpisodeResult {
             episode_id: "ep-1".to_string(),
@@ -212,6 +219,7 @@ mod tests {
         let key = wal
             .persist_pending(&ep, "worker-1", 1, &result)
             .expect("persist");
+        assert_eq!(key, "ep-1:1:worker-1:lease-1");
         assert_eq!(wal.pending_count(), 1);
         let loaded = wal.load_pending();
         assert_eq!(loaded.len(), 1);
