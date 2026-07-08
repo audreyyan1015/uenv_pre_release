@@ -32,15 +32,35 @@ pub fn build_reset_config(
     Ok(serde_json::to_vec(&config)?)
 }
 
-fn normalize_dataset(value: &str) -> String {
+pub fn normalize_dataset(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    if trimmed.eq_ignore_ascii_case("gsm8k") || trimmed.to_ascii_lowercase().contains("gsm8k") {
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("gsm8k") {
         return "gsm8k".to_string();
     }
-    trimmed.to_string()
+    if lower.contains("pubmedqa") {
+        return "pubmedqa".to_string();
+    }
+    if lower.contains("scitab") {
+        return "scitab".to_string();
+    }
+    if lower.contains("olymmath") {
+        if lower.contains("hard") {
+            return "olymmath-hard".to_string();
+        }
+        if lower.contains("easy") {
+            return "olymmath-easy".to_string();
+        }
+        return "olymmath".to_string();
+    }
+    match lower.as_str() {
+        "en-easy" | "zh-easy" => "olymmath-easy".to_string(),
+        "en-hard" | "zh-hard" => "olymmath-hard".to_string(),
+        _ => trimmed.to_string(),
+    }
 }
 
 pub fn reward_target(reward_json: &Value) -> Option<String> {
@@ -60,4 +80,18 @@ pub fn reward_target(reward_json: &Value) -> Option<String> {
         .get("ground_truth")
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_dataset;
+
+    #[test]
+    fn normalizes_benchmark_datasets() {
+        assert_eq!(normalize_dataset("openai/gsm8k"), "gsm8k");
+        assert_eq!(normalize_dataset("PubMedQA"), "pubmedqa");
+        assert_eq!(normalize_dataset("scitab-dev"), "scitab");
+        assert_eq!(normalize_dataset("OlymMATH-HARD"), "olymmath-hard");
+        assert_eq!(normalize_dataset("EN-EASY"), "olymmath-easy");
+    }
 }
