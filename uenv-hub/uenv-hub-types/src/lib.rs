@@ -617,6 +617,13 @@ pub struct EnvPackageManifest {
     pub agent_defaults: Value,
     #[serde(default)]
     pub contracts: PackageContracts,
+    /// OpenEnv-style environment contract: Action / Observation / State JSON
+    /// Schemas describing the standardized `reset()/step()/state()` interface this
+    /// package's environment exposes. This aligns EnvPackages with the same
+    /// contract used by the classic env registry (方案 §4.1；OpenEnv `models.py`),
+    /// so RL frameworks and validators can bind uniformly across environments.
+    #[serde(default)]
+    pub interface: InterfaceSchema,
 }
 
 /// One artifact supplied inline at publish time; the server persists its bytes
@@ -683,6 +690,10 @@ pub struct PublishPackageRequest {
     pub agent_defaults: Value,
     #[serde(default)]
     pub contracts: PackageContracts,
+    /// OpenEnv-style Action/Observation/State JSON Schemas for this package's
+    /// environment contract. Optional; validated and echoed into the manifest.
+    #[serde(default)]
+    pub interface: InterfaceSchema,
     #[serde(default)]
     pub artifacts: Vec<InlineArtifact>,
     /// Large artifacts staged from files on the Hub host (e.g. image tarballs).

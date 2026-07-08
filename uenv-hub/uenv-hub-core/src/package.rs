@@ -268,6 +268,24 @@ pub async fn publish_inline_package(
         ));
     }
 
+    // Validate the OpenEnv-style interface schemas (reuses the same validator as
+    // the classic env registry / `uenv env validate`, so publish and CLI agree).
+    {
+        let mut report = dto::ValidationReport::ok();
+        crate::domain::interface::validate_interface(&req.interface, &mut report);
+        if !report.valid {
+            let detail = report
+                .issues
+                .iter()
+                .map(|i| format!("{}: {}", i.location, i.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(HubError::InvalidManifest(format!(
+                "invalid interface schema: {detail}"
+            )));
+        }
+    }
+
     let (mut rows, mut refs) =
         stage_artifacts(artifact_root, package_id, &req.version, &req.artifacts)?;
     let (file_rows, file_refs) =
@@ -299,6 +317,7 @@ pub async fn publish_inline_package(
         worker_overlay: req.worker_overlay.clone(),
         agent_defaults: req.agent_defaults.clone(),
         contracts: req.contracts.clone(),
+        interface: req.interface.clone(),
     };
     let manifest_json = serde_json::to_string(&manifest)?;
 
@@ -464,6 +483,7 @@ mod tests {
             worker_overlay: serde_json::Value::Null,
             agent_defaults: serde_json::Value::Null,
             contracts: dto::PackageContracts::default(),
+            interface: dto::InterfaceSchema::default(),
             artifacts: vec![],
             file_artifacts: vec![dto::FileArtifact {
                 name: "django.tar".into(),

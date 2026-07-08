@@ -90,7 +90,11 @@ impl ImageCacheFactory {
     }
 
     /// 从环境构造。优先 `UENV_SWE_IMAGE_PULL_POLICY`（local_only|mirror|allow_public）；
-    /// 否则兼容旧 `UENV_SWE_IMAGE_PULL` 布尔（默认开启，命中即跳过、零开销）。
+    /// 否则兼容旧 `UENV_SWE_IMAGE_PULL` 布尔。
+    ///
+    /// **纯内网默认零 egress**：未显式配置时默认 `LocalOnly`（只用本地/Hub tar 导入的镜像，
+    /// miss 即明确报错，绝不联网第三方）。要开启公网 pull 必须显式
+    /// `UENV_SWE_IMAGE_PULL_POLICY=allow_public` 或 `UENV_SWE_IMAGE_PULL=1`。
     pub fn from_env(runtime: ContainerRuntime) -> Self {
         if let Ok(p) = std::env::var("UENV_SWE_IMAGE_PULL_POLICY") {
             if let Some(policy) = ImagePullPolicy::parse(&p) {
@@ -98,8 +102,8 @@ impl ImageCacheFactory {
             }
         }
         let pull_enabled = std::env::var("UENV_SWE_IMAGE_PULL")
-            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
-            .unwrap_or(true);
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
         Self::new(runtime, pull_enabled)
     }
 
@@ -254,7 +258,9 @@ pub fn load_args(tar_path: &str) -> Vec<String> {
     vec!["load".to_string(), "-i".to_string(), tar_path.to_string()]
 }
 
-/// 7143 等环境默认 registry mirror 易 429；miss 时依次 direct → 备用 mirror prefix。
+/// pull 时的 mirror 前缀列表。**纯内网默认为空**（零 egress，不再内置任何公网 mirror）；
+/// 仅当运维显式设置 `UENV_SWE_PULL_MIRRORS`（逗号分隔）时才启用——且这些前缀应指向内网
+/// registry。历史的 `dockerproxy.net` 默认已移除，避免任何隐式公网访问。
 pub fn pull_mirrors_from_env() -> Vec<String> {
     std::env::var("UENV_SWE_PULL_MIRRORS")
         .ok()
@@ -265,7 +271,7 @@ pub fn pull_mirrors_from_env() -> Vec<String> {
                 .collect()
         })
         .filter(|v: &Vec<String>| !v.is_empty())
-        .unwrap_or_else(|| vec!["dockerproxy.net".to_string()])
+        .unwrap_or_default()
 }
 
 /// 带 mirror 回退的 pull；成功后将 mirror 引用 tag 为 `image`。
@@ -409,6 +415,18 @@ mod tests {
     }
 
     #[test]
+    fn from_env_defaults_to_local_only_zero_egress() {
+        // 未显式开启 pull 时，默认策略必须是 LocalOnly（纯内网零 egress）。
+        unsafe {
+            std::env::remove_var("UENV_SWE_IMAGE_PULL_POLICY");
+            std::env::remove_var("UENV_SWE_IMAGE_PULL");
+        }
+        let f = ImageCacheFactory::from_env(ContainerRuntime::Docker);
+        assert_eq!(f.policy(), ImagePullPolicy::LocalOnly);
+        assert!(!f.pull_enabled());
+    }
+
+    #[test]
     fn pull_policy_parse_and_allows() {
         assert_eq!(ImagePullPolicy::parse("local_only"), Some(ImagePullPolicy::LocalOnly));
         assert_eq!(ImagePullPolicy::parse("MIRROR"), Some(ImagePullPolicy::Mirror));
@@ -435,11 +453,15 @@ mod tests {
     }
 
     #[test]
-    fn pull_mirrors_default_includes_dockerproxy() {
+    fn pull_mirrors_default_empty_for_zero_egress() {
+        // 纯内网：未显式配置 mirror 时必须为空，杜绝任何隐式公网前缀。
         unsafe {
             std::env::remove_var("UENV_SWE_PULL_MIRRORS");
         }
-        assert_eq!(pull_mirrors_from_env(), vec!["dockerproxy.net".to_string()]);
+        assert!(
+            pull_mirrors_from_env().is_empty(),
+            "default mirrors must be empty for intranet zero-egress"
+        );
     }
 
     #[test]

@@ -238,6 +238,7 @@ async fn seed_swe_package(
         worker_overlay: overlay.clone(),
         agent_defaults,
         contracts,
+        interface: swe_interface_schema(variant),
         artifacts: vec![
             dto::InlineArtifact {
                 name: "catalog.json".into(),
@@ -283,6 +284,65 @@ async fn seed_swe_package(
     package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
     tracing::info!(package_id, version, variant, "seeded EnvPackage");
     Ok(())
+}
+
+/// The standardized OpenEnv-style environment contract for SWE-bench packages.
+///
+/// Declares Action / Observation / State JSON Schemas so the EnvPackage carries
+/// the same `reset()/step()/state()` contract the classic env registry uses
+/// (方案 §4.1；OpenEnv `models.py`). The SWE action space is the sandbox tool set
+/// exercised by `SweSession` (exec / write_file / read_file / apply_patch /
+/// submit); observations mirror `StepObservation`; state mirrors the session
+/// truth (instance / base_commit / step_count / resolved).
+fn swe_interface_schema(variant: &str) -> dto::InterfaceSchema {
+    dto::InterfaceSchema {
+        action: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "SweAction",
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["exec", "write_file", "read_file", "apply_patch", "submit"]
+                },
+                "command": { "type": "string", "description": "shell command for `exec`" },
+                "path": { "type": "string", "description": "container path for write_file/read_file" },
+                "content": { "type": "string", "description": "file content for write_file" },
+                "patch": { "type": "string", "description": "unified diff for apply_patch" }
+            },
+            "additionalProperties": false
+        })),
+        observation: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "SweObservation",
+            "type": "object",
+            "properties": {
+                "issue_text": { "type": "string", "description": "task issue (reset observation)" },
+                "stdout": { "type": "string" },
+                "stderr": { "type": "string" },
+                "exit_code": { "type": "integer" },
+                "read_content": { "type": "string" },
+                "write_ok": { "type": "boolean" },
+                "truncated": { "type": "boolean" }
+            },
+            "additionalProperties": true
+        })),
+        state: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "SweState",
+            "type": "object",
+            "required": ["instance_id", "benchmark_variant"],
+            "properties": {
+                "instance_id": { "type": "string" },
+                "benchmark_variant": { "type": "string", "const": variant },
+                "base_commit": { "type": "string" },
+                "step_count": { "type": "integer", "minimum": 0 },
+                "resolved": { "type": "boolean" }
+            },
+            "additionalProperties": true
+        })),
+    }
 }
 
 /// Build the `images.manifest.json` body from a SWE catalog: one entry per
@@ -493,6 +553,8 @@ pub async fn seed_agent_bridge_openhands(
             tool_bridge_schema: Some("openhands-uenv-v1".into()),
             ..Default::default()
         },
+        // Agent-bridge is a code bundle, not an environment → no interface contract.
+        interface: dto::InterfaceSchema::default(),
         artifacts,
         file_artifacts: vec![],
     };
