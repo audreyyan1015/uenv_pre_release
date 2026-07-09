@@ -1,8 +1,8 @@
 # 五类 Benchmark — Worker 支持现状与跨层调整
 
-> 日期：2026-07-09（merge + 7143 实机联调后更新）  
+> 日期：2026-07-09（merge + 7143 实机联调 + 跨层文档修订）  
 > 范围：PubMedQA、SciTab、DSCodeBench、SWE-bench-Pro、OlymMATH-EASY/HARD  
-> 对照文档：[DSCodeBench-CodeEnv-扩展规划草案](./DSCodeBench-CodeEnv-扩展规划草案.md)、[实机联调记录-code-env](./实机联调记录-code-env.md)
+> 对照文档：[DSCodeBench-CodeEnv-扩展规划草案](./DSCodeBench-CodeEnv-扩展规划草案.md)、[实机联调记录-code-env](./实机联调记录-code-env.md)、[Hub 环境标准化指南](../hub/uenv-hub环境标准化指南.md)
 
 ---
 
@@ -12,11 +12,21 @@
 |---|-----------|----------|-----------------|-----------|------------|
 | 1 | **PubMedQA** | 文本阅读理解（yes/no/maybe） | `math` | ✅ **已支持** | math backend + 7143 E2E 通过 |
 | 2 | **SciTab** | 表格理解（支持/反驳/不足） | `math` | ✅ **已支持** | 复用 math env，三分类 backend 已落地 |
-| 3 | **DSCodeBench** | 代码生成 + 官方测试 | `code` | ⚠️ **部分支持（MVP）** | Worker 插件已落地；官方数据与全链路待补 |
+| 3 | **DSCodeBench** | 代码生成 + 官方测试 | `code` | ⚠️ **部分支持（MVP）** | Worker 插件已落地；Hub 全量 benchmark 待 sync |
 | 4 | **SWE-bench-Pro** | 测试生成 / 程序修复 | `swe` | ✅ **已支持** | 7143 实机联调路径成熟 |
 | 5 | **OlymMATH** | 奥赛级数学推理 | `math` | ✅ **已支持** | `\boxed{}` 提取 + 归一化；easy/hard split |
 
-**5 项中 Worker 侧完整就绪 4 项（PubMedQA、SciTab、OlymMATH、SWE-bench-Pro），MVP 就绪 1 项（DSCodeBench）。**
+**Worker 侧**：4 项完整就绪 + 1 项 MVP（DSCodeBench）。
+
+**跨层剩余（Blocking 闭环）**：主要在 **Bridge P0 代码**（B-1/B-2）、**Hub 制品 publish**（H-1/H-2/H-5）、**内网 sync 运维**；`uenv-server` **源码无需改**。
+
+| 模块 | 代码要改？ | 当前状态 |
+|------|-----------|----------|
+| Worker | — | ✅ 五类 backend 已就绪（DSCodeBench 为 MVP） |
+| Bridge | ⚠️ P0 | ✅ Core 透传已完成；⚠️ B-1/B-2 待做；B-10 adapter-core 部署 |
+| Hub | ⚠️ P0 | ⚠️ 内网预缓存制品待 publish |
+| uenv-server | ✅ 否 | ✅ 仅 SWE 联调项（S-2/S-3） |
+| proto / fixtures / VeRL 样例 | — | ✅ proto 不变；fixtures + smoke + VeRL JSON **已入库** |
 
 ---
 
@@ -38,14 +48,29 @@
 | Server `8.130.75.157` 部署 `uenv-adapter-core` → `/usr/local/bin/uenv-adapter-core` | ✅ |
 | Bridge `response_text` 透传（免 LLM smoke） | ✅ `uenv-bridge/core/src/core.rs` |
 | **Math 四 dataset E2E**（gsm8k / pubmedqa / scitab / olymmath-easy） | ✅ 全部 `reward=1.0` |
+| fixtures + smoke + VeRL 参考样例入库 | ✅ 见下文「仓库已落地资产」 |
+
+### 仓库已落地资产（非 Worker 代码）
+
+| 路径 | 内容 |
+|------|------|
+| `fixtures/math/samples/*.json` | pubmedqa / scitab / olymmath-easy smoke payload |
+| `fixtures/code/samples/ds_smoke_001.json` | DSCodeBench inline test |
+| `uenv-bridge/scripts/smoke_math_datasets_grpcurl.py` | math 四 dataset grpcurl E2E |
+| `uenv-bridge/scripts/smoke_code_env_grpcurl.py` | code env grpcurl E2E |
+| `uenv-bridge/scripts/samples/verl_benchmark_samples.json` | 五类 VeRL 单条样本参考 |
+| `uenv-bridge/src/uenv/__init__.py` | 修复 async e2e 的 `from uenv.bridge` import |
 
 ```bash
-# 7143 上执行（需 grpcurl + 已部署 adapter-core）
+# 7143 / 实机（需 grpcurl + Worker + adapter-core）
 python3 uenv-bridge/scripts/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
-# 期望输出：OK: math multi-dataset e2e passed
+python3 uenv-bridge/scripts/smoke_code_env_grpcurl.py 8.130.75.157:8088
+
+# VeRL async（需 mock LLM）
+PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/verify_math_datasets_and_async_e2e.py
 ```
 
-> **说明**：`verify_math_datasets_and_async_e2e.py` 依赖 VeRL + mock LLM 全链路，本地/7143 需正确设置 `PYTHONPATH=uenv-bridge/src`；grpcurl smoke 已覆盖 Worker + Bridge + Server 核心路径。
+> grpcurl smoke 覆盖 **adapter-core + uenv-server 调度 + Worker**；不依赖 VeRL 训练栈。
 
 ---
 
@@ -91,7 +116,7 @@ python3 uenv-bridge/scripts/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
 | 项 | 内容 |
 |----|------|
 | Hub | 内网预缓存 math env 制品（manifest + 插件/可选 dataset 包）；Worker `sync` 后离线可用 |
-| Fixtures | 官方样本 fixture + 与 golden 对齐的批量评测 |
+| Fixtures | ✅ smoke JSON 已有（`fixtures/math/samples/`）；待补 textproto/pb 与 golden 批量评测 |
 
 ---
 
@@ -131,7 +156,8 @@ python3 uenv-bridge/scripts/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
 | **Worker 现状** | ⚠️ **MVP 已落地**（2026-07-09） |
 | 已实现 | `plugins/code/`、`uenv-code-plugin`、`dataset=dscodebench`、`evaluate_code.py` |
 | 7143 验证 | m4/m5 插件与 Executor 测试通过；code 预热池 dispatch 正常 |
-| 未完成 | 官方 `benchmark/` 数据未部署；`test_script_path` 全量模式待实机；Podman 沙箱（Phase 2） |
+| smoke | ✅ `smoke_code_env_grpcurl.py`（inline `test_code`） |
+| 未完成 | Hub 全量 benchmark 制品；`test_script_path` 官方模式；Podman 沙箱（Phase 2） |
 
 #### Worker 已有能力
 
@@ -145,7 +171,7 @@ env_type=code → plugins/code → extract 代码 → Python 评测
 
 | 项 | 内容 |
 |----|------|
-| W-1 | 7143 安装 DSCodeBench 官方 benchmark + 10 库 Python 环境 |
+| W-1 | Hub sync DSCodeBench EnvPackage（benchmark + Python 依赖），非各节点手工安装 |
 | W-2 | 对接官方 `benchmark_construction_evaluation/evaluate.py` |
 | W-3 | Phase 2：Podman 沙箱 backend |
 | W-4 | 持久化 `UENV_CODE_PLUGIN_BIN` 至 `/root/.uenv-worker.env` |
@@ -258,47 +284,56 @@ env:
 | **Hub** | ⚠️ **要**（发布 manifest + **制品**：镜像 tar、benchmark 包、依赖） | 导入机 publish → Worker `env sync` |
 | **uenv-server** | ✅ **不要**（无 benchmark 专用分支） | 联调：Worker 在线、SWE EnvPackage 版本匹配、可选 AgentJob E2E |
 | **proto** | ✅ 不要 | — |
-| **fixtures / smoke** | ⚠️ 补样本 | 分 dataset fixture + grpcurl smoke |
-| **VeRL / 训练侧** | ⚠️ Dataset 字段契约 | `ground_truth`、`dataset`、`extra_info` |
+| **fixtures / smoke** | ✅ 样本 + smoke 已入库；SWE pro 仍缺最小 textproto |
+| **VeRL / 训练侧** | ✅ 参考样例已入库；训练 parquet 需业务侧导出 |
 | **运维 / Deploy** | — | 内网零 egress：Hub 预缓存 → Worker sync |
+
+### 除 Bridge / Hub / uenv-server 外：能否现在完成？
+
+| 模块 | 现在能否完成？ | 说明 |
+|------|-------------|------|
+| **proto** | ✅ 已完成 | 无需任何改动 |
+| **fixtures / smoke** | ✅ 已入库 | JSON 样本 + math/code grpcurl smoke；SWE textproto 仍缺 |
+| **VeRL 样例** | ✅ 已入库 | `uenv-bridge/scripts/samples/verl_benchmark_samples.json` |
+| **verify 脚本 import** | ✅ 已修复 | `uenv-bridge/src/uenv/__init__.py` |
+| **CI** | ⚠️ 视流水线 | 可加 `cargo test -p uenv-math-env` 等 job |
+| **运维 / Hub sync** | ❌ 依赖内网 | 需导入机 + Hub + Worker 节点 |
+| **VeRL 全链路训练** | ❌ 依赖 7142 LLM | 需 mock LLM / 真模型 + adapter-core |
 
 ### 跨层数据流与职责
 
-> **部署模型**：整体在内网运行；Hub 负责 **提前缓存** 镜像、benchmark、插件与依赖包。Worker 扩缩容或新机上线时经 Hub **一次性 sync 到本地**，Episode 热路径 **不访问公网**。详见 [`Docs/hub/uenv-hub环境标准化指南.md`](../hub/uenv-hub环境标准化指南.md)。
+> **部署模型**：整体在内网运行；Hub 负责 **提前缓存** 镜像、benchmark、插件与依赖包。Worker 经 Hub **一次性 sync**，Episode 热路径 **不访问公网**。详见 [Hub 环境标准化指南](../hub/uenv-hub环境标准化指南.md)。
 
 ```
 [外网导入机，一次性]  docker save / git clone / pip wheel 打包
         │
         ▼ publish / publish-image
 ┌───────────────────┐     manifest + 制品字节（tar/catalog/benchmark/插件）
-│ uenv-hub（内网）   │     EnvPackage（swe/code benchmark）+ env registry（math/code manifest）
+│ uenv-hub（内网）   │     EnvPackage + env registry（math/code manifest）
 └─────────┬─────────┘
-          │ uenv env sync / GET artifact（部署期，非 Episode 热路径）
+          │ uenv env sync（部署期）
           ▼
 ┌───────────────────┐
-│ uenv-worker       │     本地 /var/lib/uenv/envs/…、plugins/、UENV_*_ROOT
+│ uenv-worker       │     本地 plugins/、/var/lib/uenv/envs/…
+└─────────┬─────────┘
+          ▲ gRPC EpisodeRequest（运行时只读本地）
+┌─────────┴─────────┐
+│ uenv-server       │     调度（源码无需为五类 benchmark 改动）
 └─────────┬─────────┘
           ▲
-          │ gRPC EpisodeRequest（运行时只读本地已 sync 资源）
 ┌─────────┴─────────┐
-│ uenv-server       │     调度；不参与 Hub 制品拉取
-└─────────┬─────────┘
-          ▲
-┌─────────┴─────────┐
-│ uenv-bridge       │     VeRL / ExecuteBatch → env_config + reward_config
+│ uenv-bridge       │     adapter-core + VeRL Agent Loop
 └───────────────────┘
 ```
 
-**关键原则**
-
 | 层级 | 职责 | 不应做的事 |
 |------|------|------------|
-| Bridge | 任务名 → `env_type`；VeRL 字段 → `env_config` / `reward_config`；按 env 透传专用字段 | 不做判分、不跑容器、不从 Hub 拉制品 |
-| Server | 调度、超时、SWE AgentJob 编排、轨迹索引 | 不解析 benchmark 答案；不负责镜像/benchmark 下载 |
-| **Hub** | **内网制品注册与预缓存**：manifest、`config_schema`、**镜像 tar**、**benchmark 数据包**、catalog、Python/插件制品；供 Worker `sync` | 不参与 Episode 热路径调度；不替代 Worker 执行判分 |
-| Worker | Reset/Step/Score；SWE 容器内 pytest；**只消费已 sync 到本地的 Hub 制品** | 默认不访问公网 registry / GitHub 实时下载 |
+| Bridge | 任务名 → `env_type`；payload 映射与字段透传 | 不判分、不拉 Hub 制品 |
+| uenv-server | 调度、SWE AgentJob、轨迹索引 | 不解析答案、不下载镜像/benchmark |
+| Hub | 内网预缓存：manifest + 镜像 tar + benchmark 包 | 不参与 Episode 热路径 |
+| Worker | Reset/Step/Score；消费已 sync 本地制品 | 默认不访问公网 |
 
-> **开发态例外**：仓库内 `plugins/` 与本地 EnvPackage 目录可跳过 Hub（便于联调）；**内网生产**应以 Hub sync 为权威来源，而非各节点手工 scp。
+> **组件勿混**：`8.130.75.157:8088` 上是 **`uenv-adapter-core`（Bridge）**，与 **`uenv-server`（Rust 调度）** 是不同二进制。
 
 ---
 
@@ -331,7 +366,7 @@ Bridge 分两层：**Rust Adapter Core**（`uenv-bridge/core/`）负责 L1↔Wor
 | B-6 | **VeRL Dataset → `extra_info` 契约** | `_metadata_extra_info()` 目前只默认填充 `question`。各 benchmark 的 `target`、`split`、`task_id` 等应通过 `sample_kwargs.extra_info` 进入 metadata，再由 Core 映射到 Worker payload / reward_config。 | P1 |
 | B-7 | **配置文件 `task_to_env_type`** | 规划中的 `configs/uenv-agent-loop.yaml` 增加显式映射表（当前仅靠 `_env_type()` 启发式）。便于新增 benchmark 时不改 Python 代码。 | P2 |
 | B-8 | **async / pass@k 结果字段** | `required_result_fields` 已含 `response_ids` / `trajectory` 等。多采样 pass@k 由训练侧聚合；Bridge 需文档化「单 episode reward 0/1」语义，避免训练代码误用 step reward 做 pass@k。 | P2 |
-| B-9 | **`verify_math_datasets_and_async_e2e.py` 可运行性** | 脚本依赖 `from uenv.bridge...`；7143 需 `PYTHONPATH=uenv-bridge/src` 或补 `uenv/__init__.py`。与 grpcurl smoke 互补：前者测 VeRL+mock LLM，后者测 Core+Worker。 | P1 |
+| B-9 | **`verify_math_datasets_and_async_e2e.py` 可运行性** | ✅ 已补 `uenv-bridge/src/uenv/__init__.py`；运行需 `PYTHONPATH=uenv-bridge/src` + mock LLM。与 grpcurl smoke 互补。 | ✅ / P1 实机 |
 | B-10 | **`uenv-adapter-core` 部署**（联调，非 uenv-server） | 跑在 Server 主机（如 `8.130.75.157:8088`），二进制 `/usr/local/bin/uenv-adapter-core`；Bridge 字段变更后须重编译部署（math smoke 曾因此失败）。脚本：`scripts/deploy-adapter-core-75157.sh`。 | P0 |
 
 #### 1.3 分 Benchmark — Bridge 待办
@@ -347,10 +382,8 @@ Bridge 分两层：**Rust Adapter Core**（`uenv-bridge/core/`）负责 L1↔Wor
 #### 1.4 验收方式
 
 ```bash
-# Adapter Core 层（不依赖 VeRL）
 python3 uenv-bridge/scripts/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
-
-# VeRL Agent Loop 层（需 mock LLM + PYTHONPATH）
+python3 uenv-bridge/scripts/smoke_code_env_grpcurl.py 8.130.75.157:8088
 PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/verify_math_datasets_and_async_e2e.py
 ```
 
@@ -358,9 +391,9 @@ PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/verify_math_datasets_and_
 
 ### 2. uenv-hub
 
-Hub 在内网部署中承担 **环境预缓存与制品分发中心**（不仅是 manifest/schema 索引）。运维在有外网权限的导入机上完成镜像 `docker save`、benchmark 打包、依赖 wheel 收集后 **publish 到 Hub**；Worker 节点部署时执行 `uenv env sync`（或等价 artifact 拉取），将内容落到本地，**Episode 运行时不再联网下载**。
+Hub 在内网承担 **环境预缓存与制品分发**（不仅是 manifest/schema）。导入机一次性 publish 后，Worker 部署期 `uenv env sync`，Episode 运行时零 egress。
 
-权威设计见：[uenv-hub环境标准化指南](../hub/uenv-hub环境标准化指南.md)（EnvPackage、`image_tar` 流式入库、`local_only` 零 egress）。
+权威设计：[uenv-hub环境标准化指南](../hub/uenv-hub环境标准化指南.md)
 
 #### 2.1 Hub 两类分发机制
 
@@ -482,18 +515,17 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 
 | Benchmark | 已有 | 待补 |
 |-----------|------|------|
-| **GSM8K / math 通用** | `fixtures/math/episode_001.*`、`fixtures/math/README.md` | 按 dataset 拆分 `episode_pubmedqa.*`、`episode_scitab.*`、`episode_olymmath.*` |
-| **DSCodeBench** | `fixtures/code/samples/ds_smoke_001.json`、`episode_001.textproto` | 官方 `test_script_path` 模式 fixture；golden pass/fail 对照 |
-| **SWE-bench-Pro** | `fixtures/swe/swe_pro_instances.json` | 最小 pro instance + 期望 reward 的 textproto |
-| **smoke 脚本** | `uenv-bridge/scripts/smoke_math_datasets_grpcurl.py` | code env grpcurl smoke；swe pro 单实例 smoke |
+| **GSM8K** | `fixtures/math/episode_001.*` | — |
+| **PubMedQA / SciTab / OlymMATH** | `fixtures/math/samples/*.json` | 分 dataset 的 textproto / `.pb` |
+| **DSCodeBench** | `fixtures/code/samples/ds_smoke_001.json`、`episode_001.textproto` | 官方 `test_script_path` fixture；golden 对照 |
+| **SWE-bench-Pro** | `fixtures/swe/swe_pro_instances.json` | 最小 pro textproto + smoke 脚本 |
+| **smoke 脚本** | `smoke_math_datasets_grpcurl.py`、`smoke_code_env_grpcurl.py` | swe pro grpcurl smoke |
 
-**共性待办**
-
-| ID | 项 | 说明 |
+| ID | 项 | 状态 |
 |----|-----|------|
-| F-1 | 每 benchmark ≥1 可读 textproto + 二进制 pb | 供 mock-scheduler / CI 回归 |
-| F-2 | `fixtures/*/README.md` 与 Hub examples 双向链接 | 避免 payload 字段漂移 |
-| F-3 | 7143 定期跑 smoke 纳入运维 checklist | math 四 dataset 已可一键验证 |
+| F-1 | 每 benchmark ≥1 JSON smoke | ✅ math/code 已入库 |
+| F-2 | textproto / pb + Hub examples 对齐 | ⚠️ 待补 |
+| F-3 | 7143 定期 smoke checklist | ⚠️ 运维流程 |
 
 ---
 
@@ -544,13 +576,13 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 | `code` | `task_id`、`test_code` 或 `test_script_path`、`library` | 缺 `test_*` 则插件无法评测 |
 | `swe` | `instance_id`、`benchmark_variant=pro` | 缺 EnvPackage 版本导致调度失败 |
 
-#### 7.3 待办
+#### 7.3 参考与待办
 
-| ID | 项 | 说明 |
+| ID | 项 | 状态 |
 |----|-----|------|
-| T-1 | 为五类 benchmark 各准备 VeRL parquet / jsonl 样例 | 放入 `uenv-bridge/scripts/` 或文档附录 |
-| T-2 | GRPO / async rollout 验证 | `verify_math_datasets_and_async_e2e.py` 覆盖 math；code/swe 需对等脚本 |
-| T-3 | reward 聚合语义 | 单步 0/1；pass@k 在 rollout 侧对同一 prompt 多次采样 |
+| T-1 | 五类 benchmark VeRL 单条样本 | ✅ `uenv-bridge/scripts/samples/verl_benchmark_samples.json` |
+| T-2 | GRPO / async rollout 实机 | ⚠️ math 有 `verify_math_datasets_and_async_e2e.py`；code/swe 待对等脚本 |
+| T-3 | pass@k 聚合语义文档化 | ⚠️ 训练侧对单 episode 0/1 reward 做 pass@k |
 
 ---
 
@@ -576,7 +608,7 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 | **P1** | Bridge | B-3, B-5, B-6, B-9 | swe 路由、reward、extra_info、async e2e | SWE + 训练 |
 | **P1** | Hub | H-3, H-4, H-6 | seed、运维手册、math dataset 包 | SWE + code + math |
 | **P1** | uenv-server | S-2, S-3 | EnvPackage 匹配、Agent E2E（**联调，非改代码**） | SWE-pro |
-| **P1** | Fixtures | F-1 | 分 dataset fixture | math 三件套 |
+| **P1** | Fixtures | F-2 | textproto/pb、Hub examples 对齐 | math + code |
 | **P2** | Bridge | B-4, B-7, B-8 | math 字段拆分、配置映射、pass@k 文档 | SciTab + 训练 |
 | **P2** | Hub | H-4, H-7 | 文档、manifest examples | 运维 |
 | **P2** | uenv-server | S-4, S-5 | 轨迹 dataset、日志（可选增强） | 可观测性 |
@@ -591,8 +623,8 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 | **uenv-hub** | ⚠️ 内网预缓存：manifest + 镜像/benchmark/依赖制品；见 §2 |
 | **uenv-server** | ✅ **代码无需改**；⚠️ 仅 SWE 联调（EnvPackage 匹配、Agent E2E）；见 §3 |
 | **proto** | ✅ 不变 |
-| **fixtures** | ⚠️ 分 benchmark 扩展（见 §fixtures） |
-| **VeRL Dataset** | ⚠️ extra_info / ground_truth 契约（见 §训练侧） |
+| **fixtures / smoke** | ✅ JSON + math/code smoke 已入库；⚠️ SWE textproto、F-2/F-3 |
+| **VeRL Dataset** | ✅ 参考 JSON 已入库；⚠️ 业务 parquet + async 实机（见 §7） |
 | **Docs/260709** | 本文档 + [实机联调记录-code-env](./实机联调记录-code-env.md) |
 
 详细说明见上文 **「其他模块跨层调整（详细）」** 各节。
@@ -626,6 +658,6 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 |-----------|---------------|-----------|
 | PubMedQA | `env_type=math` + `dataset=pubmedqa` → yes/no/maybe 判分 | ✅ smoke |
 | SciTab | `env_type=math` + `dataset=scitab` → 三分类 claim 判分 | ✅ smoke |
-| DSCodeBench | `env_type=code` → 官方 harness pass@1 与 golden 对齐 | ⚠️ MVP（inline test） |
+| DSCodeBench | `env_type=code` → 官方 harness pass@1 与 golden 对齐 | ⚠️ MVP（inline test + grpcurl smoke） |
 | SWE-bench-Pro | `env_type=swe` + `variant=pro` → patch 应用 + pytest reward=1 | ✅ 历史联调 |
 | OlymMATH | `env_type=math` + `dataset=olymmath-*` → 等价答案判分 | ✅ smoke（easy） |

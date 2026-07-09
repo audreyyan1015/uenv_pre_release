@@ -19,6 +19,9 @@ L1 调度键为 **`math`**；各 benchmark 通过 `payload.dataset` 区分。
 | `episode_001.textproto` | GSM8K 可读 EpisodeRequest 样例 |
 | `episode_001.pb` | 二进制 fixture（由生成器产出） |
 | `expected_result_001.pb` | 期望 EpisodeResult |
+| `samples/pubmedqa_smoke.json` | PubMedQA smoke payload |
+| `samples/scitab_smoke.json` | SciTab smoke payload |
+| `samples/olymmath_easy_smoke.json` | OlymMATH-Easy smoke payload |
 
 ## Payload 示例
 
