@@ -431,6 +431,7 @@ async fn run_publish_image(
         worker_overlay: serde_json::json!({ "swe": { "image_pull_policy": "local_only" } }),
         agent_defaults: serde_json::Value::Null,
         contracts: uenv_hub_types::PackageContracts::default(),
+        interface: uenv_hub_types::InterfaceSchema::default(),
         artifacts: vec![],
         file_artifacts,
     };

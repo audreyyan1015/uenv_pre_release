@@ -19,7 +19,7 @@ use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for_spec;
 use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
-use crate::swe::image_cache::{ImageCacheFactory, resolve_provision_image};
+use crate::swe::image_cache::{ImageCacheFactory, ImagePullPolicy, resolve_provision_image};
 use crate::swe::pro_eval::try_external_pro_grade;
 use crate::swe::resettable::PodmanResettableInstance;
 use crate::swe::spec::{build_reset_observation, ResetObservation, Workspace};
@@ -76,6 +76,8 @@ impl SweSession {
         keep: bool,
         worker_id: &str,
         gateway_base_url: &str,
+        image_tar: Option<&std::path::Path>,
+        pull_policy: Option<ImagePullPolicy>,
     ) -> Result<(Self, ResetObservation), DynErr> {
         let provision_start = Instant::now();
         let image = instance.image_ref();
@@ -93,9 +95,14 @@ impl SweSession {
         let ws = instance.workspace_dir();
         let is_pro = instance.variant() == crate::swe::variant::BenchmarkVariant::Pro;
 
-        // 0) M4：确保镜像本地可用（inspect 命中即跳过；miss 时按配置 pull）。
-        let factory = ImageCacheFactory::from_env(runtime);
-        let image_state = factory.ensure_image(&image)?;
+        // 0) M4：确保镜像本地可用。命中本地即跳过；否则**优先**从 Hub 托管 tar `docker load`
+        //    （纯内网零 egress）；仅当无 tar 且策略显式允许时才回退 pull（默认 local_only 会直接报错）。
+        //    策略优先级：EnvPackage overlay 声明（权威）> 进程环境（from_env，默认 local_only）。
+        let factory = match pull_policy {
+            Some(p) => ImageCacheFactory::with_policy(runtime, p),
+            None => ImageCacheFactory::from_env(runtime),
+        };
+        let image_state = factory.ensure_image_with_tar(&image, image_tar)?;
         let provision_image = resolve_provision_image(&factory, &image, &instance.instance_id);
 
         // 1) provision：按 CommandPolicy 生成 run flags（cap_drop / network / 可选 seccomp，

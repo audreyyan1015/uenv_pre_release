@@ -120,7 +120,7 @@ datasets:
 
 | 阶段 | 方案 | 说明 |
 |------|------|------|
-| Phase 1 MVP | `process` + 子进程隔离 | 开发联调；Worker 宿主机预装 Python 与 10 库 |
+| Phase 1 MVP | `process` + 子进程隔离 | 开发联调；**内网生产**由 Hub 预缓存 Python 依赖包，Worker sync 后离线执行 |
 | Phase 2 生产 | `podman` 容器 | 对齐 PRD CodeEnv 规划；参考 `uenv-worker/src/swe/` 容器 exec 模式 |
 | 不推荐 | 复用 `env_type=swe` | 单函数题过重；破坏 env_type 语义 |
 
@@ -197,29 +197,42 @@ for key in [
 | `src/episode/reward_engine.rs` | 不变 | 默认采信插件 `step.reward`；DSCodeBench 判分在插件内完成 |
 | `src/plugin/host.rs` | 不变 | 扫描 `plugins/code/manifest.yaml`，spawn 子进程 |
 | `src/pool/warmup_pool.rs` | 不变 | 按 `env_type=code` 独立分池 |
-| `src/hub/env_resolver.rs` | 轻量 | Hub pull 时识别 `code` env_type；本地无 manifest 时拉取 |
+| `src/hub/env_resolver.rs` | 轻量 | Hub pull/sync 时识别 `code` env_type；拉取 **manifest + benchmark 制品** 到本地 |
 
 ---
 
 ### 1.6 运行时依赖与部署
 
-Worker 宿主机或 CodeEnv 容器镜像需预装：
+Worker 节点上的 Python 与 10 库应来自 **Hub 预缓存的依赖制品**（venv/wheel tar），经 `uenv env sync` 落到本地；Episode 运行时不再 pip install 或访问 PyPI。
 
-**Python 生态**
+内网导入机（一次性，可访问外网）负责：
 
-- Python 3.10+
-- NumPy、Pandas、SciPy、Scikit-learn、TensorFlow、PyTorch、Matplotlib、Seaborn、Keras、LightGBM（版本与 DSCodeBench 官方 README 对齐）
+- 克隆 [DSCodeBench](https://github.com/ShuyinOuyang/DSCodeBench) 并打包 `benchmark/`
+- 锁定版本的 pandas / numpy / … wheel
+- `uenv env publish` 将 code EnvPackage（manifest + benchmark tar + 依赖 tar + 插件）入库 Hub
 
-**Benchmark 制品**
+Worker 部署：
 
-- DSCodeBench `benchmark/` 数据目录
-- `benchmark_construction_evaluation/` 评测脚本
+```bash
+uenv env sync dscodebench --version 0.1.0
+export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
+```
 
-**环境变量（建议）**
+开发联调可暂时使用仓库内 `plugins/code/` + 手工路径，**不等同于内网生产路径**。
+
+**EnvPackage 应包含的制品**
+
+| 类别 | 内容 |
+|------|------|
+| Python 生态 | Python 3.10+ 及 NumPy、Pandas、SciPy、Scikit-learn、TensorFlow、PyTorch、Matplotlib、Seaborn、Keras、LightGBM（版本与 DSCodeBench 官方 README 对齐），以 wheel/venv tar 形式入库 |
+| Benchmark | `benchmark/` 数据目录、`benchmark_construction_evaluation/` 评测脚本 |
+| 插件 | `uenv-code-plugin`、`evaluate_code.py` |
+
+**环境变量（Worker sync 后）**
 
 | 变量 | 说明 |
 |------|------|
-| `UENV_DSCODEBENCH_ROOT` | benchmark 数据根路径 |
+| `UENV_DSCODEBENCH_ROOT` | Hub sync 后的 benchmark 根路径（包内相对路径即可） |
 | `UENV_CODE_PYTHON` | Python 解释器路径（默认 `python3`） |
 | `UENV_CODE_TIMEOUT_SECS` | 全局默认超时 |
 | `UENV_CODE_SANDBOX` | `process` / `podman`（Phase 2） |
@@ -278,11 +291,18 @@ fixtures/code/
 | `configs/uenv-agent-loop.yaml` | `task_to_env_type.dscodebench: code` |
 | VeRL Dataset | 样本 `env_config` 对齐 Worker payload 契约 |
 
-### 2.3 `uenv-hub` — 轻量
+### 2.3 `uenv-hub` — 内网预缓存（非仅 manifest）
 
-- 更新 `code` env 的 manifest（从 placeholder → 真实插件描述）。
-- 发布 `plugins/code` 版本；可选托管 benchmark 元数据。
-- scaffold 模板 `code` 对齐实际目录结构。
+整体在内网部署时，Hub 负责 **提前抓取并缓存** DSCodeBench 所需制品，Worker 部署期 sync，运行时零 egress：
+
+| 项 | 改动 |
+|----|------|
+| code env registry | manifest 从 placeholder → 真实插件描述（`datasets: [dscodebench]`、`config_schema`） |
+| **EnvPackage 制品** | `benchmark/` tar、Python 依赖 tar、插件二进制、`evaluate_code.py` |
+| 发布流程 | 导入机打包 → Hub `publish` / artifact POST → Worker `uenv env sync dscodebench` |
+| scaffold | 模板 `code` 对齐实际目录与制品清单 |
+
+详见 [`Docs/hub/uenv-hub环境标准化指南.md`](../hub/uenv-hub环境标准化指南.md)。
 
 ### 2.4 `plugin_proto/` / `proto/` — 基本不变
 
@@ -353,7 +373,7 @@ fixtures/code/
 | 依赖版本 | 10 库版本漂移导致与官方结果不一致 | 锁定 Docker 镜像版本；golden 测试对齐 |
 | 安全 | 模型生成代码不可信 | Phase 2 必须上 Podman；MVP 仅限内网 |
 | pass@k | 训练可能需要多次采样 | 当前单轮 step 返回 0/1；pass@k 由 Bridge/训练侧聚合 |
-| Hub 制品体积 | benchmark 数据 + 脚本较大 | 宿主机预装或独立 volume，Hub 只存 manifest 与 schema |
+| Hub 制品体积 | benchmark 数据 + 脚本 + Python 依赖较大 | **Hub 内网预缓存**全量 tar；导入机一次性外网抓取；Worker 仅 `sync`，不实时下载 |
 
 ---
 

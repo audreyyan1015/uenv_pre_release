@@ -140,23 +140,13 @@ impl SweInstancePool {
             .ok_or_else(|| format!("swe instance_id `{instance_id}` not in catalog (size={})", self.store.len()))?
             .clone();
 
-        // M4：若存在 Hub 预制镜像 tar，且镜像本地缺失，则先 `docker load`（替代公网 pull）。
-        // 主动前置，使随后 provision 内部的 ensure_image 命中本地、零 egress。
-        if self.env_package.is_some() {
-            let image = instance.image_ref();
-            if let Some(tar) = self.image_tar_for(instance_id, &image) {
-                let factory = ImageCacheFactory::from_env(self.runtime);
-                if let Err(err) = factory.ensure_image_with_tar(&image, Some(&tar)) {
-                    tracing::warn!(
-                        instance_id = %instance_id,
-                        image = %image,
-                        tar = %tar.display(),
-                        error = %err,
-                        msg = "swe_env_package_image_load_failed"
-                    );
-                }
-            }
-        }
+        // M4：解析 Hub 预制镜像 tar（若 EnvPackage 已同步），直接交给 provision。
+        // provision 内部 `ensure_image_with_tar` 会优先 `docker load` 该 tar，无 tar 且
+        // 策略非 local_only 时才回退 pull（默认 local_only → 纯内网零 egress）。
+        let image_tar = self.image_tar_for(instance_id, &instance.image_ref());
+        // EnvPackage overlay 声明的 image_pull_policy 为权威（默认无 EnvPackage 时由 from_env
+        // 决定，进程默认 local_only）。
+        let pull_policy = self.env_package.as_ref().and_then(|p| p.image_pull_policy);
 
         // M2-4：叠加池级 seccomp profile 目录（call-site 仅决定 mode）。
         let policy = self.apply_seccomp(policy);
@@ -170,6 +160,8 @@ impl SweInstancePool {
                 false,
                 &self.worker_id,
                 &self.gateway_base_url,
+                image_tar.as_deref(),
+                pull_policy,
             )?;
 
         let count = {
@@ -216,7 +208,11 @@ impl SweInstancePool {
     /// `warm_tag=true` 时（M0-3 / M4-3）额外给镜像打 `cache/swe-<id>:warm` 本地 tag，作为
     /// `SandboxSpec.optional_image_cache` 语义的产物。返回 `(present_or_pulled, failed)` 计数。
     pub fn prewarm_images(&self, instance_ids: &[String], warm_tag: bool) -> (usize, usize) {
-        let factory = ImageCacheFactory::from_env(self.runtime);
+        // 与 provision 一致：EnvPackage 声明的 pull policy 权威，否则 from_env（默认 local_only）。
+        let factory = match self.env_package.as_ref().and_then(|p| p.image_pull_policy) {
+            Some(p) => ImageCacheFactory::with_policy(self.runtime, p),
+            None => ImageCacheFactory::from_env(self.runtime),
+        };
         let mut ok = 0usize;
         let mut fail = 0usize;
         for id in instance_ids {

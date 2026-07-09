@@ -72,11 +72,20 @@ python3 scripts/smoke_code_submit.py 8.130.75.157:8088
 # 期望：status=completed reward=1.0
 ```
 
-## DSCodeBench 官方数据（后续）
+## DSCodeBench 官方数据（内网：经 Hub sync）
 
-设置环境变量后可用 `test_script_path` 模式：
+**内网生产**：benchmark 与 Python 依赖应作为 **code EnvPackage 制品** 发布到 Hub，Worker 部署时 sync，而非各节点手工 git clone 或 pip install。
+
+```bash
+# Worker 节点（Hub 已 publish 后）
+uenv env sync dscodebench --version 0.1.0
+export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
+export UENV_DSCODEBENCH_EVAL_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0   # 可选，含官方 evaluate.py
+```
+
+**开发联调**（可暂时跳过 Hub）：
 
 ```bash
 export UENV_DSCODEBENCH_ROOT=/path/to/DSCodeBench/benchmark
-export UENV_DSCODEBENCH_EVAL_ROOT=/path/to/DSCodeBench  # 可选，官方 evaluate.py
+export UENV_DSCODEBENCH_EVAL_ROOT=/path/to/DSCodeBench
 ```

@@ -360,7 +360,7 @@ struct TestResults {
 | 同 repo+commit 多 task | `task_ref` 指向独立 `task_specs` 条目 |
 | ResettableInstance 池抽象 | Container → Snapshot 演进 |
 | EpisodeArtifact 统一产物 | M2+；MVP 可临时传递 |
-| Hub 只存索引 | 镜像字节与 TB 级缓存在 Worker |
+| Hub 只存索引 | ~~镜像字节与 TB 级缓存在 Worker~~ **已 superseded**：内网模型下 Hub **托管镜像 tar + catalog**（EnvPackage），Worker 经 `uenv env sync` 预制；见 [`Docs/hub/uenv-hub环境标准化指南.md`](../hub/uenv-hub环境标准化指南.md) |
 
 ---
 

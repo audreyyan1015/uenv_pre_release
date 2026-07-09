@@ -230,7 +230,9 @@ async fn invalid_version_is_rejected() {
 
 #[tokio::test]
 async fn env_package_publish_manifest_artifact_and_sync_plan() {
-    use uenv_hub_types::{InlineArtifact, PackageContracts, PackagePlatform, PublishPackageRequest};
+    use uenv_hub_types::{
+        InlineArtifact, InterfaceSchema, PackageContracts, PackagePlatform, PublishPackageRequest,
+    };
 
     let (addr, _tmp) = spawn_server().await;
     let client = HttpClient::new(format!("http://{addr}"), None);
@@ -249,6 +251,11 @@ async fn env_package_publish_manifest_artifact_and_sync_plan() {
         worker_overlay: serde_json::json!({"swe": {"benchmark_variant": "verified", "image_pull_policy": "local_only"}}),
         agent_defaults: serde_json::json!({}),
         contracts: PackageContracts::default(),
+        interface: InterfaceSchema {
+            action: Some(serde_json::json!({"type": "object", "required": ["type"]})),
+            observation: Some(serde_json::json!({"type": "object"})),
+            state: Some(serde_json::json!({"type": "object"})),
+        },
         artifacts: vec![InlineArtifact {
             name: "catalog.json".into(),
             kind: "catalog".into(),
@@ -275,6 +282,14 @@ async fn env_package_publish_manifest_artifact_and_sync_plan() {
     assert_eq!(manifest.artifacts.len(), 1);
     let art = &manifest.artifacts[0];
     assert!(art.digest.starts_with("sha256:"));
+    // OpenEnv interface contract survives publish → manifest round-trip over HTTP.
+    assert!(manifest.interface.action.is_some());
+    assert!(manifest.interface.observation.is_some());
+    assert!(manifest.interface.state.is_some());
+
+    // Dedicated interface endpoint returns the same contract.
+    let iface = client.get_package_interface("e2e-pkg", "latest").await.unwrap();
+    assert!(iface.action.is_some() && iface.state.is_some());
 
     // artifact bytes round-trip (digest verified server-side on read)
     let bytes = client
@@ -319,6 +334,7 @@ async fn hub_hosts_image_tarball_and_streams_it_to_worker() {
         },
         worker_overlay: serde_json::json!({"swe": {"image_pull_policy": "local_only"}}),
         agent_defaults: serde_json::json!({}),
+        interface: uenv_hub_types::InterfaceSchema::default(),
         contracts: PackageContracts::default(),
         artifacts: vec![],
         file_artifacts: vec![FileArtifact {
