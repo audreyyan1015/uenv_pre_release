@@ -272,6 +272,28 @@ fn sample_to_worker_payload(
             }
         }
     }
+    // CodeEnv / DSCodeBench: forward execution fields from env_config.
+    if sample.env_type == "code" {
+        if let Some(obj) = worker_payload.as_object_mut() {
+            for key in [
+                "task_id",
+                "library",
+                "test_code",
+                "test_script_path",
+                "ground_truth_path",
+                "entry_point",
+                "num_tests",
+                "random_seed",
+                "timeout_secs",
+                "benchmark_root",
+                "response_text",
+            ] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+    }
     worker_payload
 }
 

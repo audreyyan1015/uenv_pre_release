@@ -2105,6 +2105,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "uenv-code-env"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "uenv-common"
 version = "0.1.0"
 dependencies = [
@@ -2176,6 +2185,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uenv-code-env",
  "uenv-common",
  "uenv-math-env",
 ]

@@ -12,8 +12,13 @@ path = "src/main.rs"
 name = "uenv-math-plugin"
 path = "src/bin/uenv-math-plugin.rs"
 
+[[bin]]
+name = "uenv-code-plugin"
+path = "src/bin/uenv-code-plugin.rs"
+
 [dependencies]
 uenv-math-env = { path = "../plugins/math" }
+uenv-code-env = { path = "../plugins/code" }
 uenv-common = { path = "../uenv-common" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }

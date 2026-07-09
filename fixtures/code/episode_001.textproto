@@ -1,0 +1,23 @@
+episode_id: "code-episode-001"
+attempt_id: 1
+env_type: "code"
+payload: "{\"request_id\":\"req-code-smoke-001\",\"question\":\"Write a Python function add(a, b) that returns the sum of a and b.\",\"dataset\":\"dscodebench\",\"task_id\":\"smoke-001\",\"library\":\"python\",\"test_code\":\"assert add(1, 2) == 3\\nassert add(-1, 1) == 0\",\"entry_point\":\"add\",\"timeout_secs\":60,\"response_text\":\"```python\\ndef add(a, b):\\n    return a + b\\n```\"}"
+mode: MODE_SINGLE
+max_steps: 1
+resource_spec {
+  cpu_cores: 1
+  memory_mb: 512
+  gpu_count: 0
+  gpu_type: ""
+}
+seed: 42
+correlation_id: "corr-code-001"
+timeout_seconds: 120
+reward_config: "{\"type\":\"rule_reward\"}"
+dispatch_lease_id: "lease-code-fixture-001"
+lease_expire_at {
+  seconds: 1800000000
+  nanos: 0
+}
+scheduler_epoch: 1
+dispatch_token: "fixture-token-code-001"
