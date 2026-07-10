@@ -1,6 +1,8 @@
-uenv-hub/data/
-uenv-hub/logs/
-uenv-hub/data/
-uenv-hub/logs/
-uenv-hub/data/
-uenv-hub/logs/
+data/
+logs/
+target/
+
+# air-gap 离线构建产物（由 scripts/airgap-*.sh 生成，不入库）
+vendor/
+.cargo/
+dist/

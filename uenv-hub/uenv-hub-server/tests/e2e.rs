@@ -143,6 +143,41 @@ async fn full_publish_query_yank_sync_flow() {
     assert_eq!(&archive[..2], &[0x1f, 0x8b]);
 }
 
+/// The standardized seed (五类 Benchmark §2 / H-1..H-3) must publish `math`
+/// v0.2.0 and `code` v0.2.0 with the supported-dataset `config_schema.dataset`
+/// enum (the Bridge routing contract) plus a populated OpenEnv interface.
+#[tokio::test]
+async fn seeded_math_code_envs_are_standardized() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let math = client.get_version("math", "latest").await.unwrap();
+    assert_eq!(math.version, "0.2.0", "math must seed the standardized v0.2.0");
+    let math_datasets: Vec<String> = math
+        .config_schema
+        .as_ref()
+        .and_then(|s| s["properties"]["dataset"]["enum"].as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    for d in ["gsm8k", "pubmedqa", "scitab", "olymmath", "olymmath-easy", "olymmath-hard"] {
+        assert!(math_datasets.iter().any(|x| x == d), "math dataset `{d}` missing from config enum");
+    }
+    assert!(math.interface.action.is_some(), "math must carry an OpenEnv action schema");
+    assert!(math.interface.observation.is_some());
+    assert!(math.interface.state.is_some());
+
+    let code = client.get_version("code", "latest").await.unwrap();
+    assert_eq!(code.version, "0.2.0", "code must seed the standardized v0.2.0");
+    let code_datasets: Vec<String> = code
+        .config_schema
+        .as_ref()
+        .and_then(|s| s["properties"]["dataset"]["enum"].as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    assert!(code_datasets.iter().any(|x| x == "dscodebench"), "code must declare dscodebench");
+    assert!(code.interface.action.is_some(), "code must carry an OpenEnv action schema");
+}
+
 #[tokio::test]
 async fn unknown_dependency_is_rejected() {
     let (addr, _tmp) = spawn_server().await;

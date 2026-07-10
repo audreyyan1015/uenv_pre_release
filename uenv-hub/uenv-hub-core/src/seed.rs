@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use uenv_hub_types as dto;
-use uenv_hub_types::{Dependencies, Example, ImageSpec, InterfaceSchema, ResourceSpec};
+use uenv_hub_types::{Example, ImageSpec, InterfaceSchema, ResourceSpec};
 
 /// Seed the official scaffold templates into the DB.
 pub async fn seed_templates(store: &SqliteStore) -> Result<()> {
@@ -30,61 +30,91 @@ pub async fn seed_templates(store: &SqliteStore) -> Result<()> {
     Ok(())
 }
 
-/// Seed example environments (math / code / agent) if they do not exist.
+/// Seed the standardized environment registry (math / code / agent).
+///
+/// Aligned with the intranet deployment model (五类 Benchmark 跨层调整 §2):
+/// * `math` v0.2.0 — gsm8k / pubmedqa / scitab / olymmath(-easy|-hard), 对齐
+///   `plugins/math/manifest.yaml`；
+/// * `code` v0.2.0 — DSCodeBench，对齐 `plugins/code/manifest.yaml`；
+/// * `agent` 0.1.0 — 多轮工具环境占位。
+///
+/// Idempotent & **additive**: the env row is created only when missing, and each
+/// target version is published only when that exact version is absent — so an
+/// already-seeded Hub (e.g. legacy `math@1.0.0`) additively gains the new
+/// standardized version instead of failing on a duplicate publish.
 pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
-    if store.find_env_row("math").await?.is_none() {
-        store
-            .create_env(NewEnv {
-                env_type: "math".into(),
-                namespace: "default".into(),
-                description: Some("Math problem-solving environment".into()),
-                author: Some("uenv-team".into()),
-                homepage: None,
-                repository: None,
-                license: Some("Apache-2.0".into()),
-                tags: vec!["math".into(), "reasoning".into()],
-            })
-            .await?;
-        store
-            .publish_version("math", math_manifest())
-            .await?;
-    }
+    ensure_env(
+        store,
+        "math",
+        "MathEnv — 通用校验/计算环境 (gsm8k/pubmedqa/scitab/olymmath)",
+        &["math", "reasoning", "qa", "validation"],
+    )
+    .await?;
+    ensure_env_version(store, "math", math_manifest()).await?;
 
-    if store.find_env_row("code").await?.is_none() {
-        store
-            .create_env(NewEnv {
-                env_type: "code".into(),
-                namespace: "default".into(),
-                description: Some("Code-execution reward environment".into()),
-                author: Some("uenv-team".into()),
-                homepage: None,
-                repository: None,
-                license: Some("Apache-2.0".into()),
-                tags: vec!["code".into(), "execution".into()],
-            })
-            .await?;
-        store
-            .publish_version("code", simple_manifest("code", "1.0.0"))
-            .await?;
-    }
+    ensure_env(
+        store,
+        "code",
+        "CodeEnv — 代码执行 + 单测奖励环境 (DSCodeBench)",
+        &["code", "execution"],
+    )
+    .await?;
+    ensure_env_version(store, "code", code_manifest()).await?;
 
-    if store.find_env_row("agent").await?.is_none() {
+    ensure_env(
+        store,
+        "agent",
+        "Multi-turn tool-using agent environment",
+        &["agent", "multi-turn"],
+    )
+    .await?;
+    ensure_env_version(store, "agent", simple_manifest("agent", "0.1.0")).await?;
+    Ok(())
+}
+
+/// Create an env row when it does not exist yet (metadata only).
+async fn ensure_env(
+    store: &SqliteStore,
+    env_type: &str,
+    description: &str,
+    tags: &[&str],
+) -> Result<()> {
+    if store.find_env_row(env_type).await?.is_none() {
         store
             .create_env(NewEnv {
-                env_type: "agent".into(),
+                env_type: env_type.into(),
                 namespace: "default".into(),
-                description: Some("Multi-turn tool-using agent environment".into()),
+                description: Some(description.into()),
                 author: Some("uenv-team".into()),
                 homepage: None,
                 repository: None,
                 license: Some("Apache-2.0".into()),
-                tags: vec!["agent".into(), "multi-turn".into()],
+                tags: tags.iter().map(|t| (*t).to_string()).collect(),
             })
             .await?;
-        store
-            .publish_version("agent", simple_manifest("agent", "0.1.0"))
-            .await?;
     }
+    Ok(())
+}
+
+/// Publish `manifest.version` for `env_type` only when that exact version is
+/// not already present (idempotent, additive — never a duplicate publish).
+async fn ensure_env_version(
+    store: &SqliteStore,
+    env_type: &str,
+    manifest: NewManifest,
+) -> Result<()> {
+    let target = manifest.version.clone();
+    let already = store
+        .list_versions(env_type)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|v| v.version == target);
+    if already {
+        return Ok(());
+    }
+    store.publish_version(env_type, manifest).await?;
+    tracing::info!(env_type, version = %target, "seeded env manifest");
     Ok(())
 }
 
@@ -563,51 +593,141 @@ pub async fn seed_agent_bridge_openhands(
     Ok(())
 }
 
+/// Supported math datasets — kept in lock-step with `plugins/math/manifest.yaml`
+/// and the Worker `payload.rs` / `plugins/math/src/score.rs` routing keys.
+const MATH_DATASETS: &[&str] =
+    &["gsm8k", "pubmedqa", "scitab", "olymmath", "olymmath-easy", "olymmath-hard"];
+
+/// Supported code datasets — kept in lock-step with `plugins/code/manifest.yaml`.
+const CODE_DATASETS: &[&str] = &["dscodebench"];
+
+/// The standardized `math` env registry manifest (v0.2.0).
+///
+/// A process (proto-uds) plugin — no container image. The supported benchmark
+/// datasets are declared as the `dataset` config enum, which is the
+/// contract the Bridge routing (`_env_type` / `normalize_dataset`) must align
+/// with, and is queryable via `GET /api/v1/envs/math/versions/latest`.
 fn math_manifest() -> NewManifest {
+    let datasets: Vec<Value> = MATH_DATASETS.iter().map(|d| json!(d)).collect();
     NewManifest {
-        version: "1.0.0".into(),
-        changelog: Some("First release: algebra and geometry".into()),
-        entrypoint: Some("uenv-worker math".into()),
-        supported_backends: vec!["process".into(), "podman".into()],
-        dependencies: Some(Dependencies {
-            requirements_path: Some("requirements.txt".into()),
-            install_script: None,
-            requires: vec![],
-        }),
+        version: "0.2.0".into(),
+        changelog: Some(
+            "v0.2.0: 多数据集 (gsm8k/pubmedqa/scitab/olymmath[-easy|-hard]); 对齐 plugins/math/manifest.yaml".into(),
+        ),
+        entrypoint: Some("./run.sh".into()),
+        supported_backends: vec!["process".into()],
+        dependencies: None,
         min_uenv_version: Some("0.1.0".into()),
-        base_image: Some("uenv-base:latest".into()),
-        health_check_path: Some("/health".into()),
-        interface: InterfaceSchema {
-            action: Some(json!({
-                "type": "object",
-                "properties": {"answer": {"type": "string"}},
-                "required": ["answer"]
-            })),
-            observation: Some(json!({
-                "type": "object",
-                "properties": {"question": {"type": "string"}, "done": {"type": "boolean"}}
-            })),
-            state: Some(json!({
-                "type": "object",
-                "properties": {"step": {"type": "integer"}, "score": {"type": "number"}}
-            })),
-        },
-        examples: vec![Example {
-            title: Some("easy single-step solve".into()),
-            request: json!({"env_config": {"difficulty": "easy"}, "actions": [{"answer": "42"}]}),
-        }],
-        image: Some(ImageSpec {
-            url: "registry.local/uenv/math:1.0.0".into(),
-            digest: Some("sha256:0000000000000000000000000000000000000000000000000000000000000000".into()),
-            size_bytes: Some(524288000),
-            arch: Some("amd64".into()),
-            base_image_ref: Some("uenv-base:latest".into()),
-        }),
+        base_image: None,
+        health_check_path: None,
+        interface: math_interface_schema(),
+        examples: vec![
+            Example {
+                title: Some("gsm8k — 数值答案".into()),
+                request: json!({
+                    "env_config": {"dataset": "gsm8k", "question": "1+1=?"},
+                    "actions": [{"response_text": "#### 2"}]
+                }),
+            },
+            Example {
+                title: Some("pubmedqa — yes/no/maybe".into()),
+                request: json!({
+                    "env_config": {"dataset": "pubmedqa", "question": "Context: ...\nQuestion: ..."},
+                    "actions": [{"response_text": "yes"}]
+                }),
+            },
+            Example {
+                title: Some("scitab — 三分类 claim".into()),
+                request: json!({
+                    "env_config": {"dataset": "scitab", "question": "Table: ...\nClaim: ..."},
+                    "actions": [{"response_text": "supports"}]
+                }),
+            },
+            Example {
+                title: Some("olymmath-easy — \\boxed{} 提取".into()),
+                request: json!({
+                    "env_config": {"dataset": "olymmath-easy", "question": "..."},
+                    "actions": [{"response_text": "\\boxed{42}"}]
+                }),
+            },
+        ],
+        image: None,
         config_schema: Some(json!({
             "type": "object",
-            "properties": {"difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]}}
+            "properties": {
+                "dataset": {
+                    "type": "string",
+                    "enum": datasets,
+                    "description": "benchmark 路由键；与 Bridge _env_type/normalize_dataset 及 Worker payload.rs 对齐"
+                },
+                "question": {"type": "string", "description": "题面文本 (PubMedQA/SciTab 上下文合并于此)"},
+                "response_text": {"type": "string", "description": "smoke/免-LLM 联调直接注入模型答案"},
+                "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]}
+            },
+            "required": ["dataset"]
         })),
-        default_config: Some(json!({"difficulty": "easy"})),
+        default_config: Some(json!({"dataset": "gsm8k"})),
+        resources: ResourceSpec {
+            cpu: Some(1.0),
+            memory_mb: Some(2048),
+            gpu: Some(0),
+            gpu_type: None,
+            disk_mb: None,
+        },
+        published_by: None,
+    }
+}
+
+/// The standardized `code` env registry manifest (v0.2.0, DSCodeBench).
+///
+/// Process (proto-uds) plugin. Full benchmark trees + Python deps are shipped as
+/// an **EnvPackage** (see 运维手册 / §H-2), not embedded in the registry manifest;
+/// this manifest carries the interface contract + execution-field config schema.
+fn code_manifest() -> NewManifest {
+    let datasets: Vec<Value> = CODE_DATASETS.iter().map(|d| json!(d)).collect();
+    NewManifest {
+        version: "0.2.0".into(),
+        changelog: Some(
+            "v0.2.0: DSCodeBench 代码执行环境; 对齐 plugins/code/manifest.yaml".into(),
+        ),
+        entrypoint: Some("./run.sh".into()),
+        supported_backends: vec!["process".into()],
+        dependencies: None,
+        min_uenv_version: Some("0.1.0".into()),
+        base_image: None,
+        health_check_path: None,
+        interface: code_interface_schema(),
+        examples: vec![Example {
+            title: Some("dscodebench — inline test_code".into()),
+            request: json!({
+                "env_config": {
+                    "dataset": "dscodebench",
+                    "task_id": "ds_smoke_001",
+                    "test_code": "assert add(1, 2) == 3"
+                },
+                "actions": [{"response_text": "def add(a, b):\n    return a + b"}]
+            }),
+        }],
+        image: None,
+        config_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "dataset": {
+                    "type": "string",
+                    "enum": datasets,
+                    "description": "benchmark 路由键；与 Bridge dscodebench→code 路由及 Worker payload.rs 对齐"
+                },
+                "task_id": {"type": "string"},
+                "library": {"type": "string", "description": "DSCodeBench 目标库 (如 pandas/numpy)"},
+                "test_code": {"type": "string", "description": "inline 单测 (smoke/联调)"},
+                "test_script_path": {"type": "string", "description": "官方 harness 相对 UENV_DSCODEBENCH_ROOT 的路径"},
+                "num_tests": {"type": "integer", "minimum": 1},
+                "random_seed": {"type": "integer"},
+                "response_text": {"type": "string", "description": "smoke/免-LLM 联调直接注入模型代码"}
+            },
+            "required": ["dataset"]
+        })),
+        default_config: Some(json!({"dataset": "dscodebench"})),
         resources: ResourceSpec {
             cpu: Some(2.0),
             memory_mb: Some(4096),
@@ -616,6 +736,94 @@ fn math_manifest() -> NewManifest {
             disk_mb: None,
         },
         published_by: None,
+    }
+}
+
+/// OpenEnv-style Action/Observation/State contract for the `math` env.
+///
+/// Action = 模型答案 (`response_text` 或规范化 `answer`);Observation 反映
+/// reset/step 返回 (`question` / `dataset` / `done`);State 反映判分真相
+/// (`dataset` / `target` / `reward` / `step_count`)。与 SWE 包的 interface 同构
+/// (方案 §4.1;OpenEnv `models.py`)。
+fn math_interface_schema() -> InterfaceSchema {
+    InterfaceSchema {
+        action: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "MathAction",
+            "type": "object",
+            "properties": {
+                "response_text": {"type": "string", "description": "模型原始回答 (含 #### / \\boxed{} 等)"},
+                "answer": {"type": "string", "description": "可选：已抽取的最终答案"}
+            },
+            "additionalProperties": true
+        })),
+        observation: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "MathObservation",
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "dataset": {"type": "string"},
+                "done": {"type": "boolean"}
+            },
+            "additionalProperties": true
+        })),
+        state: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "MathState",
+            "type": "object",
+            "properties": {
+                "dataset": {"type": "string"},
+                "target": {"type": "string", "description": "ground-truth 答案"},
+                "reward": {"type": "number", "minimum": 0, "maximum": 1},
+                "step_count": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": true
+        })),
+    }
+}
+
+/// OpenEnv-style Action/Observation/State contract for the `code` env (DSCodeBench).
+fn code_interface_schema() -> InterfaceSchema {
+    InterfaceSchema {
+        action: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "CodeAction",
+            "type": "object",
+            "properties": {
+                "response_text": {"type": "string", "description": "模型回答 (含 ```python``` 代码块)"},
+                "code": {"type": "string", "description": "可选：已抽取的纯代码"}
+            },
+            "additionalProperties": true
+        })),
+        observation: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "CodeObservation",
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "dataset": {"type": "string"},
+                "passed": {"type": "boolean"},
+                "total_tests": {"type": "integer"},
+                "passed_tests": {"type": "integer"},
+                "stdout": {"type": "string"},
+                "stderr": {"type": "string"}
+            },
+            "additionalProperties": true
+        })),
+        state: Some(json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "CodeState",
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "dataset": {"type": "string"},
+                "library": {"type": "string"},
+                "passed": {"type": "boolean"},
+                "step_count": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": true
+        })),
     }
 }
 
