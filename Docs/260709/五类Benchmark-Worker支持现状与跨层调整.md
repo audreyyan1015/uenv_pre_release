@@ -1,6 +1,6 @@
 # 五类 Benchmark — Worker 支持现状与跨层调整
 
-> 日期：2026-07-09（merge + 7143 实机联调 + 跨层文档修订）  
+> 日期：2026-07-11（Hub `8.130.95.176` 已升级至 math/code@0.2.0 + 五类预缓存 seed；此前 07-09 merge + 7143 联调）  
 > 范围：PubMedQA、SciTab、DSCodeBench、SWE-bench-Pro、OlymMATH-EASY/HARD  
 > 对照文档：[DSCodeBench-CodeEnv-扩展规划草案](./DSCodeBench-CodeEnv-扩展规划草案.md)、[实机联调记录-code-env](./实机联调记录-code-env.md)、[Hub 环境标准化指南](../hub/uenv-hub环境标准化指南.md)
 
@@ -12,19 +12,19 @@
 |---|-----------|----------|-----------------|-----------|------------|
 | 1 | **PubMedQA** | 文本阅读理解（yes/no/maybe） | `math` | ✅ **已支持** | math backend + 7143 E2E 通过 |
 | 2 | **SciTab** | 表格理解（支持/反驳/不足） | `math` | ✅ **已支持** | 复用 math env，三分类 backend 已落地 |
-| 3 | **DSCodeBench** | 代码生成 + 官方测试 | `code` | ⚠️ **部分支持（MVP）** | Worker 插件已落地；Hub 全量 benchmark 待 sync |
+| 3 | **DSCodeBench** | 代码生成 + 官方测试 | `code` | ⚠️ **部分支持（MVP）** | Worker 插件已落地；Hub 已有 MVP 包，全量树仍待导入机 |
 | 4 | **SWE-bench-Pro** | 测试生成 / 程序修复 | `swe` | ✅ **已支持** | 7143 实机联调路径成熟 |
 | 5 | **OlymMATH** | 奥赛级数学推理 | `math` | ✅ **已支持** | `\boxed{}` 提取 + 归一化；easy/hard split |
 
 **Worker 侧**：4 项完整就绪 + 1 项 MVP（DSCodeBench）。
 
-**跨层剩余（Blocking 闭环）**：主要在 **Bridge P0 代码**（B-1/B-2）、**Hub 制品 publish**（H-1/H-2/H-5）、**内网 sync 运维**；`uenv-server` **源码无需改**。
+**跨层剩余（Blocking 闭环）**：主要在 **Bridge P0 代码**（B-1/B-2）、**Hub 全量制品**（H-2 全量 DSCode / H-5 Pro 镜像 tar）、**Worker `env sync` 运维**；`uenv-server` **源码无需改**。
 
 | 模块 | 代码要改？ | 当前状态 |
 |------|-----------|----------|
 | Worker | — | ✅ 五类 backend 已就绪（DSCodeBench 为 MVP） |
 | Bridge | ⚠️ P0 | ✅ Core 透传已完成；⚠️ B-1/B-2 待做；B-10 adapter-core 部署 |
-| Hub | ⚠️ P0 | ⚠️ 内网预缓存制品待 publish |
+| Hub | ⚠️ 剩余 H-5 / 全量包 | ✅ `8.130.95.176` 已 seed math/code@0.2.0 + smoke/MVP 预缓存；⚠️ Pro 真实 image_tar、DSCode 全量树仍缺 |
 | uenv-server | ✅ 否 | ✅ 仅 SWE 联调项（S-2/S-3） |
 | proto / fixtures / VeRL 样例 | — | ✅ proto 不变；fixtures + smoke + VeRL JSON **已入库** |
 
@@ -402,37 +402,47 @@ Hub 在内网承担 **环境预缓存与制品分发**（不仅是 manifest/sche
 | **Env registry** | `GET /api/v1/envs/{env_type}/versions/...` | math/code **manifest**、interface schema、可选 **插件制品 tar** | PubMedQA / SciTab / OlymMATH（math）；DSCodeBench（code） |
 | **EnvPackage** | `GET /api/v1/packages/{id}/versions/...`、`uenv env sync` | **镜像 tar**、catalog.json、eval_spec、**benchmark 数据包**、worker overlay | SWE-bench-Pro；DSCodeBench 全量；未来 math dataset 离线包 |
 
-#### 2.2 现状与差距
+#### 2.2 现状与差距（Hub `8.130.95.176`，2026-07-11 已升级）
 
 | env_type | 本地 `plugins/*/manifest.yaml` | Hub 当前能力 | 内网生产缺口 |
 |----------|-------------------------------|-------------|-------------|
-| `math` | ✅ gsm8k / pubmedqa / scitab / olymmath* | ⚠️ seed 中 `math_manifest()` 仍为旧示例 | 发布 v0.2 manifest + 可选 **dataset fixture 制品**（评测集 tar） |
-| `code` | ✅ `plugins/code/manifest.yaml` | ⚠️ seed 为 placeholder；**尚无 DSCodeBench benchmark 包** | 发布 code EnvPackage：benchmark 树 + Python 依赖 + 插件 |
-| `swe` | N/A（Worker native） | ✅ EnvPackage + `image_tar` 能力已实现 | Pro **真实镜像 tar** 需导入机预置并 `publish-image` |
+| `math` | ✅ gsm8k / pubmedqa / scitab / olymmath* | ✅ **`math@0.2.0` latest**（legacy `1.0.0` 已 yank）；✅ EnvPackage `math-smoke-fixtures@0.1.0`（pubmedqa/scitab/olymmath-easy 样本） | 全量评测集 tar / 插件二进制仍可选增强 |
+| `code` | ✅ `plugins/code/manifest.yaml` | ✅ **`code@0.2.0` latest**；✅ EnvPackage **`dscodebench@0.1.0` MVP**（smoke sample + `evaluate_code.py`） | **全量** `benchmark/` 树 + Python wheel/venv 仍需导入机 |
+| `swe` | N/A（Worker native） | ✅ `swe-bench-pro@0.2.0` / verified + agent bridge | Pro **真实镜像 tar** 需导入机预置并 `publish-image` |
 
 > 联调仓库若自带 `plugins/` 或已手工 sync 的 EnvPackage，Worker 可跳过 Hub HTTP；这属于 **开发便利**，不是内网生产路径。
+
+**实机验收（Bearer token + `http://8.130.95.176:8088`）**：
+
+| 资源 | 状态 |
+|------|------|
+| `GET /envs/math/versions/latest` | `0.2.0`，datasets 含 gsm8k/pubmedqa/scitab/olymmath* |
+| `GET /envs/code/versions/latest` | `0.2.0`，datasets=`[dscodebench]` |
+| `GET /packages/math-smoke-fixtures/versions/latest` | `0.1.0`，含三份 math smoke JSON |
+| `GET /packages/dscodebench/versions/latest` | `0.1.0` MVP |
+| `GET /packages/swe-bench-pro/versions/latest` | `0.2.0`（catalog/overlay；image_tar 仍可能缺） |
 
 #### 2.3 待办（共性）
 
 | ID | 项 | 详细说明 | 优先级 |
 |----|-----|----------|--------|
-| H-1 | **发布 math env v0.2.x（registry + 制品）** | manifest 对齐 `plugins/math/manifest.yaml`（含 `datasets`）；可选 inline 制品：`uenv-math-plugin` 二进制、各 dataset smoke/fixture tar。 | P0 |
-| H-2 | **发布 code / DSCodeBench EnvPackage** | 含：`benchmark/` 官方树（或分 library tar）、`evaluate_code.py`、**Python 3.10+ 与 10 库 wheel/venv 包**、code 插件；Worker sync 后 `UENV_DSCODEBENCH_ROOT` 指向包内路径。 | P0 |
-| H-3 | **更新 `seed.rs` 与导入脚本** | 新 Hub 实例 seed 出与内网模型一致的 manifest；文档化「导入机 → Hub → Worker sync」三步。 | P1 |
+| H-1 | **发布 math env v0.2.x（registry + 制品）** | ✅ **已完成（2026-07-11）**：`math@0.2.0` + `math-smoke-fixtures@0.1.0`；legacy `1.0.0` yank。可选增强：插件二进制 / 全量 dataset tar。 | ✅ / P2 增强 |
+| H-2 | **发布 code / DSCodeBench EnvPackage** | ⚠️ **MVP 已完成**：`dscodebench@0.1.0` + `code@0.2.0`。剩余：官方 **benchmark/** 全量树 + **Python 3.10+ / 10 库 wheel**。 | P0（全量） |
+| H-3 | **更新 `seed.rs` 与导入脚本** | ✅ seed 已含 math/code@0.2.0、yank legacy、`config/benchmark/` fixture 包；新实例启动即对齐。 | ✅ |
 | H-4 | **五类 benchmark 运维手册** | 在 `Docs/hub/` 补充：各 benchmark 在 Hub 上应缓存哪些制品、`uenv env sync` / `publish-image` 示例。 | P1 |
 | H-5 | **SWE-bench-Pro 镜像与 catalog 全量入库** | 导入机 `docker save` Pro 实例镜像 → `uenv env publish-image`；catalog 替换占位样例；7143 仅 `sync --docker-load`，无外拉。 | P0 |
-| H-6 | **math dataset 离线评测包（可选）** | PubMedQA / SciTab / OlymMATH 若训练需固定 held-out 集，可打 tar 随 math env 或独立 package 发布；**非**「只存 schema」。 | P2 |
+| H-6 | **math dataset 离线评测包（可选）** | smoke 已入库；全量 held-out 评测集 tar 仍可选。 | P2 |
 | H-7 | **fixtures 与 Hub examples 对齐** | manifest `examples[]` 与 `fixtures/math`、`fixtures/code` 一致；sync 后路径与文档中的 `test_script_path` 相对路径一致。 | P2 |
 
 #### 2.4 分 Benchmark — Hub 预缓存清单
 
-| Benchmark | Hub 应缓存的制品 | Worker sync 后本地路径（示例） |
-|-----------|-----------------|------------------------------|
-| **PubMedQA** | math manifest + 插件；可选 pubmedqa 样本 tar | `plugins/math/` 或 `/var/lib/uenv/envs/math/0.2.0/` |
-| **SciTab** | 同上；可选表格 claim 样本 tar | 同上 |
-| **DSCodeBench** | code EnvPackage：**benchmark/** + 依赖包 + 插件 + eval 脚本 | `/var/lib/uenv/envs/dscodebench/0.1.0/benchmark/` → `UENV_DSCODEBENCH_ROOT` |
-| **SWE-bench-Pro** | EnvPackage：catalog + **image_tar** + eval_spec + overlay | `/var/lib/uenv/envs/swe-bench-pro/0.2.0/` |
-| **OlymMATH** | math manifest；可选 easy/hard 题目 tar | 同 math env |
+| Benchmark | Hub 应缓存的制品 | 2026-07-11 Hub 状态 | Worker sync 后本地路径（示例） |
+|-----------|-----------------|---------------------|------------------------------|
+| **PubMedQA** | math manifest + 可选样本 | ✅ `math@0.2.0` + smoke fixture | `plugins/math/` 或 sync 包 `samples/` |
+| **SciTab** | 同上 | ✅ 同上 | 同上 |
+| **DSCodeBench** | code EnvPackage：benchmark + 依赖 + eval | ⚠️ MVP；全量树待导入 | `/var/lib/uenv/envs/dscodebench/0.1.0/benchmark/` → `UENV_DSCODEBENCH_ROOT` |
+| **SWE-bench-Pro** | EnvPackage：catalog + **image_tar** + eval_spec | ⚠️ catalog 有；**image_tar 仍缺** | `/var/lib/uenv/envs/swe-bench-pro/0.2.0/` |
+| **OlymMATH** | math manifest + 可选题目包 | ✅ `math@0.2.0` + easy smoke | 同 math |
 
 #### 2.5 内网部署工作流（运维）
 
@@ -603,10 +613,10 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 | 优先级 | 模块 | ID | 内容 | 影响 benchmark |
 |--------|------|-----|------|----------------|
 | **P0** | Bridge | B-1, B-2, **B-10** | dataset 显式化；dscodebench 路由；**adapter-core 部署** | 全部 E2E |
-| **P0** | Hub | H-1, H-2, H-5 | math/code 制品 + SWE Pro 镜像 tar | math + DSCodeBench + SWE |
-| **P0** | Deploy | — | 导入机 → Hub publish → Worker `env sync` | 全部 |
+| **P0** | Hub | H-2（全量）, H-5 | DSCode 全量树/依赖 + SWE Pro 镜像 tar（H-1/MVP 已完成） | DSCodeBench + SWE |
+| **P0** | Deploy | — | Worker `uenv env sync` 消费 Hub 已缓存制品 | 全部 |
 | **P1** | Bridge | B-3, B-5, B-6, B-9 | swe 路由、reward、extra_info、async e2e | SWE + 训练 |
-| **P1** | Hub | H-3, H-4, H-6 | seed、运维手册、math dataset 包 | SWE + code + math |
+| **P1** | Hub | H-4, H-6 | 运维手册、math 全量 dataset 包（H-3 seed ✅） | SWE + code + math |
 | **P1** | uenv-server | S-2, S-3 | EnvPackage 匹配、Agent E2E（**联调，非改代码**） | SWE-pro |
 | **P1** | Fixtures | F-2 | textproto/pb、Hub examples 对齐 | math + code |
 | **P2** | Bridge | B-4, B-7, B-8 | math 字段拆分、配置映射、pass@k 文档 | SciTab + 训练 |

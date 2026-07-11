@@ -42,6 +42,9 @@ pub async fn seed_templates(store: &SqliteStore) -> Result<()> {
 /// target version is published only when that exact version is absent — so an
 /// already-seeded Hub (e.g. legacy `math@1.0.0`) additively gains the new
 /// standardized version instead of failing on a duplicate publish.
+///
+/// After publishing `0.2.0`, any non-yanked legacy `1.0.0` placeholder is yanked
+/// so `/versions/latest` resolves to the standardized schema (semver: 1.0.0 > 0.2.0).
 pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
     ensure_env(
         store,
@@ -51,6 +54,7 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
     )
     .await?;
     ensure_env_version(store, "math", math_manifest()).await?;
+    yank_legacy_placeholder(store, "math", "1.0.0", "0.2.0").await?;
 
     ensure_env(
         store,
@@ -60,6 +64,7 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
     )
     .await?;
     ensure_env_version(store, "code", code_manifest()).await?;
+    yank_legacy_placeholder(store, "code", "1.0.0", "0.2.0").await?;
 
     ensure_env(
         store,
@@ -69,6 +74,40 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
     )
     .await?;
     ensure_env_version(store, "agent", simple_manifest("agent", "0.1.0")).await?;
+    Ok(())
+}
+
+/// Yank a legacy placeholder version once the standardized `current` version
+/// exists, so semver-based `latest` points at the real schema (not 1.0.0 > 0.2.0).
+async fn yank_legacy_placeholder(
+    store: &SqliteStore,
+    env_type: &str,
+    legacy: &str,
+    current: &str,
+) -> Result<()> {
+    let versions = store.list_versions(env_type).await.unwrap_or_default();
+    let has_current = versions
+        .iter()
+        .any(|v| v.version == current && !v.is_yanked);
+    let has_legacy = versions.iter().any(|v| v.version == legacy && !v.is_yanked);
+    if !(has_current && has_legacy) {
+        return Ok(());
+    }
+    match store
+        .yank_version(
+            env_type,
+            legacy,
+            &format!("superseded by standardized {env_type}@{current}"),
+        )
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(env_type, legacy, current, "yanked legacy env placeholder");
+        }
+        Err(e) => {
+            tracing::warn!(env_type, legacy, error = %e, "skip yanking legacy placeholder");
+        }
+    }
     Ok(())
 }
 
@@ -133,6 +172,9 @@ pub async fn seed_all(store: &SqliteStore) -> Result<()> {
 /// the on-disk catalog files, if not already present. Tolerant: a missing
 /// catalog file is logged and skipped rather than failing startup.
 ///
+/// Also seeds five-benchmark fixture packages under `config/benchmark/`
+/// (math smoke samples + DSCodeBench MVP) when those directories exist.
+///
 /// `catalog_dir` defaults to the same `config/swe` the SWE catalog endpoint
 /// reads; `artifact_root` is the Hub artifact store.
 pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_dir: &Path) -> Result<()> {
@@ -159,6 +201,225 @@ pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_di
     )
     .await?;
     seed_agent_bridge_openhands(store, artifact_root, catalog_dir).await?;
+    seed_benchmark_fixture_packages(store, artifact_root, catalog_dir).await?;
+    Ok(())
+}
+
+/// Seed math/code fixture EnvPackages used for intranet pre-cache / smoke sync.
+///
+/// Reads from `config/benchmark/` (sibling of `config/swe` when `catalog_dir`
+/// is the default). Missing dirs are skipped (non-fatal).
+async fn seed_benchmark_fixture_packages(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    catalog_dir: &Path,
+) -> Result<()> {
+    let benchmark_dir = catalog_dir
+        .parent()
+        .map(|p| p.join("benchmark"))
+        .unwrap_or_else(|| PathBuf::from("config/benchmark"));
+    seed_math_smoke_fixtures(store, artifact_root, &benchmark_dir).await?;
+    seed_dscodebench_mvp(store, artifact_root, &benchmark_dir).await?;
+    Ok(())
+}
+
+async fn seed_math_smoke_fixtures(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    benchmark_dir: &Path,
+) -> Result<()> {
+    let package_id = "math-smoke-fixtures";
+    let version = "0.1.0";
+    if store.get_package_manifest(package_id, version).await.is_ok() {
+        return Ok(());
+    }
+    let src = benchmark_dir.join("math-smoke-fixtures");
+    if !src.is_dir() {
+        tracing::warn!(
+            package_id,
+            path = %src.display(),
+            "skip math smoke fixtures seed: directory missing"
+        );
+        return Ok(());
+    }
+
+    let sample_names = [
+        "pubmedqa_smoke.json",
+        "scitab_smoke.json",
+        "olymmath_easy_smoke.json",
+    ];
+    let mut artifacts: Vec<dto::InlineArtifact> = Vec::new();
+    for name in sample_names {
+        let path = src.join(name);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            tracing::warn!(package_id, file = name, "skip missing math smoke sample");
+            continue;
+        };
+        artifacts.push(dto::InlineArtifact {
+            name: name.into(),
+            kind: "dataset".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some(format!("samples/{name}")),
+            content: Some(content),
+            content_b64: None,
+        });
+    }
+    if artifacts.is_empty() {
+        tracing::warn!(package_id, "skip math smoke fixtures seed: no sample files");
+        return Ok(());
+    }
+
+    let catalog = json!({
+        "package_id": package_id,
+        "version": version,
+        "kind": "math-dataset-fixtures",
+        "datasets": ["pubmedqa", "scitab", "olymmath-easy"],
+        "samples": sample_names,
+    });
+    artifacts.insert(
+        0,
+        dto::InlineArtifact {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("catalog.json".into()),
+            content: Some(serde_json::to_string_pretty(&catalog)?),
+            content_b64: None,
+        },
+    );
+
+    let overlay = json!({
+        "math": {
+            "fixture_package": true,
+            "datasets": ["pubmedqa", "scitab", "olymmath-easy", "gsm8k"]
+        }
+    });
+    let req = dto::PublishPackageRequest {
+        version: version.into(),
+        publisher: Some("org-uenv-math".into()),
+        description: Some(
+            "Math benchmark smoke fixtures (PubMedQA / SciTab / OlymMATH-easy) for Hub pre-cache."
+                .into(),
+        ),
+        changelog: Some("Seed math smoke dataset fixtures for five-benchmark prep.".into()),
+        platform: dto::PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["math_fixtures".into()],
+        },
+        worker_overlay: overlay,
+        agent_defaults: json!({}),
+        contracts: dto::PackageContracts::default(),
+        interface: dto::InterfaceSchema::default(),
+        artifacts,
+        file_artifacts: vec![],
+    };
+    package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
+    tracing::info!(package_id, version, "seeded math smoke fixture EnvPackage");
+    Ok(())
+}
+
+async fn seed_dscodebench_mvp(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    benchmark_dir: &Path,
+) -> Result<()> {
+    let package_id = "dscodebench";
+    let version = "0.1.0";
+    if store.get_package_manifest(package_id, version).await.is_ok() {
+        return Ok(());
+    }
+    let src = benchmark_dir.join("dscodebench");
+    if !src.is_dir() {
+        tracing::warn!(
+            package_id,
+            path = %src.display(),
+            "skip dscodebench seed: directory missing"
+        );
+        return Ok(());
+    }
+
+    let mut artifacts: Vec<dto::InlineArtifact> = Vec::new();
+    let sample_path = src.join("samples/ds_smoke_001.json");
+    if let Ok(content) = std::fs::read_to_string(&sample_path) {
+        artifacts.push(dto::InlineArtifact {
+            name: "ds_smoke_001.json".into(),
+            kind: "dataset".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("benchmark/samples/ds_smoke_001.json".into()),
+            content: Some(content),
+            content_b64: None,
+        });
+    }
+    let eval_path = src.join("evaluate_code.py");
+    if let Ok(content) = std::fs::read_to_string(&eval_path) {
+        artifacts.push(dto::InlineArtifact {
+            name: "evaluate_code.py".into(),
+            kind: "eval_script".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("text/x-python".into()),
+            target_rel_path: Some("benchmark/evaluate_code.py".into()),
+            content: Some(content),
+            content_b64: None,
+        });
+    }
+    if artifacts.is_empty() {
+        tracing::warn!(package_id, "skip dscodebench seed: no MVP artifacts");
+        return Ok(());
+    }
+
+    let catalog = json!({
+        "package_id": package_id,
+        "version": version,
+        "kind": "dscodebench-mvp",
+        "note": "MVP smoke package (inline sample + evaluate_code). Full DSCodeBench tree is imported separately.",
+        "UENV_DSCODEBENCH_ROOT_hint": "benchmark"
+    });
+    artifacts.insert(
+        0,
+        dto::InlineArtifact {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("catalog.json".into()),
+            content: Some(serde_json::to_string_pretty(&catalog)?),
+            content_b64: None,
+        },
+    );
+
+    let overlay = json!({
+        "code": {
+            "dataset": "dscodebench",
+            "dscodebench_root_rel": "benchmark",
+            "eval_script_rel": "benchmark/evaluate_code.py"
+        }
+    });
+    let req = dto::PublishPackageRequest {
+        version: version.into(),
+        publisher: Some("org-uenv-code".into()),
+        description: Some(
+            "DSCodeBench MVP EnvPackage — smoke sample + evaluate_code.py (full tree via import machine)."
+                .into(),
+        ),
+        changelog: Some("Seed DSCodeBench MVP for five-benchmark Hub pre-cache.".into()),
+        platform: dto::PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["dscodebench".into(), "code_eval".into()],
+        },
+        worker_overlay: overlay,
+        agent_defaults: json!({}),
+        contracts: dto::PackageContracts::default(),
+        interface: dto::InterfaceSchema::default(),
+        artifacts,
+        file_artifacts: vec![],
+    };
+    package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
+    tracing::info!(package_id, version, "seeded DSCodeBench MVP EnvPackage");
     Ok(())
 }
 
