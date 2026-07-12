@@ -11,6 +11,8 @@
 DSCodeBench 属于 **执行型 CodeEnv**（`env_type=code`），判分依赖 **官方测试 harness 在沙箱内执行模型生成代码**，与 GSM8K（`env_type=math`、规则字符串匹配）路径不同。  
 **主要工作量在 Worker 侧**：新建 `plugins/code/` 插件、扩展 payload 透传、注册独立预热池与运行时依赖；Server / Proto 基本可复用。
 
+> **Worker Phase 1（2026-07-11）**：脚手架 / payload / 官方风格 harness（对齐上游 `run_test.py` 单题语义）/ HealthCheck / golden fixture **已完成**。剩余主要为 Hub 全量制品 sync 与 Phase 2 Podman；Bridge B-1/B-2 仍待做。
+
 ---
 
 ## 背景与定位
@@ -263,15 +265,15 @@ fixtures/code/
 
 ### 1.8 Worker 侧实施顺序（建议）
 
-| 序号 | 任务 | 依赖 |
-|------|------|------|
-| W-1 |  scaffold `plugins/code/` + manifest + run.sh | — |
-| W-2 | 实现 `uenv-code-plugin` Reset/Step/Close | W-1 |
-| W-3 | 集成 DSCodeBench 官方 harness（executor） | W-2 + benchmark 数据 |
-| W-4 | 扩展 `build_reset_config` payload 透传 | — |
-| W-5 | 配置 `env.types: [code]` + WarmupPool 分池验证 | W-1 |
-| W-6 | 单元 / 插件 / E2E 测试 + golden 对齐 | W-3 |
-| W-7 | Phase 2：Podman 沙箱 backend | W-3 |
+| 序号 | 任务 | 依赖 | 状态（2026-07-11） |
+|------|------|------|-------------------|
+| W-1 |  scaffold `plugins/code/` + manifest + run.sh | — | ✅ |
+| W-2 | 实现 `uenv-code-plugin` Reset/Step/Close | W-1 | ✅（Close 清状态；HealthCheck 校验 python/脚本/ROOT） |
+| W-3 | 集成 DSCodeBench 官方 harness（executor） | W-2 + benchmark 数据 | ✅ `dscodebench_harness.py`（对齐 `run_test.py` 单题语义；**非**不存在的 `evaluate.py`） |
+| W-4 | 扩展 `build_reset_config` payload 透传 | — | ✅ 含 `ground_truth_code/path` |
+| W-5 | 配置 `env.types: [code]` + WarmupPool 分池验证 | W-1 | ✅ m6 math/code 独立池 |
+| W-6 | 单元 / 插件 / E2E 测试 + golden 对齐 | W-3 | ✅ `dscodebench_golden` + stdlib fixture `ds_001` |
+| W-7 | Phase 2：Podman 沙箱 backend | W-3 | ❌ 未做 |
 
 ---
 

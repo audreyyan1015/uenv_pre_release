@@ -7,6 +7,9 @@ use tokio::process::Command;
 
 use super::extract::extract_python_code;
 
+/// Cap evaluator stdout/stderr retained in error messages (planning §1.1).
+const MAX_IO_CHARS: usize = 16 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluationRequest {
     pub code: String,
@@ -14,6 +17,10 @@ pub struct EvaluationRequest {
     pub test_code: Option<String>,
     #[serde(default)]
     pub test_script_path: Option<String>,
+    #[serde(default)]
+    pub ground_truth_code: Option<String>,
+    #[serde(default)]
+    pub ground_truth_path: Option<String>,
     #[serde(default)]
     pub entry_point: Option<String>,
     #[serde(default)]
@@ -144,8 +151,8 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = truncate_chars(&String::from_utf8_lossy(&output.stdout), MAX_IO_CHARS);
+    let stderr = truncate_chars(&String::from_utf8_lossy(&output.stderr), MAX_IO_CHARS);
 
     if !output.status.success() {
         let err = if stderr.trim().is_empty() {
@@ -166,7 +173,14 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
         };
     }
 
-    match serde_json::from_str::<EvaluationResult>(stdout.trim()) {
+    // Prefer the last non-empty line (evaluator prints one JSON object).
+    let json_line = stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(stdout.trim());
+
+    match serde_json::from_str::<EvaluationResult>(json_line) {
         Ok(mut result) => {
             if result.execution_time_ms == 0 {
                 result.execution_time_ms = started.elapsed().as_millis() as u64;
@@ -183,6 +197,14 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
             )),
         },
     }
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{truncated}…[truncated]")
 }
 
 fn python_binary() -> String {
@@ -217,12 +239,22 @@ fn evaluator_script_path() -> PathBuf {
 mod tests {
     use super::*;
 
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repo root")
+            .to_path_buf()
+    }
+
     #[tokio::test]
     async fn inline_test_passes() {
         let req = EvaluationRequest {
             code: String::new(),
             test_code: Some("assert add(1, 2) == 3".into()),
             test_script_path: None,
+            ground_truth_code: None,
+            ground_truth_path: None,
             entry_point: Some("add".into()),
             num_tests: None,
             random_seed: None,
@@ -242,6 +274,8 @@ mod tests {
             code: String::new(),
             test_code: Some("assert add(1, 2) == 3".into()),
             test_script_path: None,
+            ground_truth_code: None,
+            ground_truth_path: None,
             entry_point: Some("add".into()),
             num_tests: None,
             random_seed: None,
@@ -252,5 +286,58 @@ mod tests {
         let action = "def add(a, b):\n    return a - b";
         let result = evaluate(action, &req).await;
         assert!(!result.passed);
+    }
+
+    #[tokio::test]
+    async fn official_harness_stdlib_fixture_passes() {
+        let root = repo_root().join("fixtures/code/benchmark");
+        let req = EvaluationRequest {
+            code: String::new(),
+            test_code: None,
+            test_script_path: Some("stdlib/ds_001_test.py".into()),
+            ground_truth_code: None,
+            ground_truth_path: Some("stdlib/ds_001_ground_truth.py".into()),
+            entry_point: None,
+            num_tests: Some(20),
+            random_seed: Some(42),
+            timeout_secs: Some(60),
+            benchmark_root: Some(root.to_string_lossy().into()),
+            task_id: Some("ds_001".into()),
+        };
+        let action = "```python\ndef add(a, b):\n    return a + b\n```";
+        let result = evaluate(action, &req).await;
+        assert!(result.passed, "{:?}", result.error);
+        assert_eq!(result.tests_run, 20);
+        assert_eq!(result.tests_passed, 20);
+    }
+
+    #[tokio::test]
+    async fn evaluation_times_out() {
+        let req = EvaluationRequest {
+            code: String::new(),
+            test_code: Some("import time\ntime.sleep(5)\nassert False".into()),
+            test_script_path: None,
+            ground_truth_code: None,
+            ground_truth_path: None,
+            entry_point: None,
+            num_tests: None,
+            random_seed: None,
+            timeout_secs: Some(1),
+            benchmark_root: None,
+            task_id: None,
+        };
+        // Sleep is in test_code after candidate exec; put sleep in candidate instead.
+        let action = "import time\ntime.sleep(5)\ndef add(a,b): return a+b";
+        let req = EvaluationRequest {
+            test_code: Some("assert add(1,2)==3".into()),
+            ..req
+        };
+        let result = evaluate(action, &req).await;
+        assert!(!result.passed);
+        let err = result.error.unwrap_or_default();
+        assert!(
+            err.contains("timed out") || err.contains("Timeout"),
+            "unexpected error: {err}"
+        );
     }
 }

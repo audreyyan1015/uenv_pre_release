@@ -35,6 +35,7 @@ pub fn build_reset_config(
         "test_code",
         "test_script_path",
         "ground_truth_path",
+        "ground_truth_code",
         "entry_point",
         "benchmark_root",
     ] {

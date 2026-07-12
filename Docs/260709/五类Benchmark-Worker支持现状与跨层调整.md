@@ -1,8 +1,23 @@
 # 五类 Benchmark — Worker 支持现状与跨层调整
 
-> 日期：2026-07-11（Hub `8.130.95.176` 已升级至 math/code@0.2.0 + 五类预缓存 seed；此前 07-09 merge + 7143 联调）  
+> 日期：2026-07-12（Hub `dscodebench@0.2.0` 全量预缓存入库；此前 07-11 Hub math/code@0.2.0 seed；07-09 merge + 7143 联调）  
 > 范围：PubMedQA、SciTab、DSCodeBench、SWE-bench-Pro、OlymMATH-EASY/HARD  
 > 对照文档：[DSCodeBench-CodeEnv-扩展规划草案](./DSCodeBench-CodeEnv-扩展规划草案.md)、[实机联调记录-code-env](./实机联调记录-code-env.md)、[Hub 环境标准化指南](../hub/uenv-hub环境标准化指南.md)
+
+---
+
+## 2026-07-12 进度快照
+
+| 层 | 已完成 | 仍缺 / 下一步 |
+|----|--------|---------------|
+| **Worker** | 五类 Phase 1 就绪；DSCode 官方 harness + golden `ds_001` | 7143 `env sync` 消费 Hub 制品；Podman Phase 2 |
+| **Hub** | `math@0.2.0` / `code@0.2.0`；`math-smoke-fixtures@0.1.0`；**`dscodebench@0.2.0` 全量**（benchmark + eval + wheels≈3.9GB） | **H-5**：SWE-Pro 真实 `image_tar` + catalog 替换占位 |
+| **Bridge** | Core 字段透传；math 四 dataset / code smoke 透传 | **B-1/B-2**（显式 `dataset`、`dscodebench`→`code`）；**B-10** adapter-core 部署 |
+| **uenv-server** | 调度通用，**源码无需改** | S-2/S-3 联调（EnvPackage 匹配、Agent E2E） |
+| **SWE 镜像导入** | 7143 历史联调可用；多 mirror 脚本就绪 | 导入机按 mirror 链拉 `jefzda/sweap-images` → `docker save` → Hub `publish-image` |
+
+**SWE 公网拉取线路（导入机 / 7143 历史实证，非生产运行时路径）**：优先脚本回退链  
+`docker.m.daocloud.io` → `docker.nju.edu.cn` → **`dockerproxy.net`（实机成功 tag）** → 直连 Docker Hub（易 429）；daemon 另有 `docker.1ms.run`。生产目标仍是 Hub `image_tar` + `sync --docker-load`。详见 `scripts/pull-pro-image-7143.sh`。
 
 ---
 
@@ -12,19 +27,19 @@
 |---|-----------|----------|-----------------|-----------|------------|
 | 1 | **PubMedQA** | 文本阅读理解（yes/no/maybe） | `math` | ✅ **已支持** | math backend + 7143 E2E 通过 |
 | 2 | **SciTab** | 表格理解（支持/反驳/不足） | `math` | ✅ **已支持** | 复用 math env，三分类 backend 已落地 |
-| 3 | **DSCodeBench** | 代码生成 + 官方测试 | `code` | ⚠️ **部分支持（MVP）** | Worker 插件已落地；Hub 已有 MVP 包，全量树仍待导入机 |
+| 3 | **DSCodeBench** | 代码生成 + 官方测试 | `code` | ✅ **Phase 1 已支持** | Hub `dscodebench@0.2.0` 全量预缓存已就绪 |
 | 4 | **SWE-bench-Pro** | 测试生成 / 程序修复 | `swe` | ✅ **已支持** | 7143 实机联调路径成熟 |
 | 5 | **OlymMATH** | 奥赛级数学推理 | `math` | ✅ **已支持** | `\boxed{}` 提取 + 归一化；easy/hard split |
 
-**Worker 侧**：4 项完整就绪 + 1 项 MVP（DSCodeBench）。
+**Worker 侧**：5 项 Phase 1 就绪（DSCodeBench 含官方 harness；Podman 为 Phase 2）。
 
-**跨层剩余（Blocking 闭环）**：主要在 **Bridge P0 代码**（B-1/B-2）、**Hub 全量制品**（H-2 全量 DSCode / H-5 Pro 镜像 tar）、**Worker `env sync` 运维**；`uenv-server` **源码无需改**。
+**跨层剩余（Blocking 闭环）**：主要在 **Bridge P0 代码**（B-1/B-2）、**Hub SWE Pro 镜像 tar**（H-5）、**Worker `env sync` 运维**；`uenv-server` **源码无需改**。
 
 | 模块 | 代码要改？ | 当前状态 |
 |------|-----------|----------|
-| Worker | — | ✅ 五类 backend 已就绪（DSCodeBench 为 MVP） |
+| Worker | — | ✅ 五类 Phase 1 已就绪（DSCode 官方 harness ✅；Podman Phase 2） |
 | Bridge | ⚠️ P0 | ✅ Core 透传已完成；⚠️ B-1/B-2 待做；B-10 adapter-core 部署 |
-| Hub | ⚠️ 剩余 H-5 / 全量包 | ✅ `8.130.95.176` 已 seed math/code@0.2.0 + smoke/MVP 预缓存；⚠️ Pro 真实 image_tar、DSCode 全量树仍缺 |
+| Hub | ⚠️ 剩余 H-5 | ✅ `dscodebench@0.2.0` 全量预缓存已入库；⚠️ Pro 真实 image_tar 仍缺 |
 | uenv-server | ✅ 否 | ✅ 仅 SWE 联调项（S-2/S-3） |
 | proto / fixtures / VeRL 样例 | — | ✅ proto 不变；fixtures + smoke + VeRL JSON **已入库** |
 
@@ -83,7 +98,8 @@ PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/verify_math_datasets_and_
   已支持             │ math         gsm8k / pubmedqa / scitab │
                     │              olymmath(-easy/-hard)       │
                     ├─────────────────────────────────────────┤
-  MVP / 部分         │ code         DSCodeBench（插件+子进程评测）│
+  Phase 1 已支持     │ code         DSCodeBench（官方 harness） │
+                    │              Hub 全量包已入库；Worker sync 待做 │
                     └─────────────────────────────────────────┘
 ```
 
@@ -153,35 +169,35 @@ PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/verify_math_datasets_and_
 | 维度 | 说明 |
 |------|------|
 | 官方输出 | Python 代码 → 官方 test harness 执行 |
-| **Worker 现状** | ⚠️ **MVP 已落地**（2026-07-09） |
-| 已实现 | `plugins/code/`、`uenv-code-plugin`、`dataset=dscodebench`、`evaluate_code.py` |
-| 7143 验证 | m4/m5 插件与 Executor 测试通过；code 预热池 dispatch 正常 |
-| smoke | ✅ `smoke_code_env_grpcurl.py`（inline `test_code`） |
-| 未完成 | Hub 全量 benchmark 制品；`test_script_path` 官方模式；Podman 沙箱（Phase 2） |
+| **Worker 现状** | ✅ **Phase 1 完整功能已落地**（2026-07-11） |
+| **Hub 现状** | ✅ **`dscodebench@0.2.0` 全量预缓存已入库**（2026-07-12，Hub `8.130.95.176`） |
+| 已实现 | `plugins/code/`、`uenv-code-plugin`、`dataset=dscodebench`、官方风格 harness（`dscodebench_harness.py`）+ inline smoke |
+| 7143 验证 | m4/m5 插件与 Executor 测试通过；code 预热池 dispatch 正常；golden `ds_001` 固定 seed 通过 |
+| smoke | ✅ `smoke_code_env_grpcurl.py`（inline）；✅ `fixtures/code/samples/ds_001.json` + `fixtures/code/benchmark/stdlib/` |
+| 未完成 | Worker 节点 `env sync` 消费全量包；Podman 沙箱（Phase 2）；Bridge B-1/B-2 |
 
 #### Worker 已有能力
 
 ```
 env_type=code → plugins/code → extract 代码 → Python 评测
-  ├─ inline test_code（smoke / 联调）     ✅
-  └─ test_script_path + UENV_DSCODEBENCH_ROOT  ⚠️ 待部署数据
+  ├─ inline test_code（smoke / 联调）                              ✅
+  └─ test_script_path + ground_truth_* + UENV_DSCODEBENCH_ROOT     ✅ 官方风格 harness
 ```
 
 #### Worker 侧剩余
 
 | 项 | 内容 |
 |----|------|
-| W-1 | Hub sync DSCodeBench EnvPackage（benchmark + Python 依赖），非各节点手工安装 |
-| W-2 | 对接官方 `benchmark_construction_evaluation/evaluate.py` |
+| W-1 | 7143：`uenv env sync dscodebench --version 0.2.0` → 解压 tar → `scripts/install_venv.sh` — 运维，非代码 |
 | W-3 | Phase 2：Podman 沙箱 backend |
-| W-4 | 持久化 `UENV_CODE_PLUGIN_BIN` 至 `/root/.uenv-worker.env` |
+| W-4 | 持久化 `UENV_CODE_PLUGIN_BIN` / `UENV_DSCODEBENCH_ROOT` / `UENV_CODE_PYTHON` 至 `/root/.uenv-worker.env` |
 
 #### 其他模块
 
 | 模块 | 状态 |
 |------|------|
 | Bridge | ✅ code 字段透传；⚠️ P0：`dscodebench` 路由 + 显式 `dataset`；adapter-core 部署（B-10） |
-| Hub | ⚠️ code EnvPackage（benchmark + 依赖） |
+| Hub | ✅ **`dscodebench@0.2.0` 全量**（H-2 完成）；`0.1.0` MVP 仍保留 |
 | uenv-server | ✅ **代码无需改** |
 | 配置 | ✅ `env.types` 已含 `code`（`deploy-7143-swe-pro.yaml`） |
 
@@ -214,7 +230,7 @@ env_type=code → plugins/code → extract 代码 → Python 评测
 
 | 项 | 说明 |
 |----|------|
-| Hub swe manifest | 内网 Hub 发布 `swe-bench-pro` EnvPackage（含 catalog + 镜像 tar）；Worker 经 `uenv env sync` 预制，非运行时外拉 |
+| Hub swe 制品（H-5） | catalog/overlay 已有；**真实 Pro `image_tar` 仍缺**。导入机可用 `scripts/pull-pro-image-7143.sh`（mirror：DaoCloud → NJU → **dockerproxy.net 实机成功** → Hub 直连）拉 `jefzda/sweap-images` 后 `docker save` → `publish-image`；Worker 仅 `sync --docker-load` |
 | Agent 编排 | SWE+Agent 全链路依赖 Server `AgentJob` + 208.77 poll 模式 |
 
 ---
@@ -258,7 +274,7 @@ env:
 | env_type | 插件/路径 | 支持的 dataset / variant |
 |----------|-----------|--------------------------|
 | `math` | `plugins/math` → `uenv-math-plugin` | `gsm8k`、`pubmedqa`、`scitab`、`olymmath` / `-easy` / `-hard`（✅） |
-| `code` | `plugins/code` → `uenv-code-plugin` | `dscodebench`（⚠️ MVP） |
+| `code` | `plugins/code` → `uenv-code-plugin` | `dscodebench`（✅ Phase 1 harness） |
 | `swe` | Worker native（Docker） | `pro` / verified / lite（✅ pro 已联调） |
 
 ### Server 主机上的组件（勿混淆）
@@ -281,7 +297,7 @@ env:
 | 模块 | 要不要改代码？ | 还要做什么（五类 benchmark） |
 |------|---------------|------------------------------|
 | **Bridge** | ⚠️ **要**（P0：显式 `dataset`、`dscodebench`→`code`） | 部署 `uenv-adapter-core`；VeRL Dataset / `extra_info` 对齐 |
-| **Hub** | ⚠️ **要**（发布 manifest + **制品**：镜像 tar、benchmark 包、依赖） | 导入机 publish → Worker `env sync` |
+| **Hub** | ⚠️ **H-5 仍要**（SWE Pro `image_tar`）；H-1/H-2/H-3 ✅ | 导入机 `publish-image` → Worker `env sync` |
 | **uenv-server** | ✅ **不要**（无 benchmark 专用分支） | 联调：Worker 在线、SWE EnvPackage 版本匹配、可选 AgentJob E2E |
 | **proto** | ✅ 不要 | — |
 | **fixtures / smoke** | ✅ 样本 + smoke 已入库；SWE pro 仍缺最小 textproto |
@@ -402,12 +418,12 @@ Hub 在内网承担 **环境预缓存与制品分发**（不仅是 manifest/sche
 | **Env registry** | `GET /api/v1/envs/{env_type}/versions/...` | math/code **manifest**、interface schema、可选 **插件制品 tar** | PubMedQA / SciTab / OlymMATH（math）；DSCodeBench（code） |
 | **EnvPackage** | `GET /api/v1/packages/{id}/versions/...`、`uenv env sync` | **镜像 tar**、catalog.json、eval_spec、**benchmark 数据包**、worker overlay | SWE-bench-Pro；DSCodeBench 全量；未来 math dataset 离线包 |
 
-#### 2.2 现状与差距（Hub `8.130.95.176`，2026-07-11 已升级）
+#### 2.2 现状与差距（Hub `8.130.95.176`，2026-07-12：DSCode 全量已入库）
 
 | env_type | 本地 `plugins/*/manifest.yaml` | Hub 当前能力 | 内网生产缺口 |
 |----------|-------------------------------|-------------|-------------|
 | `math` | ✅ gsm8k / pubmedqa / scitab / olymmath* | ✅ **`math@0.2.0` latest**（legacy `1.0.0` 已 yank）；✅ EnvPackage `math-smoke-fixtures@0.1.0`（pubmedqa/scitab/olymmath-easy 样本） | 全量评测集 tar / 插件二进制仍可选增强 |
-| `code` | ✅ `plugins/code/manifest.yaml` | ✅ **`code@0.2.0` latest**；✅ EnvPackage **`dscodebench@0.1.0` MVP**（smoke sample + `evaluate_code.py`） | **全量** `benchmark/` 树 + Python wheel/venv 仍需导入机 |
+| `code` | ✅ `plugins/code/manifest.yaml` | ✅ **`code@0.2.0` latest**；✅ EnvPackage **`dscodebench@0.2.0` 全量**（benchmark 1000 题 + eval 脚本 + 官方 wheels≈3.9GB，106 个 whl）；`0.1.0` MVP 仍保留 | Worker `uenv env sync dscodebench --version 0.2.0` 后解压 tar 并 `scripts/install_venv.sh` |
 | `swe` | N/A（Worker native） | ✅ `swe-bench-pro@0.2.0` / verified + agent bridge | Pro **真实镜像 tar** 需导入机预置并 `publish-image` |
 
 > 联调仓库若自带 `plugins/` 或已手工 sync 的 EnvPackage，Worker 可跳过 Hub HTTP；这属于 **开发便利**，不是内网生产路径。
@@ -419,7 +435,7 @@ Hub 在内网承担 **环境预缓存与制品分发**（不仅是 manifest/sche
 | `GET /envs/math/versions/latest` | `0.2.0`，datasets 含 gsm8k/pubmedqa/scitab/olymmath* |
 | `GET /envs/code/versions/latest` | `0.2.0`，datasets=`[dscodebench]` |
 | `GET /packages/math-smoke-fixtures/versions/latest` | `0.1.0`，含三份 math smoke JSON |
-| `GET /packages/dscodebench/versions/latest` | `0.1.0` MVP |
+| `GET /packages/dscodebench/versions/latest` | **`0.2.0` 全量**（benchmark + eval + wheels≈3.9GB） |
 | `GET /packages/swe-bench-pro/versions/latest` | `0.2.0`（catalog/overlay；image_tar 仍可能缺） |
 
 #### 2.3 待办（共性）
@@ -427,20 +443,20 @@ Hub 在内网承担 **环境预缓存与制品分发**（不仅是 manifest/sche
 | ID | 项 | 详细说明 | 优先级 |
 |----|-----|----------|--------|
 | H-1 | **发布 math env v0.2.x（registry + 制品）** | ✅ **已完成（2026-07-11）**：`math@0.2.0` + `math-smoke-fixtures@0.1.0`；legacy `1.0.0` yank。可选增强：插件二进制 / 全量 dataset tar。 | ✅ / P2 增强 |
-| H-2 | **发布 code / DSCodeBench EnvPackage** | ⚠️ **MVP 已完成**：`dscodebench@0.1.0` + `code@0.2.0`。剩余：官方 **benchmark/** 全量树 + **Python 3.10+ / 10 库 wheel**。 | P0（全量） |
+| H-2 | **发布 code / DSCodeBench EnvPackage** | ✅ **全量已完成（2026-07-12，Hub `8.130.95.176`）**：`dscodebench@0.2.0` 含 `benchmark.tar.gz`（1.2MB）、`eval-scripts.tar.gz`、`wheels.tar.gz`（≈3.9GB / 106 wheels，对齐官方 `requirements.txt`）。Worker：`sync` → 解压 → `scripts/install_venv.sh`。 | ✅ |
 | H-3 | **更新 `seed.rs` 与导入脚本** | ✅ seed 已含 math/code@0.2.0、yank legacy、`config/benchmark/` fixture 包；新实例启动即对齐。 | ✅ |
 | H-4 | **五类 benchmark 运维手册** | 在 `Docs/hub/` 补充：各 benchmark 在 Hub 上应缓存哪些制品、`uenv env sync` / `publish-image` 示例。 | P1 |
-| H-5 | **SWE-bench-Pro 镜像与 catalog 全量入库** | 导入机 `docker save` Pro 实例镜像 → `uenv env publish-image`；catalog 替换占位样例；7143 仅 `sync --docker-load`，无外拉。 | P0 |
+| H-5 | **SWE-bench-Pro 镜像与 catalog 全量入库** | 导入机按 `scripts/pull-pro-image-7143.sh` 多 mirror 拉 `jefzda/sweap-images`（实机成功线：**dockerproxy.net**；另试 DaoCloud / NJU / `1ms.run`；直连易 429）→ `docker save` → `uenv env publish-image`；catalog 替换占位样例；7143 仅 `sync --docker-load`，无外拉。 | P0 |
 | H-6 | **math dataset 离线评测包（可选）** | smoke 已入库；全量 held-out 评测集 tar 仍可选。 | P2 |
 | H-7 | **fixtures 与 Hub examples 对齐** | manifest `examples[]` 与 `fixtures/math`、`fixtures/code` 一致；sync 后路径与文档中的 `test_script_path` 相对路径一致。 | P2 |
 
 #### 2.4 分 Benchmark — Hub 预缓存清单
 
-| Benchmark | Hub 应缓存的制品 | 2026-07-11 Hub 状态 | Worker sync 后本地路径（示例） |
+| Benchmark | Hub 应缓存的制品 | 2026-07-12 Hub 状态 | Worker sync 后本地路径（示例） |
 |-----------|-----------------|---------------------|------------------------------|
 | **PubMedQA** | math manifest + 可选样本 | ✅ `math@0.2.0` + smoke fixture | `plugins/math/` 或 sync 包 `samples/` |
 | **SciTab** | 同上 | ✅ 同上 | 同上 |
-| **DSCodeBench** | code EnvPackage：benchmark + 依赖 + eval | ⚠️ MVP；全量树待导入 | `/var/lib/uenv/envs/dscodebench/0.1.0/benchmark/` → `UENV_DSCODEBENCH_ROOT` |
+| **DSCodeBench** | code EnvPackage：benchmark + 依赖 + eval | ✅ `dscodebench@0.2.0` 全量预缓存 | `/var/lib/uenv/envs/dscodebench/0.2.0/` → 解压后 `benchmark/` → `UENV_DSCODEBENCH_ROOT` |
 | **SWE-bench-Pro** | EnvPackage：catalog + **image_tar** + eval_spec | ⚠️ catalog 有；**image_tar 仍缺** | `/var/lib/uenv/envs/swe-bench-pro/0.2.0/` |
 | **OlymMATH** | math manifest + 可选题目包 | ✅ `math@0.2.0` + easy smoke | 同 math |
 
@@ -448,18 +464,24 @@ Hub 在内网承担 **环境预缓存与制品分发**（不仅是 manifest/sche
 
 ```bash
 # ① 导入机（可访问外网，一次性）
-git clone DSCodeBench && tar czf dscodebench-benchmark.tar.gz benchmark/
-docker save sweb.eval.x86_64.<instance> -o swe-instance.tar
+# DSCode：已在 Hub 完成；以下为 SWE Pro 镜像导入
+bash scripts/pull-pro-image-7143.sh <dockerhub_tag>   # DaoCloud → NJU → dockerproxy → Hub 直连
+docker save jefzda/sweap-images:<tag> -o swe-instance.tar
 
 # ② Hub 主机（内网）
-uenv env publish --manifest plugins/code/manifest.yaml    # registry
-uenv env publish-image swe-bench-pro 0.2.0 --tar swe-instance.tar
-# DSCodeBench：将 benchmark tar 作为 EnvPackage artifact POST 入库（见环境标准化指南 §4）
+uenv env publish --manifest plugins/code/manifest.yaml    # registry（已完成）
+uenv env publish-image swe-bench-pro 0.2.0 --tar swe-instance.tar   # H-5 待做
+# DSCodeBench@0.2.0 已入库，无需重复 POST
 
 # ③ Worker 节点（内网，部署/扩缩容）
 uenv env sync swe-bench-pro --version 0.2.0 --docker-load
-uenv env sync dscodebench --version 0.1.0   # 含 benchmark + 依赖
-export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
+uenv env sync dscodebench --version 0.2.0
+# sync 得到 *.tar.gz 后在包目录解压：
+#   tar xzf benchmark.tar.gz && tar xzf eval-scripts.tar.gz && tar xzf wheels.tar.gz
+#   bash scripts/install_venv.sh   # 离线安装官方依赖到本地 venv
+export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.2.0/benchmark
+export UENV_CODE_EVAL_SCRIPT=/var/lib/uenv/envs/dscodebench/0.2.0/scripts/evaluate_code.py
+export UENV_CODE_PYTHON=/var/lib/uenv/envs/dscodebench/0.2.0/venv/bin/python
 ```
 
 ---
@@ -527,7 +549,7 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 |-----------|------|------|
 | **GSM8K** | `fixtures/math/episode_001.*` | — |
 | **PubMedQA / SciTab / OlymMATH** | `fixtures/math/samples/*.json` | 分 dataset 的 textproto / `.pb` |
-| **DSCodeBench** | `fixtures/code/samples/ds_smoke_001.json`、`episode_001.textproto` | 官方 `test_script_path` fixture；golden 对照 |
+| **DSCodeBench** | `ds_smoke_001.json`、`ds_001.json`、`benchmark/stdlib/`、`episode_001.textproto` | 更多官方题 golden；7143 全量包 smoke |
 | **SWE-bench-Pro** | `fixtures/swe/swe_pro_instances.json` | 最小 pro textproto + smoke 脚本 |
 | **smoke 脚本** | `smoke_math_datasets_grpcurl.py`、`smoke_code_env_grpcurl.py` | swe pro grpcurl smoke |
 
@@ -548,7 +570,7 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 | `UENV_MATH_PLUGIN_BIN` | math 全系列 | 指向 `uenv-math-plugin`；7143 需写入 `/root/.uenv-worker.env` |
 | `UENV_CODE_PLUGIN_BIN` | DSCodeBench | 指向 `uenv-code-plugin` |
 | `UENV_CODE_EVAL_SCRIPT` | DSCodeBench | 默认 `plugins/code/scripts/evaluate_code.py` |
-| `UENV_DSCODEBENCH_ROOT` | DSCodeBench 全量 | **Hub sync 后的** benchmark 根目录（如 `/var/lib/uenv/envs/dscodebench/0.1.0/benchmark`）；MVP 联调可用 repo 内路径 |
+| `UENV_DSCODEBENCH_ROOT` | DSCodeBench 全量 | **Hub sync 后的** benchmark 根目录（如 `/var/lib/uenv/envs/dscodebench/0.2.0/benchmark`）；本地联调可用 `fixtures/code/benchmark/` |
 | `UENV_HUB_ENDPOINT` | Worker / CLI | 内网 Hub 地址；启用后部署期 pull/sync 制品 |
 | `swe.env_package_dir` | SWE-pro | **Hub sync 后的** EnvPackage 本地目录（如 `/var/lib/uenv/envs/swe-bench-pro/0.2.0`） |
 | `env.types: [math, code, swe]` | 7143 Worker | `config/uenv-worker.deploy-7143-swe-pro.yaml` |
@@ -613,7 +635,7 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 | 优先级 | 模块 | ID | 内容 | 影响 benchmark |
 |--------|------|-----|------|----------------|
 | **P0** | Bridge | B-1, B-2, **B-10** | dataset 显式化；dscodebench 路由；**adapter-core 部署** | 全部 E2E |
-| **P0** | Hub | H-2（全量）, H-5 | DSCode 全量树/依赖 + SWE Pro 镜像 tar（H-1/MVP 已完成） | DSCodeBench + SWE |
+| **P0** | Hub | H-5 | SWE Pro 镜像 tar（H-1/H-2 已完成） | SWE |
 | **P0** | Deploy | — | Worker `uenv env sync` 消费 Hub 已缓存制品 | 全部 |
 | **P1** | Bridge | B-3, B-5, B-6, B-9 | swe 路由、reward、extra_info、async e2e | SWE + 训练 |
 | **P1** | Hub | H-4, H-6 | 运维手册、math 全量 dataset 包（H-3 seed ✅） | SWE + code + math |
@@ -630,7 +652,7 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 | 模块 | 状态 / 待办 |
 |------|-------------|
 | **uenv-bridge** | ⚠️ 代码：B-1/B-2；部署：**adapter-core（B-10）**；见 §1 |
-| **uenv-hub** | ⚠️ 内网预缓存：manifest + 镜像/benchmark/依赖制品；见 §2 |
+| **uenv-hub** | ✅ math/code registry + DSCode 全量包；⚠️ **H-5** SWE Pro `image_tar`；见 §2 |
 | **uenv-server** | ✅ **代码无需改**；⚠️ 仅 SWE 联调（EnvPackage 匹配、Agent E2E）；见 §3 |
 | **proto** | ✅ 不变 |
 | **fixtures / smoke** | ✅ JSON + math/code smoke 已入库；⚠️ SWE textproto、F-2/F-3 |
@@ -645,9 +667,9 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 
 | 优先级 | Benchmark | 跨层重点（Worker 已就绪后的剩余工作） |
 |--------|-----------|--------------------------------------|
-| **P0** | DSCodeBench | Hub 发布 code EnvPackage（benchmark + 依赖）；Worker `sync`；Bridge `dscodebench`→`code` |
-| **P0** | SWE-bench-Pro | Hub Pro 镜像 tar + catalog；Worker `sync --docker-load`；EnvPackage 调度匹配 |
-| **P1** | PubMedQA / SciTab / OlymMATH | Hub math 制品发布；Bridge 显式 `dataset`；VeRL Dataset + fixtures |
+| **P0** | DSCodeBench | Hub 全量包 ✅；下一步 Worker `sync 0.2.0` + Bridge `dscodebench`→`code`（B-1/B-2） |
+| **P0** | SWE-bench-Pro | Hub Pro **真实**镜像 tar（H-5，mirror 导入）+ catalog；Worker `sync --docker-load`；EnvPackage 调度匹配 |
+| **P1** | PubMedQA / SciTab / OlymMATH | Hub math registry ✅；Bridge 显式 `dataset`；VeRL Dataset + fixtures |
 | **P2** | SciTab | Bridge 拆分 `table_html`/`claim` 字段（当前 question 合并不阻塞） |
 
 ---
@@ -668,6 +690,6 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 |-----------|---------------|-----------|
 | PubMedQA | `env_type=math` + `dataset=pubmedqa` → yes/no/maybe 判分 | ✅ smoke |
 | SciTab | `env_type=math` + `dataset=scitab` → 三分类 claim 判分 | ✅ smoke |
-| DSCodeBench | `env_type=code` → 官方 harness pass@1 与 golden 对齐 | ⚠️ MVP（inline test + grpcurl smoke） |
+| DSCodeBench | `env_type=code` → 官方 harness pass@1 与 golden 对齐 | ✅ Phase 1（inline + `ds_001` golden）；⚠️ 全量包待 7143 `sync` |
 | SWE-bench-Pro | `env_type=swe` + `variant=pro` → patch 应用 + pytest reward=1 | ✅ 历史联调 |
 | OlymMATH | `env_type=math` + `dataset=olymmath-*` → 等价答案判分 | ✅ smoke（easy） |

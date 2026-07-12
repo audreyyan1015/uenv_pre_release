@@ -37,6 +37,8 @@ struct PluginState {
     library: String,
     test_code: Option<String>,
     test_script_path: Option<String>,
+    ground_truth_code: Option<String>,
+    ground_truth_path: Option<String>,
     entry_point: Option<String>,
     num_tests: Option<u32>,
     random_seed: Option<i64>,
@@ -70,6 +72,8 @@ struct EpisodeConfig {
     library: Option<String>,
     test_code: Option<String>,
     test_script_path: Option<String>,
+    ground_truth_code: Option<String>,
+    ground_truth_path: Option<String>,
     entry_point: Option<String>,
     num_tests: Option<u32>,
     random_seed: Option<i64>,
@@ -113,6 +117,8 @@ impl PluginService for CodePlugin {
         s.library = config.library.unwrap_or_else(|| "python".to_string());
         s.test_code = config.test_code;
         s.test_script_path = config.test_script_path;
+        s.ground_truth_code = config.ground_truth_code;
+        s.ground_truth_path = config.ground_truth_path;
         s.entry_point = config.entry_point;
         s.num_tests = config.num_tests;
         s.random_seed = config.random_seed;
@@ -137,6 +143,8 @@ impl PluginService for CodePlugin {
             code: String::new(),
             test_code: s.test_code.clone(),
             test_script_path: s.test_script_path.clone(),
+            ground_truth_code: s.ground_truth_code.clone(),
+            ground_truth_path: s.ground_truth_path.clone(),
             entry_point: s.entry_point.clone(),
             num_tests: s.num_tests,
             random_seed: s.random_seed,
@@ -180,6 +188,8 @@ impl PluginService for CodePlugin {
         &self,
         _request: Request<CloseRequest>,
     ) -> Result<Response<CloseResponse>, Status> {
+        let mut s = self.state.lock().await;
+        *s = PluginState::default();
         Ok(Response::new(CloseResponse { ok: true }))
     }
 
@@ -187,10 +197,53 @@ impl PluginService for CodePlugin {
         &self,
         _request: Request<HealthCheckRequest>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
-        Ok(Response::new(HealthCheckResponse {
-            ok: true,
-            message: "ok".to_string(),
-        }))
+        let mut issues = Vec::new();
+
+        let python = std::env::var("UENV_CODE_PYTHON").unwrap_or_else(|_| "python3".into());
+        match std::process::Command::new(&python)
+            .arg("-c")
+            .arg("import sys; print(sys.version)")
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => issues.push(format!(
+                "python `{python}` failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )),
+            Err(e) => issues.push(format!("python `{python}` not runnable: {e}")),
+        }
+
+        let script = std::env::var("UENV_CODE_EVAL_SCRIPT").unwrap_or_else(|_| {
+            "plugins/code/scripts/evaluate_code.py".to_string()
+        });
+        if !PathBuf::from(&script).is_file() {
+            // Also accept relative discovery used by executor.
+            let known = [
+                "plugins/code/scripts/evaluate_code.py",
+                "../plugins/code/scripts/evaluate_code.py",
+            ];
+            if !known.iter().any(|p| PathBuf::from(p).is_file()) {
+                issues.push(format!("eval script not found: {script}"));
+            }
+        }
+
+        if let Ok(root) = std::env::var("UENV_DSCODEBENCH_ROOT") {
+            if !root.is_empty() && !PathBuf::from(&root).is_dir() {
+                issues.push(format!("UENV_DSCODEBENCH_ROOT missing: {root}"));
+            }
+        }
+
+        if issues.is_empty() {
+            Ok(Response::new(HealthCheckResponse {
+                ok: true,
+                message: "ok".to_string(),
+            }))
+        } else {
+            Ok(Response::new(HealthCheckResponse {
+                ok: false,
+                message: issues.join("; "),
+            }))
+        }
     }
 }
 

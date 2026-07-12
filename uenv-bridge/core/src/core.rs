@@ -286,6 +286,7 @@ fn sample_to_worker_payload(
                 "test_code",
                 "test_script_path",
                 "ground_truth_path",
+                "ground_truth_code",
                 "entry_point",
                 "num_tests",
                 "random_seed",
