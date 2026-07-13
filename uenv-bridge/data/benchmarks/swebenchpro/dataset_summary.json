@@ -1,0 +1,26 @@
+{
+  "dataset": "ScaleAI/SWE-bench_Pro",
+  "split": "test",
+  "sample_count": 731,
+  "repo_distribution": {
+    "NodeBB/NodeBB": 44,
+    "qutebrowser/qutebrowser": 79,
+    "ansible/ansible": 96,
+    "internetarchive/openlibrary": 91,
+    "gravitational/teleport": 76,
+    "navidrome/navidrome": 57,
+    "element-hq/element-web": 56,
+    "future-architect/vuls": 62,
+    "protonmail/webclients": 65,
+    "flipt-io/flipt": 85,
+    "tutao/tutanota": 20
+  },
+  "language_distribution": {
+    "js": 165,
+    "python": 266,
+    "go": 280,
+    "ts": 20
+  },
+  "jsonl": "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swebenchpro/test.jsonl",
+  "csv": "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swebenchpro/swe_bench_pro_full.csv"
+}
