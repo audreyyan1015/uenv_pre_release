@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use crate::control_plane::client::ControlPlane;
+use crate::episode::async_context::build_idempotency_key;
 use crate::episode::executor::{EpisodeExecutor, ExecuteContext};
 use crate::metrics::MetricsExporter;
 use crate::pool::warmup_pool::WarmupPool;
@@ -334,7 +335,12 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
         let metrics = self.metrics.clone();
         tokio::spawn(async move {
             let identity = cp.identity().read().await.clone();
-            let idempotency_key = format!("{}:{}:{}", episode_id, attempt_id, identity.worker_id);
+            let idempotency_key = build_idempotency_key(
+                &episode_id,
+                attempt_id,
+                &identity.worker_id,
+                &episode_for_wal.dispatch_lease_id,
+            );
             let persisted = wal.persist_pending(
                 &episode_for_wal,
                 &identity.worker_id,

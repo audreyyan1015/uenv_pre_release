@@ -12,7 +12,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
 #[cfg(unix)]
 use tonic::transport::Server;
-use uenv_math_env::gsm8k::answers_match;
+use uenv_math_env::score_action;
 use uenv_worker::proto::plugin::v1::plugin_service_server::PluginService;
 #[cfg(unix)]
 use uenv_worker::proto::plugin::v1::plugin_service_server::PluginServiceServer;
@@ -63,20 +63,6 @@ async fn load_episode_config(path: &PathBuf) -> EpisodeConfig {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => EpisodeConfig::default(),
-    }
-}
-
-fn score_action(dataset: &str, action: &str, expected: &str) -> f64 {
-    if dataset == "gsm8k" {
-        if answers_match(action, expected) {
-            1.0
-        } else {
-            0.0
-        }
-    } else if action.trim() == expected.trim() {
-        1.0
-    } else {
-        0.0
     }
 }
 

@@ -1,0 +1,13 @@
+{
+  "request_id": "req-code-smoke-001",
+  "question": "Write a Python function add(a, b) that returns the sum of a and b.",
+  "dataset": "dscodebench",
+  "task_id": "smoke-001",
+  "library": "python",
+  "test_code": "assert add(1, 2) == 3\nassert add(-1, 1) == 0\nassert add(0, 0) == 0",
+  "entry_point": "add",
+  "num_tests": 3,
+  "random_seed": 42,
+  "timeout_secs": 60,
+  "response_text": "```python\ndef add(a, b):\n    return a + b\n```"
+}

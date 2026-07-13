@@ -35,3 +35,9 @@ burst = 200
 
 [cors]
 allow_origins = ["*"]
+
+# EnvPackage 制品目录 + 启动时幂等 seed（SWE catalogs + config/benchmark 五类 fixture）
+[packages]
+artifact_dir = "data/artifacts"
+catalog_seed_dir = "config/swe"
+seed_examples = true

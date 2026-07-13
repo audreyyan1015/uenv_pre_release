@@ -208,6 +208,11 @@ async fn env_package_publish_get_list_artifacts() {
             trajectory_bundle_schema: Some("v2.2".into()),
             tool_bridge_schema: None,
         },
+        interface: InterfaceSchema {
+            action: Some(serde_json::json!({"type": "object", "required": ["type"]})),
+            observation: Some(serde_json::json!({"type": "object"})),
+            state: None,
+        },
         artifacts: vec![
             InlineArtifact {
                 name: "catalog.json".into(),
@@ -237,6 +242,9 @@ async fn env_package_publish_get_list_artifacts() {
     assert_eq!(manifest.package_id, "demo-pkg");
     assert_eq!(manifest.artifacts.len(), 2);
     assert!(manifest.artifacts.iter().all(|a| a.digest.starts_with("sha256:")));
+    // OpenEnv interface contract is persisted into the manifest.
+    assert!(manifest.interface.action.is_some());
+    assert!(manifest.interface.observation.is_some());
 
     // latest resolves to the published version.
     let latest = s.get_package_manifest("demo-pkg", "latest").await.unwrap();
@@ -252,6 +260,7 @@ async fn env_package_publish_get_list_artifacts() {
         worker_overlay: serde_json::Value::Null,
         agent_defaults: serde_json::Value::Null,
         contracts: PackageContracts::default(),
+        interface: InterfaceSchema::default(),
         artifacts: vec![],
         file_artifacts: vec![],
     };
