@@ -321,7 +321,10 @@ async fn seed_math_smoke_fixtures(
     Ok(())
 }
 
-async fn seed_dscodebench_mvp(
+/// Seed the DSCodeBench MVP CodeEnv EnvPackage (`dscodebench@0.1.0`) from the
+/// `config/benchmark/dscodebench/` smoke artifacts. `pub` so it can be exercised
+/// directly in tests (mirrors `seed_agent_bridge_openhands`).
+pub async fn seed_dscodebench_mvp(
     store: &SqliteStore,
     artifact_root: &Path,
     benchmark_dir: &Path,
@@ -414,7 +417,10 @@ async fn seed_dscodebench_mvp(
         worker_overlay: overlay,
         agent_defaults: json!({}),
         contracts: dto::PackageContracts::default(),
-        interface: dto::InterfaceSchema::default(),
+        // DSCodeBench is a CodeEnv → carry the same OpenEnv Action/Observation/State
+        // contract as the `code` env-registry manifest so RL frameworks/validators
+        // bind uniformly across the registry entry and this EnvPackage (标准化契约).
+        interface: code_interface_schema(),
         artifacts,
         file_artifacts: vec![],
     };
