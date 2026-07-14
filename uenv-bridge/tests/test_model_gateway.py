@@ -115,6 +115,42 @@ class ModelGatewayTest(unittest.TestCase):
                 upstream_a.close()
                 upstream_b.close()
 
+    def test_disable_thinking_injects_qwen_chat_template_kwargs(self) -> None:
+        upstream = MockOpenAIServer("upstream")
+        gateway = ModelGateway(
+            ModelGatewayConfig(
+                enabled=True,
+                bind_host="127.0.0.1",
+                port=0,
+                disable_thinking=True,
+            )
+        )
+        try:
+            gateway_url = gateway.start([upstream.url])
+            request = urllib.request.Request(
+                f"{gateway_url}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": "policy",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"foo": "bar", "enable_thinking": True},
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                json.loads(response.read())
+
+            forwarded = json.loads(upstream.requests[0]["body"])
+            self.assertEqual(
+                forwarded["chat_template_kwargs"],
+                {"foo": "bar", "enable_thinking": False},
+            )
+        finally:
+            gateway.stop()
+            upstream.close()
+
     def test_uses_generation_response_body_model_version(self) -> None:
         upstream = MockOpenAIServer(
             "upstream-versioned",

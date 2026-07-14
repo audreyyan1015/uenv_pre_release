@@ -832,6 +832,28 @@ class UEnvAgentLoopTest(unittest.TestCase):
             with self.subTest(data_source=data_source):
                 self.assertEqual(loop._env_type({"data_source": data_source}), "math")
 
+    def test_build_episode_request_writes_explicit_dataset_for_pubmedqa(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10, 11],
+            raw_prompt=[{"role": "user", "content": "Context: ...\nQuestion: ..."}],
+            sample_kwargs={
+                "data_source": "pubmedqa",
+                "reward_model": {"style": "rule", "ground_truth": "yes"},
+                "extra_info": {"dataset": "PubMedQA", "batch_id": "batch-pubmedqa"},
+            },
+        )
+        payload = json.loads(request.payload.decode("utf-8"))
+
+        self.assertEqual(request.env_type, "math")
+        self.assertEqual(payload["env_config"]["dataset"], "pubmedqa")
+        self.assertEqual(payload["env_config"]["data_source"], "pubmedqa")
+
     def test_agent_loop_client_config_reads_streaming_env(self) -> None:
         with unittest.mock.patch.dict("os.environ", {"UENV_ADAPTER_CORE_STREAMING": "1"}):
             config = AgentLoopClientConfig.from_env()

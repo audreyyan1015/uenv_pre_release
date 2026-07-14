@@ -31,6 +31,7 @@ class ModelGatewayConfig:
     public_url: str = ""
     request_timeout_seconds: float = 300.0
     log_path: str = ""
+    disable_thinking: bool = False
 
 
 @dataclass(slots=True)
@@ -180,7 +181,13 @@ class ModelGateway:
             if key.lower() in {"host", "content-length", "connection", "accept-encoding"}:
                 continue
             request_headers[key] = value
-        request = urllib.request.Request(upstream_url, data=body if method != "GET" else None, headers=request_headers, method=method)
+        forward_body = self._forward_request_body(method=method, path=path, headers=headers, body=body)
+        request = urllib.request.Request(
+            upstream_url,
+            data=forward_body if method != "GET" else None,
+            headers=request_headers,
+            method=method,
+        )
         try:
             with urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds) as response:
                 response_headers = dict(response.headers.items())
@@ -212,6 +219,31 @@ class ModelGateway:
             route = route[2:]
         query = f"?{parsed.query}" if parsed.query else ""
         return f"{upstream}{route}{query}"
+
+    def _forward_request_body(self, *, method: str, path: str, headers: Any, body: bytes) -> bytes:
+        if method.upper() == "GET" or not self.config.disable_thinking or not body:
+            return body
+        if not self._is_chat_completions_path(path):
+            return body
+        content_type = str(headers.get("Content-Type", "") or headers.get("content-type", "")).lower()
+        if "json" not in content_type:
+            return body
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except Exception:
+            return body
+        if not isinstance(data, dict):
+            return body
+        chat_template_kwargs = data.get("chat_template_kwargs")
+        if not isinstance(chat_template_kwargs, dict):
+            chat_template_kwargs = {}
+            data["chat_template_kwargs"] = chat_template_kwargs
+        chat_template_kwargs["enable_thinking"] = False
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    def _is_chat_completions_path(self, path: str) -> bool:
+        route = urllib.parse.urlsplit(path).path.rstrip("/")
+        return route.endswith("/chat/completions")
 
     def _response_with_model_version(
         self,

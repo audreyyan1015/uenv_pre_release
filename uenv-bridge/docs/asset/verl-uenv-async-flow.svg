@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1840" height="1200" viewBox="0 0 1840 1200" role="img" aria-labelledby="title desc">
+  <title id="title">VeRL fully async UEnv integration flow</title>
+  <desc id="desc">The UEnv AgentLoop handoff and return path in VeRL fully async policy, using VeRL's internal MessageQueue.</desc>
+  <style>
+    text { font-family: Arial, &quot;Noto Sans CJK SC&quot;, sans-serif; fill: #172033; }
+    .title { font-size: 26px; font-weight: 700; } .subtitle { font-size: 13px; fill: #475569; }
+    .section { font-size: 16px; font-weight: 700; } .node-title { font-size: 14px; font-weight: 700; }
+    .node { font-size: 13px; } .label { font-size: 12px; font-weight: 700; } .note { font-size: 12px; }
+    .box { rx: 8; ry: 8; stroke-width: 2; } .edge { fill: none; stroke-width: 2.5; marker-end: url(#arrow); }
+    .dashed { stroke-dasharray: 7 5; }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 4 L0 8z" fill="#475569"/></marker>
+    <marker id="blue-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 4 L0 8z" fill="#2563eb"/></marker>
+    <marker id="orange-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 4 L0 8z" fill="#d97706"/></marker>
+    <marker id="green-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0 0 L10 4 L0 8z" fill="#16a34a"/></marker>
+  </defs>
+  <rect width="1840" height="1200" fill="#ffffff"/>
+  <text class="title" x="40" y="52">VeRL fully_async 接入 UEnv：接出点、回接点与 VeRL MessageQueue</text>
+  <text class="subtitle" x="40" y="82">UEnv 不实现异步结果队列：每个 episode 在 AgentLoop 内完成 request / result 往返；完成后的 RolloutSample 由 VeRL 的 MessageQueue 在 Rollouter 和 Trainer 之间传递。</text>
+
+  <rect x="30" y="112" width="1780" height="168" fill="#f8fafc" stroke="#0284c7" stroke-width="2"/><rect x="30" y="112" width="1780" height="34" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text class="section" x="48" y="135" fill="#0c4a6e">VeRL fully_async_policy 控制面</text>
+  <rect class="box" x="70" y="165" width="720" height="82" fill="#eff6ff" stroke="#2563eb"/>
+  <text class="node-title" x="88" y="190">FullyAsyncTaskRunner._initialize_components()</text><text class="node" x="88" y="213">创建 FullyAsyncRollouter、FullyAsyncTrainer</text><text class="node" x="88" y="233">创建 MessageQueue Ray Actor，并向两端注入 MessageQueueClient；并发启动 rollouter.fit() 与 trainer.fit()</text>
+  <rect class="box" x="1040" y="165" width="420" height="82" fill="#fef3c7" stroke="#d97706"/>
+  <text class="node-title" x="1058" y="190">VeRL MessageQueue（Ray Actor）</text><text class="node" x="1058" y="213">deque + async condition；非 UEnv 组件</text><text class="node" x="1058" y="233">max_queue_size、生产 / 消费 / 丢弃统计</text>
+  <path d="M790 206 H1040" class="edge dashed" stroke="#0284c7" marker-end="url(#blue-arrow)"/><text class="label" x="856" y="196" fill="#0c4a6e">MessageQueueClient</text>
+
+  <rect x="30" y="310" width="1780" height="480" fill="#f8fafc" stroke="#2563eb" stroke-width="2"/><rect x="30" y="310" width="1780" height="34" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text class="section" x="48" y="333" fill="#1e3a8a">1. Rollouter 从 VeRL AgentLoop 接出，调用 UEnv 完成单条 rollout</text>
+  <rect class="box" x="70" y="385" width="210" height="105" fill="#dbeafe" stroke="#2563eb"/>
+  <text class="node-title" x="175" y="406" text-anchor="middle">FullyAsyncRollouter</text><text class="node" x="175" y="426" text-anchor="middle">_process_single_sample_</text><text class="node" x="175" y="445" text-anchor="middle">streaming()</text><text class="node" x="175" y="464" text-anchor="middle">RolloutSample</text><text class="node" x="175" y="482" text-anchor="middle">full_batch: DataProto</text>
+  <rect class="box" x="330" y="385" width="220" height="105" fill="#dbeafe" stroke="#2563eb"/>
+  <text class="node-title" x="440" y="411" text-anchor="middle">FullyAsyncAgentLoopManager</text><text class="node" x="440" y="434" text-anchor="middle">generate_sequences_single()</text><text class="node" x="440" y="456" text-anchor="middle">选择 AgentLoopWorker</text><text class="node" x="440" y="476" text-anchor="middle">发起 Ray RPC</text>
+  <rect class="box" x="600" y="385" width="230" height="105" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="3"/>
+  <text class="node-title" x="715" y="411" text-anchor="middle">AgentLoopWorker</text><text class="node" x="715" y="434" text-anchor="middle">generate_sequences()</text><text class="node-title" x="715" y="462" text-anchor="middle" fill="#1e3a8a">接出点</text><text class="node" x="715" y="480" text-anchor="middle">批量补丁识别 uenv_agent</text>
+  <rect class="box" x="880" y="385" width="240" height="105" fill="#e0f2fe" stroke="#0284c7"/>
+  <text class="node-title" x="1000" y="411" text-anchor="middle">UEnvAgentLoop.run_batch()</text><text class="node" x="1000" y="434" text-anchor="middle">构建 EpisodeRequest</text><text class="node" x="1000" y="456" text-anchor="middle">parallel_mode = fully_async</text><text class="node" x="1000" y="476" text-anchor="middle">字段见下方 Request</text>
+  <rect class="box" x="1170" y="385" width="180" height="105" fill="#e0f2fe" stroke="#0284c7"/>
+  <text class="node-title" x="1260" y="411" text-anchor="middle">Rust Adapter Core</text><text class="node" x="1260" y="434" text-anchor="middle">ExecuteBatchStream</text><text class="node" x="1260" y="456" text-anchor="middle">按 request_id 对齐</text>
+  <rect class="box" x="1400" y="385" width="230" height="105" fill="#ffedd5" stroke="#ea580c"/>
+  <text class="node-title" x="1515" y="411" text-anchor="middle">UEnv Server / Worker</text><text class="node" x="1515" y="434" text-anchor="middle">调度环境 / 工具、调用模型</text><text class="node" x="1515" y="456" text-anchor="middle">写入 reward、trajectory、token logprobs</text>
+  <path d="M280 438 H330" class="edge" stroke="#2563eb" marker-end="url(#blue-arrow)"/>
+  <path d="M550 438 H600" class="edge" stroke="#2563eb" marker-end="url(#blue-arrow)"/><text class="label" x="555" y="428" fill="#1e3a8a">Ray RPC</text>
+  <path d="M830 438 H880" class="edge" stroke="#1d4ed8" marker-end="url(#blue-arrow)"/>
+  <path d="M1120 438 H1170" class="edge" stroke="#0284c7" marker-end="url(#blue-arrow)"/>
+  <path d="M1350 438 H1400" class="edge" stroke="#ea580c" marker-end="url(#orange-arrow)"/><text class="label" x="1354" y="428" fill="#7c2d12">派发</text>
+  <rect class="box" x="880" y="540" width="390" height="90" fill="#f8fafc" stroke="#60a5fa"/>
+  <text class="node-title" x="898" y="564">EpisodeRequest</text><text class="node" x="898" y="587">request_id / batch_id / sample_index；generation_config / model_endpoint</text><text class="node" x="898" y="610">metadata.parallel_mode = fully_async</text><path d="M1000 490 V540" class="edge dashed" stroke="#60a5fa" marker-end="url(#blue-arrow)"/>
+  <rect class="box" x="1480" y="540" width="280" height="92" fill="#fae8ff" stroke="#9333ea"/>
+  <text class="node-title" x="1498" y="562">VeRL rollout model endpoint</text><text class="node" x="1498" y="584">/v1/chat/completions，logprobs = true</text><text class="node" x="1498" y="605">body: uenv_model_version</text><text class="node" x="1498" y="624">header: version fallback</text>
+  <path d="M1515 490 V540" class="edge" stroke="#9333ea" marker-end="url(#arrow)"/><text class="label" x="1527" y="522" fill="#581c87">模型请求</text><path d="M1580 540 V510 H1550 V490" class="edge dashed" stroke="#9333ea" marker-end="url(#arrow)"/><text class="label" x="1590" y="522" fill="#581c87">响应</text>
+  <rect class="box" x="850" y="665" width="590" height="94" fill="#fff7ed" stroke="#fb923c"/>
+  <text class="node-title" x="868" y="689">EpisodeResult / StepRecord.info</text><text class="node" x="868" y="712">response_ids / response_mask / reward / trajectory</text><text class="node" x="868" y="734">parallel_mode + rollout_param_version + rollout_policy_version</text><text class="node" x="868" y="754">rollout_log_probs 与 response_ids 对齐</text>
+  <path d="M1515 490 V640 H1440 V665" class="edge dashed" stroke="#ea580c" marker-end="url(#orange-arrow)"/><text class="label" x="1450" y="653" fill="#7c2d12">结果回传</text>
+
+  <rect x="30" y="825" width="1780" height="350" fill="#f8fafc" stroke="#16a34a" stroke-width="2"/><rect x="30" y="825" width="1780" height="34" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+  <text class="section" x="48" y="848" fill="#14532d">2. 结果从 AgentLoop 回接到 VeRL DataProto，再进入 VeRL MessageQueue 供 Trainer 消费</text>
+  <rect class="box" x="100" y="910" width="350" height="138" fill="#e0f2fe" stroke="#0284c7"/>
+  <text class="node-title" x="118" y="935">UEnvAgentLoop._output_from_result()</text><text class="node" x="118" y="958">AgentLoopOutput：response_ids / response_mask / reward</text><text class="node" x="118" y="980">response_logprobs = rollout_log_probs</text><text class="node" x="118" y="1002">extra_fields: global_steps / min / max</text><text class="node" x="118" y="1025">（来自 rollout_param_version）</text>
+  <rect class="box" x="490" y="910" width="320" height="138" fill="#bbf7d0" stroke="#16a34a" stroke-width="3"/>
+  <text class="node-title" x="650" y="935" text-anchor="middle">AgentLoopWorker</text><text class="node" x="650" y="958" text-anchor="middle">_agent_loop_postprocess()</text><text class="node" x="650" y="980" text-anchor="middle">+ _postprocess()</text><text class="node-title" x="650" y="1007" text-anchor="middle" fill="#14532d">回接点</text><text class="node" x="650" y="1027" text-anchor="middle">AgentLoopOutput -&gt; DataProto</text>
+  <rect class="box" x="870" y="920" width="260" height="118" fill="#dbeafe" stroke="#2563eb"/>
+  <text class="node-title" x="1000" y="946" text-anchor="middle">FullyAsyncRollouter</text><text class="node" x="1000" y="969" text-anchor="middle">ret -&gt; RolloutSample.full_batch</text><text class="node" x="1000" y="991" text-anchor="middle">message_queue_client</text><text class="node" x="1000" y="1012" text-anchor="middle">.put_sample()</text>
+  <rect class="box" x="1200" y="900" width="290" height="158" fill="#fef3c7" stroke="#d97706" stroke-width="3"/>
+  <text class="node-title" x="1218" y="927">VeRL MessageQueue（Ray Actor）</text><text class="node" x="1218" y="952">put_sample(RolloutSample)</text><text class="node" x="1218" y="975">队满丢弃最旧样本；通知 consumer</text><text class="node-title" x="1218" y="1012" fill="#78350f">UEnv 不创建 / 不持有此队列</text>
+  <rect class="box" x="1550" y="910" width="230" height="138" fill="#dcfce7" stroke="#16a34a"/>
+  <text class="node-title" x="1568" y="935">FullyAsyncTrainer</text><text class="node" x="1568" y="958">_get_samples_from_queue()</text><text class="node" x="1568" y="981">get_sample -&gt; 组装训练 batch</text><text class="node" x="1568" y="1003">fit_step: ratio / loss</text><text class="node" x="1568" y="1025">actor update</text>
+  <path d="M850 712 H800 V880 H450 V950" class="edge dashed" stroke="#ea580c" marker-end="url(#orange-arrow)"/><text class="label" x="500" y="870" fill="#7c2d12">Server -&gt; Core -&gt; Adapter 回传</text>
+  <path d="M450 979 H490" class="edge" stroke="#0284c7" marker-end="url(#blue-arrow)"/>
+  <path d="M810 979 H870" class="edge" stroke="#16a34a" marker-end="url(#green-arrow)"/><text class="label" x="815" y="969" fill="#14532d">返回 DataProto</text>
+  <path d="M1130 979 H1200" class="edge" stroke="#d97706" stroke-width="3" marker-end="url(#orange-arrow)"/><text class="label" x="1142" y="969" fill="#78350f">put_sample</text>
+  <path d="M1490 979 H1550" class="edge" stroke="#d97706" stroke-width="3" marker-end="url(#orange-arrow)"/><text class="label" x="1499" y="969" fill="#78350f">get_sample</text>
+  <path d="M1665 910 V880 H1000 V920" class="edge dashed" stroke="#16a34a" marker-end="url(#green-arrow)"/><text class="label" x="1110" y="870" fill="#14532d">checkpoint_manager.update_weights() + reset_staleness()：NCCL 参数同步到 Rollouter / rollout endpoint</text>
+</svg>

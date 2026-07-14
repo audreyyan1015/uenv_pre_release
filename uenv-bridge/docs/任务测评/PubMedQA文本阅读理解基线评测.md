@@ -67,6 +67,13 @@ scripts/benchmark/evaluate_pubmedqa.py
 scripts/benchmark/run_pubmedqa_baseline.sh
 ```
 
+UEnv 环境口径新增评测脚本：
+
+```text
+scripts/benchmark/evaluate_pubmedqa_uenv.py
+scripts/benchmark/run_pubmedqa_uenv_baseline.sh
+```
+
 运行方式：
 
 ```bash
@@ -130,9 +137,10 @@ temp/benchmarks/pubmedqa/qwen3_6_35b_a3b
 | 容器环境确认 | 已完成，正式评测镜像内为 vLLM 0.19.0 / torch 2.10.0+cu130 / transformers 4.57.6 |
 | GPU 可用性确认 | 已完成，8 张 A100 80GB 可用 |
 | 目标模型完整权重下载 | 已完成，26 个 safetensors shard 已落地 |
-| 评测链路 smoke test | 已完成，使用本地小模型验证脚本可以产出 predictions 和 metrics |
-| 目标模型 vLLM smoke test | 已完成，`vLLM + label_logprob` 在 3 条样本上跑通 |
 | 目标模型全量评测 | 已完成，使用 `vLLM + label_logprob` 和 `vLLM + generate` 跑完 1000 条 expert-labeled 样本 |
+| UEnv 环境评测入口 | 已完成，新增 PubMedQA → AdapterCore/Server/Worker/math plugin 的评测 driver |
+| UEnv 真实冻结模型全量评测 | 已完成，1000 条样本经 AdapterCore/Server/Worker 调用 adapter model gateway 和 vLLM |
+| UEnv thinking 口径评测 | 已完成，开启 Qwen thinking 并将 `MAX_TOKENS` 提高到 1024，完成 1000 条全量评测 |
 
 当前本地模型目录已完整：
 
@@ -238,6 +246,193 @@ temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_vllm_generate_strict/predictions.jsonl
 temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_vllm_generate_strict/predictions.csv
 ```
 
+## 7. UEnv 环境口径
+
+按照 Worker 侧五类 benchmark 文档，PubMedQA 不新增独立 `reading` 环境，而是复用 `math` 环境：
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| `env_type` | `math` | 由 Server 调度到 math Worker / plugin |
+| `env_config.dataset` | `pubmedqa` | Worker 内部路由到 PubMedQA yes/no/maybe 判分 backend |
+| `reward_config.target` | `yes/no/maybe` | 当前样本的 gold label |
+| `model_endpoint.url` | OpenAI-compatible `/v1` endpoint | Worker 调用冻结模型生成答案 |
+
+UEnv 口径链路：
+
+```text
+PubMedQA 样本
+  -> Adapter 构造 EpisodeRequest
+  -> AdapterCore / Server
+  -> Worker math plugin
+  -> 调用模型 endpoint
+  -> PubMedQA backend 解析 yes/no/maybe 并给 reward
+  -> EpisodeResult
+  -> driver 聚合 Accuracy / Macro-F1
+```
+
+当前已完成两类 UEnv 口径全量评测：
+
+1. 真实冻结模型 1000 条全量评测。Worker 访问 adapter model gateway，gateway 上游为本机 vLLM，并注入 `chat_template_kwargs.enable_thinking=false`，避免 Qwen3.6 输出长 thinking 文本污染 yes/no/maybe 解析。
+2. thinking 全量评测。gateway 不传 `enable_thinking=false`，模型保留 Qwen thinking，并将 `MAX_TOKENS` 提高到 1024，用于验证带思考输出在 UEnv 链路中的全量解析效果和指标表现。
+
+真实冻结模型 UEnv 全量结果：
+
+| 模型 | AdapterCore endpoint | Model endpoint | 样本数 | completed | Parse rate | Accuracy | Macro-F1 | reward accuracy |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | adapter gateway `http://10.10.20.142:18088/v1` -> vLLM `http://127.0.0.1:18080/v1` | 1000 | 1000 | 0.9990 | 0.7960 | 0.5718 | 0.7960 |
+
+UEnv thinking 全量结果：
+
+| 模型 | AdapterCore endpoint | Model endpoint | 样本数 | completed | Parse rate | Accuracy | Macro-F1 | reward accuracy | 配置 |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | adapter gateway `http://10.10.20.142:18088/v1` -> vLLM `http://127.0.0.1:18080/v1` | 1000 | 1000 | 1.0000 | 0.8000 | 0.5802 | 0.8000 | thinking 开启，`MAX_TOKENS=1024` |
+
+真实冻结模型 UEnv 输出文件：
+
+```text
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full/metrics.json
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full/predictions_official.json
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full/predictions.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full/predictions.csv
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full/uenv_requests.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full/uenv_results.jsonl
+```
+
+UEnv thinking 全量输出文件：
+
+```text
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/metrics.json
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/predictions_official.json
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/predictions.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/predictions.csv
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/uenv_requests.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/uenv_results.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/model-gateway.jsonl
+```
+
+真实冻结模型 UEnv 各类别指标：
+
+| 类别 | Precision | Recall | F1 | Support |
+|---|---:|---:|---:|---:|
+| yes | 0.8085 | 0.9257 | 0.8632 | 552 |
+| no | 0.8040 | 0.8373 | 0.8203 | 338 |
+| maybe | 0.1333 | 0.0182 | 0.0320 | 110 |
+
+真实冻结模型 UEnv 混淆矩阵：
+
+| Gold \\ Pred | yes | no | maybe | unparsed |
+|---|---:|---:|---:|---:|
+| yes | 511 | 34 | 7 | 0 |
+| no | 48 | 283 | 6 | 1 |
+| maybe | 73 | 35 | 2 | 0 |
+
+UEnv thinking 全量各类别指标：
+
+| 类别 | Precision | Recall | F1 | Support |
+|---|---:|---:|---:|---:|
+| yes | 0.8122 | 0.9167 | 0.8613 | 552 |
+| no | 0.8039 | 0.8609 | 0.8314 | 338 |
+| maybe | 0.2000 | 0.0273 | 0.0480 | 110 |
+
+UEnv thinking 全量预测分布：
+
+| 标签 | Gold | Pred |
+|---|---:|---:|
+| yes | 552 | 623 |
+| no | 338 | 362 |
+| maybe | 110 | 15 |
+
+UEnv thinking 全量混淆矩阵：
+
+| Gold \\ Pred | yes | no | maybe | unparsed |
+|---|---:|---:|---:|---:|
+| yes | 506 | 37 | 9 | 0 |
+| no | 44 | 291 | 3 | 0 |
+| maybe | 73 | 34 | 3 | 0 |
+
+真实冻结模型 UEnv 评测命令如下。运行前需要先启动一个 Worker 可访问的 OpenAI-compatible 模型 endpoint；本次使用 adapter model gateway 对外暴露给 Worker，gateway 上游再连接本机 vLLM。
+
+启动 vLLM：
+
+```bash
+podman run --rm -d \
+  --name uenv-pubmedqa-vllm \
+  --network host \
+  --device nvidia.com/gpu=all \
+  --pids-limit=-1 \
+  --shm-size=64g \
+  -v /data/ronghao:/data/ronghao \
+  -e MODELSCOPE_CACHE=/data/ronghao/models/modelscope \
+  localhost/vllm-openai:v0.19.0-cu130 \
+  --host 0.0.0.0 \
+  --port 18080 \
+  --model /data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B \
+  --served-model-name Qwen/Qwen3.6-35B-A3B \
+  --tensor-parallel-size 8 \
+  --max-model-len 8192 \
+  --gpu-memory-utilization 0.88 \
+  --trust-remote-code
+```
+
+启动 adapter model gateway：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+PYTHONPATH=src \
+scripts/benchmark/run_model_gateway.py \
+  --upstream http://127.0.0.1:18080/v1 \
+  --bind-host 0.0.0.0 \
+  --port 18088 \
+  --public-url http://10.10.20.142:18088/v1 \
+  --log-path temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full/model-gateway.jsonl \
+  --disable-thinking
+```
+
+运行 UEnv 评测：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18088/v1 \
+UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
+OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_gateway_full \
+BATCH_SIZE=1 \
+PROMPT_STYLE=strict_label \
+MAX_TOKENS=64 \
+./scripts/benchmark/run_pubmedqa_uenv_baseline.sh
+```
+
+UEnv thinking 全量评测命令如下。与 no-thinking 口径相比，gateway 启动时不传 `--disable-thinking`，并将 `MAX_TOKENS` 调整为 1024。
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$OUTPUT_DIR"
+
+nohup env PYTHONPATH=src \
+scripts/benchmark/run_model_gateway.py \
+  --upstream http://127.0.0.1:18080/v1 \
+  --bind-host 0.0.0.0 \
+  --port 18088 \
+  --public-url http://10.10.20.142:18088/v1 \
+  --log-path "$OUTPUT_DIR/model-gateway.jsonl" \
+  > "$OUTPUT_DIR/model-gateway.out" 2>&1 &
+
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18088/v1 \
+UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
+OUTPUT_DIR="$OUTPUT_DIR" \
+BATCH_SIZE=1 \
+PROMPT_STYLE=strict_label \
+MAX_TOKENS=1024 \
+./scripts/benchmark/run_pubmedqa_uenv_baseline.sh
+```
+
 对照结果：
 
 | 模型 | 后端 | 推理方式 | 样本数 | Parse rate | Accuracy | Macro-F1 | 说明 |
@@ -250,51 +445,7 @@ temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_vllm_generate_strict/predictions.csv
 temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_label_logprob/
 ```
 
-为了验证评测链路，已用本地已有小模型执行 8 条样本 smoke test：
-
-```bash
-cd /data/ronghao/uenv/uenv-bridge
-
-podman run --rm \
-  --entrypoint bash \
-  --network host \
-  --device nvidia.com/gpu=0 \
-  -v /data/ronghao:/data/ronghao \
-  -w /data/ronghao/uenv/uenv-bridge \
-  localhost/uenv-bridge-verl:layer4-build \
-  -lc 'python3 scripts/benchmark/evaluate_pubmedqa.py \
-    --data data/benchmarks/pubmedqa/ori_pqal.json \
-    --model /data/ronghao/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct \
-    --output-dir temp/benchmarks/pubmedqa/qwen2_5_0_5b_smoke \
-    --limit 8 \
-    --tensor-parallel-size 1 \
-    --max-model-len 2048 \
-    --gpu-memory-utilization 0.5 \
-    --enforce-eager'
-```
-
-Smoke test 输出：
-
-| 模型 | 样本数 | Parse rate | Accuracy | Macro-F1 | 说明 |
-|---|---:|---:|---:|---:|---|
-| `Qwen2.5-0.5B-Instruct` | 8 | 1.0000 | 0.1250 | 0.0741 | 仅用于验证评测脚本，不作为任务书目标模型结果 |
-
-输出文件：
-
-```text
-temp/benchmarks/pubmedqa/qwen2_5_0_5b_smoke/metrics.json
-temp/benchmarks/pubmedqa/qwen2_5_0_5b_smoke/predictions_official.json
-temp/benchmarks/pubmedqa/qwen2_5_0_5b_smoke/predictions.jsonl
-temp/benchmarks/pubmedqa/qwen2_5_0_5b_smoke/predictions.csv
-```
-
-同时使用 `transformers` 后端执行了 3 条样本 smoke test，验证备用后端可用：
-
-| 模型 | 后端 | 样本数 | Parse rate | Accuracy | Macro-F1 | 说明 |
-|---|---|---:|---:|---:|---:|---|
-| `Qwen2.5-0.5B-Instruct` | `transformers` | 3 | 1.0000 | 0.0000 | 0.0000 | 仅用于验证备用后端，不作为任务书目标模型结果 |
-
-## 7. 复现命令
+## 8. 复现命令
 
 `vLLM + label_logprob` 正式评测命令：
 
@@ -347,6 +498,8 @@ TRANSFORMERS_DEVICE_MAP=auto \
 ./scripts/benchmark/run_pubmedqa_baseline.sh
 ```
 
-## 8. 观察
+## 9. 观察
 
-`vLLM + label_logprob` 的主要问题是 `maybe` 类完全没有被预测出来，导致 `maybe` 的 F1 为 0，并显著拉低 Macro-F1。`vLLM + generate` 在严格标签 prompt 下可以预测出部分 `maybe`，整体 Accuracy 和 Macro-F1 更高，但它依赖对生成文本的解析，且推理成本高于候选标签打分。后续如果针对 PubMedQA 做后训练或格式/分类校准，重点应关注 `maybe` 类的判别能力，而不仅是总体 Accuracy。
+`vLLM + label_logprob` 的主要问题是 `maybe` 类完全没有被预测出来，导致 `maybe` 的 F1 为 0，并显著拉低 Macro-F1。`vLLM + generate` 在严格标签 prompt 下可以预测出部分 `maybe`，整体 Accuracy 和 Macro-F1 更高，但它依赖对生成文本的解析，且推理成本高于候选标签打分。
+
+UEnv 口径下，thinking 全量结果相比 no-thinking 全量结果略有提升：Accuracy 从 0.7960 到 0.8000，Macro-F1 从 0.5718 到 0.5802，且 parse rate 从 0.9990 提升到 1.0000。主要短板仍是 `maybe` 类召回较低，thinking 全量中 `maybe` recall 只有 0.0273。后续如果针对 PubMedQA 做后训练或格式/分类校准，重点应关注 `maybe` 类的判别能力，而不仅是总体 Accuracy。

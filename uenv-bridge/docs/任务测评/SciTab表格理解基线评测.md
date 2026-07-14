@@ -189,22 +189,149 @@ temp/benchmarks/scitab/qwen3_6_35b_a3b_vllm_label_logprob/predictions.jsonl
 temp/benchmarks/scitab/qwen3_6_35b_a3b_vllm_label_logprob/predictions.csv
 ```
 
-## 7. 结果分析
+## 7. UEnv 环境口径
+
+按照 Worker 侧五类 benchmark 文档，SciTab 复用 `math` 环境，不新增独立 `reading` 环境：
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| `env_type` | `math` | 由 Server 调度到 math Worker / plugin |
+| `env_config.dataset` | `scitab` | Worker 内部路由到 SciTab 三分类 backend |
+| `reward_config.target` | `supports/refutes/not enough info` | 当前样本的 gold label |
+| `model_endpoint.url` | adapter gateway `http://10.10.20.142:18088/v1` | Worker 调用冻结模型生成标签 |
+
+UEnv 全量评测使用 adapter model gateway 转发到本机 vLLM。no-thinking 口径会注入 `chat_template_kwargs.enable_thinking=false`，避免 Qwen3.6 输出 reasoning 文本污染标签解析；thinking 口径不传 `--disable-thinking`，模型保留 Qwen thinking，并将 `MAX_TOKENS` 提高到 1024。
+
+UEnv 结果汇总：
+
+| 口径 | 模型 | AdapterCore endpoint | 样本数 | completed | Parse rate | Accuracy | Macro-F1 | reward accuracy |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| no-thinking 全量 | `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | 1224 | 1224 | 1.0000 | 0.6814 | 0.6813 | 0.6814 |
+| thinking 全量，`MAX_TOKENS=1024` | `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | 1224 | 1224 | 0.9984 | 0.6920 | 0.6847 | 0.7418 |
+
+说明：`Accuracy` 来自 adapter 侧对 `response_text` 的本地标签解析；`reward accuracy` 来自 Worker 返回的 `EpisodeResult.summary.total_reward`。thinking 口径中两者存在差异，说明 Worker 判分逻辑与 adapter 侧 `parse_label()` 对长 reasoning 输出的解析规则不完全一致，后续如需将 reward 作为唯一指标，应继续对齐 Worker 与 adapter 的标签抽取逻辑。
+
+UEnv no-thinking 全量各类别指标：
+
+| 类别 | Precision | Recall | F1 | Support |
+|---|---:|---:|---:|---:|
+| supports | 0.7069 | 0.6543 | 0.6795 | 457 |
+| refutes | 0.7240 | 0.6764 | 0.6994 | 411 |
+| not enough info | 0.6163 | 0.7219 | 0.6649 | 356 |
+
+UEnv no-thinking 全量混淆矩阵：
+
+| Gold \ Pred | supports | refutes | not enough info | unparsed |
+|---|---:|---:|---:|---:|
+| supports | 299 | 62 | 96 | 0 |
+| refutes | 69 | 278 | 64 | 0 |
+| not enough info | 55 | 44 | 257 | 0 |
+
+UEnv thinking 全量各类别指标：
+
+| 类别 | Precision | Recall | F1 | Support |
+|---|---:|---:|---:|---:|
+| supports | 0.5929 | 0.9081 | 0.7174 | 457 |
+| refutes | 0.8345 | 0.5888 | 0.6904 | 411 |
+| not enough info | 0.8190 | 0.5337 | 0.6463 | 356 |
+
+UEnv thinking 全量混淆矩阵：
+
+| Gold \ Pred | supports | refutes | not enough info | unparsed |
+|---|---:|---:|---:|---:|
+| supports | 415 | 13 | 28 | 1 |
+| refutes | 154 | 242 | 14 | 1 |
+| not enough info | 131 | 35 | 190 | 0 |
+
+UEnv no-thinking 全量输出文件：
+
+```text
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_gateway_full/metrics.json
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_gateway_full/predictions_official.json
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_gateway_full/predictions.jsonl
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_gateway_full/predictions.csv
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_gateway_full/uenv_requests.jsonl
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_gateway_full/uenv_results.jsonl
+```
+
+UEnv thinking 全量输出文件：
+
+```text
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/metrics.json
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/predictions_official.json
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/predictions.jsonl
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/predictions.csv
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/uenv_requests.jsonl
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/uenv_results.jsonl
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/model-gateway.jsonl
+temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260714_213138/run.log
+```
+
+UEnv 运行命令：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18088/v1 \
+UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
+OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_gateway_full \
+BATCH_SIZE=1 \
+PROMPT_STYLE=strict_label \
+MAX_TOKENS=64 \
+./scripts/benchmark/run_scitab_uenv_baseline.sh
+```
+
+UEnv thinking 全量评测命令如下。运行前启动的 adapter model gateway 不传 `--disable-thinking`。
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+export OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_thinking_max1024_full_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$OUTPUT_DIR"
+
+nohup env PYTHONPATH=src \
+scripts/benchmark/run_model_gateway.py \
+  --upstream http://127.0.0.1:18080/v1 \
+  --bind-host 0.0.0.0 \
+  --port 18088 \
+  --public-url http://10.10.20.142:18088/v1 \
+  --log-path "$OUTPUT_DIR/model-gateway.jsonl" \
+  > "$OUTPUT_DIR/model-gateway.out" 2>&1 &
+
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18088/v1 \
+UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
+OUTPUT_DIR="$OUTPUT_DIR" \
+BATCH_SIZE=1 \
+PROMPT_STYLE=strict_label \
+MAX_TOKENS=1024 \
+./scripts/benchmark/run_scitab_uenv_baseline.sh 2>&1 | tee "$OUTPUT_DIR/run.log"
+```
+
+## 8. 结果分析
 
 `vLLM + generate` 能稳定产出可解析标签，parse rate 为 99.84%，说明当前 prompt 已基本满足后续 Eval-first 和 RL/RLVR 的格式 gate。主要问题是预测分布明显偏向 `supports`：supports recall 达到 96.72%，但 refutes 和 not enough info 的 recall 分别只有 22.87% 和 36.24%，导致 Macro-F1 低于 Accuracy。
 
 `vLLM + label_logprob` 在 SciTab 上退化为全部预测 `not enough info`，Accuracy 接近该类别占比，Macro-F1 明显偏低。该模式在 PubMedQA 上可以作为三分类基线，但在 SciTab 的长表格 claim verification prompt 下存在候选标签打分偏置，当前不适合作为主评测结果。
 
-## 8. 当前结论
+UEnv no-thinking 口径下，Worker 通过 adapter gateway 调用同一个冻结模型，并关闭 thinking 后直接输出短标签，预测分布更均衡，Accuracy 和 Macro-F1 均提升到约 68.13%。
+
+UEnv thinking 全量口径同样完成 1224 条样本全链路闭环，`completed=1224`、`failed=0`。按 adapter 本地解析，Accuracy 为 69.20%，Macro-F1 为 68.47%，相比 no-thinking 全量略有提升；按 Worker reward 统计，reward accuracy 为 74.18%。thinking 输出平均长度约 2332 字符，单条 UEnv 往返平均约 3.28 秒，本轮运行时间约 67 分钟。由于 thinking 输出包含较长推理过程，本地解析出现 2 条 unparsed，并且与 Worker reward 存在部分不一致，后续需要统一长输出标签抽取规则。
+
+## 9. 当前结论
 
 本阶段已经跑通表格理解任务的完整基线评测链路：数据下载、8GPU vLLM 推理、预测文件落盘、指标统计和结果分析均已完成。
 
 当前基准模型在 SciTab 上的主结果为：
 
 ```text
-Accuracy: 54.33%
-Macro-F1: 49.92%
-Parse rate: 99.84%
+UEnv thinking Accuracy: 69.20%
+UEnv thinking Macro-F1: 68.47%
+UEnv thinking Parse rate: 99.84%
+UEnv thinking reward accuracy: 74.18%
 ```
 
-后续如果进入训练阶段，建议重点提升 `refutes` 和 `not enough info` 两类的召回率，并在 reward/verifier 设计中加入类别均衡或难例采样，避免模型继续偏向 `supports`。
+后续如果进入训练阶段，建议重点提升 `refutes` 和 `not enough info` 两类的召回率，并在 reward/verifier 设计中加入类别均衡或难例采样，避免模型继续偏向 `supports`。同时需要对齐 Worker 侧 reward 与 adapter 侧指标脚本的标签抽取逻辑，避免 thinking 长输出下出现指标解释偏差。
