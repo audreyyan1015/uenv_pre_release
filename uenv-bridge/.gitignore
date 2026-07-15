@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 /temp/
 /output/
+/AGENTS.md
 /logs/*
 !/logs/README.md
 !/logs/curated/
