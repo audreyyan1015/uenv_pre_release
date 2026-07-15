@@ -19,6 +19,9 @@ fi
 source /root/.uenv-server.env
 
 mkdir -p "$UENV_HOME/trajectory-data/bodies" "$UENV_HOME/logs"
+if [[ -f "$UENV_HOME/config/logrotate/uenv-adapter-core" && -d /etc/logrotate.d ]]; then
+  cp "$UENV_HOME/config/logrotate/uenv-adapter-core" /etc/logrotate.d/uenv-adapter-core
+fi
 
 source "$HOME/.cargo/env" 2>/dev/null || true
 cargo build -p uenv-adapter-core --release 2>&1 | tail -8
