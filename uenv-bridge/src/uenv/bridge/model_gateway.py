@@ -32,6 +32,9 @@ class ModelGatewayConfig:
     request_timeout_seconds: float = 300.0
     log_path: str = ""
     disable_thinking: bool = False
+    force_enable_thinking: bool = False
+    preserve_thinking: bool = False
+    thinking_token_budget: int | None = None
 
 
 @dataclass(slots=True)
@@ -221,7 +224,13 @@ class ModelGateway:
         return f"{upstream}{route}{query}"
 
     def _forward_request_body(self, *, method: str, path: str, headers: Any, body: bytes) -> bytes:
-        if method.upper() == "GET" or not self.config.disable_thinking or not body:
+        should_rewrite = (
+            self.config.disable_thinking
+            or self.config.force_enable_thinking
+            or self.config.preserve_thinking
+            or self.config.thinking_token_budget is not None
+        )
+        if method.upper() == "GET" or not should_rewrite or not body:
             return body
         if not self._is_chat_completions_path(path):
             return body
@@ -238,7 +247,14 @@ class ModelGateway:
         if not isinstance(chat_template_kwargs, dict):
             chat_template_kwargs = {}
             data["chat_template_kwargs"] = chat_template_kwargs
-        chat_template_kwargs["enable_thinking"] = False
+        if self.config.disable_thinking:
+            chat_template_kwargs["enable_thinking"] = False
+        elif self.config.force_enable_thinking:
+            chat_template_kwargs["enable_thinking"] = True
+        if self.config.preserve_thinking:
+            chat_template_kwargs["preserve_thinking"] = True
+        if self.config.thinking_token_budget is not None:
+            data["thinking_token_budget"] = self.config.thinking_token_budget
         return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def _is_chat_completions_path(self, path: str) -> bool:
@@ -252,6 +268,7 @@ class ModelGateway:
         upstream: str,
         response_headers: dict[str, str],
     ) -> tuple[bytes, dict[str, Any]]:
+        response_body = self._response_with_preserved_reasoning(response_body)
         model_version = self._extract_response_model_version(
             response_body,
             upstream=upstream,
@@ -260,6 +277,37 @@ class ModelGateway:
         if not self._has_bound_model_version(model_version):
             return response_body, {}
         return self._attach_model_version(response_body, upstream=upstream, model_version=model_version), model_version
+
+    def _response_with_preserved_reasoning(self, response_body: bytes) -> bytes:
+        if not self.config.preserve_thinking:
+            return response_body
+        data = self._json_object(response_body)
+        choices = data.get("choices") if data else None
+        if not isinstance(choices, list):
+            return response_body
+
+        changed = False
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            reasoning = message.get("reasoning")
+            if not isinstance(reasoning, str) or not reasoning:
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and "<think>" in content:
+                continue
+            content_text = content if isinstance(content, str) else ""
+            merged = f"<think>\n{reasoning.strip()}\n</think>"
+            if content_text.strip():
+                merged = f"{merged}\n\n{content_text}"
+            message["content"] = merged
+            changed = True
+        if not changed:
+            return response_body
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def _extract_response_model_version(
         self,

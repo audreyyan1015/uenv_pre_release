@@ -89,12 +89,30 @@ def build_request(
     max_tokens: int,
     temperature: float,
     top_p: float,
+    enable_thinking: bool,
+    preserve_thinking: bool,
+    thinking_token_budget: int | None,
     timeout_seconds: int,
     seed: int,
     metadata: dict[str, Any],
 ) -> EpisodeRequest:
     request_id = f"olymmath-{qid}-{uuid.uuid4().hex[:8]}"
     dataset = str(metadata["dataset"])
+    generation_config: dict[str, Any] = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "max_new_tokens": max_tokens,
+    }
+    if enable_thinking or preserve_thinking:
+        chat_template_kwargs: dict[str, Any] = {}
+        if enable_thinking:
+            chat_template_kwargs["enable_thinking"] = True
+        if preserve_thinking:
+            chat_template_kwargs["preserve_thinking"] = True
+        generation_config["chat_template_kwargs"] = chat_template_kwargs
+    if thinking_token_budget is not None:
+        generation_config["thinking_token_budget"] = thinking_token_budget
     payload = {
         "protocol_version": "1.0",
         "framework": "uenv-benchmark",
@@ -113,12 +131,7 @@ def build_request(
             "endpoint_type": "http",
             "url": model_endpoint,
             "model_name": model_name,
-            "generation_config": {
-                "temperature": temperature,
-                "top_p": top_p,
-                "max_tokens": max_tokens,
-                "max_new_tokens": max_tokens,
-            },
+            "generation_config": generation_config,
             "max_retries": 3,
         },
         "episode_config": {
@@ -290,6 +303,34 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def load_existing_result_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    with path.open(encoding="utf-8") as file:
+        for line_no, line in enumerate(file, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                row = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"invalid json in {path}:{line_no}: {exc}") from exc
+            if not isinstance(row, dict):
+                raise SystemExit(f"invalid row in {path}:{line_no}: expected object")
+            if not row.get("qid"):
+                raise SystemExit(f"invalid row in {path}:{line_no}: missing qid")
+            rows.append(row)
+    return rows
+
+
+def dedupe_rows_by_qid(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        deduped[str(row["qid"])] = row
+    return list(deduped.values())
+
+
 def payload_json(request: EpisodeRequest) -> dict[str, Any]:
     return json.loads(request.payload.decode("utf-8"))
 
@@ -308,12 +349,20 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument("--preserve-thinking", action="store_true")
+    parser.add_argument("--thinking-token-budget", type=int, default=None)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--client-timeout-seconds", type=float, default=2400.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--connect-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--requests-log", type=Path, default=None)
     parser.add_argument("--results-log", type=Path, default=None)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Append to existing logs and skip qids already present in the results log.",
+    )
     args = parser.parse_args()
 
     if not args.model_endpoint:
@@ -337,6 +386,9 @@ def main() -> int:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
+            enable_thinking=args.enable_thinking,
+            preserve_thinking=args.preserve_thinking,
+            thinking_token_budget=args.thinking_token_budget,
             timeout_seconds=args.timeout_seconds,
             seed=args.seed + idx,
             metadata={
@@ -352,10 +404,37 @@ def main() -> int:
 
     request_log = args.requests_log or args.output_dir / "uenv_requests.jsonl"
     result_log = args.results_log or args.output_dir / "uenv_results.jsonl"
-    request_log.unlink(missing_ok=True)
-    result_log.unlink(missing_ok=True)
+    if args.resume:
+        current_qids = {str(example.qid) for example in examples}
+        rows = [
+            row
+            for row in dedupe_rows_by_qid(load_existing_result_rows(result_log))
+            if str(row["qid"]) in current_qids
+        ]
+        completed_qids = {str(row["qid"]) for row in rows}
+        requests = [
+            request
+            for request, example in zip(requests, examples, strict=True)
+            if str(example.qid) not in completed_qids
+        ]
+        print(
+            json.dumps(
+                {
+                    "resume": True,
+                    "existing_results": len(rows),
+                    "remaining_requests": len(requests),
+                    "request_log": str(request_log),
+                    "result_log": str(result_log),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    else:
+        request_log.unlink(missing_ok=True)
+        result_log.unlink(missing_ok=True)
+        rows: list[dict[str, Any]] = []
 
-    rows: list[dict[str, Any]] = []
     client = RustCoreEpisodeClient(
         RustCoreClientConfig(
             endpoint=args.endpoint,
@@ -364,7 +443,11 @@ def main() -> int:
         )
     )
     try:
-        example_by_request_id = {request.request_id: example for request, example in zip(requests, examples, strict=True)}
+        example_by_qid = {str(example.qid): example for example in examples}
+        example_by_request_id = {
+            request.request_id: example_by_qid[str(payload_json(request)["metadata"]["qid"])]
+            for request in requests
+        }
         for batch in tqdm(list(batched(requests, args.batch_size)), desc="UEnv OlymMATH"):
             started = time.time()
             for request in batch:
@@ -400,6 +483,12 @@ def main() -> int:
             "datasets": args.datasets,
             "prompt_style": args.prompt_style,
             "inference_mode": "uenv_generate",
+            "enable_thinking": args.enable_thinking,
+            "preserve_thinking": args.preserve_thinking,
+            "thinking_token_budget": args.thinking_token_budget,
+            "max_tokens": args.max_tokens,
+            "resume": args.resume,
+            "remaining_requests_at_start": len(requests),
         },
     )
     metrics = json.loads((args.output_dir / "metrics.json").read_text(encoding="utf-8"))

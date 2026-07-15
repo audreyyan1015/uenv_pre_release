@@ -151,6 +151,81 @@ class ModelGatewayTest(unittest.TestCase):
             gateway.stop()
             upstream.close()
 
+    def test_enable_thinking_injects_qwen_chat_template_kwargs_and_budget(self) -> None:
+        upstream = MockOpenAIServer("upstream")
+        gateway = ModelGateway(
+            ModelGatewayConfig(
+                enabled=True,
+                bind_host="127.0.0.1",
+                port=0,
+                force_enable_thinking=True,
+                preserve_thinking=True,
+                thinking_token_budget=16384,
+            )
+        )
+        try:
+            gateway_url = gateway.start([upstream.url])
+            request = urllib.request.Request(
+                f"{gateway_url}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": "policy",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"foo": "bar"},
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                json.loads(response.read())
+
+            forwarded = json.loads(upstream.requests[0]["body"])
+            self.assertEqual(
+                forwarded["chat_template_kwargs"],
+                {"foo": "bar", "enable_thinking": True, "preserve_thinking": True},
+            )
+            self.assertEqual(forwarded["thinking_token_budget"], 16384)
+        finally:
+            gateway.stop()
+            upstream.close()
+
+    def test_preserve_thinking_merges_reasoning_into_content(self) -> None:
+        upstream = MockOpenAIServer("upstream")
+        gateway = ModelGateway(
+            ModelGatewayConfig(
+                enabled=True,
+                bind_host="127.0.0.1",
+                port=0,
+                preserve_thinking=True,
+            )
+        )
+        try:
+            gateway_url = gateway.start([upstream.url])
+            payload = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning": "work through the problem",
+                        }
+                    }
+                ]
+            }
+            body, model_version = gateway._response_with_model_version(
+                json.dumps(payload).encode("utf-8"),
+                upstream=gateway_url,
+                response_headers={},
+            )
+
+            self.assertEqual(model_version, {})
+            merged = json.loads(body)["choices"][0]["message"]["content"]
+            self.assertEqual(merged, "<think>\nwork through the problem\n</think>")
+        finally:
+            gateway.stop()
+            upstream.close()
+
     def test_uses_generation_response_body_model_version(self) -> None:
         upstream = MockOpenAIServer(
             "upstream-versioned",
