@@ -141,8 +141,16 @@ class AgentControlClient:
         reward: float,
         trajectory_id: str = "",
         error_message: str = "",
+        *,
+        agent_id: str,
     ) -> bool:
-        """回填结果；返回 Server 是否 ack。"""
+        """回填结果；返回 Server 是否 ack。
+
+        ``agent_id`` 必须与 PollAgentJob 领取该 job 时使用的注册 id 一致，
+        否则 Server 返回 ``AGENT_MISMATCH`` 且不释放 in-flight job。
+        """
+        if not agent_id:
+            raise ValueError("agent_id is required for CompleteAgentJob")
         req = self._pb2.AgentJobCompleteRequest(
             job_id=job_id,
             run_id=run_id,
@@ -150,8 +158,17 @@ class AgentControlClient:
             reward=float(reward),
             trajectory_id=trajectory_id,
             error_message=error_message,
+            agent_id=agent_id,
         )
         resp = self._stub.CompleteAgentJob(req, timeout=self.timeout_sec)
+        if not resp.ack:
+            code = getattr(resp, "code", "") or ""
+            message = getattr(resp, "message", "") or ""
+            print(
+                f"[agent-client] CompleteAgentJob not acked job={job_id} "
+                f"agent_id={agent_id} code={code} message={message}",
+                flush=True,
+            )
         return bool(resp.ack)
 
     def agent_heartbeat(self, agent_id: str, active_jobs: int, timestamp_ms: int = 0) -> int:
