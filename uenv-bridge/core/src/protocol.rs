@@ -91,12 +91,21 @@ pub struct ExecuteBatchResponse {
     pub results: Vec<SampleResult>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelEndpoint {
+    pub endpoint_type: String,
+    pub url: String,
+    pub model_name: String,
+    pub generation_config_json: Vec<u8>,
+    pub max_retries: i32,
+}
+
 /// 单个样本的输入信息，由 Python 侧的 VeRL 训练框架填充。
 ///
-/// 每个 SampleEnvelope 对应 VeRL 一次 rollout 的结果：
-/// 模型根据 prompt 生成了一段回复，该回复的文本被序列化进 payload_json，
-/// 需要通过 UEnv 环境评估得到 reward 分数。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 每个 SampleEnvelope 对应一次需要 UEnv 执行的样本请求。
+/// 输入协议使用类型化字段；旧 payload_json/meta_json/model_output_json
+/// 只保留在 proto 兼容层中，adapter-core 内部不再读取。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SampleEnvelope {
     /// 本样本在当前批次中的唯一标识符，用于把执行结果映射回对应的样本。
     pub request_id: String,
@@ -108,12 +117,17 @@ pub struct SampleEnvelope {
     pub framework: String,
     /// 需要执行的环境类型，例如 "math"、"gsm8k"，用于调度器选择合适的 Worker。
     pub env_type: String,
-    /// 样本的详细信息，序列化为 JSON 字节。
-    /// 包含 env_config（环境配置）、episode_config（执行配置）、
-    /// reward_config（reward 计算配置）、model_endpoint（模型端点）等字段。
-    pub payload_json: Vec<u8>,
-    /// 附加元数据，序列化为 JSON 字节，供调试和追踪使用。
-    pub meta_json: Vec<u8>,
+    /// Canonical training parallel protocol mode forwarded to Server.
+    pub parallel_mode: String,
+    pub env_config_json: Vec<u8>,
+    pub episode_config_json: Vec<u8>,
+    pub reward_config_json: Vec<u8>,
+    pub model_endpoint: Option<ModelEndpoint>,
+    pub timeout_seconds: i32,
+    pub correlation_id: String,
+    pub sample_context_json: Vec<u8>,
+    pub env_package_id: String,
+    pub env_package_version: String,
 }
 
 /// 单个样本的执行结果，由 UEnv 环境计算得出。
@@ -139,6 +153,12 @@ pub struct SampleResult {
     pub error_code: String,
     /// 错误信息（仅在 status 为 "failed" 时有值）。
     pub error_message: String,
+    /// Canonical rollout model parameter version for async training.
+    pub rollout_param_version: i64,
+    /// Canonical rollout policy version for async training.
+    pub rollout_policy_version: String,
+    /// Per-token rollout log probabilities aligned with response_ids.
+    pub rollout_log_probs: Vec<f32>,
 }
 
 // -----------------------------------------------------------------------------
@@ -190,9 +210,29 @@ impl TryFrom<pb::SampleEnvelope> for SampleEnvelope {
             sample_index: value.sample_index,
             framework: value.framework,
             env_type: value.env_type,
-            payload_json: value.payload_json,
-            meta_json: value.meta_json,
+            parallel_mode: value.parallel_mode,
+            env_config_json: value.env_config_json,
+            episode_config_json: value.episode_config_json,
+            reward_config_json: value.reward_config_json,
+            model_endpoint: value.model_endpoint.map(Into::into),
+            timeout_seconds: value.timeout_seconds,
+            correlation_id: value.correlation_id,
+            sample_context_json: value.sample_context_json,
+            env_package_id: value.env_package_id,
+            env_package_version: value.env_package_version,
         })
+    }
+}
+
+impl From<pb::ModelEndpoint> for ModelEndpoint {
+    fn from(value: pb::ModelEndpoint) -> Self {
+        Self {
+            endpoint_type: value.endpoint_type,
+            url: value.url,
+            model_name: value.model_name,
+            generation_config_json: value.generation_config_json,
+            max_retries: value.max_retries,
+        }
     }
 }
 
@@ -210,6 +250,9 @@ impl From<SampleResult> for pb::SampleResult {
             trajectory_json: value.trajectory_json,
             error_code: value.error_code,
             error_message: value.error_message,
+            rollout_param_version: value.rollout_param_version,
+            rollout_policy_version: value.rollout_policy_version,
+            rollout_log_probs: value.rollout_log_probs,
         }
     }
 }

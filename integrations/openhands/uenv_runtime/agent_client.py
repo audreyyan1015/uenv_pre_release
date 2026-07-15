@@ -141,17 +141,70 @@ class AgentControlClient:
         reward: float,
         trajectory_id: str = "",
         error_message: str = "",
+        parallel_mode: str = "",
+        rollout_param_version: int | None = None,
+        rollout_policy_version: str | None = None,
+        rollout_log_probs: list[float] | None = None,
+        worker_start_ts: float | None = None,
+        worker_finish_ts: float | None = None,
+        result_ready_ts: float | None = None,
+        worker_latency_ms: int | None = None,
+        model_latency_ms: int | None = None,
+        response_ids: list[int] | None = None,
+        response_mask: list[int] | None = None,
+        *,
+        agent_id: str,
     ) -> bool:
-        """回填结果；返回 Server 是否 ack。"""
-        req = self._pb2.AgentJobCompleteRequest(
-            job_id=job_id,
-            run_id=run_id,
-            status=status,
-            reward=float(reward),
-            trajectory_id=trajectory_id,
-            error_message=error_message,
-        )
+        """回填结果；返回 Server 是否 ack。
+
+        ``agent_id`` 必须与 PollAgentJob 领取该 job 时使用的注册 id 一致，
+        否则 Server 返回 ``AGENT_MISMATCH`` 且不释放 in-flight job。
+        """
+        if not agent_id:
+            raise ValueError("agent_id is required for CompleteAgentJob")
+        ids = [int(item) for item in (response_ids or [])]
+        mask = [int(item) for item in (response_mask or [])]
+        log_probs = [float(item) for item in (rollout_log_probs or [])]
+        req_kwargs = {
+            "job_id": job_id,
+            "run_id": run_id,
+            "status": status,
+            "reward": float(reward),
+            "trajectory_id": trajectory_id,
+            "error_message": error_message,
+            "agent_id": agent_id,
+            "parallel_mode": parallel_mode,
+            "rollout_log_probs": log_probs,
+        }
+        if rollout_param_version is not None:
+            req_kwargs["rollout_param_version"] = int(rollout_param_version)
+        if rollout_policy_version is not None:
+            req_kwargs["rollout_policy_version"] = str(rollout_policy_version)
+        if worker_start_ts is not None:
+            req_kwargs["worker_start_ts"] = float(worker_start_ts)
+        if worker_finish_ts is not None:
+            req_kwargs["worker_finish_ts"] = float(worker_finish_ts)
+        if result_ready_ts is not None:
+            req_kwargs["result_ready_ts"] = float(result_ready_ts)
+        if worker_latency_ms is not None:
+            req_kwargs["worker_latency_ms"] = int(worker_latency_ms)
+        if model_latency_ms is not None:
+            req_kwargs["model_latency_ms"] = int(model_latency_ms)
+        req = self._pb2.AgentJobCompleteRequest(**req_kwargs)
+        if ids or mask:
+            if ids and not mask:
+                mask = [1] * len(ids)
+            req.rollout_trace.response_ids.extend(ids)
+            req.rollout_trace.response_mask.extend(mask)
         resp = self._stub.CompleteAgentJob(req, timeout=self.timeout_sec)
+        if not resp.ack:
+            code = getattr(resp, "code", "") or ""
+            message = getattr(resp, "message", "") or ""
+            print(
+                f"[agent-client] CompleteAgentJob not acked job={job_id} "
+                f"agent_id={agent_id} code={code} message={message}",
+                flush=True,
+            )
         return bool(resp.ack)
 
     def agent_heartbeat(self, agent_id: str, active_jobs: int, timestamp_ms: int = 0) -> int:
@@ -180,7 +233,7 @@ def _job_from_proto(job: Any) -> AgentJob:
         agent_bridge_id=job.agent_bridge_id,
         agent_bridge_version=job.agent_bridge_version,
         driver_entrypoint=job.driver_entrypoint,
-        model_endpoint=job.model_endpoint,
+        model_endpoint=job.model_endpoint_config.url if job.HasField("model_endpoint_config") else "",
         max_iterations=int(job.max_iterations) or 30,
         workspace_dir=job.workspace_dir or "/app",
         episode_id=job.episode_id,

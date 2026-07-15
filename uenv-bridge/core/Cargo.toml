@@ -24,7 +24,7 @@ tonic-prost = "0.14"
 prost = "0.14"
 uenv-server = { path = "../../uenv-server" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

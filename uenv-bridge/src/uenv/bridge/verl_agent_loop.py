@@ -525,6 +525,10 @@ class UEnvAgentLoop(AgentLoopBase):
 
     def _model_version_from_result(self, result: EpisodeResult) -> dict[str, Any]:
         output: dict[str, Any] = {}
+        if result.rollout_param_version is not None:
+            output["rollout_param_version"] = result.rollout_param_version
+        if result.rollout_policy_version:
+            output["rollout_policy_version"] = result.rollout_policy_version
         for step in result.trajectory.steps:
             info = step.info if isinstance(step.info, dict) else {}
             nested = self._json_object_from_info(info.get("uenv_model_version"))
@@ -615,7 +619,8 @@ class UEnvAgentLoop(AgentLoopBase):
                 "metadata",
             ],
         }
-        metadata.update(self._parallel_metadata(sample_kwargs))
+        parallel_mode, parallel_metadata = self._parallel_metadata(sample_kwargs)
+        metadata.update(parallel_metadata)
         generation_config = {
             "temperature": sampling_params.get("temperature"),
             "top_p": sampling_params.get("top_p"),
@@ -671,6 +676,7 @@ class UEnvAgentLoop(AgentLoopBase):
             resource_spec=ResourceSpec(),
             model_endpoint=model_endpoint,
             seed=seed,
+            parallel_mode=parallel_mode,
         )
 
     def _record_episode_requests(self, requests: list[EpisodeRequest], *, phase: str) -> None:
@@ -792,9 +798,8 @@ class UEnvAgentLoop(AgentLoopBase):
         ids: list[int] = []
         fallback_text = ""
         for step in result.trajectory.steps:
-            step_ids = self._ids_from_info(step.info, "response_ids")
-            if step_ids:
-                ids.extend(step_ids)
+            if step.response_ids:
+                ids.extend(int(item) for item in step.response_ids)
                 continue
             text = step.info.get("response_text") or step.action.decode("utf-8", errors="replace")
             if text:
@@ -804,9 +809,8 @@ class UEnvAgentLoop(AgentLoopBase):
         if fallback_text:
             return self._encode_response_text(fallback_text)
         for step in reversed(result.trajectory.steps):
-            ids = self._ids_from_info(step.info, "response_ids")
-            if ids:
-                return ids
+            if step.response_ids:
+                return [int(item) for item in step.response_ids]
             text = step.info.get("response_text") or step.action.decode("utf-8", errors="replace")
             ids = self._encode_response_text(text)
             if ids:
@@ -816,30 +820,11 @@ class UEnvAgentLoop(AgentLoopBase):
     def _response_mask_from_result(self, result: EpisodeResult, fallback_len: int) -> list[int]:
         masks: list[int] = []
         for step in result.trajectory.steps:
-            step_mask = self._ids_from_info(step.info, "response_mask")
-            if step_mask:
-                masks.extend(1 if item else 0 for item in step_mask)
+            if step.response_mask:
+                masks.extend(1 if item else 0 for item in step.response_mask)
         if masks:
             return masks
         return [1] * fallback_len
-
-    def _ids_from_info(self, info: dict[str, str], key: str) -> list[int]:
-        raw = info.get(key)
-        if raw is None:
-            return []
-        try:
-            value = json.loads(raw)
-        except Exception:
-            value = raw
-        if not isinstance(value, list):
-            return []
-        ids = []
-        for item in value:
-            try:
-                ids.append(int(item))
-            except Exception:
-                return []
-        return ids
 
     def _encode_response_text(self, text: str) -> list[int]:
         if self.tokenizer is None:
@@ -934,18 +919,18 @@ class UEnvAgentLoop(AgentLoopBase):
         )
         return str(model_name)
 
-    def _parallel_metadata(self, sample_kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _parallel_metadata(self, sample_kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         mode = str(
             self._value_from_extra_info(sample_kwargs, "parallel_mode", self.config_for_uenv.parallel_mode) or "sync"
         )
-        output: dict[str, Any] = {"parallel_mode": mode}
+        output: dict[str, Any] = {}
         global_step = self._value_from_extra_info(sample_kwargs, "global_step", None)
         if global_step is None:
             global_step = self._value_from_extra_info(sample_kwargs, "global_steps", None)
         if global_step is not None:
             output["global_step"] = self._jsonable(global_step)
         if mode != "one_step_off_policy":
-            return output
+            return mode, {"verl": output} if output else {}
 
         generation_step = self._value_from_extra_info(sample_kwargs, "generation_step", global_step)
         target_train_step = self._value_from_extra_info(
@@ -967,15 +952,12 @@ class UEnvAgentLoop(AgentLoopBase):
                 "rollout_step": self._jsonable(rollout_step),
                 "consume_step": self._jsonable(consume_step),
                 "policy_version": self._jsonable(policy_version),
-                "rollout_policy_version": self._jsonable(
-                    self._value_from_extra_info(sample_kwargs, "rollout_policy_version", policy_version)
-                ),
                 "parameter_sync_id": self._jsonable(
                     self._value_from_extra_info(sample_kwargs, "parameter_sync_id", self._sync_id_from_step(generation_step))
                 ),
             }
         )
-        return output
+        return mode, {"verl": output}
 
     def _step_plus_one(self, value: Any) -> Any:
         try:

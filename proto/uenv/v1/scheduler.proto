@@ -4,7 +4,9 @@ package uenv.scheduler.v1;
 import "uenv/v1/common.proto";
 import "uenv/v1/episode.proto";
 
-// ControlPlane — Worker 作为 Client 连接 Scheduler / Mock / Server
+// 干净版 proto：保留注册时负载上报字段，用于 server 重启后恢复 worker 负载视图。
+//
+// 控制面服务：Worker 作为客户端连接 Scheduler、Mock 或 Server。
 
 service ControlPlaneService {
     rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
@@ -25,9 +27,14 @@ message RegisterWorkerRequest {
     uenv.v1.ResourceSpec resource = 3;
     string endpoint = 4;
     uint32 max_concurrent = 5;
-    // Runtime Gateway public URL for AgentJob injection (C-layer).
+    // Runtime Gateway 的公网地址，用于注入 AgentJob（C 层）。
     string gateway_public_url = 6;
     repeated SyncedEnvPackage synced_env_packages = 7;
+    // 注册时 worker 侧的当前负载。server 重启后可在第一次心跳到达前
+    // 先用这个值恢复负载视图。
+    int32 load = 8;
+    // 注册时 worker 侧真实容量。区别于历史 max_concurrent 配置值。
+    int32 max_load = 9;
 }
 
 message RegisterWorkerResponse {

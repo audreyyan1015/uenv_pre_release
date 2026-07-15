@@ -5,12 +5,14 @@ from uenv.v1 import adapter_core_pb2 as uenv_dot_v1_dot_adapter__core__pb2
 
 
 class AdapterCoreServiceStub(object):
-  """Local Python shim -> Rust adapter core API.
+  """干净版 proto：只保留类型化协议字段。
+  这份文件用于未来替换正式 proto。
 
-  The Python side owns VeRL AgentLoop objects such as prompt tokens, sampling
-  parameters, reward config, and sample metadata. The Rust core receives
-  normalized sample envelopes, converts them to UEnv EpisodeRequest values,
-  and calls the in-process UEnv Server API by function call.
+  本地 Python 适配层调用 Rust adapter core 的接口。
+
+  Python 侧负责 VeRL AgentLoop 对象，例如提示词 token、采样参数、奖励配置和样本元数据。
+  Rust core 接收规范化后的样本信封，将其转换成 UEnv EpisodeRequest，
+  再通过进程内函数调用访问 UEnv Server API。
   """
 
   def __init__(self, channel):
@@ -37,12 +39,14 @@ class AdapterCoreServiceStub(object):
 
 
 class AdapterCoreServiceServicer(object):
-  """Local Python shim -> Rust adapter core API.
+  """干净版 proto：只保留类型化协议字段。
+  这份文件用于未来替换正式 proto。
 
-  The Python side owns VeRL AgentLoop objects such as prompt tokens, sampling
-  parameters, reward config, and sample metadata. The Rust core receives
-  normalized sample envelopes, converts them to UEnv EpisodeRequest values,
-  and calls the in-process UEnv Server API by function call.
+  本地 Python 适配层调用 Rust adapter core 的接口。
+
+  Python 侧负责 VeRL AgentLoop 对象，例如提示词 token、采样参数、奖励配置和样本元数据。
+  Rust core 接收规范化后的样本信封，将其转换成 UEnv EpisodeRequest，
+  再通过进程内函数调用访问 UEnv Server API。
   """
 
   def ExecuteBatch(self, request, context):

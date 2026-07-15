@@ -1,23 +1,6 @@
-// control_plane.rs：控制平面服务（ControlPlaneService）的实现。
-//
-// 控制平面是服务器与 worker 之间的管理通道，负责处理：
-//   1. Worker 注册：worker 启动后向服务器报告自己的地址和能力
-//   2. 心跳：worker 定期发送心跳，服务器更新 worker 的负载信息
-//   3. 结果上报：worker 执行完 episode 后，通过这个接口把结果发回服务器
-//   4. Worker 列表查询：查询当前所有已注册的 worker
-//
-// 一次完整 episode 的数据流（各接口配合关系）：
-//
-//   Worker                     Server (本文件)              submit_episode (service.rs)
-//     |--- RegisterWorker ------>|                               |
-//     |                          | 存入调度器                     |
-//     |
-//     | (稍后，服务器下发 episode)
-//     |<--- DispatchEpisode ------|  (由 service.rs 发起 gRPC 调用)
-//     |  执行 episode 中...       |
-//     |--- ReportResult -------->|                               |
-//     |                          |--- oneshot channel 发送结果 -->|
-//     |                          |                   客户端收到结果|
+// 文件职责：实现 worker control plane gRPC，管理 worker 注册、心跳、lease 状态和结果回填。
+// 主要功能：处理 RegisterWorker、Heartbeat/stream、ReportResult、late report/idempotency 检查和 worker 负载同步。
+// 大致工作流：worker 注册进入 scheduler；执行完成后上报结果；control plane 校验 dispatch lease/token 后走统一 result finalizer。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -35,57 +18,60 @@ use crate::proto::scheduler::v1::{
     WorkerInfo,
 };
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
-use crate::service::{complete_episode_result, ResultPersistenceContext, ResultTiming};
+use crate::result_finalizer::{complete_episode_result, ResultPersistenceContext, ResultTiming};
 use crate::state::ServerState;
 
-/// ControlPlaneService 的实现结构体，持有服务器全局状态的引用。
+/// worker control plane gRPC 服务实现。
+///
+/// 这个服务负责 worker 注册、心跳、结果上报和 worker 列表查询。它不直接执行 episode，
+/// 而是维护 worker 状态，并把 worker 上报的结果交给正在等待的 episode service。
 pub struct ControlPlaneServiceImpl {
     pub state: Arc<ServerState>,
 }
 
 #[tonic::async_trait]
 impl ControlPlaneService for ControlPlaneServiceImpl {
-    /// Worker 注册接口：worker 启动时调用，向服务器声明自己的地址和能力。
+    /// 注册 worker。
     ///
-    /// 注册信息包括：
-    /// - worker_id：唯一标识（可由 worker 自己指定，也可由服务器自动生成 UUID）
-    /// - endpoint：worker 监听的 gRPC 地址（服务器下发 episode 时连接此地址）
-    /// - supported_env_types：该 worker 支持的环境类型列表（调度时用来匹配）
-    /// - max_concurrent：该 worker 最多同时执行的 episode 数
+    /// 注册请求会被转换成 scheduler 内部的 `WorkerInfo`。如果同 worker_id 已经有 active
+    /// lease，scheduler 会拒绝替换旧记录并返回 `accepted=false`，此时 admission 容量不能增加。
     async fn register_worker(
         &self,
         request: Request<RegisterWorkerRequest>,
     ) -> Result<Response<RegisterWorkerResponse>, Status> {
         let req = request.into_inner();
 
-        // 如果 worker 没有提供 worker_id，服务器自动生成一个 UUID 作为唯一标识
+        // worker_id 为空或为 auto 时由 server 生成，避免多个 worker 使用空字符串作为同一个 id。
         let worker_id = if req.worker_id.is_empty() || req.worker_id == "auto" {
             uuid::Uuid::new_v4().to_string()
         } else {
             req.worker_id
         };
 
-        // 构造调度器内部使用的 WorkerInfo。
-        // 注意：这是 scheduler::traits 中定义的类型，与 proto 生成的 WorkerInfo 同名，
-        // 通过 "as SchedulerWorkerInfo" 别名来区分两者。
+        // proto 生成的 WorkerInfo 和 scheduler 内部的 WorkerInfo 名称相同，这里显式使用别名。
+        // 注册请求可能来自刚检测到 server 重启的 worker，此时 load/max_load 比等待下一次
+        // heartbeat 更早反映 worker 真实状态。旧 worker 没有这些字段时仍兼容 max_concurrent。
+        let reported_load = req.load.max(0) as u32;
+        let capacity = if req.max_load > 0 {
+            req.max_load as u32
+        } else if req.max_concurrent > 0 {
+            req.max_concurrent
+        } else {
+            1
+        };
         let info = SchedulerWorkerInfo {
             worker_id: worker_id.clone(),
             endpoint: req.endpoint.clone(),
             supported_env_types: req.supported_env_types.clone(),
-            // max_concurrent 为 0 表示 worker 未指定，默认设为 1（每次处理一个 episode）
-            capacity: if req.max_concurrent > 0 {
-                req.max_concurrent
-            } else {
-                1
-            },
-            current_load: 0, // 初始负载为 0
+            capacity,
+            current_load: reported_load,
             reserved_load: 0,
-            reported_load: 0,
+            reported_load,
             resource: req.resource.clone(),
             draining: false,
-            last_report_at: Some(std::time::Instant::now()), // 从注册时刻起算5min超时，防止 None 导致永不降级
-            last_heartbeat_at: Some(std::time::Instant::now()), // 注册即视为一次心跳，30s 内需发真实心跳续期
-            // SWE+Agent 编排：保存 Gateway 对外 URL 与已 sync 的 EnvPackage（严格版本校验用）
+            // 注册时初始化为当前时间，避免刚注册但还没有 report 的 worker 被立即判定为 degraded。
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
             gateway_public_url: req.gateway_public_url.clone(),
             synced_env_packages: req
                 .synced_env_packages
@@ -98,73 +84,43 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 .collect(),
         };
 
-        // 动态队列：注册前先取旧容量（重注册时计算 delta）
-        let old_capacity = if self.state.queue_dynamic {
-            self.state
-                .scheduler
-                .read()
-                .list_workers()
-                .into_iter()
-                .find(|w| w.worker_id == worker_id)
-                .map(|w| w.capacity)
-                .unwrap_or(0) as usize
-        } else {
-            0
-        };
-
-        // 注册到调度器（内部会先删除同 ID 的旧记录，再插入新记录，实现幂等注册）
-        self.state.scheduler.write().register_worker(info);
+        let registration = self.state.scheduler.write().register_worker(info);
         info!(
             worker_id = %worker_id,
             endpoint = %req.endpoint,
+            accepted = registration.accepted,
+            load = reported_load,
+            max_load = capacity,
             "control_plane_register"
         );
 
-        // 动态队列：按 delta 增减 semaphore permits
-        if self.state.queue_dynamic {
-            let new_capacity = req.max_concurrent.max(1) as usize;
-            if let Some(ref sem) = self.state.episode_semaphore {
-                if new_capacity > old_capacity {
-                    let added = new_capacity - old_capacity;
-                    sem.add_permits(added);
-                    info!(worker_id = %worker_id, added_permits = added,
-                          total_permits = sem.available_permits(), "queue_permits_added");
-                } else if old_capacity > new_capacity {
-                    // 减少：后台 acquire + forget（不阻塞注册流程）
-                    let reduce = (old_capacity - new_capacity) as u32;
-                    let sem = Arc::clone(sem);
-                    tokio::spawn(async move {
-                        if let Ok(permit) = sem.acquire_many(reduce).await {
-                            permit.forget();
-                        }
-                    });
-                }
-            }
+        if registration.accepted {
+            // dynamic admission 的容量必须以 scheduler 实际接受的注册结果为准。
+            self.state
+                .admission
+                .on_capacity_changed(registration.old_capacity, registration.new_capacity);
         }
 
-        // 返回注册结果，包含服务器确认的 worker_id 和当前服务器 epoch
         Ok(Response::new(RegisterWorkerResponse {
-            accepted: true,
+            accepted: registration.accepted,
             worker_id,
-            message: "accepted".to_string(),
+            message: if registration.accepted {
+                "accepted"
+            } else {
+                "worker_id already has active lease; existing worker marked draining"
+            }
+            .to_string(),
             server_epoch: self.state.epoch(),
         }))
     }
 
-    /// WorkerHeartbeat 接口的响应流类型。
-    /// ReceiverStream 把异步 mpsc::Receiver 包装成 gRPC 框架可用的 Stream 类型。
+    /// worker 心跳响应流类型。
     type WorkerHeartbeatStream = ReceiverStream<Result<HeartbeatResponse, Status>>;
 
-    /// 心跳接口：双向流模式（worker 持续发送心跳请求，服务器持续回复响应）。
+    /// 处理 worker 心跳双向流。
     ///
-    /// worker 定期（默认每 5 秒）发送心跳，包含自身当前的负载信息。
-    /// 服务器收到心跳后：
-    ///   1. 计算心跳单程延迟（server 收到时间 - worker 发送时间）并记录日志
-    ///   2. 更新调度器中该 worker 的负载记录（使 worker 的真实负载反映到调度决策中）
-    ///   3. 回复确认，告知 worker 下次心跳的建议间隔时间
-    ///
-    /// 实现方式：把实际的流处理逻辑放到后台 tokio task 中，
-    /// 函数本身立即返回，不阻塞 gRPC 框架的调度线程。
+    /// 每条心跳会更新 scheduler 中的 worker 负载和容量。如果容量变化，dynamic admission
+    /// 也要同步调整。返回流用于给 worker 回复确认、server_epoch 和下一次心跳间隔。
     async fn worker_heartbeat(
         &self,
         request: Request<tonic::Streaming<HeartbeatRequest>>,
@@ -172,50 +128,31 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         let mut stream = request.into_inner();
         let state = self.state.clone();
 
-        // 创建带缓冲的 mpsc channel（多生产者单消费者）。
-        // 后台 task 通过 tx 发送响应，gRPC 框架通过 rx（包装后）把响应流回 worker。
-        // 缓冲大小 16 表示最多积压 16 条未发送的响应。
+        // gRPC streaming handler 需要立即返回响应流，因此实际读取心跳的逻辑放到后台任务中。
         let (tx, rx) = mpsc::channel(16);
 
-        // 启动后台异步任务处理心跳流。
-        // tokio::spawn 让任务在后台独立运行，当前函数立即返回。
-        // 后台任务持续读取心跳，直到 worker 断开连接（流结束或出错）才退出。
         tokio::spawn(async move {
             while let Some(next) = stream.next().await {
                 match next {
                     Ok(heartbeat) => {
-                        // 计算心跳单程延迟：server 收到时间 - worker 发送时间。
-                        // 要求两端时钟大致同步；偏差过大时 lag_ms 可能为负，用 max(0) 截断。
+                        // lag_ms 只用于观测网络和 worker 侧调度延迟，不参与调度决策。
                         let now_ms = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as i64;
                         let lag_ms = (now_ms - heartbeat.timestamp_ms).max(0);
 
-                        // 用心跳中的负载数据更新调度器里该 worker 的状态。
-                        // max(0)：proto 中 load/max_load 是有符号 i32，
-                        // 确保不会把负数转成 u32（负数转 u32 会溢出成超大值）。
+                        // proto 中 load/max_load 是有符号整数，负数没有业务意义，因此先截断为 0。
                         let capacity_change = state.scheduler.write().update_worker_load(
                             &heartbeat.worker_id,
                             heartbeat.load.max(0) as u32,
                             heartbeat.max_load.max(0) as u32,
                         );
-                        if state.queue_dynamic {
-                            if let (Some((old_capacity, new_capacity)), Some(sem)) =
-                                (capacity_change, state.episode_semaphore.as_ref())
-                            {
-                                if new_capacity > old_capacity {
-                                    sem.add_permits((new_capacity - old_capacity) as usize);
-                                } else if old_capacity > new_capacity {
-                                    let reduce = old_capacity - new_capacity;
-                                    let sem = Arc::clone(sem);
-                                    tokio::spawn(async move {
-                                        if let Ok(permit) = sem.acquire_many(reduce).await {
-                                            permit.forget();
-                                        }
-                                    });
-                                }
-                            }
+                        if let Some((old_capacity, new_capacity)) = capacity_change {
+                            // worker 心跳改变容量时，dynamic admission 也必须同步。
+                            state
+                                .admission
+                                .on_capacity_changed(old_capacity, new_capacity);
                         }
 
                         info!(
@@ -226,39 +163,35 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                             "heartbeat_received"
                         );
 
-                        // 构造心跳响应，通知 worker 服务器一切正常
                         let resp = HeartbeatResponse {
                             ok: true,
-                            drain: None, // None 表示不要求 worker 停止接受新任务
+                            drain: None,
                             server_epoch: state.epoch(),
                             next_heartbeat_interval_ms: state.heartbeat_interval_ms as i32,
                         };
 
-                        // 把响应发入 channel；如果发送失败说明 gRPC 连接已关闭，退出循环
                         if tx.send(Ok(resp)).await.is_err() {
                             break;
                         }
                     }
                     Err(err) => {
-                        // 读取心跳流出错（通常是网络断开），记录警告日志并退出循环
                         warn!("heartbeat stream error: {err}");
                         break;
                     }
                 }
             }
-            // 循环结束后 tx 自动被 drop，gRPC 框架收到流结束信号并关闭连接
         });
 
-        // 把 mpsc::Receiver 包装成 ReceiverStream 返回给 gRPC 框架，作为服务端响应流
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    /// 结果上报接口：worker 执行完 episode 后调用，把结果发回服务器。
+    /// worker 上报 native 异步结果。
     ///
-    /// 处理步骤：
-    /// 1. 用 idempotency_key 做幂等性检查，防止重复处理同一个结果
-    /// 2. 从 pending_results 中找到对应的 oneshot channel 发送端
-    /// 3. 通过 channel 把结果传递给 service.rs 中等待的 submit_episode 调用
+    /// 处理顺序：
+    /// 1. 校验 server_epoch、幂等 key、dispatch lease 和 token。
+    /// 2. 从 pending_results 中原子移除等待项。
+    /// 3. 使用保存的 EpisodeContext 做统一 finalization。
+    /// 4. 通过 oneshot channel 把结果交回 submit_episode。
     async fn report_result(
         &self,
         request: Request<ReportResultRequest>,
@@ -275,6 +208,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
 
         self.state.sweep_ttl_caches();
 
+        // 非 0 epoch 必须和当前 server 匹配，防止旧 server 实例的结果污染当前状态。
         if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
             warn!(
                 worker_id = %req.worker_id,
@@ -298,6 +232,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 "empty idempotency_key",
             ));
         }
+        // 同一个 idempotency_key 重试时直接返回第一次处理结果。
         if let Some(record) = self.state.idempotency_cache.get(&req.idempotency_key) {
             let code = if record.ack {
                 "DUPLICATE_ACCEPTED"
@@ -358,6 +293,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         );
 
         if let Some(pending_ref) = self.state.pending_results.get(&pending_key) {
+            // 先读 pending entry 做拒绝判断，避免错误 worker 或错误 token 把 entry 移除。
             if pending_ref.worker_id != req.worker_id {
                 warn!(
                     worker_id = %req.worker_id,
@@ -403,6 +339,8 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 pending.worker_id == req.worker_id && pending.dispatch_token == req.dispatch_token
             });
         let Some((_, pending)) = removed else {
+            // pending 不存在时不一定是内部错误。可能是重复上报、超时后 late report、
+            // 取消后 late report，或者 worker 使用了未知 lease。
             let (code, message) =
                 if let Some(outcome) = self.state.result_outcomes.get(&pending_key) {
                     if outcome.code == "ACCEPTED" {
@@ -436,26 +374,14 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             return Ok(response(false, false, &code, &message));
         };
 
-        let request_for_result = crate::proto::v1::EpisodeRequest {
-            episode_id: episode_id.clone(),
-            attempt_id,
-            parallel_mode: pending.parallel_mode.clone(),
-            enqueue_ts: Some(pending.enqueue_ts),
-            metadata: std::collections::HashMap::from([(
-                "parallel_mode".to_string(),
-                pending.parallel_mode.clone(),
-            )]),
-            ..Default::default()
-        };
         let timing = ResultTiming {
             enqueue_at: pending.enqueue_at,
             dispatch_at: Some(pending.dispatch_at),
-            enqueue_ts: pending.enqueue_ts,
             dispatch_ts: Some(pending.dispatch_ts),
         };
         result = complete_episode_result(
             &self.state,
-            &request_for_result,
+            &pending.ctx.request,
             result,
             Some(timing),
             Some(ResultPersistenceContext::native(
@@ -465,14 +391,9 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             false,
         );
 
-        self.state.result_outcomes.insert(
-            pending_key.clone(),
-            crate::state::TimedOutcome {
-                expires_at,
-                code: "ACCEPTED".to_string(),
-                message: String::new(),
-            },
-        );
+        // 结果已经被接受后，后续同 lease 的不同 idempotency_key 上报也要得到稳定语义。
+        self.state
+            .remember_result_outcome(pending_key.clone(), "ACCEPTED", "");
         remember(true, "ACCEPTED", "accepted");
         self.state
             .scheduler
@@ -494,8 +415,6 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             .read()
             .list_workers()
             .into_iter()
-            // 过滤：env_types 为空时不过滤（保留所有 worker）；
-            // 否则只保留 supported_env_types 与请求的 env_types 有交集的 worker。
             .filter(|w| {
                 req.env_types.is_empty()
                     || req
@@ -526,9 +445,12 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::episode_context::EpisodeContext;
     use crate::proto::scheduler::v1::ReportResultRequest;
     use crate::proto::scheduler::v1::control_plane_service_server::ControlPlaneService;
-    use crate::proto::v1::EpisodeResult;
+    use crate::proto::v1::{EpisodeRequest, EpisodeResult};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn report_req(idempotency_key: &str) -> ReportResultRequest {
         ReportResultRequest {
@@ -546,23 +468,49 @@ mod tests {
         }
     }
 
+    fn pending_result(tx: tokio::sync::oneshot::Sender<EpisodeResult>) -> crate::state::PendingResult {
+        let enqueue_at = Instant::now();
+        let mut request = EpisodeRequest {
+            episode_id: "ep1".to_string(),
+            attempt_id: 1,
+            parallel_mode: "sync".to_string(),
+            enqueue_ts: Some(0.0),
+            metadata: std::collections::HashMap::from([(
+                "parallel_mode".to_string(),
+                "sync".to_string(),
+            )]),
+            ..Default::default()
+        };
+        request.metadata.insert("custom_key".to_string(), "custom_value".to_string());
+        let ctx = Arc::new(EpisodeContext::from_request(
+            &request,
+            "sync",
+            "",
+            enqueue_at,
+            0.0,
+            enqueue_at + Duration::from_secs(60),
+        ));
+        crate::state::PendingResult {
+            ctx,
+            tx,
+            worker_id: "w1".to_string(),
+            dispatch_lease_id: "lease-1".to_string(),
+            dispatch_token: b"token-1".to_vec(),
+            parallel_mode: "sync".to_string(),
+            enqueue_at,
+            dispatch_at: enqueue_at,
+            enqueue_ts: 0.0,
+            dispatch_ts: 0.0,
+        }
+    }
+
     #[tokio::test]
     async fn different_idempotency_after_accepted_returns_already_completed() {
         let state = crate::create_default_state();
         let (tx, _rx) = tokio::sync::oneshot::channel();
         state.pending_results.insert(
             ("ep1".to_string(), 1, "lease-1".to_string()),
-            crate::state::PendingResult {
-                tx,
-                worker_id: "w1".to_string(),
-                dispatch_lease_id: "lease-1".to_string(),
-                dispatch_token: b"token-1".to_vec(),
-                parallel_mode: "sync".to_string(),
-                enqueue_at: std::time::Instant::now(),
-                dispatch_at: std::time::Instant::now(),
-                enqueue_ts: 0.0,
-                dispatch_ts: 0.0,
-            },
+            pending_result(tx),
         );
         let svc = ControlPlaneServiceImpl { state };
         let first = svc
@@ -590,5 +538,198 @@ mod tests {
         assert!(!second_key.ack);
         assert!(!second_key.duplicate);
         assert_eq!(second_key.code, "ALREADY_COMPLETED");
+    }
+
+    #[tokio::test]
+    async fn report_result_preserves_episode_context_metadata() {
+        let state = crate::create_default_state();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.pending_results.insert(
+            ("ep1".to_string(), 1, "lease-1".to_string()),
+            pending_result(tx),
+        );
+        let svc = ControlPlaneServiceImpl { state };
+
+        let response = svc
+            .report_result(Request::new(report_req("key-context")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.ack);
+        assert_eq!(response.code, "ACCEPTED");
+
+        let result = rx.await.expect("result delivered");
+        assert_eq!(result.metadata.get("custom_key").map(String::as_str), Some("custom_value"));
+        assert_eq!(result.parallel_mode, "sync");
+        assert!(!result.metadata.contains_key("parallel_mode"));
+    }
+
+    #[tokio::test]
+    async fn wrong_worker_report_is_rejected_without_consuming_pending() {
+        let state = crate::create_default_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.pending_results.insert(
+            ("ep1".to_string(), 1, "lease-1".to_string()),
+            pending_result(tx),
+        );
+        let svc = ControlPlaneServiceImpl { state };
+        let mut req = report_req("key-wrong-worker");
+        req.worker_id = "w2".to_string();
+
+        let response = svc
+            .report_result(Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.ack);
+        assert_eq!(response.code, "WORKER_MISMATCH");
+        assert!(svc
+            .state
+            .pending_results
+            .contains_key(&("ep1".to_string(), 1, "lease-1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn wrong_dispatch_token_report_is_rejected_without_consuming_pending() {
+        let state = crate::create_default_state();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.pending_results.insert(
+            ("ep1".to_string(), 1, "lease-1".to_string()),
+            pending_result(tx),
+        );
+        let svc = ControlPlaneServiceImpl { state };
+        let mut req = report_req("key-wrong-token");
+        req.dispatch_token = b"not-the-token".to_vec();
+
+        let response = svc
+            .report_result(Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.ack);
+        assert_eq!(response.code, "TOKEN_MISMATCH");
+        assert!(svc
+            .state
+            .pending_results
+            .contains_key(&("ep1".to_string(), 1, "lease-1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn late_report_after_timeout_returns_recorded_outcome() {
+        let state = crate::create_default_state();
+        state.result_outcomes.insert(
+            ("ep1".to_string(), 1, "lease-1".to_string()),
+            crate::state::TimedOutcome {
+                expires_at: Instant::now() + Duration::from_secs(60),
+                code: "LATE_AFTER_TIMEOUT".to_string(),
+                message: "episode execution timeout".to_string(),
+            },
+        );
+        let svc = ControlPlaneServiceImpl { state };
+
+        let response = svc
+            .report_result(Request::new(report_req("key-late-timeout")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.ack);
+        assert_eq!(response.code, "LATE_AFTER_TIMEOUT");
+        assert_eq!(response.message, "episode execution timeout");
+    }
+
+    #[tokio::test]
+    async fn late_report_after_cancel_returns_cancel_outcome() {
+        let state = crate::create_default_state();
+        state.cancel_outcomes.insert(
+            "ep1".to_string(),
+            crate::state::TimedOutcome {
+                expires_at: Instant::now() + Duration::from_secs(60),
+                code: "LATE_AFTER_CANCEL".to_string(),
+                message: "episode cancelled".to_string(),
+            },
+        );
+        let svc = ControlPlaneServiceImpl { state };
+
+        let response = svc
+            .report_result(Request::new(report_req("key-late-cancel")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.ack);
+        assert_eq!(response.code, "LATE_AFTER_CANCEL");
+        assert_eq!(response.message, "episode was cancelled");
+    }
+    fn register_req(max_concurrent: u32) -> RegisterWorkerRequest {
+        RegisterWorkerRequest {
+            worker_id: "w1".to_string(),
+            endpoint: "127.0.0.1:50052".to_string(),
+            supported_env_types: vec!["test".to_string()],
+            max_concurrent,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn register_worker_initializes_reported_load() {
+        let state = crate::create_state_with_config(&crate::ServerConfig::default());
+        let svc = ControlPlaneServiceImpl {
+            state: Arc::clone(&state),
+        };
+        let mut req = register_req(4);
+        req.load = 2;
+        req.max_load = 6;
+
+        svc.register_worker(Request::new(req)).await.unwrap();
+
+        let workers = state.scheduler.read().list_workers();
+        assert_eq!(workers[0].reported_load, 2);
+        assert_eq!(workers[0].reserved_load, 0);
+        assert_eq!(workers[0].current_load, 2);
+        assert_eq!(workers[0].capacity, 6);
+    }
+
+    #[tokio::test]
+    async fn active_lease_reregister_does_not_increase_admission_permits() {
+        let mut cfg = crate::ServerConfig::default();
+        cfg.episode.queue_dynamic = true;
+        let state = crate::create_state_with_config(&cfg);
+        let svc = ControlPlaneServiceImpl {
+            state: Arc::clone(&state),
+        };
+
+        svc.register_worker(Request::new(register_req(1)))
+            .await
+            .unwrap();
+        assert_eq!(state.admission.available_permits(), 1);
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let permit = state
+            .admission
+            .acquire_until(&cancel_token, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        state
+            .scheduler
+            .write()
+            .reserve(&EpisodeRequest {
+                episode_id: "ep-active".to_string(),
+                env_type: "test".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(state.admission.available_permits(), 0);
+
+        let reregister = svc
+            .register_worker(Request::new(register_req(10)))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!reregister.accepted);
+        assert_eq!(state.admission.available_permits(), 0);
+        let workers = state.scheduler.read().list_workers();
+        assert_eq!(workers[0].capacity, 1);
+        assert!(workers[0].draining);
+        drop(permit);
     }
 }

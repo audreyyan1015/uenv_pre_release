@@ -1,92 +1,71 @@
-// scheduler/traits.rs：调度器的抽象接口和相关数据类型。
-//
-// 调度器的职责：当训练框架提交一个 episode 请求时，
-// 从所有已注册的 worker 中选择一个来执行。
-//
-// 选择依据：
-//   1. worker 是否支持请求中指定的环境类型（env_type）
-//   2. worker 当前负载是否已满（current_load < capacity）
-//   3. 调度算法决定在多个可用 worker 中选哪一个（轮询、最小负载等）
-//
-// 使用 trait 定义接口的好处：
-//   可以在不修改调用方代码的情况下，替换不同的调度算法实现。
-//   例如，把 RoundRobinScheduler 换成 LeastLoadScheduler，
-//   只需要新类型实现同一个 Scheduler trait 即可。
+// 文件职责：定义调度器抽象接口和调度错误类型。
+// 主要功能：声明 Scheduler trait、ScheduleError 以及 worker 注册/选择/释放/快照所需的统一方法。
+// 大致工作流：service/control_plane 只依赖 trait 调用调度能力，具体实现由 scheduler/mod.rs 的 RoundRobinScheduler 提供。
 
 use crate::proto::v1::{EpisodeRequest, ResourceSpec};
 
-/// Scheduler trait：调度器的抽象接口。
-/// 所有调度算法（RoundRobin、LeastLoad 等）都需要实现这个 trait。
+/// 调度器接口。
 ///
-/// Send + 'static 约束说明：
-///   - Send：实现类型可以安全地在线程间传递（tokio 的多线程运行时要求）
-///   - 'static：类型内部不持有生命周期受限的引用（Arc 包装要求）
+/// 调度器维护 worker 列表和 worker 侧负载信息。service 层通过这个接口完成三类操作：
+/// 注册/注销 worker、为 episode 选择 worker、在 episode 结束后释放 server 侧 reservation。
 pub trait Scheduler: Send + 'static {
-    /// 注册一个新的 worker。
-    /// worker 启动后向 server 发送 RegisterWorker 请求，
-    /// control_plane.rs 收到请求后会调用这个方法把 worker 加入调度器。
-    fn register_worker(&mut self, info: WorkerInfo);
-
-    /// 注销一个 worker，将其从调度器中移除。
-    /// worker 下线或被管理员手动 drain 时调用。
-    /// 注销后，该 worker 不再接收新的 episode 分配。
+    /// 注册 worker，或更新同 worker_id 的记录。
+    ///
+    /// 返回 `WorkerRegistration`，让 control plane 知道这次注册是否真的改变了容量。
+    /// 如果同 worker_id 已经有 active lease，调度器可以拒绝替换记录。
+    fn register_worker(&mut self, info: WorkerInfo) -> WorkerRegistration;
+    /// 注销 worker。实现可以先标记 draining，再根据是否还有负载决定是否移除。
     fn unregister_worker(&mut self, worker_id: &str);
-
-    /// 核心调度方法：为一个 episode 请求选择合适的 worker。
-    ///
-    /// 返回值：
-    /// - Ok(WorkerAssignment)：选中的 worker 的 ID 和 gRPC 地址
-    /// - Err(ScheduleError)：没有合适的 worker 可用（具体原因见 ScheduleError）
-    ///
-    /// &self 表示只读访问：调度本身不修改 worker 的状态。
+    /// 只读地选择 worker，不改变负载。保留给查询或未来只读调度场景。
     fn schedule(&self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError>;
-
-    /// ?? Worker admission?????????????????? reservation?
+    /// 选择 worker 并增加 server 侧 reservation，防止并发请求超过 worker 容量。
     fn reserve(&mut self, request: &EpisodeRequest) -> Result<WorkerAssignment, ScheduleError>;
-
-    /// ???? server-side reservation?
+    /// episode 结束或 dispatch 失败后释放 reservation。
     fn release(&mut self, worker_id: &str);
 }
 
-/// WorkerInfo：一个已注册 worker 的完整信息。
-/// 调度器内部用这个结构体存储每个 worker 的状态。
+/// 调度器内部保存的 worker 状态。
 pub struct WorkerInfo {
-    /// worker 的唯一标识符（字符串，可以是 UUID 或自定义名称）
+    /// worker 的稳定标识，来自 RegisterWorker 请求。
     pub worker_id: String,
-    /// worker 的 gRPC 监听地址，格式为 "IP:端口"，例如 "192.168.1.10:50052"
-    /// 服务器在向 worker 下发 episode 时会连接这个地址
+    /// worker gRPC 地址，server 下发 native episode 或 cancel 时使用。
     pub endpoint: String,
-    /// 该 worker 支持的环境类型列表，例如 ["lammps", "gym-cartpole"]
-    /// 调度时会把 episode 请求中的 env_type 与这个列表匹配
+    /// worker 支持的环境类型。调度时必须包含 request.env_type。
     pub supported_env_types: Vec<String>,
-    /// 该 worker 最多同时执行的 episode 数（容量上限）
+    /// worker 声明的最大并发 episode 数。
     pub capacity: u32,
-    /// 该 worker 当前正在执行的 episode 数（当前负载）
-    /// ?????/??????????????????? reported_load?
+    /// 对外展示用的当前负载，一般等于 max(reserved_load, reported_load)。
     pub current_load: u32,
-    /// server ?????? terminal ? reservation ??
+    /// server 已经分配但 worker 心跳未必已经反映出来的负载。
     pub reserved_load: u32,
-    /// worker ???????????
+    /// worker 心跳上报的实际负载。
     pub reported_load: u32,
-    /// Worker 机器实际拥有的资源规格（注册时由 worker 上报，None 表示未上报）
+    /// worker 资源规格。请求包含 resource_spec 时需要检查是否满足。
     pub resource: Option<ResourceSpec>,
-    /// 是否正在 drain：true 时不再接受新 episode，等待当前任务执行完毕
+    /// true 表示不再接收新的 episode，已有 episode 可以继续结束。
     pub draining: bool,
-    /// 上次成功上报 report_result 的时刻（None 表示从未上报）。
-    /// 用于检测 Worker 假活：load > 0 但长时间无 episode 完成时跳过调度。
+    /// 最近一次成功 report_result 的时间，用于识别长时间没有完成任务的 worker。
     pub last_report_at: Option<std::time::Instant>,
-    /// 上次收到心跳包的时刻（注册时初始化为 Some(now)）。
-    /// 超过 heartbeat_timeout_secs 无心跳则认为连接断开。
+    /// 最近一次心跳时间，用于判断 worker 是否失联。
     pub last_heartbeat_at: Option<std::time::Instant>,
-    /// Runtime Gateway 对外可访问 URL（SWE+Agent 编排时写入 AgentJob.gateway_url）。
-    /// 由 RegisterWorker.gateway_public_url 上报；native 路径不使用。
+    /// Runtime Gateway 对外地址。SWE agent 路径需要 agent 通过它访问环境。
     pub gateway_public_url: String,
-    /// 该 worker 已 sync 的 EnvPackage 列表（严格版本校验用）。
-    /// SWE+Agent 调度时要求 synced_env_packages 含请求的 env_package@version。
+    /// worker 已同步的环境包列表。带 env_package 的请求必须匹配这里的 package 和版本。
     pub synced_env_packages: Vec<SyncedEnvPackageInfo>,
 }
 
-/// Worker 已 sync 的 EnvPackage 记录（对应 proto SyncedEnvPackage）。
+/// worker 注册对调度器容量产生的实际影响。
+///
+/// control plane 使用 old_capacity/new_capacity 更新 admission permits。`accepted=false` 时，
+/// old_capacity 和 new_capacity 相同，表示 admission 不应该调整容量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerRegistration {
+    pub accepted: bool,
+    pub old_capacity: u32,
+    pub new_capacity: u32,
+}
+
+/// worker 已同步的环境包信息。
 #[derive(Clone)]
 pub struct SyncedEnvPackageInfo {
     pub package_id: String,
@@ -94,32 +73,26 @@ pub struct SyncedEnvPackageInfo {
     pub bundle_digest: String,
 }
 
-/// WorkerAssignment：调度结果，表示一个 episode 应该分发给哪个 worker。
+/// 调度结果。service 层拿到它之后会进行 dispatch 或 SWE session 创建。
 #[derive(Debug, Clone)]
 pub struct WorkerAssignment {
-    /// 被选中的 worker 的 ID（用于更新负载计数等操作）
     pub worker_id: String,
-    /// 被选中的 worker 的 gRPC 地址（用于建立连接并下发 episode）
     pub endpoint: String,
-    /// 被选中的 worker 的 Runtime Gateway 对外 URL（SWE+Agent 编排注入 AgentJob）。
     pub gateway_public_url: String,
 }
 
-/// 调度失败时的错误类型，描述失败的具体原因。
-/// thiserror::Error 宏会自动实现 std::error::Error trait，
-/// 并根据 #[error("...")] 属性生成对应的错误信息字符串。
+/// 调度失败原因。
+///
+/// 这些错误会影响重试策略。容量不足通常可以等一段时间再试；env_type 或 env_package
+/// 不匹配通常表示当前 worker 集合无法处理这个请求。
 #[derive(Debug, thiserror::Error)]
 pub enum ScheduleError {
-    /// 调度器中没有任何已注册的 worker（worker 列表为空）
     #[error("no worker available")]
     NoWorkerAvailable,
-    /// 有 worker 注册，但没有一个支持请求中指定的 env_type
     #[error("no worker supports env type")]
     NoMatchingEnvType,
-    /// 支持该 env_type 的 worker 都已满载（current_load >= capacity）
     #[error("all workers at capacity")]
     AllWorkersAtCapacity,
-    /// 有支持该 env_type 的 worker，但没有一个 sync 了请求的 env_package@version
     #[error("no worker has synced the requested env_package")]
     NoMatchingEnvPackage,
 }

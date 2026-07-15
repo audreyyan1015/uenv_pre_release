@@ -192,7 +192,6 @@ mod tests {
             max_steps: 1,
             timeout_seconds: 10,
             resource_spec: None,
-            model_endpoint: String::new(),
             reward_config: b"{}".to_vec(),
             seed: Some(0),
             correlation_id: "t-1".to_string(),

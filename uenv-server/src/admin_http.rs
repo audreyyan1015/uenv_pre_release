@@ -1,27 +1,34 @@
+// 文件职责：提供轻量级 HTTP admin 接口，给运维和调试查看 server 当前状态。
+// 主要功能：暴露 /health、/status、/agents 等只读端点，汇总 worker、episode、Agent 池和 AgentJob 队列信息。
+// 大致工作流：启动时绑定 admin_http_bind/admin_http_port，收到 HTTP 请求后读取 ServerState 快照并直接写回 JSON/文本响应。
+
 //! 轻量级 HTTP admin 接口，默认监听 :50052。
 //!
 //! 端点：
-//!   GET /status  → JSON，包含所有 worker 状态和各 worker 正在跑的 episode 列表
-//!   GET /agents  → JSON，Agent 池状态（已注册 Agent + in-flight/待领 AgentJob）
-//!   GET /health  → "ok"（用于 liveness probe）
+//!   GET /status  返回 JSON，包含所有 worker 状态和各 worker 正在运行的 episode 列表。
+//!   GET /agents  返回 JSON，包含 Agent 池状态、已注册 Agent 和 AgentJob 队列状态。
+//!   GET /health  返回 "ok"，用于 liveness probe。
 //!
 //! 不依赖 axum / hyper，直接用 tokio TcpListener：
-//! 接受连接 → 读取请求行 → 忽略请求体 → 写回 HTTP/1.1 响应。
+//!   1. 接受 TCP 连接。
+//!   2. 读取 HTTP 请求头的前 2 KiB。
+//!   3. 只解析请求路径和鉴权 header，不处理请求体。
+//!   4. 写回简单的 HTTP/1.1 响应。
 //! 仅供 uenv-ctl 运维工具使用，不对外暴露敏感数据。
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use crate::admin_query::AdminQueryService;
 use crate::state::ServerState;
 
 /// 启动 admin HTTP 服务，绑定到 `0.0.0.0:{port}`。
 /// port=0 时不启动（配置禁用）。
 pub async fn serve(state: Arc<ServerState>, bind_addr: String, port: u16, admin_token: String) {
+    // admin HTTP 是运维辅助接口，不参与 episode 调度。启动失败只记录日志，不阻止 gRPC 服务继续运行。
     if port == 0 {
         return;
     }
@@ -37,13 +44,14 @@ pub async fn serve(state: Arc<ServerState>, bind_addr: String, port: u16, admin_
         }
     };
     loop {
+        // 每个连接单独启动一个 task 处理，避免慢客户端阻塞后续连接 accept。
         let Ok((mut stream, peer)) = listener.accept().await else {
             continue;
         };
         let state = Arc::clone(&state);
         let admin_token = admin_token.clone();
         tokio::spawn(async move {
-            // 读取请求（最多 2 KiB），只解析第一行获取路径
+            // 读取请求（最多 2 KiB），只解析第一行获取路径。超过 2 KiB 的 body 或 header 不会被继续读取。
             let mut buf = [0u8; 2048];
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
@@ -54,6 +62,7 @@ pub async fn serve(state: Arc<ServerState>, bind_addr: String, port: u16, admin_
                 .unwrap_or("/");
 
             let path = path.trim_end_matches('/');
+            // /health 允许无 token 访问，方便容器或 systemd 健康检查；其他端点在配置 token 后需要鉴权。
             let authorized = admin_token.is_empty()
                 || path == "/health"
                 || req.lines().any(|line| {
@@ -75,101 +84,63 @@ pub async fn serve(state: Arc<ServerState>, bind_addr: String, port: u16, admin_
                 "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n\r\n{body}",
                 len = body.len(),
             );
+            // 写失败通常表示客户端已断开，admin 接口不需要把这个错误传播到主服务。
             let _ = stream.write_all(response.as_bytes()).await;
             tracing::debug!(peer = %peer, path, "admin_http");
         });
     }
 }
 
-fn elapsed_secs(t: Option<Instant>) -> Option<u64> {
-    t.map(|i| i.elapsed().as_secs())
-}
-
 fn status_json(state: &ServerState) -> Value {
-    // 按 worker_id 聚合正在跑的 episode
-    let mut episodes_by_worker: HashMap<String, Vec<Value>> = HashMap::new();
-    for entry in state.active_episodes.iter() {
-        let ep = entry.value();
-        episodes_by_worker
-            .entry(ep.worker_id.clone())
-            .or_default()
-            .push(json!({
-                "episode_id":   ep.episode_id,
-                "attempt_id":   ep.attempt_id,
-                "batch_id":     ep.batch_id,
-                "elapsed_secs": ep.started_at.elapsed().as_secs(),
-            }));
-    }
-
-    let workers = state.scheduler.read().list_workers();
-    let total_capacity: u32 = workers.iter().map(|w| w.capacity).sum();
-
-    let worker_json: Vec<Value> = workers
-        .iter()
+    // status JSON 是 AdminQueryService 快照的 HTTP 表示，避免 admin_http 直接遍历内部 map。
+    let status = AdminQueryService::new(state).status();
+    let worker_json: Vec<Value> = status
+        .workers
+        .into_iter()
         .map(|w| {
-            let status = if w.draining {
-                "draining"
-            } else if w.degraded {
-                "degraded"
-            } else {
-                "ready"
-            };
-            // 按耗时降序，最老的 episode 排前面
-            let mut eps = episodes_by_worker
-                .get(&w.worker_id)
-                .cloned()
-                .unwrap_or_default();
-            eps.sort_by(|a, b| {
-                b["elapsed_secs"].as_u64().cmp(&a["elapsed_secs"].as_u64())
-            });
+            let episodes: Vec<Value> = w
+                .episodes
+                .into_iter()
+                .map(|ep| {
+                    json!({
+                        "episode_id":   ep.episode_id,
+                        "attempt_id":   ep.attempt_id,
+                        "batch_id":     ep.batch_id,
+                        "elapsed_secs": ep.elapsed_secs,
+                    })
+                })
+                .collect();
             json!({
                 "worker_id":           w.worker_id,
                 "endpoint":            w.endpoint,
-                "status":              status,
-                "load":                w.current_load,
+                "status":              w.status,
+                "load":                w.load,
                 "capacity":            w.capacity,
-                "last_heartbeat_secs": elapsed_secs(w.last_heartbeat_at),
-                "last_report_secs":    elapsed_secs(w.last_report_at),
-                "episodes":            eps,
+                "last_heartbeat_secs": w.last_heartbeat_secs,
+                "last_report_secs":    w.last_report_secs,
+                "episodes":            episodes,
             })
         })
         .collect();
 
-    // 动态队列剩余 permit 数（-1 表示无队列限制）
-    let queue_permits = state
-        .episode_semaphore
-        .as_ref()
-        .map(|s| s.available_permits() as i64)
-        .unwrap_or(-1i64);
-
     json!({
-        "server_epoch":    state.epoch(),
-        "worker_count":    workers.len(),
-        "total_capacity":  total_capacity,
-        "active_episodes": state.active_episodes.len(),
-        "pending_results": state.pending_results.len(),
-        "queue_permits":   queue_permits,
+        "server_epoch":    status.server_epoch,
+        "worker_count":    status.worker_count,
+        "total_capacity":  status.total_capacity,
+        "active_episodes": status.active_episodes,
+        "pending_results": status.pending_results,
+        "queue_permits":   status.queue_permits,
         "workers":         worker_json,
     })
 }
 
 /// Agent 池状态：已注册 Agent + AgentJob 队列（in-flight / 待领）。
 fn agents_json(state: &ServerState) -> Value {
-    let agents = state.agent_registry.snapshot();
-
-    // 按 pool 聚合 Agent 的容量/负载，便于一眼看池饱和度。
-    let mut cap_by_pool: HashMap<String, (u32, u32)> = HashMap::new();
-    for a in &agents {
-        if a.stale {
-            continue;
-        }
-        let e = cap_by_pool.entry(a.agent_pool_id.clone()).or_insert((0, 0));
-        e.0 += a.max_concurrent; // 容量之和
-        e.1 += a.current_load; // 当前负载之和
-    }
-
-    let agent_json: Vec<Value> = agents
-        .iter()
+    // Agent 状态包括资源池容量和队列状态，主要用于排查 SWE agent 调度是否卡在待领取或执行中。
+    let status = AdminQueryService::new(state).agents();
+    let agent_json: Vec<Value> = status
+        .agents
+        .into_iter()
         .map(|a| {
             json!({
                 "agent_id":            a.agent_id,
@@ -186,52 +157,40 @@ fn agents_json(state: &ServerState) -> Value {
         })
         .collect();
 
-    let pool_json: Vec<Value> = cap_by_pool
+    let pool_json: Vec<Value> = status
+        .pools
         .into_iter()
-        .map(|(pool, (cap, load))| {
+        .map(|pool| {
             json!({
-                "agent_pool_id":  pool,
-                "total_capacity": cap,
-                "total_load":     load,
-                "pending_jobs":   state.agent_job_queue.pending_len(&pool),
+                "agent_pool_id":  pool.agent_pool_id,
+                "total_capacity": pool.total_capacity,
+                "total_load":     pool.total_load,
+                "pending_jobs":   pool.pending_jobs,
             })
         })
         .collect();
 
-    let in_flight: Vec<Value> = state
-        .agent_job_queue
-        .in_flight_snapshot()
+    let in_flight: Vec<Value> = status
+        .in_flight_detail
         .into_iter()
-        .map(|(job_id, agent_id)| {
+        .map(|job| {
             json!({
-                "job_id":   job_id,
-                // agent_id 为空表示已入队但尚未被任何 Agent 领取
-                "agent_id": if agent_id.is_empty() { Value::Null } else { json!(agent_id) },
+                "job_id":   job.job_id,
+                // agent_id 为空表示已入队但尚未被任何 Agent 领取。
+                "agent_id": job.agent_id.map_or(Value::Null, |agent_id| json!(agent_id)),
             })
         })
         .collect();
-
-    let pending_total: usize = state
-        .agent_job_queue
-        .pending_by_pool()
-        .iter()
-        .map(|(_, n)| *n)
-        .sum();
-
-    // in-flight 表在 enqueue 时即登记（含尚未被 poll 领取的），complete/abandon 时移除。
-    // 因此 outstanding = 待领(pending) + 已领取执行中(running)，两者是包含关系而非并列。
-    let outstanding = state.agent_job_queue.in_flight_len();
-    let running = outstanding.saturating_sub(pending_total);
 
     json!({
-        "server_epoch":      state.epoch(),
-        "agent_count":       agents.len(),
-        // outstanding = 已入队未完成的 AgentJob 总数（= pending + running）
-        "outstanding_jobs":  outstanding,
-        "pending_jobs":      pending_total,   // 已入队、尚未被 Agent 领取
-        "running_jobs":      running,         // 已被领取、执行中
+        "server_epoch":      status.server_epoch,
+        "agent_count":       status.agent_count,
+        // outstanding 表示已入队但尚未完成的 AgentJob 总数，等于 pending + running。
+        "outstanding_jobs":  status.outstanding_jobs,
+        "pending_jobs":      status.pending_jobs,   // 已入队、尚未被 Agent 领取。
+        "running_jobs":      status.running_jobs,   // 已被领取、执行中。
         "pools":             pool_json,
         "agents":            agent_json,
-        "in_flight_detail":  in_flight,       // agent_id=null 表示尚未领取
+        "in_flight_detail":  in_flight,       // agent_id=null 表示尚未领取。
     })
 }

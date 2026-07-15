@@ -446,7 +446,7 @@ Hub 在内网承担 **环境预缓存与制品分发**（不仅是 manifest/sche
 | H-2 | **发布 code / DSCodeBench EnvPackage** | ✅ **全量已完成（2026-07-12，Hub `8.130.95.176`）**：`dscodebench@0.2.0` 含 `benchmark.tar.gz`（1.2MB）、`eval-scripts.tar.gz`、`wheels.tar.gz`（≈3.9GB / 106 wheels，对齐官方 `requirements.txt`）。Worker：`sync` → 解压 → `scripts/install_venv.sh`。 | ✅ |
 | H-3 | **更新 `seed.rs` 与导入脚本** | ✅ seed 已含 math/code@0.2.0、yank legacy、`config/benchmark/` fixture 包；新实例启动即对齐。 | ✅ |
 | H-4 | **五类 benchmark 运维手册** | 在 `Docs/hub/` 补充：各 benchmark 在 Hub 上应缓存哪些制品、`uenv env sync` / `publish-image` 示例。 | P1 |
-| H-5 | **SWE-bench-Pro 镜像与 catalog 全量入库** | 导入机按 `scripts/pull-pro-image-7143.sh` 多 mirror 拉 `jefzda/sweap-images`（实机成功线：**dockerproxy.net**；另试 DaoCloud / NJU / `1ms.run`；直连易 429）→ `docker save` → `uenv env publish-image`；catalog 替换占位样例；7143 仅 `sync --docker-load`，无外拉。 | P0 |
+| H-5 | **SWE-bench-Pro 镜像与 catalog 全量入库** | ⚠️ **过渡中（2026-07-13）**：catalog `0.3.4`（731）+ Hub **3** 个 `image_tar`；Hub 全量入库已停（盘≈100G）。**7143** Docker data-root 已迁 `/data/docker`，后台 `pull-swe-pro-images-worker.sh` 本机全量直拉（~1.5TB）。Hub 扩容后再 `docker save`→`publish-image`。 | P0 / Worker 直拉中 |
 | H-6 | **math dataset 离线评测包（可选）** | smoke 已入库；全量 held-out 评测集 tar 仍可选。 | P2 |
 | H-7 | **fixtures 与 Hub examples 对齐** | manifest `examples[]` 与 `fixtures/math`、`fixtures/code` 一致；sync 后路径与文档中的 `test_script_path` 相对路径一致。 | P2 |
 

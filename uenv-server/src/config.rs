@@ -1,5 +1,10 @@
+// 文件职责：定义并加载 uenv-server 的运行时 YAML 配置。
+// 主要功能：描述 ServerConfig、SchedulerConfig、EpisodeConfig，提供默认值、文件加载和基础合法性校验。
+// 大致工作流：adapter-core 启动时读取 UENV_CONFIG_PATH 或 config/server.yaml，解析后创建 ServerState 并注入调度/episode/admin 参数。
+
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 
 /// Server 全局配置，从 server.toml 加载。所有字段均有 serde default，
@@ -10,9 +15,9 @@ pub struct ServerConfig {
     pub port: u16,
     /// admin HTTP 端口（uenv-ctl 使用）。0 = 禁用，默认 50052。
     pub admin_http_port: u16,
-    /// admin HTTP ??????????????????????
+    /// admin HTTP 监听地址。默认只绑定 127.0.0.1，避免管理接口直接暴露到公网。
     pub admin_http_bind: String,
-    /// admin HTTP bearer / X-Admin-Token????????????????
+    /// admin HTTP bearer / X-Admin-Token 令牌。为空时表示不校验管理令牌。
     pub admin_http_token: String,
     pub scheduler: SchedulerConfig,
     pub episode: EpisodeConfig,
@@ -55,9 +60,9 @@ pub struct EpisodeConfig {
     /// 启用后 adapter 层并发上限 = Σ(已注册 worker 的 max_concurrent)，
     /// 无需手动配置 queue_max_in_flight。
     pub queue_dynamic: bool,
-    /// async result ?????0 ???? TTL ???
+    /// async result 缓存保留秒数。0 表示不按 TTL 清理。
     pub completed_async_ttl_secs: u64,
-    /// async result ??????0 ????? async result?
+    /// async result 缓存最大条数。0 表示不保存异步结果。
     pub completed_async_max_entries: usize,
     pub agent_job_pickup_timeout_secs: u64,
 }
@@ -105,28 +110,76 @@ impl Default for EpisodeConfig {
 }
 
 impl ServerConfig {
+    /// 从指定路径读取配置文件。
+    ///
+    /// 这个函数要求文件必须存在，并且 YAML 内容必须能解析、能通过 validate 校验。
+    /// 适合生产启动路径使用，避免配置写错后仍然按默认值启动。
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read server config {}: {e}", path.display()))?;
-        serde_yaml::from_str(&content)
-            .map_err(|e| format!("failed to parse server config {}: {e}", path.display()))
+        let cfg: Self = serde_yaml::from_str(&content)
+            .map_err(|e| format!("failed to parse server config {}: {e}", path.display()))?;
+        cfg.validate()?;
+        Ok(cfg)
     }
 
-    /// ?????????????????? fallback ??????
-    /// ?? UENV_SERVER_CONFIG_STRICT=1 ??????????? panic??????????
-    pub fn load_or_default(path: impl AsRef<Path>) -> Self {
-        let strict = std::env::var("UENV_SERVER_CONFIG_STRICT")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            .unwrap_or(false);
-        match Self::load(path.as_ref()) {
-            Ok(cfg) => cfg,
-            Err(e) if strict => panic!("{e}"),
-            Err(e) => {
-                eprintln!("warn: {e}; using defaults");
-                Self::default()
+    /// 读取配置文件；只有文件不存在时才使用默认配置。
+    ///
+    /// “文件不存在”和“文件存在但内容错误”是两种不同情况：
+    /// - 不存在：开发或测试环境可以使用默认值。
+    /// - 存在但解析失败或字段非法：必须返回错误，防止生产环境静默使用错误配置。
+    pub fn load_or_default_if_missing(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                let cfg: Self = serde_yaml::from_str(&content)
+                    .map_err(|e| format!("failed to parse server config {}: {e}", path.display()))?;
+                cfg.validate()?;
+                Ok(cfg)
             }
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("failed to read server config {}: {e}", path.display())),
         }
+    }
+
+    /// 兼容旧调用方的便捷函数。
+    ///
+    /// 如果配置文件存在但非法，这里会 panic。启动流程可以直接失败并打印具体错误。
+    pub fn load_or_default(path: impl AsRef<Path>) -> Self {
+        Self::load_or_default_if_missing(path).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// 校验配置字段之间的基本不变量。
+    ///
+    /// 这里不做复杂业务校验，只拒绝会导致 server 无法正确运行的值，例如 0 超时、
+    /// 0 channel 容量、未知 scheduler strategy。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.scheduler.strategy != "round_robin" {
+            return Err(format!(
+                "unsupported scheduler.strategy '{}': expected 'round_robin'",
+                self.scheduler.strategy
+            ));
+        }
+        if self.scheduler.schedule_retry_interval_ms == 0 {
+            return Err("scheduler.schedule_retry_interval_ms must be greater than 0".to_string());
+        }
+        if self.scheduler.heartbeat_interval_ms == 0 {
+            return Err("scheduler.heartbeat_interval_ms must be greater than 0".to_string());
+        }
+        if self.scheduler.heartbeat_timeout_secs == 0 {
+            return Err("scheduler.heartbeat_timeout_secs must be greater than 0".to_string());
+        }
+        if self.episode.default_timeout_secs == 0 {
+            return Err("episode.default_timeout_secs must be greater than 0".to_string());
+        }
+        if self.episode.max_attempts == 0 {
+            return Err("episode.max_attempts must be greater than 0".to_string());
+        }
+        if self.episode.broadcast_capacity == 0 {
+            return Err("episode.broadcast_capacity must be greater than 0".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -177,6 +230,7 @@ episode:
     #[test]
     fn config_yaml_overrides_all_fields() {
         let cfg: ServerConfig = serde_yaml::from_str(SAMPLE_YAML).expect("parse");
+        cfg.validate().expect("valid config");
         assert_eq!(cfg.port, 9999);
         assert_eq!(cfg.scheduler.worker_degraded_threshold_secs, 120);
         assert_eq!(cfg.scheduler.schedule_retry_interval_ms, 250);
@@ -201,6 +255,7 @@ episode:
         use crate::state::ServerState;
 
         let cfg: ServerConfig = serde_yaml::from_str(SAMPLE_YAML).expect("parse");
+        cfg.validate().expect("valid config");
         let scheduler = Arc::new(RwLock::new(
             RoundRobinScheduler::new(cfg.scheduler.worker_degraded_threshold_secs, cfg.scheduler.heartbeat_timeout_secs)
         ));
@@ -221,6 +276,40 @@ episode:
         let cfg = ServerConfig::load_or_default("/nonexistent/path/server.yaml");
         // 缺失文件时应使用默认值，不 panic
         assert_eq!(cfg.episode.max_attempts, 3);
+    }
+
+    #[test]
+    fn config_existing_parse_error_fails_fast() {
+        let path = std::env::temp_dir().join(format!(
+            "uenv-bad-server-config-{}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "scheduler: [not valid yaml for this schema").expect("write");
+        let err = ServerConfig::load_or_default_if_missing(&path).expect_err("parse should fail");
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("failed to parse server config"));
+    }
+
+    #[test]
+    fn config_unknown_scheduler_strategy_fails_fast() {
+        let yaml = r#"
+scheduler:
+  strategy: least_load
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let err = cfg.validate().expect_err("strategy should fail");
+        assert!(err.contains("unsupported scheduler.strategy"));
+    }
+
+    #[test]
+    fn config_invalid_timeout_fails_fast() {
+        let yaml = r#"
+episode:
+  default_timeout_secs: 0
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let err = cfg.validate().expect_err("timeout should fail");
+        assert!(err.contains("default_timeout_secs"));
     }
 
     #[test]

@@ -1,12 +1,14 @@
 syntax = "proto3";
 package uenv.bridge.v1;
 
-// Local Python shim -> Rust adapter core API.
+// 干净版 proto：只保留类型化协议字段。
+// 这份文件用于未来替换正式 proto。
 //
-// The Python side owns VeRL AgentLoop objects such as prompt tokens, sampling
-// parameters, reward config, and sample metadata. The Rust core receives
-// normalized sample envelopes, converts them to UEnv EpisodeRequest values,
-// and calls the in-process UEnv Server API by function call.
+// 本地 Python 适配层调用 Rust adapter core 的接口。
+//
+// Python 侧负责 VeRL AgentLoop 对象，例如提示词 token、采样参数、奖励配置和样本元数据。
+// Rust core 接收规范化后的样本信封，将其转换成 UEnv EpisodeRequest，
+// 再通过进程内函数调用访问 UEnv Server API。
 service AdapterCoreService {
   rpc ExecuteBatch(ExecuteBatchRequest) returns (ExecuteBatchResponse);
   rpc ExecuteBatchStream(stream SampleEnvelope) returns (stream SampleResult);
@@ -25,14 +27,37 @@ message ExecuteBatchResponse {
   repeated SampleResult results = 3;
 }
 
+// 模型服务端点的结构化表示。
+message ModelEndpoint {
+  string endpoint_type = 1;
+  string url = 2;
+  string model_name = 3;
+  bytes generation_config_json = 4;
+  int32 max_retries = 5;
+}
+
 message SampleEnvelope {
   string request_id = 1;
   string batch_id = 2;
   uint32 sample_index = 3;
   string framework = 4;
   string env_type = 5;
-  bytes payload_json = 6;
-  bytes meta_json = 7;
+  // 历史字段号，已删除并保留，禁止复用。
+  reserved 6, 7, 18;
+  // 训练并行模式。
+  string parallel_mode = 8;
+  // 环境、episode、奖励配置的结构化 JSON。
+  bytes env_config_json = 9;
+  bytes episode_config_json = 10;
+  bytes reward_config_json = 11;
+  // 模型端点的结构化消息。
+  ModelEndpoint model_endpoint = 12;
+  // 超时、关联 ID、样本上下文和环境包版本信息。
+  int32 timeout_seconds = 13;
+  string correlation_id = 14;
+  bytes sample_context_json = 15;
+  string env_package_id = 16;
+  string env_package_version = 17;
 }
 
 message SampleResult {
@@ -46,6 +71,10 @@ message SampleResult {
   bytes trajectory_json = 8;
   string error_code = 9;
   string error_message = 10;
+  // 异步训练返回的 rollout 版本和 token 级 logprob。
+  int64 rollout_param_version = 11;
+  string rollout_policy_version = 12;
+  repeated float rollout_log_probs = 13;
 }
 
 message HealthCheckRequest {}

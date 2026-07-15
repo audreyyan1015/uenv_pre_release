@@ -1,9 +1,11 @@
 #![cfg(unix)]
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use uenv_worker::episode::executor::{EpisodeExecutor, ExecuteContext};
 use uenv_worker::plugin::host::PluginHost;
 use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
-use uenv_worker::proto::v1::{EpisodeRequest, ExecutionMode, ResourceSpec};
+use uenv_worker::proto::v1::{EpisodeRequest, ExecutionMode, ModelEndpoint, ResourceSpec};
 
 #[tokio::test]
 async fn m5_single_round_code_dscodebench_smoke() {
@@ -26,10 +28,9 @@ async fn m5_single_round_code_dscodebench_smoke() {
         "library": "python",
         "test_code": "assert add(1, 2) == 3",
         "entry_point": "add",
-        "response_text": "```python\ndef add(a, b):\n    return a + b\n```",
         "timeout_secs": 30
     });
-    let request = EpisodeRequest {
+    let mut request = EpisodeRequest {
         episode_id: "code-episode-001".to_string(),
         attempt_id: 1,
         env_type: "code".to_string(),
@@ -42,13 +43,41 @@ async fn m5_single_round_code_dscodebench_smoke() {
             gpu_count: 0,
             gpu_type: String::new(),
         }),
-        model_endpoint: String::new(),
         seed: Some(42),
         correlation_id: "corr-code-001".to_string(),
         timeout_seconds: 120,
         reward_config: br#"{"type":"rule_reward"}"#.to_vec(),
         ..Default::default()
     };
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock llm");
+    let addr = listener.local_addr().expect("mock llm addr");
+    request.model_endpoint_config = Some(ModelEndpoint {
+        endpoint_type: "http".to_string(),
+        url: format!("http://{addr}/v1"),
+        model_name: "code-model".to_string(),
+        generation_config_json: Vec::new(),
+        max_retries: 0,
+    });
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept mock llm");
+        let mut buffer = vec![0; 8192];
+        let _ = stream
+            .read(&mut buffer)
+            .await
+            .expect("read mock llm request");
+        let body = br#"{"choices":[{"message":{"content":"```python\ndef add(a, b):\n    return a + b\n```"},"finish_reason":"stop"}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write mock llm response");
+    });
 
     let host = PluginHost::load_from_dir(plugin_dir).expect("load plugin host");
     let pool = WarmupPool::new(
