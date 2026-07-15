@@ -20,7 +20,7 @@ message AgentJob {
     string agent_bridge_id = 10;
     string agent_bridge_version = 11;
     string driver_entrypoint = 12;
-    string model_endpoint = 13;
+    ModelEndpoint model_endpoint_config = 13;
     int32 max_iterations = 14;
     string workspace_dir = 15;
     string episode_id = 16;

@@ -1,4 +1,4 @@
-﻿syntax = "proto3";
+syntax = "proto3";
 package uenv.v1;
 
 // ─── 错误码 ──────────────────────────────────────────────
@@ -50,4 +50,3 @@ enum ExecutionMode {
     MODE_MODEL_CALLBACK = 3;
     MODE_CUSTOM       = 4;
 }
-

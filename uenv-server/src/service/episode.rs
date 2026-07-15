@@ -655,11 +655,7 @@ impl UEnvEpisodeService {
             agent_bridge_id: spec.agent_bridge_id.clone(),
             agent_bridge_version: spec.agent_bridge_version.clone(),
             driver_entrypoint: spec.driver_entrypoint.clone(),
-            model_endpoint: req
-                .model_endpoint_config
-                .as_ref()
-                .map(|endpoint| endpoint.url.clone())
-                .unwrap_or_default(),
+            model_endpoint_config: req.model_endpoint_config.clone(),
             max_iterations: spec.max_iterations,
             workspace_dir: spec.workspace_dir.clone(),
             episode_id: episode_id.clone(),

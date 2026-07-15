@@ -55,7 +55,7 @@
 不应保留在 `payload` 或 `metadata` 里的字段：
 
 - 调度/执行控制：`parallel_mode`、`timeout_seconds`、`correlation_id`、`dispatch_lease_id`、`dispatch_token`。
-- 模型调用协议：`model_endpoint`、`model_endpoint_config`、`model_name`、`generation_config`、`env_package_id`、`env_package_version`。
+- 模型调用协议：旧 `model_endpoint` string、payload `model_name/generation_config`、`env_package_id`、`env_package_version`；模型端点保留为 typed `ModelEndpoint` / `model_endpoint_config`。
 - rollout 输入侧旧键：`response_text`、`response_ids`、`response_mask`、`rollout_log_probs`、`response_logprobs`、`response_log_probs`、`rollout_param_version`、`rollout_policy_version`、`uenv_model_version`。
 - timing/result 字段：`enqueue_ts`、`dispatch_ts`、`worker_start_ts`、`worker_finish_ts`、`result_ready_ts`、`server_latency_ms`、`worker_latency_ms`、`model_latency_ms`。
 
@@ -521,7 +521,7 @@ package：`uenv.v1`
 | 10 | `agent_bridge_id` | `string` | 否 | Agent bridge 包 ID。 |
 | 11 | `agent_bridge_version` | `string` | 否 | Agent bridge 版本。 |
 | 12 | `driver_entrypoint` | `string` | 否 | agent driver 入口。 |
-| 13 | `model_endpoint` | `string` | 否 | 模型端点。 |
+| 13 | `model_endpoint_config` | `ModelEndpoint` | 是 | 结构化模型端点配置；替代旧 `model_endpoint` string。 |
 | 14 | `max_iterations` | `int32` | 否 | agent 最大迭代次数。 |
 | 15 | `workspace_dir` | `string` | 否 | workspace 路径。 |
 | 16 | `episode_id` | `string` | 否 | 关联 episode ID。 |

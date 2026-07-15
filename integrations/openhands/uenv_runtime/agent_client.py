@@ -216,7 +216,7 @@ def _job_from_proto(job: Any) -> AgentJob:
         agent_bridge_id=job.agent_bridge_id,
         agent_bridge_version=job.agent_bridge_version,
         driver_entrypoint=job.driver_entrypoint,
-        model_endpoint=job.model_endpoint,
+        model_endpoint=job.model_endpoint_config.url if job.HasField("model_endpoint_config") else "",
         max_iterations=int(job.max_iterations) or 30,
         workspace_dir=job.workspace_dir or "/app",
         episode_id=job.episode_id,

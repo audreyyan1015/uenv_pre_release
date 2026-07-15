@@ -3,11 +3,11 @@
 更新时间：2026-07-15
 代码基线：`bridge-alignment`，已合并到 `5b8f12f`。
 
-本文档只记录从当前代码状态继续收口 clean proto 迁移还需要做什么。旧版文档里“正式 proto 仍是兼容版、等待 proto-clean 替换”的说法已经过期：当前 `/home/uenv/proto` 已经是 clean 字段集合，`/home/uenv/proto-clean/proto` 现在更像是干净协议模板和说明目录。
+本文档只记录从当前代码状态继续收口 clean proto 迁移还需要做什么。旧版文档里“正式 proto 仍是兼容版、等待 proto-clean 替换”的说法已经过期：当前 `/home/uenv/proto` 已经全量对齐 `/home/uenv/proto-clean/proto`；除正式目录额外保留的 `proto/README.md` 外，`diff -qr proto proto-clean/proto` 已无协议文件差异。
 
 ## 当前结论
 
-- 正式 proto 已经删除旧兼容字段，旧字段号用 `reserved` 保留，避免后续误复用。
+- 正式 proto 已经删除旧兼容字段，旧字段号用 `reserved` 保留，避免后续误复用；正式 proto 与 proto-clean 模板已全量一致。
 - Rust server、worker、adapter-core 走 `build.rs` 编译期生成 protobuf，当前测试已经验证 clean proto 可编译。
 - Python bridge adapter-core 生成文件已经重新生成，当前生成文件不再暴露 `payload_json`、`meta_json`、`model_output_json` 字段名。
 - Bridge / adapter-core / server / worker 主链路已经走 typed 字段：`parallel_mode`、`ModelEndpoint`、rollout 版本、logprobs、`RolloutTrace`、cancel 拆分字段。
@@ -65,6 +65,7 @@
   - `rollout_log_probs`
   - timing latency 字段
 - `RolloutTrace` 已接入 agent 完成上报，server 会把 `AgentJobCompleteRequest.rollout_trace` 映射到 `EpisodeResult.trajectory.steps[0].rollout_trace`。
+- `AgentJob` 的模型端点也已改成 typed `model_endpoint_config: ModelEndpoint`；server 从 `EpisodeRequest.model_endpoint_config` 原样传给 agent job，OpenHands agent client 再读取其中的 `url`。
 - `RegisterWorkerRequest.load/max_load` 已进入注册逻辑，server 重启后 worker 重新注册时可以恢复真实负载视图。
 - `CancelEpisodeResponse` 已走拆分字段：
   - `server_cancelled`
@@ -155,6 +156,8 @@
 最近一次合并后已执行：
 
 - `git diff --check`：通过。
+- `diff -qr proto proto-clean/proto`：除 `proto/README.md` 外无协议文件差异。
+- 正式 proto 旧字段扫描：`payload_json`、`meta_json`、`model_output_json`、`string model_endpoint =`、`bool cancelled =` 均无命中。
 - `cargo test -p uenv-adapter-core`：11 个测试通过。
 - `cargo test -p uenv-server`：52 个单元测试 + 7 个集成测试通过。
 - `cargo test -p uenv-worker`：通过；2 个 Docker/SWE 重型测试 ignored。
