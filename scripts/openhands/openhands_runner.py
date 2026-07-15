@@ -204,26 +204,171 @@ def _import_agent_client():
     return AgentControlClient
 
 
-def _read_reward(out_dir: Path) -> tuple[str, float, str]:
-    """从 driver 输出的 submit_result.json 读 (status, reward, trajectory_id)。
+def _int_list(value: Any) -> list[int]:
+    """把 typed JSON 数组规整成 int list；不解析旧 info 字符串。"""
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for item in value:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _float_list(value: Any) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    out: list[float] = []
+    for item in value:
+        try:
+            out.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rollout_trace_from_doc(doc: Any) -> tuple[list[int], list[int]]:
+    """从 typed rollout_trace / trajectory.steps[*].rollout_trace 提取 token trace。"""
+    if not isinstance(doc, dict):
+        return [], []
+
+    trace = doc.get("rollout_trace")
+    if isinstance(trace, dict):
+        ids = _int_list(trace.get("response_ids"))
+        mask = _int_list(trace.get("response_mask"))
+        if ids or mask:
+            return ids, mask
+
+    trajectory = doc.get("trajectory")
+    candidates = [doc]
+    if isinstance(trajectory, dict):
+        candidates.append(trajectory)
+    for candidate in candidates:
+        steps = candidate.get("steps") if isinstance(candidate, dict) else None
+        if not isinstance(steps, list):
+            continue
+        ids: list[int] = []
+        mask: list[int] = []
+        for step in steps:
+            step_trace = step.get("rollout_trace") if isinstance(step, dict) else None
+            if not isinstance(step_trace, dict):
+                continue
+            ids.extend(_int_list(step_trace.get("response_ids")))
+            mask.extend(_int_list(step_trace.get("response_mask")))
+        if ids or mask:
+            return ids, mask
+
+    return [], []
+
+
+def _read_rollout_trace(out_dir: Path, submit_doc: dict[str, Any]) -> tuple[list[int], list[int]]:
+    ids, mask = _rollout_trace_from_doc(submit_doc)
+    if ids or mask:
+        return ids, mask
+    bundle_file = out_dir / "trajectory_bundle.json"
+    if not bundle_file.is_file():
+        return [], []
+    try:
+        bundle = json.loads(bundle_file.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return [], []
+    return _rollout_trace_from_doc(bundle)
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _first_present(*docs: dict[str, Any], key: str) -> Any:
+    for doc in docs:
+        if key in doc and doc.get(key) not in (None, ""):
+            return doc.get(key)
+    return None
+
+
+def _read_rollout_fields(out_dir: Path, submit_doc: dict[str, Any]) -> dict[str, Any]:
+    bundle_doc = _read_json_file(out_dir / "trajectory_bundle.json")
+    response_ids, response_mask = _read_rollout_trace(out_dir, submit_doc)
+    return {
+        "parallel_mode": str(_first_present(submit_doc, bundle_doc, key="parallel_mode") or ""),
+        "rollout_param_version": _optional_int(
+            _first_present(submit_doc, bundle_doc, key="rollout_param_version")
+        ),
+        "rollout_policy_version": _first_present(
+            submit_doc,
+            bundle_doc,
+            key="rollout_policy_version",
+        ),
+        "rollout_log_probs": _float_list(
+            _first_present(submit_doc, bundle_doc, key="rollout_log_probs")
+        ),
+        "worker_start_ts": _optional_float(
+            _first_present(submit_doc, bundle_doc, key="worker_start_ts")
+        ),
+        "worker_finish_ts": _optional_float(
+            _first_present(submit_doc, bundle_doc, key="worker_finish_ts")
+        ),
+        "result_ready_ts": _optional_float(
+            _first_present(submit_doc, bundle_doc, key="result_ready_ts")
+        ),
+        "worker_latency_ms": _optional_int(
+            _first_present(submit_doc, bundle_doc, key="worker_latency_ms")
+        ),
+        "model_latency_ms": _optional_int(
+            _first_present(submit_doc, bundle_doc, key="model_latency_ms")
+        ),
+        "response_ids": response_ids,
+        "response_mask": response_mask,
+    }
+
+
+def _read_reward(out_dir: Path) -> tuple[str, float, str, dict[str, Any]]:
+    """从 driver 输出的 submit_result.json 读 status/reward/trajectory_id/typed rollout 字段。
 
     submit_result.json 结构见 run_swebenchpro_official.py：含 reward / resolved /
     trajectory_ref.trajectory_id。文件缺失（driver 崩溃）视为 failed。
     """
     f = out_dir / "submit_result.json"
     if not f.is_file():
-        return "failed", 0.0, ""
+        return "failed", 0.0, "", {}
     try:
         doc = json.loads(f.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return "failed", 0.0, ""
+        return "failed", 0.0, "", {}
     reward = float(doc.get("reward", 0.0) or 0.0)
     ref = doc.get("trajectory_ref") or {}
     tid = ref.get("trajectory_id") if isinstance(ref, dict) else None
     trajectory_id = str(tid) if tid else ""  # null/缺失 → 空串，不要变成 "None"
+    rollout_fields = _read_rollout_fields(out_dir, doc)
     # driver 正常退出即视为 completed（reward 承载评分；resolved 与否由 reward 反映）。
     status = "completed"
-    return status, reward, trajectory_id
+    return status, reward, trajectory_id, rollout_fields
 
 
 def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
@@ -235,6 +380,7 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
     """
     global _active_jobs
     status, reward, trajectory_id, err = "failed", 0.0, "", ""
+    rollout_fields: dict[str, Any] = {}
     try:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         out_dir = RUNS_DIR / f"agent-{job.job_id}-{stamp}"
@@ -276,7 +422,7 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
             (out_dir / "runner_stdout.log").write_text(proc.stdout[-16000:], encoding="utf-8")
             (out_dir / "runner_stderr.log").write_text(proc.stderr[-16000:], encoding="utf-8")
             if proc.returncode == 0:
-                status, reward, trajectory_id = _read_reward(out_dir)
+                status, reward, trajectory_id, rollout_fields = _read_reward(out_dir)
             else:
                 status = "failed"
                 err = f"run script exit {proc.returncode}: {proc.stderr[-2000:]}"
@@ -295,11 +441,13 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
                 trajectory_id=trajectory_id,
                 error_message=err,
                 agent_id=agent_id,
+                **rollout_fields,
             )
+            response_ids = rollout_fields.get("response_ids") or []
             print(
                 f"[agent-poll] completed job={job.job_id} status={status} "
                 f"reward={reward} trajectory_id={trajectory_id} "
-                f"agent_id={agent_id} acked={acked}",
+                f"agent_id={agent_id} response_ids={len(response_ids)} acked={acked}",
                 flush=True,
             )
         except Exception as exc:  # noqa: BLE001
@@ -444,4 +592,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

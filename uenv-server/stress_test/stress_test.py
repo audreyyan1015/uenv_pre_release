@@ -98,6 +98,9 @@ class Metrics:
 
 METRICS = Metrics()
 
+def json_bytes(value: dict) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode()
+
 # ── Mock Worker gRPC 服务端（接收 DispatchEpisode）────────────────────────────
 class MockWorkerServicer(worker_service_pb2_grpc.WorkerGrpcServiceServicer):
     def __init__(self, worker_id: str, cp_stub, server_epoch_ref: list):
@@ -253,12 +256,14 @@ async def load_generator(stop_event: asyncio.Event):
                 batch_id=batch_id,
                 sample_index=i,
                 framework="verl",
-            env_type=ENV_TYPE,
-                payload_json=json.dumps({
+                env_type=ENV_TYPE,
+                env_config_json=json_bytes({
                     "question": "2+2=?",
-                    "timeout_seconds": 120,
-                }).encode(),
-                meta_json=b"{}",
+                    "dataset": ENV_TYPE,
+                }),
+                episode_config_json=json_bytes({"max_steps": 1}),
+                sample_context_json=json_bytes({}),
+                timeout_seconds=120,
             ))
         t0 = time.time()
         try:

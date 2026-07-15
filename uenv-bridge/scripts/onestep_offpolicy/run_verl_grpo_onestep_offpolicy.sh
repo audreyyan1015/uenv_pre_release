@@ -21,7 +21,7 @@ Common overrides:
   IMAGE                         Default: localhost/uenv-bridge-verl:layer4-build
   VERL_WORKSPACE                Default: /data/podman/verl/workspace
   MODEL_PATH                    Default: /data/ronghao/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
-  DATA_DIR                      Default: <repo>/data
+  DATA_DIR                      Default: <repo>/data/gsm8k
   TRAINING_STEPS                Default: 1. Override to match Layer4 comparison runs.
   TRAIN_BATCH_SIZE              Default: 256
   PPO_MINI_BATCH_SIZE           Default: 64
@@ -95,7 +95,7 @@ DEFAULT_CONTAINER_MODEL_PATH=/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
 MODEL_PATH=${MODEL_PATH:-${DEFAULT_HOST_MODEL_PATH}}
 CONTAINER_MODEL_PATH=${CONTAINER_MODEL_PATH:-${DEFAULT_CONTAINER_MODEL_PATH}}
 
-DATA_DIR=${DATA_DIR:-${REPO_DIR}/data}
+DATA_DIR=${DATA_DIR:-${REPO_DIR}/data/gsm8k}
 CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/gsm8k}
 
 TRAINING_STEPS=${TRAINING_STEPS:-1}

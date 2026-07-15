@@ -28,6 +28,7 @@ class EpisodeRequest:
     resource_spec: ResourceSpec = field(default_factory=ResourceSpec)
     model_endpoint: str = ""
     seed: int | None = None
+    parallel_mode: str = "sync"
 
 
 @dataclass(slots=True)
@@ -40,6 +41,8 @@ class StepRecord:
     truncated: bool = False
     info: dict[str, str] = field(default_factory=dict)
     duration_ms: int = 0
+    response_ids: list[int] = field(default_factory=list)
+    response_mask: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -65,6 +68,9 @@ class EpisodeResult:
     summary: EpisodeSummary = field(default_factory=EpisodeSummary)
     error_code: int | None = None
     error_message: str = ""
+    rollout_param_version: int | None = None
+    rollout_policy_version: str | None = None
+    rollout_log_probs: list[float] = field(default_factory=list)
 
 
 def request_to_jsonable(request: EpisodeRequest) -> dict[str, Any]:
@@ -82,4 +88,5 @@ def request_to_jsonable(request: EpisodeRequest) -> dict[str, Any]:
         },
         "model_endpoint": request.model_endpoint,
         "seed": request.seed,
+        "parallel_mode": request.parallel_mode,
     }

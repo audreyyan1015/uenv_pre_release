@@ -127,6 +127,9 @@ class Metrics:
 
 METRICS = Metrics()
 
+def json_bytes(value: dict) -> bytes:
+    return json.dumps(value, separators=(",", ":")).encode()
+
 
 # ── Mock LLM HTTP Server ──────────────────────────────────────────────────────
 class MockLLMServer:
@@ -357,26 +360,26 @@ async def load_generator(stop_event: asyncio.Event):
                 sample_index=i,
                 env_type=ENV_TYPE,
                 framework="verl",
-                # SampleEnvelope.payload_json 结构（adapter-core 解析）：
-                #   env_config.question  → worker payload.question（非空 → 触发真实 LLM 调用）
-                #   model_endpoint.url   → worker payload.model_endpoint（指向 mock LLM）
-                #   reward_config        → 透传给 worker，math plugin 用 target 比对答案
-                payload_json=json.dumps({
-                    "env_config": {
-                        "question": LLM_QUESTION,
-                        "dataset": "gsm8k",  # 使用 gsm8k answers_match，兼容 "#### 42" 格式
-                    },
-                    "model_endpoint": {
-                        "url": f"http://127.0.0.1:{LLM_PORT}/v1",
-                        "model_name": "mock-llm",
-                    },
-                    "reward_config": {
-                        "type": "rule_reward",
-                        "target": LLM_TARGET,
-                    },
-                    "timeout_seconds": 700,  # 需大于最大 LLM 延迟 600s
-                }).encode(),
-                meta_json=b"{}",
+                # typed SampleEnvelope 字段（adapter-core 解析）：
+                #   env_config_json.question → worker payload.question（非空 → 触发真实 LLM 调用）
+                #   model_endpoint.url       → EpisodeRequest.model_endpoint（指向 mock LLM）
+                #   reward_config_json       → 透传给 worker，math plugin 用 target 比对答案
+                env_config_json=json_bytes({
+                    "question": LLM_QUESTION,
+                    "dataset": "gsm8k",  # 使用 gsm8k answers_match，兼容 "#### 42" 格式
+                }),
+                episode_config_json=json_bytes({"max_steps": 1}),
+                reward_config_json=json_bytes({
+                    "type": "rule_reward",
+                    "target": LLM_TARGET,
+                }),
+                model_endpoint=adapter_core_pb2.ModelEndpoint(
+                    endpoint_type="http",
+                    url=f"http://127.0.0.1:{LLM_PORT}/v1",
+                    model_name="mock-llm",
+                ),
+                sample_context_json=json_bytes({}),
+                timeout_seconds=700,  # 需大于最大 LLM 延迟 600s
             )
             for i in range(BATCH_SIZE)
         ]

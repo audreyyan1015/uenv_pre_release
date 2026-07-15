@@ -411,6 +411,7 @@ impl SweSession {
                 observation,
                 timestamp_ms: now_ms(),
                 duration_ms,
+                rollout_trace: None,
             });
         }
     }

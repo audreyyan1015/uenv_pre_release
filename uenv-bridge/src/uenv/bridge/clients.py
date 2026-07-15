@@ -18,6 +18,32 @@ from .protocol import (
     Trajectory,
 )
 
+_PROTOCOL_METADATA_KEYS = {
+    "parallel_mode",
+    "timeout_seconds",
+    "correlation_id",
+    "model_endpoint",
+    "env_package_id",
+    "env_package_version",
+    "rollout_param_version",
+    "rollout_policy_version",
+    "rollout_log_probs",
+    "response_ids",
+    "response_mask",
+    "enqueue_ts",
+    "dispatch_ts",
+    "result_ready_ts",
+    "worker_start_ts",
+    "worker_finish_ts",
+    "server_latency_ms",
+    "worker_latency_ms",
+    "model_latency_ms",
+    "dispatch_lease_id",
+    "lease_expire_at",
+    "scheduler_epoch",
+    "dispatch_token",
+}
+
 
 class EpisodeClient(Protocol):
     def submit_episode(self, request: EpisodeRequest) -> EpisodeResult:
@@ -206,7 +232,13 @@ class RustCoreEpisodeClient:
         samples = []
         for idx, request in enumerate(requests):
             payload = self._payload_json(request)
-            metadata = payload.get("metadata") or {}
+            metadata = self._dict_field(payload, "metadata")
+            sample_context = self._sample_context(metadata)
+            env_config = self._dict_field(payload, "env_config")
+            episode_config = self._dict_field(payload, "episode_config")
+            reward_config = self._dict_field(payload, "reward_config")
+            model_endpoint = self._dict_field(payload, "model_endpoint")
+            generation_config = self._dict_field(model_endpoint, "generation_config")
             batch_id = batch_id or str(metadata.get("batch_id") or "")
             samples.append(
                 {
@@ -215,8 +247,22 @@ class RustCoreEpisodeClient:
                     "sample_index": int(metadata.get("sample_index", idx)),
                     "framework": str(payload.get("framework") or "verl"),
                     "env_type": request.env_type,
-                    "payload_json": request.payload,
-                    "meta_json": self._json_bytes(metadata),
+                    "parallel_mode": request.parallel_mode,
+                    "env_config_json": self._json_bytes(env_config),
+                    "episode_config_json": self._json_bytes(episode_config),
+                    "reward_config_json": self._json_bytes(reward_config),
+                    "model_endpoint": {
+                        "endpoint_type": str(model_endpoint.get("endpoint_type") or "http"),
+                        "url": str(request.model_endpoint or model_endpoint.get("url") or ""),
+                        "model_name": str(model_endpoint.get("model_name") or ""),
+                        "generation_config_json": self._json_bytes(generation_config),
+                        "max_retries": int(model_endpoint.get("max_retries") or 0),
+                    },
+                    "timeout_seconds": int(payload.get("timeout_seconds") or 0),
+                    "correlation_id": str(payload.get("correlation_id") or ""),
+                    "sample_context_json": self._json_bytes(sample_context),
+                    "env_package_id": str(env_config.get("env_package_id") or env_config.get("package_id") or ""),
+                    "env_package_version": str(env_config.get("env_package_version") or env_config.get("package_version") or ""),
                 }
             )
         core_request = {
@@ -252,6 +298,9 @@ class RustCoreEpisodeClient:
             ),
             error_code=int(error_code) if str(error_code or "").isdigit() else None,
             error_message=error_message,
+            rollout_param_version=self._optional_int_field(result, "rollout_param_version"),
+            rollout_policy_version=self._optional_string_field(result, "rollout_policy_version"),
+            rollout_log_probs=[float(v) for v in list(self._field(result, "rollout_log_probs", []) or [])],
         )
 
     def _decode_core_trajectory(
@@ -299,6 +348,9 @@ class RustCoreEpisodeClient:
         info = data.get("info") or {}
         if not isinstance(info, dict):
             info = {}
+        rollout_trace = data.get("rollout_trace") or {}
+        if not isinstance(rollout_trace, dict):
+            rollout_trace = {}
         return StepRecord(
             step_index=int(data.get("step_index", idx) or 0),
             observation=self._bytes_from_jsonable(data.get("observation", b"")),
@@ -308,6 +360,8 @@ class RustCoreEpisodeClient:
             truncated=bool(data.get("truncated", False)),
             info={str(key): self._string_from_jsonable(value) for key, value in info.items()},
             duration_ms=int(data.get("duration_ms", 0) or 0),
+            response_ids=self._int_list_from_jsonable(rollout_trace.get("response_ids")),
+            response_mask=self._int_list_from_jsonable(rollout_trace.get("response_mask")),
         )
 
     def _bytes_from_jsonable(self, value: Any) -> bytes:
@@ -321,6 +375,28 @@ class RustCoreEpisodeClient:
         if isinstance(value, str):
             return value
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    def _dict_field(self, value: dict[str, Any], name: str) -> dict[str, Any]:
+        item = value.get(name) if isinstance(value, dict) else None
+        return item if isinstance(item, dict) else {}
+
+    def _sample_context(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            str(key): value
+            for key, value in metadata.items()
+            if str(key) not in _PROTOCOL_METADATA_KEYS
+        }
+
+    def _int_list_from_jsonable(self, value: Any) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        output: list[int] = []
+        for item in value:
+            try:
+                output.append(int(item))
+            except Exception:
+                continue
+        return output
 
     def _payload_json(self, request: EpisodeRequest) -> dict[str, Any]:
         try:
@@ -343,6 +419,21 @@ class RustCoreEpisodeClient:
         if isinstance(value, dict):
             return value.get(name, default)
         return getattr(value, name, default)
+
+    def _optional_int_field(self, value: Any, name: str) -> int | None:
+        raw = self._field(value, name, None)
+        if raw in (None, "", 0):
+            return None
+        try:
+            return int(raw)
+        except Exception:
+            return None
+
+    def _optional_string_field(self, value: Any, name: str) -> str | None:
+        raw = self._field(value, name, None)
+        if raw in (None, ""):
+            return None
+        return str(raw)
 
     def _json_bytes(self, value: Any) -> bytes:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

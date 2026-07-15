@@ -7,7 +7,9 @@ use prost::Message;
 use uenv_worker::episode::executor::{EpisodeExecutor, ExecuteContext};
 use uenv_worker::plugin::host::PluginHost;
 use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
-use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult};
+use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult, ModelEndpoint};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn m5_single_round_math_matches_expected_reward_and_status() {
@@ -26,10 +28,30 @@ async fn m5_single_round_math_matches_expected_reward_and_status() {
 
     let req_bytes = fs::read(fixture_path).expect("read request fixture");
     let mut request = EpisodeRequest::decode(req_bytes.as_slice()).expect("decode request fixture");
-    let mut payload: serde_json::Value =
-        serde_json::from_slice(&request.payload).expect("decode request payload");
-    payload["response_text"] = serde_json::Value::String("20".to_string());
-    request.payload = serde_json::to_vec(&payload).expect("encode request payload");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock llm");
+    let addr = listener.local_addr().expect("mock llm addr");
+    request.model_endpoint_config = Some(ModelEndpoint {
+        endpoint_type: "http".to_string(),
+        url: format!("http://{addr}/v1"),
+        model_name: "default-model".to_string(),
+        generation_config_json: Vec::new(),
+        max_retries: 0,
+    });
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept mock llm");
+        let mut buffer = vec![0; 8192];
+        let _ = stream.read(&mut buffer).await.expect("read mock llm request");
+        let body = b"{\"choices\":[{\"message\":{\"content\":\"20\"},\"finish_reason\":\"stop\"}]}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write mock llm response");
+    });
 
     let expected_bytes = fs::read(expected_path).expect("read expected fixture");
     let expected = EpisodeResult::decode(expected_bytes.as_slice()).expect("decode expected result");

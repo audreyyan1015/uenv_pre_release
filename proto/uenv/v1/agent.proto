@@ -1,5 +1,7 @@
-﻿syntax = "proto3";
+syntax = "proto3";
 package uenv.v1;
+
+import "uenv/v1/episode.proto";
 
 // Server → Agent pool job contract (design 260629 / 260701).
 // C-layer scheduling state: gateway_url, session_id, run_id are injected per job.
@@ -18,7 +20,7 @@ message AgentJob {
     string agent_bridge_id = 10;
     string agent_bridge_version = 11;
     string driver_entrypoint = 12;
-    string model_endpoint = 13;
+    ModelEndpoint model_endpoint_config = 13;
     int32 max_iterations = 14;
     string workspace_dir = 15;
     string episode_id = 16;
@@ -90,6 +92,8 @@ message AgentJobCompleteRequest {
     optional int64 worker_latency_ms = 15;
     optional int64 model_latency_ms = 16;
     map<string, string> metadata = 17;
+    // 结构化 rollout trace；用于传递 response_ids / response_mask。
+    RolloutTrace rollout_trace = 18;
 }
 
 message AgentJobCompleteResponse {
@@ -104,4 +108,3 @@ service AgentControlService {
     rpc PollAgentJob(PollAgentJobRequest) returns (PollAgentJobResponse);
     rpc CompleteAgentJob(AgentJobCompleteRequest) returns (AgentJobCompleteResponse);
 }
-

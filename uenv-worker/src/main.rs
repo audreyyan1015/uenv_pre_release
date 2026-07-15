@@ -118,7 +118,6 @@ async fn dispatch_swe(
         env_type: "swe".to_string(),
         payload: serde_json::to_vec(&payload)?,
         max_steps: 1,
-        model_endpoint: String::new(),
         correlation_id: format!("swe-dispatch-{}", args.instance),
         dispatch_lease_id: "swe-local-lease".to_string(),
         ..Default::default()

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from uenv.bridge.agent_loop_clients import AgentLoopClientConfig
 from uenv.bridge.clients import RustCoreClientConfig, RustCoreEpisodeClient
-from uenv.bridge.protocol import EpisodeResult, EpisodeSummary, StepRecord, Trajectory
+from uenv.bridge.protocol import EpisodeRequest, EpisodeResult, EpisodeSummary, StepRecord, Trajectory
 from uenv.bridge.verl_agent_loop import UEnvAgentLoop
 
 
@@ -63,11 +63,9 @@ class BatchRecordingEpisodeClient:
                             action=f"answer-{index}".encode("utf-8"),
                             reward=float(index + 1),
                             terminated=True,
-                            info={
-                                "response_ids": json.dumps([200 + index]),
-                                "response_mask": "[1]",
-                                "response_text": f"answer-{index}",
-                            },
+                            info={"response_text": f"answer-{index}"},
+                            response_ids=[200 + index],
+                            response_mask=[1],
                         )
                     ],
                     total_reward=float(index + 1),
@@ -103,7 +101,9 @@ class CapacityAwareEpisodeClient(BatchRecordingEpisodeClient):
                         action=b"ok",
                         reward=1.0,
                         terminated=True,
-                        info={"response_ids": "[42]", "response_mask": "[1]", "response_text": "ok"},
+                        info={"response_text": "ok"},
+                        response_ids=[42],
+                        response_mask=[1],
                     )
                 ],
                 total_reward=1.0,
@@ -130,7 +130,8 @@ class ReorderedEpisodeClient(BatchRecordingEpisodeClient):
                                 action=f"answer-{index}".encode("utf-8"),
                                 reward=float(index),
                                 terminated=True,
-                                info={"response_ids": json.dumps([300 + index]), "response_mask": "[1]"},
+                                response_ids=[300 + index],
+                                response_mask=[1],
                             )
                         ],
                         total_reward=float(index),
@@ -188,9 +189,11 @@ class FakeCoreTrajectoryStub:
                     "reward": 0.75,
                     "terminated": True,
                     "info": {
+                        "finish_reason": "done",
+                    },
+                    "rollout_trace": {
                         "response_ids": [101, 102],
                         "response_mask": [1, 1],
-                        "finish_reason": "done",
                     },
                 }
             ],
@@ -428,7 +431,8 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
 
         metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
-        self.assertEqual(metadata["parallel_mode"], "sync")
+        self.assertEqual(request.parallel_mode, "sync")
+        self.assertNotIn("parallel_mode", metadata)
         self.assertNotIn("generation_step", metadata)
         self.assertNotIn("policy_version", metadata)
 
@@ -447,16 +451,19 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
 
         metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
-        self.assertEqual(metadata["parallel_mode"], "one_step_off_policy")
-        self.assertEqual(metadata["global_step"], 3)
-        self.assertEqual(metadata["generation_step"], 3)
-        self.assertEqual(metadata["target_train_step"], 4)
-        self.assertEqual(metadata["rollout_step"], 3)
-        self.assertEqual(metadata["consume_step"], 4)
-        self.assertEqual(metadata["policy_version"], "actor-step-3")
-        self.assertEqual(metadata["rollout_policy_version"], "actor-step-3")
-        self.assertEqual(metadata["parameter_sync_id"], "sync-3")
-        self.assertNotIn("max_allowed_staleness", metadata)
+        self.assertEqual(request.parallel_mode, "one_step_off_policy")
+        self.assertNotIn("parallel_mode", metadata)
+        verl_metadata = metadata["verl"]
+        self.assertNotIn("global_step", metadata)
+        self.assertEqual(verl_metadata["global_step"], 3)
+        self.assertEqual(verl_metadata["generation_step"], 3)
+        self.assertEqual(verl_metadata["target_train_step"], 4)
+        self.assertEqual(verl_metadata["rollout_step"], 3)
+        self.assertEqual(verl_metadata["consume_step"], 4)
+        self.assertEqual(verl_metadata["policy_version"], "actor-step-3")
+        self.assertNotIn("rollout_policy_version", verl_metadata)
+        self.assertEqual(verl_metadata["parameter_sync_id"], "sync-3")
+        self.assertNotIn("max_allowed_staleness", verl_metadata)
 
     def test_build_episode_request_allows_one_step_metadata_overrides(self) -> None:
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(self._result_with_token_ids()))
@@ -483,16 +490,19 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
 
         metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
-        self.assertEqual(metadata["parallel_mode"], "one_step_off_policy")
-        self.assertEqual(metadata["global_step"], 10)
-        self.assertEqual(metadata["generation_step"], 8)
-        self.assertEqual(metadata["target_train_step"], 10)
-        self.assertEqual(metadata["rollout_step"], 8)
-        self.assertEqual(metadata["consume_step"], 10)
-        self.assertEqual(metadata["policy_version"], "actor-custom-8")
-        self.assertEqual(metadata["rollout_policy_version"], "rollout-custom-8")
-        self.assertEqual(metadata["parameter_sync_id"], "sync-custom-8")
-        self.assertNotIn("max_allowed_staleness", metadata)
+        self.assertEqual(request.parallel_mode, "one_step_off_policy")
+        self.assertNotIn("parallel_mode", metadata)
+        verl_metadata = metadata["verl"]
+        self.assertNotIn("global_step", metadata)
+        self.assertEqual(verl_metadata["global_step"], 10)
+        self.assertEqual(verl_metadata["generation_step"], 8)
+        self.assertEqual(verl_metadata["target_train_step"], 10)
+        self.assertEqual(verl_metadata["rollout_step"], 8)
+        self.assertEqual(verl_metadata["consume_step"], 10)
+        self.assertEqual(verl_metadata["policy_version"], "actor-custom-8")
+        self.assertNotIn("rollout_policy_version", verl_metadata)
+        self.assertEqual(verl_metadata["parameter_sync_id"], "sync-custom-8")
+        self.assertNotIn("max_allowed_staleness", verl_metadata)
 
     def test_output_prefers_result_rollout_param_version_for_fully_async_steps(self) -> None:
         result = EpisodeResult(
@@ -505,18 +515,16 @@ class UEnvAgentLoopTest(unittest.TestCase):
                         action=b"4",
                         reward=1.0,
                         terminated=True,
-                        info={
-                            "response_ids": "[101]",
-                            "response_mask": "[1]",
-                            "rollout_param_version": "11",
-                            "rollout_policy_version": "actor-step-11",
-                        },
+                        response_ids=[101],
+                        response_mask=[1],
                     )
                 ],
                 total_reward=1.0,
                 total_steps=1,
             ),
             summary=EpisodeSummary(total_reward=1.0, total_steps=1, terminate_reason="done"),
+            rollout_param_version=11,
+            rollout_policy_version="actor-step-11",
         )
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result), parallel_mode="fully_async")
 
@@ -562,14 +570,18 @@ class UEnvAgentLoopTest(unittest.TestCase):
                         action=b"first action",
                         reward=0.25,
                         terminated=False,
-                        info={"response_ids": "[11, 12]", "response_mask": "[1, 0]", "response_text": "first"},
+                        info={"response_text": "first"},
+                        response_ids=[11, 12],
+                        response_mask=[1, 0],
                     ),
                     StepRecord(
                         step_index=2,
                         action=b"second action",
                         reward=0.75,
                         terminated=True,
-                        info={"response_ids": "[21, 22, 23]", "response_mask": "[1, 1, 0]", "response_text": "second"},
+                        info={"response_text": "second"},
+                        response_ids=[21, 22, 23],
+                        response_mask=[1, 1, 0],
                     ),
                 ],
                 total_reward=1.0,
@@ -774,7 +786,8 @@ class UEnvAgentLoopTest(unittest.TestCase):
 
         self.assertEqual(result.summary.total_reward, 0.75)
         self.assertEqual(result.trajectory.steps[0].action, b"42")
-        self.assertEqual(result.trajectory.steps[0].info["response_ids"], "[101,102]")
+        self.assertEqual(result.trajectory.steps[0].response_ids, [101, 102])
+        self.assertEqual(result.trajectory.steps[0].response_mask, [1, 1])
 
     def test_rust_core_client_sends_multiple_samples_in_one_execute_batch(self) -> None:
         stub = FakeCoreBatchStub()
@@ -796,6 +809,69 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual([sample["sample_index"] for sample in stub.last_request["samples"]], [0, 1, 2])
         self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
         self.assertEqual([result.summary.total_reward for result in results], [0.0, 1.0, 2.0])
+
+    def test_rust_core_client_filters_protocol_keys_from_sample_context(self) -> None:
+        stub = FakeCoreBatchStub()
+        client = RustCoreEpisodeClient(RustCoreClientConfig(), stub=stub)
+        payload = {
+            "framework": "verl",
+            "metadata": {
+                "batch_id": "batch-clean-context",
+                "sample_index": 0,
+                "data_source": "gsm8k",
+                "extra_info": {"question_id": "q1"},
+                "parallel_mode": "legacy",
+                "timeout_seconds": 99,
+                "correlation_id": "legacy-correlation",
+                "model_endpoint": "legacy-model-endpoint",
+                "env_package_id": "legacy-package",
+                "env_package_version": "legacy-version",
+                "rollout_param_version": 7,
+                "rollout_policy_version": "policy-old",
+                "rollout_log_probs": [0.1],
+                "response_ids": [1, 2],
+                "response_mask": [1, 1],
+                "worker_latency_ms": 12,
+                "dispatch_lease_id": "legacy-lease",
+                "dispatch_token": "legacy-token",
+            },
+            "env_config": {"dataset": "gsm8k"},
+            "episode_config": {"max_steps": 1},
+            "reward_config": {"type": "rule_reward", "target": "20"},
+        }
+        request = EpisodeRequest(
+            request_id="clean-context-1",
+            env_type="math",
+            payload=json.dumps(payload).encode("utf-8"),
+            parallel_mode="sync",
+        )
+
+        result = client.submit_episode(request)
+
+        self.assertEqual(result.status, "completed")
+        sample = stub.last_request["samples"][0]
+        context = json.loads(sample["sample_context_json"].decode("utf-8"))
+        self.assertEqual(context["batch_id"], "batch-clean-context")
+        self.assertEqual(context["sample_index"], 0)
+        self.assertEqual(context["data_source"], "gsm8k")
+        self.assertEqual(context["extra_info"], {"question_id": "q1"})
+        for key in [
+            "parallel_mode",
+            "timeout_seconds",
+            "correlation_id",
+            "model_endpoint",
+            "env_package_id",
+            "env_package_version",
+            "rollout_param_version",
+            "rollout_policy_version",
+            "rollout_log_probs",
+            "response_ids",
+            "response_mask",
+            "worker_latency_ms",
+            "dispatch_lease_id",
+            "dispatch_token",
+        ]:
+            self.assertNotIn(key, context)
 
     def test_rust_core_client_can_use_execute_batch_stream(self) -> None:
         stub = FakeCoreStreamStub()
@@ -845,11 +921,11 @@ class UEnvAgentLoopTest(unittest.TestCase):
             reward=2.0,
             terminated=True,
             info={
-                "response_ids": "[101, 102]",
-                "response_mask": "[1, 0]",
                 "response_text": "4",
                 "finish_reason": "done",
             },
+            response_ids=[101, 102],
+            response_mask=[1, 0],
         )
         return EpisodeResult(
             request_id="result-1",

@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use tracing_subscriber::EnvFilter;
 use tonic::transport::Server;
 
 use uenv_adapter_core::pb::adapter_core_service_server::AdapterCoreServiceServer;
@@ -31,12 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "[::]:50051".to_string())
         .parse()?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
     let binary_path = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -44,8 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let build_git_sha = option_env!("UENV_BUILD_GIT_SHA").unwrap_or("unknown");
     let build_time = option_env!("UENV_BUILD_TIME").unwrap_or("unknown");
 
-    tracing::info!(%addr, "uenv listening");
-    println!("uenv listening on {addr}");
+    tracing::info!(%addr, "uenv_listening");
 
     let backend = std::env::var("UENV_ADAPTER_CORE_BACKEND")
         .unwrap_or_else(|_| "server".to_string());
@@ -177,14 +172,6 @@ impl EpisodeService for StaticRolloutEpisodeService {
             .map(|request| {
                 let response_mask = vec![1; self.response_ids.len()];
                 let mut info = std::collections::HashMap::new();
-                info.insert(
-                    "response_ids".to_string(),
-                    serde_json::to_string(&self.response_ids).unwrap_or_default(),
-                );
-                info.insert(
-                    "response_mask".to_string(),
-                    serde_json::to_string(&response_mask).unwrap_or_default(),
-                );
                 info.insert("response_text".to_string(), self.response_text.clone());
                 info.insert("finish_reason".to_string(), "static_rollout".to_string());
 
@@ -195,6 +182,10 @@ impl EpisodeService for StaticRolloutEpisodeService {
                         reward: self.reward,
                         terminated: true,
                         info,
+                        rollout_trace: Some(uenv_server::proto::v1::RolloutTrace {
+                            response_ids: self.response_ids.clone(),
+                            response_mask,
+                        }),
                         ..Default::default()
                     }],
                     total_reward: self.reward,
@@ -233,4 +224,38 @@ fn parse_i64_list(value: &str) -> Option<Vec<i64>> {
         items.push(item.trim().parse::<i64>().ok()?);
     }
     Some(items)
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let format = std::env::var("UENV_LOG_FORMAT")
+        .unwrap_or_else(|_| "text".to_string())
+        .to_ascii_lowercase();
+    let ansi = env_bool("UENV_LOG_ANSI").unwrap_or(format != "json");
+
+    match format.as_str() {
+        "json" => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .json()
+            .init(),
+        "compact" => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(ansi)
+            .compact()
+            .init(),
+        _ => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(ansi)
+            .init(),
+    }
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    let value = std::env::var(key).ok()?;
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }

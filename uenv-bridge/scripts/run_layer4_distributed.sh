@@ -23,7 +23,7 @@ Common environment overrides:
   VERL_WORKSPACE                Host VeRL workspace. Default: /data/podman/verl/workspace
   MODEL_PATH                    Host policy model path. Default: /data/ronghao/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
   HOST_MODEL_PATH               Host policy model path; preferred when MODEL_PATH is used as an old container-path alias.
-  DATA_DIR                      Host generated VeRL-format GSM8K dir. Default: <repo>/data/
+  DATA_DIR                      Host generated VeRL-format GSM8K dir. Default: <repo>/data/gsm8k
   CONTAINER_MODEL_PATH          Container policy model path. Default: /models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
   CONTAINER_DATA_DIR            Container generated VeRL-format GSM8K dir. Default: /uenv/uenv-bridge/tmp/verl_layer4_agent_loop_data
   INFER_BACKEND                 VeRL rollout backend. Default: vllm
@@ -130,7 +130,7 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 ROLLOUT_N=${ROLLOUT_N:-5}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
 DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-1024}
-DATA_DIR=${DATA_DIR:-/data/ronghao/uenv/uenv-bridge/data}
+DATA_DIR=${DATA_DIR:-/data/ronghao/uenv/uenv-bridge/data/gsm8k}
 CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/gsm8k}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 

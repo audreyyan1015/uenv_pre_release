@@ -129,23 +129,6 @@ impl RolloutModelMeta {
     }
 }
 
-pub fn extract_rollout_from_payload(payload: &Value) -> RolloutModelMeta {
-    let mut meta = RolloutModelMeta::default();
-    if let Some(obj) = payload.as_object() {
-        apply_rollout_fields_from_map(&mut meta, obj);
-    }
-    if let Some(metadata) = payload.get("metadata").and_then(Value::as_object) {
-        apply_rollout_fields_from_map(&mut meta, metadata);
-        if let Some(extra_info) = metadata.get("extra_info").and_then(Value::as_object) {
-            apply_rollout_fields_from_map(&mut meta, extra_info);
-        }
-    }
-    if let Some(version) = payload.get("uenv_model_version").and_then(Value::as_object) {
-        apply_version_from_map(&mut meta, version);
-    }
-    meta
-}
-
 pub fn parse_model_version_from_response(
     body: &Value,
     headers: &HashMap<String, String>,
@@ -237,6 +220,23 @@ pub fn parse_response_ids_from_chat_response(body: &Value) -> Vec<i64> {
     ids
 }
 
+fn is_protocol_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        "parallel_mode"
+            | "rollout_param_version"
+            | "rollout_policy_version"
+            | "rollout_log_probs"
+            | "enqueue_ts"
+            | "dispatch_ts"
+            | "result_ready_ts"
+            | "worker_start_ts"
+            | "worker_finish_ts"
+            | "server_latency_ms"
+            | "worker_latency_ms"
+            | "model_latency_ms"
+    )
+}
 pub fn apply_async_to_result(
     mut result: EpisodeResult,
     episode: &EpisodeRequest,
@@ -262,46 +262,23 @@ pub fn apply_async_to_result(
             .as_mut()
             .and_then(|t| t.steps.last_mut())
         {
-            if !meta.response_ids.is_empty() {
-                step.info.insert(
-                    "response_ids".to_string(),
-                    serde_json::to_string(&meta.response_ids).unwrap_or_default(),
-                );
-            }
-            if !meta.response_mask.is_empty() {
-                step.info.insert(
-                    "response_mask".to_string(),
-                    serde_json::to_string(&meta.response_mask).unwrap_or_default(),
-                );
-            }
-            if let Some(param) = meta.rollout_param_version {
-                step.info
-                    .insert("rollout_param_version".to_string(), param.to_string());
-            }
-            if let Some(policy) = &meta.rollout_policy_version {
-                step.info
-                    .insert("rollout_policy_version".to_string(), policy.clone());
-            }
-            if !meta.rollout_log_probs.is_empty() {
-                step.info.insert(
-                    "rollout_log_probs".to_string(),
-                    serde_json::to_string(&meta.rollout_log_probs).unwrap_or_default(),
-                );
+            if !meta.response_ids.is_empty() || !meta.response_mask.is_empty() {
+                step.rollout_trace = Some(crate::proto::v1::RolloutTrace {
+                    response_ids: meta.response_ids.clone(),
+                    response_mask: meta.response_mask.clone(),
+                });
             }
         }
     }
 
     for (key, value) in &episode.metadata {
-        result.metadata.entry(key.clone()).or_insert_with(|| value.clone());
+        if !is_protocol_metadata_key(key) {
+            result.metadata.entry(key.clone()).or_insert_with(|| value.clone());
+        }
     }
-    result
-        .metadata
-        .entry("parallel_mode".to_string())
-        .or_insert_with(|| parallel_mode.to_string());
 
     result
 }
-
 pub fn build_failed_async_result(
     episode: &EpisodeRequest,
     parallel_mode: &str,
@@ -338,53 +315,8 @@ pub fn validate_async_completed(
     rollout.validate_for_async()
 }
 
-fn apply_rollout_fields_from_map(meta: &mut RolloutModelMeta, map: &serde_json::Map<String, Value>) {
-    if meta.response_ids.is_empty() {
-        meta.response_ids = parse_i64_list(map.get("response_ids"));
-    }
-    if meta.response_mask.is_empty() {
-        meta.response_mask = parse_i32_list(map.get("response_mask"));
-    }
-    if meta.rollout_log_probs.is_empty() {
-        meta.rollout_log_probs = parse_f32_list(
-            map.get("rollout_log_probs")
-                .or_else(|| map.get("response_logprobs"))
-                .or_else(|| map.get("response_log_probs")),
-        );
-    }
-    apply_version_from_map(meta, map);
-}
-
-fn apply_version_from_map(meta: &mut RolloutModelMeta, map: &serde_json::Map<String, Value>) {
-    if meta.rollout_param_version.is_none() {
-        meta.rollout_param_version = parse_i64_value(map.get("rollout_param_version"));
-    }
-    if meta
-        .rollout_policy_version
-        .as_ref()
-        .is_none_or(|v| v.is_empty())
-    {
-        meta.rollout_policy_version = map
-            .get("rollout_policy_version")
-            .and_then(parse_string_value);
-    }
-    if meta.rollout_policy_version.is_none() {
-        if let Some(param) = meta.rollout_param_version {
-            meta.rollout_policy_version = Some(format!("actor-step-{param}"));
-        }
-    }
-}
-
 fn parse_i64_list(value: Option<&Value>) -> Vec<i64> {
     parse_json_list(value, |v| v.as_i64())
-}
-
-fn parse_i32_list(value: Option<&Value>) -> Vec<i32> {
-    parse_json_list(value, |v| v.as_i64().map(|n| n as i32))
-}
-
-fn parse_f32_list(value: Option<&Value>) -> Vec<f32> {
-    parse_json_list(value, |v| v.as_f64().map(|n| n as f32))
 }
 
 fn parse_json_list<T, F>(value: Option<&Value>, f: F) -> Vec<T>
@@ -426,44 +358,6 @@ fn parse_string_value(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn extracts_rollout_from_payload() {
-        let payload = json!({
-            "response_ids": [101, 102],
-            "response_mask": [1, 1],
-            "rollout_log_probs": [-0.1, -0.2],
-            "metadata": {
-                "rollout_param_version": "11",
-                "rollout_policy_version": "actor-step-11"
-            }
-        });
-        let meta = extract_rollout_from_payload(&payload);
-        assert_eq!(meta.response_ids, vec![101, 102]);
-        assert_eq!(meta.rollout_log_probs.len(), 2);
-        assert_eq!(meta.rollout_param_version, Some(11));
-        assert_eq!(meta.rollout_policy_version.as_deref(), Some("actor-step-11"));
-    }
-
-    #[test]
-    fn extracts_rollout_from_extra_info() {
-        let payload = json!({
-            "response_text": "answer",
-            "metadata": {
-                "extra_info": {
-                    "response_ids": [201, 202],
-                    "response_mask": [1, 0],
-                    "rollout_log_probs": [-0.3, 0.0],
-                    "rollout_param_version": "12",
-                    "rollout_policy_version": "actor-step-12"
-                }
-            }
-        });
-        let meta = extract_rollout_from_payload(&payload);
-        assert_eq!(meta.response_ids, vec![201, 202]);
-        assert_eq!(meta.rollout_log_probs, vec![-0.3, 0.0]);
-        assert_eq!(meta.rollout_param_version, Some(12));
-    }
 
     #[test]
     fn from_message_restores_async_error_codes() {

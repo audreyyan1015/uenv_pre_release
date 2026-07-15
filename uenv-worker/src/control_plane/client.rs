@@ -130,6 +130,7 @@ impl SchedulerControlPlaneClient {
     pub async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await;
+        let active_load = self.metrics.active_episode_count() as i32;
         let response = client
             .register_worker(RegisterWorkerRequest {
                 worker_id: identity.worker_id.clone(),
@@ -139,6 +140,8 @@ impl SchedulerControlPlaneClient {
                 max_concurrent: self.max_concurrent,
                 gateway_public_url: self.gateway_public_url.clone(),
                 synced_env_packages: self.synced_env_packages.clone(),
+                load: active_load,
+                max_load: self.max_concurrent as i32,
             })
             .await?
             .into_inner();

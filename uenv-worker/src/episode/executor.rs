@@ -8,8 +8,8 @@ use crate::episode::async_context::{
 };
 use crate::episode::model_client::{ModelClient, ModelInferError};
 use crate::episode::rollout_meta::{
-    apply_async_to_result, build_failed_async_result, extract_rollout_from_payload,
-    validate_async_completed, AsyncRolloutError, RolloutModelMeta,
+    apply_async_to_result, build_failed_async_result, validate_async_completed, AsyncRolloutError,
+    RolloutModelMeta,
 };
 use crate::llm::LlmConfig;
 use crate::episode::payload::build_reset_config;
@@ -173,6 +173,7 @@ impl EpisodeExecutor {
                     &episode.reward_config,
                     step_index as u32,
                     step_require_rollout,
+                    episode.model_endpoint_config.as_ref(),
                 )
                 .await;
             let infer = match infer {
@@ -250,6 +251,7 @@ impl EpisodeExecutor {
                 truncated: step.truncated,
                 info: step_info,
                 duration_ms: step_duration_ms as i64,
+                rollout_trace: None,
             };
             current_observation = step.observation;
             steps.push(step_record.clone());
@@ -516,6 +518,7 @@ impl EpisodeExecutor {
             truncated: false,
             info,
             duration_ms: outcome.duration_ms as i64,
+            rollout_trace: None,
         };
         let trajectory = Trajectory {
             steps: vec![step.clone()],
@@ -528,7 +531,9 @@ impl EpisodeExecutor {
         let worker_latency_ms = ((worker_finish_ts - worker_start_ts) * 1000.0).round() as i64;
 
         if is_async_mode(parallel_mode) {
-            let rollout_meta = extract_rollout_from_payload(&payload);
+            // SWE async no longer accepts rollout metadata smuggled through payload/metadata.
+            // A future typed plugin result path should populate this before validation.
+            let rollout_meta = RolloutModelMeta::default();
             if let Err(err) = validate_async_completed(parallel_mode, &rollout_meta) {
                 return Ok(failed_output(
                     episode,

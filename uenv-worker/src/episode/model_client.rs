@@ -7,13 +7,11 @@ use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
 
 use crate::episode::rollout_meta::{
-    extract_rollout_from_payload, parse_logprobs_from_chat_response,
-    parse_model_version_from_response, parse_response_ids_from_chat_response, AsyncRolloutError,
-    RolloutModelMeta,
+    parse_logprobs_from_chat_response, parse_model_version_from_response,
+    parse_response_ids_from_chat_response, AsyncRolloutError, RolloutModelMeta,
 };
-use crate::llm::{
-    chat_completions_url_for_endpoint, parse_payload_model_endpoint, LlmConfig,
-};
+use crate::llm::{chat_completions_url_for_endpoint, is_valid_llm_endpoint, LlmConfig};
+use crate::proto::v1::ModelEndpoint;
 
 #[derive(Debug, Clone)]
 pub struct ModelInferOutput {
@@ -72,7 +70,7 @@ impl ModelClient {
         reward_config: &[u8],
         step_index: u32,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        self.infer_with_rollout_meta(payload, reward_config, step_index, false)
+        self.infer_with_rollout_meta(payload, reward_config, step_index, false, None)
             .await
             .map(|output| output.action)
             .map_err(|err| match err {
@@ -85,8 +83,9 @@ impl ModelClient {
         &self,
         payload: &[u8],
         reward_config: &[u8],
-        step_index: u32,
+        _step_index: u32,
         require_rollout_meta: bool,
+        model_endpoint: Option<&ModelEndpoint>,
     ) -> Result<ModelInferOutput, ModelInferError> {
         let payload_json: Value = if payload.is_empty() {
             Value::Null
@@ -95,32 +94,12 @@ impl ModelClient {
                 .map_err(|err| ModelInferError::Other(format!("invalid payload json: {err}")))?
         };
 
-        // W-1: VeRL rollout answer takes priority on the first step.
-        if step_index <= 1 {
-            if let Some(response) = payload_json.get("response_text").and_then(Value::as_str) {
-                if !response.is_empty() {
-                    let mut rollout_meta = if require_rollout_meta {
-                        Some(extract_rollout_from_payload(&payload_json))
-                    } else {
-                        None
-                    };
-                    if require_rollout_meta {
-                        if let Some(meta) = rollout_meta.as_mut() {
-                            if meta.response_mask.is_empty() && !meta.response_ids.is_empty() {
-                                meta.response_mask = vec![1; meta.response_ids.len()];
-                            }
-                            meta.validate_for_async()?;
-                        }
-                    }
-                    return Ok(ModelInferOutput {
-                        action: response.as_bytes().to_vec(),
-                        rollout_meta,
-                    });
-                }
-            }
-        }
-
-        let (endpoint_base, model_name) = resolve_llm_target(&payload_json, &self.llm);
+        let LlmTarget {
+            endpoint_base,
+            model_name,
+            max_retries,
+        } = resolve_llm_target(&self.llm, model_endpoint);
+        let gen_cfg = model_endpoint_generation_config(model_endpoint)?;
         let llm_ready = LlmConfig::llm_call_ready(&endpoint_base, &self.llm);
         let question = payload_json
             .get("question")
@@ -171,16 +150,6 @@ impl ModelClient {
             ModelInferError::Other("model client: payload missing question".to_string())
         })?;
 
-        let gen_cfg = payload_json
-            .get("generation_config")
-            .cloned()
-            .or_else(|| {
-                payload_json
-                    .pointer("/model_endpoint/generation_config")
-                    .cloned()
-            })
-            .unwrap_or_else(|| json!({}));
-
         let temperature = gen_cfg
             .get("temperature")
             .and_then(Value::as_f64)
@@ -204,7 +173,7 @@ impl ModelClient {
         }
 
         let url = chat_completions_url_for_endpoint(&endpoint_base);
-        let max_retries = self.llm.max_retries.max(1);
+        let max_retries = max_retries.max(1);
         let mut last_err = String::new();
         for attempt in 0..max_retries {
             let model_start = Instant::now();
@@ -240,9 +209,6 @@ impl ModelClient {
                             });
                             meta.rollout_log_probs = parse_logprobs_from_chat_response(&resp_json)?;
                             meta.response_ids = parse_response_ids_from_chat_response(&resp_json);
-                            if meta.response_ids.is_empty() {
-                                meta.response_ids = extract_rollout_from_payload(&payload_json).response_ids;
-                            }
                             if meta.response_mask.is_empty() && !meta.response_ids.is_empty() {
                                 meta.response_mask = vec![1; meta.response_ids.len()];
                             }
@@ -315,142 +281,151 @@ fn build_http_client(timeout_secs: u64) -> Client {
         })
 }
 
-fn resolve_llm_target(payload: &Value, llm: &LlmConfig) -> (String, String) {
-    if let Some(endpoint) = parse_payload_model_endpoint(payload) {
-        let model_name = payload
-            .get("model_name")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                payload
-                    .get("model_endpoint")
-                    .and_then(Value::as_object)
-                    .and_then(|m| m.get("model_name"))
-                    .and_then(Value::as_str)
-            })
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| llm.model_name.clone());
-        return (endpoint, model_name);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LlmTarget {
+    endpoint_base: String,
+    model_name: String,
+    max_retries: usize,
+}
+
+fn resolve_llm_target(llm: &LlmConfig, model_endpoint: Option<&ModelEndpoint>) -> LlmTarget {
+    let typed_url = model_endpoint.map(|endpoint| endpoint.url.trim()).unwrap_or("");
+    let endpoint_base = if is_valid_llm_endpoint(typed_url) {
+        typed_url.to_string()
+    } else {
+        if !typed_url.is_empty() {
+            tracing::warn!(
+                model_endpoint = typed_url,
+                "worker_model_endpoint_invalid"
+            );
+        }
+        llm.endpoint.trim().to_string()
+    };
+    let model_name = model_endpoint
+        .map(|endpoint| endpoint.model_name.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| llm.model_name.clone());
+    let max_retries = model_endpoint
+        .and_then(|endpoint| usize::try_from(endpoint.max_retries).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(llm.max_retries);
+    LlmTarget {
+        endpoint_base,
+        model_name,
+        max_retries,
     }
-    (llm.endpoint.trim().to_string(), llm.model_name.clone())
+}
+
+fn model_endpoint_generation_config(
+    model_endpoint: Option<&ModelEndpoint>,
+) -> Result<Value, ModelInferError> {
+    let Some(endpoint) = model_endpoint else {
+        return Ok(json!({}));
+    };
+    if endpoint.generation_config_json.is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_slice(&endpoint.generation_config_json).map_err(|err| {
+        ModelInferError::Other(format!(
+            "invalid model_endpoint_config.generation_config_json: {err}"
+        ))
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_llm_target, ModelClient, ModelInferError};
-    use crate::episode::rollout_meta::AsyncRolloutError;
+    use super::{resolve_llm_target, LlmTarget, ModelClient};
     use crate::llm::LlmConfig;
-    use serde_json::json;
+    use crate::proto::v1::ModelEndpoint;
+    use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    #[tokio::test]
-    async fn async_pre_rollout_extracts_rollout_meta_from_payload() {
-        let client = ModelClient::new();
-        let payload = r#"{
-            "response_text":"answer 42",
-            "response_ids":[101,102],
-            "response_mask":[1,1],
-            "rollout_log_probs":[-0.1,-0.2],
-            "metadata":{
-                "rollout_param_version":"11",
-                "rollout_policy_version":"actor-step-11"
-            }
-        }"#;
-        let output = client
-            .infer_with_rollout_meta(payload.as_bytes(), br#"{}"#, 1, true)
-            .await
-            .expect("infer");
-        assert_eq!(output.action, b"answer 42");
-        let meta = output.rollout_meta.expect("rollout meta");
-        assert_eq!(meta.rollout_param_version, Some(11));
-        assert_eq!(meta.rollout_log_probs.len(), 2);
-        assert_eq!(meta.response_ids, vec![101, 102]);
-    }
-
-    #[tokio::test]
-    async fn async_pre_rollout_fails_when_logprobs_missing() {
-        let client = ModelClient::new();
-        let payload = r#"{
-            "response_text":"answer 42",
-            "response_ids":[101],
-            "metadata":{"rollout_param_version":"11","rollout_policy_version":"actor-step-11"}
-        }"#;
-        let err = client
-            .infer_with_rollout_meta(payload.as_bytes(), br#"{}"#, 1, true)
-            .await
-            .expect_err("should fail");
-        assert_eq!(err, ModelInferError::Rollout(AsyncRolloutError::RolloutLogprobsMissing));
-    }
-
     #[test]
-    fn uses_valid_payload_model_endpoint_override() {
+    fn uses_typed_model_endpoint_override() {
         let llm = LlmConfig {
             endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             model_name: "default-model".to_string(),
             ..LlmConfig::default()
         };
-        let payload = json!({
-            "model_endpoint": "http://127.0.0.1:8000/v1",
-            "model_name": "override-model"
-        });
+        let endpoint = typed_endpoint("http://127.0.0.1:8000/v1", "override-model", json!({}));
         assert_eq!(
-            resolve_llm_target(&payload, &llm),
-            (
-                "http://127.0.0.1:8000/v1".to_string(),
-                "override-model".to_string()
-            )
+            resolve_llm_target(&llm, Some(&endpoint)),
+            LlmTarget {
+                endpoint_base: "http://127.0.0.1:8000/v1".to_string(),
+                model_name: "override-model".to_string(),
+                max_retries: llm.max_retries,
+            }
         );
     }
 
     #[test]
-    fn falls_back_to_default_when_payload_endpoint_invalid() {
+    fn ignores_payload_model_fields_without_typed_endpoint() {
+        let llm = LlmConfig {
+            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            model_name: "default-model".to_string(),
+            ..LlmConfig::default()
+        };
+        assert_eq!(
+            resolve_llm_target(&llm, None),
+            LlmTarget {
+                endpoint_base: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+                model_name: "default-model".to_string(),
+                max_retries: llm.max_retries,
+            }
+        );
+    }
+
+    #[test]
+    fn falls_back_to_default_when_typed_endpoint_invalid() {
         let llm = LlmConfig {
             endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             model_name: "deepseek-v4-flash".to_string(),
             ..LlmConfig::default()
         };
         assert_eq!(
-            resolve_llm_target(&json!({"model_endpoint": ""}), &llm),
-            (
-                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
-                "deepseek-v4-flash".to_string()
-            )
+            resolve_llm_target(&llm, None),
+            LlmTarget {
+                endpoint_base: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+                model_name: "deepseek-v4-flash".to_string(),
+                max_retries: llm.max_retries,
+            }
         );
+        let endpoint = typed_endpoint("not-a-url", "", json!({}));
         assert_eq!(
-            resolve_llm_target(&json!({"model_endpoint": "not-a-url"}), &llm),
-            (
-                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
-                "deepseek-v4-flash".to_string()
-            )
+            resolve_llm_target(&llm, Some(&endpoint)),
+            LlmTarget {
+                endpoint_base: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+                model_name: "deepseek-v4-flash".to_string(),
+                max_retries: llm.max_retries,
+            }
         );
     }
 
     #[test]
-    fn override_endpoint_without_model_name_uses_default_model() {
+    fn typed_endpoint_without_model_name_uses_default_model() {
         let llm = LlmConfig {
             endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             model_name: "deepseek-v4-flash".to_string(),
             ..LlmConfig::default()
         };
+        let endpoint = typed_endpoint("http://127.0.0.1:8000/v1", "", json!({}));
         assert_eq!(
-            resolve_llm_target(
-                &json!({"model_endpoint": "http://127.0.0.1:8000/v1"}),
-                &llm
-            ),
-            (
-                "http://127.0.0.1:8000/v1".to_string(),
-                "deepseek-v4-flash".to_string()
-            )
+            resolve_llm_target(&llm, Some(&endpoint)),
+            LlmTarget {
+                endpoint_base: "http://127.0.0.1:8000/v1".to_string(),
+                model_name: "deepseek-v4-flash".to_string(),
+                max_retries: llm.max_retries,
+            }
         );
     }
 
     #[tokio::test]
-    async fn prefers_response_text_over_rule_reward() {
+    async fn ignores_response_text_payload_shortcut() {
         let client = ModelClient::new();
-        let payload = format!(r#"{{"response_text":"{} 42","question":"q"}}"#, "####");
+        let payload = format!(r#"{{"response_text":"{} 42"}}"#, "####");
         let action = client
             .infer_action(
                 payload.as_bytes(),
@@ -459,7 +434,7 @@ mod tests {
             )
             .await
             .expect("infer");
-        assert_eq!(action, b"#### 42");
+        assert_eq!(action, b"20");
     }
 
     #[tokio::test]
@@ -517,14 +492,12 @@ mod tests {
         });
 
         let client = ModelClient::with_config(LlmConfig {
+            endpoint: format!("http://{}/v1", addr),
             api_key: "sk-test".to_string(),
             model_name: "deepseek-v4-flash".to_string(),
             ..LlmConfig::default()
         });
-        let payload = format!(
-            r#"{{"question":"ping","model_endpoint":"http://{}/v1","model_name":"deepseek-v4-flash"}}"#,
-            addr
-        );
+        let payload = r#"{"question":"ping","model_name":"deepseek-v4-flash"}"#;
         let action = client
             .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"x"}"#, 1)
             .await
@@ -536,7 +509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uses_default_config_when_payload_has_no_valid_override() {
+    async fn ignores_payload_generation_config_and_uses_default_config() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let captured = Arc::new(Mutex::new(String::new()));
@@ -562,7 +535,7 @@ mod tests {
             model_name: "default-model".to_string(),
             ..LlmConfig::default()
         });
-        let payload = r#"{"question":"2+2?","model_endpoint":"","generation_config":{"max_new_tokens":16}}"#;
+        let payload = r#"{"question":"2+2?","generation_config":{"max_new_tokens":16}}"#;
         let action = client
             .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"4"}"#, 1)
             .await
@@ -572,6 +545,68 @@ mod tests {
         let request = captured.lock().expect("lock").clone();
         assert!(request.starts_with("POST /v1/chat/completions "));
         assert!(request.contains(r#""model":"default-model""#));
+        assert!(request.contains(r#""max_tokens":512"#));
+    }
+
+    #[tokio::test]
+    async fn uses_typed_generation_config_json() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_for_task = captured.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0; 8192];
+            let n = stream.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+            *captured_for_task.lock().expect("lock") = request;
+            let body = b"{\"choices\":[{\"message\":{\"content\":\"#### 4\"},\"finish_reason\":\"stop\"}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let client = ModelClient::with_config(LlmConfig {
+            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            model_name: "default-model".to_string(),
+            ..LlmConfig::default()
+        });
+        let endpoint = typed_endpoint(
+            &format!("http://{addr}/v1"),
+            "typed-model",
+            json!({"max_new_tokens":16}),
+        );
+        let action = client
+            .infer_with_rollout_meta(
+                br#"{"question":"2+2?","generation_config":{"max_new_tokens":99}}"#,
+                br#"{"type":"rule_reward","target":"4"}"#,
+                1,
+                false,
+                Some(&endpoint),
+            )
+            .await
+            .expect("infer")
+            .action;
+
+        assert_eq!(action, b"#### 4");
+        let request = captured.lock().expect("lock").clone();
+        assert!(request.starts_with("POST /v1/chat/completions "));
+        assert!(request.contains(r#""model":"typed-model""#));
         assert!(request.contains(r#""max_tokens":16"#));
+        assert!(!request.contains(r#""max_tokens":99"#));
+    }
+
+    fn typed_endpoint(url: &str, model_name: &str, generation_config: Value) -> ModelEndpoint {
+        ModelEndpoint {
+            endpoint_type: "http".to_string(),
+            url: url.to_string(),
+            model_name: model_name.to_string(),
+            generation_config_json: serde_json::to_vec(&generation_config).unwrap_or_default(),
+            max_retries: 0,
+        }
     }
 }

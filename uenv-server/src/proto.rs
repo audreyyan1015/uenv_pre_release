@@ -1,3 +1,7 @@
+// 文件职责：把 build.rs 生成的 protobuf Rust 代码引入 uenv-server 命名空间。
+// 主要功能：include v1、scheduler.v1、worker.v1 等 proto 包，供 service/control_plane/scheduler 共享类型。
+// 大致工作流：编译时 tonic_prost_build 输出 OUT_DIR 文件；本模块通过 include_proto! 在源码中暴露生成类型。
+
 // proto.rs：把编译好的 protobuf 代码引入 Rust 命名空间。
 //
 // .proto 文件在编译时（build.rs）被 tonic_prost_build 转换成 Rust 代码，
