@@ -1,13 +1,13 @@
-# proto-clean 剩余迁移状态
+# clean proto 迁移状态
 
 更新时间：2026-07-15
-代码基线：`bridge-alignment`，已合并到 `5b8f12f`。
+代码基线：`bridge-alignment`，截至 `4b862b6`。
 
-本文档只记录从当前代码状态继续收口 clean proto 迁移还需要做什么。旧版文档里“正式 proto 仍是兼容版、等待 proto-clean 替换”的说法已经过期：当前 `/home/uenv/proto` 已经全量对齐 `/home/uenv/proto-clean/proto`；除正式目录额外保留的 `proto/README.md` 外，`diff -qr proto proto-clean/proto` 已无协议文件差异。
+本文档只记录从当前代码状态继续收口 clean proto 迁移还需要做什么。旧版文档里“正式 proto 仍是兼容版、等待临时 clean proto 目录替换”的说法已经过期：当前 `/home/uenv/proto` 已经是唯一正式协议来源。
 
 ## 当前结论
 
-- 正式 proto 已经删除旧兼容字段，旧字段号用 `reserved` 保留，避免后续误复用；正式 proto 与 proto-clean 模板已全量一致。
+- 正式 proto 已经删除旧兼容字段，旧字段号用 `reserved` 保留，避免后续误复用。
 - Rust server、worker、adapter-core 走 `build.rs` 编译期生成 protobuf，当前测试已经验证 clean proto 可编译。
 - Python bridge adapter-core 生成文件已经重新生成，当前生成文件不再暴露 `payload_json`、`meta_json`、`model_output_json` 字段名。
 - Bridge / adapter-core / server / worker 主链路已经走 typed 字段：`parallel_mode`、`ModelEndpoint`、rollout 版本、logprobs、`RolloutTrace`、cancel 拆分字段。
@@ -142,10 +142,10 @@
 ### P2：文档和脚本清理
 
 1. 旧联调文档里仍可能保留 `payload_json/meta_json/info.response_ids` 等历史描述；这些不影响运行，但会误导后续读代码的人。
-2. 只维护当前指定的三份迁移文档：
-   - `/home/uenv/proto-clean/REMAINING_CLEAN_MIGRATION.md`
-   - `/home/uenv/proto-clean/CLEAN_PROTO_FIELDS.md`
-   - `/home/uenv/code-change-summary-since-last-commit.md`
+2. 只维护当前指定的迁移文档：
+   - `/home/uenv/proto/REMAINING_CLEAN_MIGRATION.md`
+   - `/home/uenv/proto/CLEAN_PROTO_FIELDS.md`
+   - `/home/uenv/Docs/server/0715协议调整.md`
 3. 后续如果继续改 proto，需要同步更新：
    - Rust 编译期生成：server、worker、adapter-core 的 `build.rs` 输出。
    - Python bridge 生成文件：`uenv-bridge/src/uenv/bridge/gen/*adapter_core_pb2*.py`。
@@ -156,7 +156,7 @@
 最近一次合并后已执行：
 
 - `git diff --check`：通过。
-- `diff -qr proto proto-clean/proto`：除 `proto/README.md` 外无协议文件差异。
+- 旧临时 clean proto 目录已删除；`/home/uenv/proto` 是唯一正式协议来源。
 - 正式 proto 旧字段扫描：`payload_json`、`meta_json`、`model_output_json`、`string model_endpoint =`、`bool cancelled =` 均无命中。
 - `cargo test -p uenv-adapter-core`：11 个测试通过。
 - `cargo test -p uenv-server`：52 个单元测试 + 7 个集成测试通过。

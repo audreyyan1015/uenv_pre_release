@@ -1,6 +1,6 @@
 # clean proto 字段说明
 
-本文档说明 `/home/uenv/proto-clean/proto/uenv/v1/*.proto` 中清理干净后的全部 message 字段。
+本文档说明 `/home/uenv/proto/uenv/v1` 中清理干净后的全部 message 字段。
 
 干净版约定：
 
