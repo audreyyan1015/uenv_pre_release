@@ -1,0 +1,7 @@
+{
+  "request_id": "req-scitab-smoke-001",
+  "question": "Table: Group A mean=10, Group B mean=5.\nClaim: Group A outperformed Group B.",
+  "dataset": "scitab",
+  "response_text": "The claim is supports by the table.",
+  "reward_config": {"type": "rule_reward", "target": "supports"}
+}

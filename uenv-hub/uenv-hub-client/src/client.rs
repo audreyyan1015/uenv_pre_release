@@ -411,6 +411,21 @@ impl HttpClient {
         .await
     }
 
+    /// Fetch the OpenEnv-style interface contract (Action/Observation/State) for
+    /// a package version. `version` may be `latest`.
+    pub async fn get_package_interface(
+        &self,
+        package_id: &str,
+        version: &str,
+    ) -> Result<uenv_hub_types::InterfaceSchema> {
+        self.get_json(
+            &format!("/api/v1/packages/{package_id}/versions/{version}/interface"),
+            &[],
+            None,
+        )
+        .await
+    }
+
     /// Fetch the deterministic sync plan for a package version.
     pub async fn get_package_sync_plan(
         &self,

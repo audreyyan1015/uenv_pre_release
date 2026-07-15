@@ -893,6 +893,21 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
         self.assertEqual([result.summary.total_reward for result in results], [10.0, 11.0, 12.0])
 
+    def test_env_type_routes_validation_benchmarks_to_math(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+        for data_source in (
+            "openai/gsm8k",
+            "pubmedqa",
+            "XinyuanLu00/SciTab",
+            "OlymMATH-EASY",
+            "olymmath-hard",
+        ):
+            with self.subTest(data_source=data_source):
+                self.assertEqual(loop._env_type({"data_source": data_source}), "math")
+
     def test_agent_loop_client_config_reads_streaming_env(self) -> None:
         with unittest.mock.patch.dict("os.environ", {"UENV_ADAPTER_CORE_STREAMING": "1"}):
             config = AgentLoopClientConfig.from_env()

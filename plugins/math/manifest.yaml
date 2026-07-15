@@ -8,5 +8,12 @@ description: MathEnv — universal validation/computation environment (PRD v7.2)
 tags:
   - math
   - reasoning
+  - validation
+  - qa
 datasets:
   - gsm8k
+  - pubmedqa
+  - scitab
+  - olymmath
+  - olymmath-easy
+  - olymmath-hard

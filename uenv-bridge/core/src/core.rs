@@ -332,6 +332,13 @@ fn sample_to_worker_payload(
         "dataset": dataset,
         "metadata": metadata,
     });
+    if let Some(obj) = worker_payload.as_object_mut() {
+        if let Some(v) = env_cfg.get("response_text") {
+            obj.insert("response_text".to_string(), v.clone());
+        }
+    }
+    // SWE native: forward instance fields from env_config so the worker can locate the
+    // image and grade (the generic mapping above only carries question/dataset).
     if sample.env_type == "swe" {
         if let Some(obj) = worker_payload.as_object_mut() {
             for key in ["instance_id", "benchmark_variant", "use_gold_patch", "command_mode"] {
@@ -349,6 +356,29 @@ fn sample_to_worker_payload(
                 "workspace_dir",
                 "llm_config_path",
                 "max_iterations",
+            ] {
+                if let Some(v) = env_cfg.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+    }
+    // CodeEnv / DSCodeBench: forward execution fields from env_config.
+    if sample.env_type == "code" {
+        if let Some(obj) = worker_payload.as_object_mut() {
+            for key in [
+                "task_id",
+                "library",
+                "test_code",
+                "test_script_path",
+                "ground_truth_path",
+                "ground_truth_code",
+                "entry_point",
+                "num_tests",
+                "random_seed",
+                "timeout_secs",
+                "benchmark_root",
+                "response_text",
             ] {
                 if let Some(v) = env_cfg.get(key) {
                     obj.insert(key.to_string(), v.clone());

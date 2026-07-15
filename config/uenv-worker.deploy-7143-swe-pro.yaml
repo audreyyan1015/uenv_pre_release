@@ -14,7 +14,7 @@ scheduler:
   mode: "remote"
 
 env:
-  types: ["math", "swe"]
+  types: ["math", "code", "swe"]
   backend: "process"
   plugin_dir: "/root/UEnv/plugins"
 

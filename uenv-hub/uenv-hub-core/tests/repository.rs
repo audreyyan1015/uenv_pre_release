@@ -208,6 +208,11 @@ async fn env_package_publish_get_list_artifacts() {
             trajectory_bundle_schema: Some("v2.2".into()),
             tool_bridge_schema: None,
         },
+        interface: InterfaceSchema {
+            action: Some(serde_json::json!({"type": "object", "required": ["type"]})),
+            observation: Some(serde_json::json!({"type": "object"})),
+            state: None,
+        },
         artifacts: vec![
             InlineArtifact {
                 name: "catalog.json".into(),
@@ -237,6 +242,9 @@ async fn env_package_publish_get_list_artifacts() {
     assert_eq!(manifest.package_id, "demo-pkg");
     assert_eq!(manifest.artifacts.len(), 2);
     assert!(manifest.artifacts.iter().all(|a| a.digest.starts_with("sha256:")));
+    // OpenEnv interface contract is persisted into the manifest.
+    assert!(manifest.interface.action.is_some());
+    assert!(manifest.interface.observation.is_some());
 
     // latest resolves to the published version.
     let latest = s.get_package_manifest("demo-pkg", "latest").await.unwrap();
@@ -252,6 +260,7 @@ async fn env_package_publish_get_list_artifacts() {
         worker_overlay: serde_json::Value::Null,
         agent_defaults: serde_json::Value::Null,
         contracts: PackageContracts::default(),
+        interface: InterfaceSchema::default(),
         artifacts: vec![],
         file_artifacts: vec![],
     };
@@ -270,6 +279,47 @@ async fn env_package_publish_get_list_artifacts() {
     // sync plan is deterministic and carries a bundle digest.
     let plan = package::sync_plan(&latest);
     assert_eq!(plan.files.len(), 2);
+    assert!(plan.bundle_digest.starts_with("sha256:"));
+}
+
+/// The seeded DSCodeBench CodeEnv EnvPackage must carry real artifact bytes
+/// **and** the OpenEnv Action/Observation/State contract, matching the `code`
+/// env-registry manifest (标准化契约；五类 Benchmark §H-2).
+#[tokio::test]
+async fn seed_dscodebench_mvp_carries_openenv_interface_and_artifacts() {
+    use std::path::PathBuf;
+    use uenv_hub_core::{package, seed};
+
+    let s = store().await;
+    let artifact_root = tempfile::tempdir().unwrap();
+    // config/benchmark lives at the sibling of uenv-hub-core inside uenv-hub/.
+    let benchmark_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../config/benchmark");
+
+    seed::seed_dscodebench_mvp(&s, artifact_root.path(), &benchmark_dir).await.unwrap();
+    // Idempotent second call is a no-op.
+    seed::seed_dscodebench_mvp(&s, artifact_root.path(), &benchmark_dir).await.unwrap();
+
+    let m = s.get_package_manifest("dscodebench", "latest").await.unwrap();
+    assert_eq!(m.version, "0.1.0");
+
+    // OpenEnv contract present (the standardization gap this closes).
+    assert!(m.interface.action.is_some(), "dscodebench package must expose an OpenEnv action schema");
+    assert!(m.interface.observation.is_some());
+    assert!(m.interface.state.is_some());
+
+    // Real artifact bytes (evaluator + smoke sample), content-addressed, syncable.
+    assert!(m.artifacts.iter().all(|a| a.digest.starts_with("sha256:")));
+    let rels: Vec<&str> = m.artifacts.iter().map(|a| a.target_rel_path.as_str()).collect();
+    assert!(rels.contains(&"benchmark/evaluate_code.py"), "missing evaluator in {rels:?}");
+    assert!(rels.contains(&"benchmark/samples/ds_smoke_001.json"), "missing smoke sample in {rels:?}");
+
+    let eval_meta = s.get_artifact_meta("dscodebench", "latest", "evaluate_code.py").await.unwrap();
+    let eval_bytes = package::read_artifact_verified(artifact_root.path(), &eval_meta.rel_path, &eval_meta.digest).unwrap();
+    assert!(String::from_utf8_lossy(&eval_bytes).contains("def "), "evaluator bytes look empty");
+
+    // Sync plan advertises every artifact for `uenv env sync dscodebench`.
+    let plan = package::sync_plan(&m);
+    assert_eq!(plan.files.len(), m.artifacts.len());
     assert!(plan.bundle_digest.starts_with("sha256:"));
 }
 

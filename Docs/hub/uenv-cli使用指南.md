@@ -1,7 +1,8 @@
 # UEnv CLI 操作文档（`uenv`）
 
-> 配套服务：UEnv-Hub（L1 注册中心）。Hub 接口对接见
-> `docs/uenv-hub-service-integration.md`。
+> 配套服务：UEnv-Hub（内网 **环境预缓存与制品分发中心**）。Hub 接口对接见
+> `docs/uenv-hub-service-integration.md`；**EnvPackage 同步（镜像 tar、benchmark 包）** 见
+> **[uenv-hub环境标准化指南.md](./uenv-hub环境标准化指南.md)**。
 > CLI 由 `uenv-hub-client` crate 构建，二进制名 **`uenv`**，通过 HTTP 调用 Hub。
 
 ---
@@ -42,7 +43,9 @@ uenv [--endpoint <URL>] <env|hub> <子命令>
 | env | `validate [--manifest]` | 本地校验 manifest + schema | 否（纯本地） |
 | env | `build [--manifest] [--engine]` | 构建镜像（docker/podman） | 否 |
 | env | `push [--manifest] [--engine]` | 构建+推送镜像并发布 manifest | 是 |
-| env | `publish [--manifest]` | 仅发布元数据（镜像已在仓库） | 是 |
+| env | `publish [--manifest]` | 发布 manifest（镜像/制品已在 Hub 或 registry） | 是 |
+| env | **`sync <package> [--version] [--docker-load]`** | **从 Hub 拉取 EnvPackage 全量制品到本地**（内网 Worker 部署主路径） | 是 |
+| env | **`publish-image <package> <version> --tar …`** | 将 `docker save` 镜像 tar 流式入库 Hub（运维在 Hub/导入机执行） | 是 |
 | env | `yank <env> --version --reason` | 下架版本 | 是 |
 | hub | `login --token [--endpoint]` | 保存 token/endpoint 到配置 | — |
 | hub | `status` | 显示 endpoint + 连通状态 | 读取需 token |
@@ -190,8 +193,26 @@ uenv env yank demoenv --version 0.1.0 --reason "broken build"
 
 ## 6. 运维 / 同步
 
+### 6.1 EnvPackage 全量同步（内网 Worker 部署）
+
+将 Hub 上已发布的 **EnvPackage**（含 catalog、benchmark tar、**镜像 tar** 等）拉到 Worker 本地，Episode 运行时不再访问公网：
+
 ```bash
-# 增量同步：拉取 since(Unix 秒) 之后变更的 manifest
+# SWE-bench-Pro：含 catalog + 镜像 tar
+uenv env sync swe-bench-pro --version 0.2.0 --docker-load
+# 落盘：/var/lib/uenv/envs/swe-bench-pro/0.2.0/
+
+# DSCodeBench（规划中的 code EnvPackage）
+uenv env sync dscodebench --version 0.1.0
+export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
+```
+
+详见 **[uenv-hub环境标准化指南.md](./uenv-hub环境标准化指南.md)** §5–§7。
+
+### 6.2 env registry 元数据增量同步
+
+```bash
+# 增量同步：拉取 since(Unix 秒) 之后变更的 manifest（不含大制品字节；大文件走 env sync）
 uenv hub sync --since 0
 #   3 manifest(s) changed since 0 (server_time=...)
 #     math@1.0.0

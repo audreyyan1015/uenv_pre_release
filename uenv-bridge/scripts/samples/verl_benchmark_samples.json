@@ -1,0 +1,60 @@
+{
+  "description": "VeRL Dataset 单条样本参考形状（五类 benchmark）。Bridge build_episode_request 消费字段见 Docs/260709/五类Benchmark-Worker支持现状与跨层调整.md §7",
+  "samples": [
+    {
+      "benchmark": "gsm8k",
+      "data_source": "openai/gsm8k",
+      "prompt": [{"role": "user", "content": "Natalia sold clips to 48 friends in April and half as many in May. How many clips total?"}],
+      "reward_model": {"style": "rule", "ground_truth": "72"},
+      "extra_info": {"dataset": "gsm8k", "max_steps": 1}
+    },
+    {
+      "benchmark": "pubmedqa",
+      "data_source": "pubmedqa",
+      "prompt": [{"role": "user", "content": "Context: A randomized trial showed improved outcomes.\nQuestion: Does treatment X improve outcomes?"}],
+      "reward_model": {"style": "rule", "ground_truth": "yes"},
+      "extra_info": {"dataset": "pubmedqa", "max_steps": 1}
+    },
+    {
+      "benchmark": "scitab",
+      "data_source": "XinyuanLu00/SciTab",
+      "prompt": [{"role": "user", "content": "Table: Group A mean=10, Group B mean=5.\nClaim: Group A outperformed Group B."}],
+      "reward_model": {"style": "rule", "ground_truth": "supports"},
+      "extra_info": {"dataset": "scitab", "max_steps": 1}
+    },
+    {
+      "benchmark": "dscodebench",
+      "data_source": "dscodebench",
+      "prompt": [{"role": "user", "content": "Write a Python function add(a, b) that returns the sum of a and b."}],
+      "reward_model": {"style": "rule", "ground_truth": ""},
+      "extra_info": {
+        "dataset": "dscodebench",
+        "task_id": "smoke-001",
+        "library": "python",
+        "test_code": "assert add(1, 2) == 3\nassert add(-1, 1) == 0",
+        "entry_point": "add",
+        "max_steps": 1
+      }
+    },
+    {
+      "benchmark": "swe-bench-pro",
+      "data_source": "swe-bench-pro",
+      "prompt": [{"role": "user", "content": "Fix the failing tests for this repository instance."}],
+      "reward_model": {"style": "rule", "ground_truth": ""},
+      "extra_info": {
+        "instance_id": "swe-pro__example-go-1",
+        "benchmark_variant": "pro",
+        "env_package_id": "swe-bench-pro",
+        "env_package_version": "0.2.0",
+        "max_steps": 1
+      }
+    },
+    {
+      "benchmark": "olymmath-easy",
+      "data_source": "OlymMATH-EASY",
+      "prompt": [{"role": "user", "content": "Find the value of 4+4+4+4."}],
+      "reward_model": {"style": "rule", "ground_truth": "16"},
+      "extra_info": {"dataset": "olymmath-easy", "max_steps": 1}
+    }
+  ]
+}

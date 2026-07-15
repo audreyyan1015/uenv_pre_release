@@ -1,0 +1,12 @@
+env_type: code
+version: "0.1.0"
+supported_backends:
+  - process
+ipc: proto-uds
+entry: ./run.sh
+description: CodeEnv — code execution + unit-test reward environment
+tags:
+  - code
+  - execution
+datasets:
+  - dscodebench

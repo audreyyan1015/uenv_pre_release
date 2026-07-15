@@ -31,7 +31,7 @@
 | **7143** | `ssh -p 7143 root@219.147.100.43` | `uenv-worker` Runtime Gateway（`:28097`）、SWE 容器池、轨迹 seal/上传 |
 | **208.77** | jump：`ssh -J root@219.147.100.43:7142 root@8.130.208.77` | OpenHands 官方 SDK 执行机；LLM 走公网 `:18888`，Runtime 走本地隧道 `:28097` |
 | **75.157** | 内网 `8.130.75.157` | 轨迹聚合 HTTP（`:8077`）；ControlPlane gRPC（`:8088`） |
-| **95.176 Hub** | 内网（可选） | Pro catalog **元数据**；不参与轨迹存储、不跑 grader |
+| **95.176 Hub** | 内网 | Pro catalog + **EnvPackage 制品**（镜像 tar 等）；不参与轨迹存储、不跑 grader |
 
 **模型**：`cognitivecomputations/DeepSeek-V3-0324-AWQ`（7142 `/data/models/DeepSeek-V3-0324-AWQ`）  
 **评测实例**：qutebrowser Pro smoke（`instance_qutebrowser__qutebrowser-…`；workspace **`/app`**）
@@ -438,7 +438,7 @@ VLLM_USE_V1=0
 | **SweInstancePool + Docker Pro 镜像** | 环境封装在 Worker；见 §3 |
 | **7142 uenv-llm-gateway + vLLM 0.9.0** | 推理与任务派发分离；7142 不承担 SWE 沙箱 |
 | **轨迹 seal → 75.157 聚合** | Worker `submit` 触发；与任务发起方无关 |
-| **Hub catalog** | 仍仅元数据；不参与 Episode 热路径 |
+| **Hub catalog** | 不参与 Episode 热路径；**2026-07 起** Hub 还托管 **EnvPackage 制品**（镜像 tar、catalog 字节），Worker 部署期 sync，非「仅元数据索引」——见 [`Docs/hub/uenv-hub环境标准化指南.md`](../hub/uenv-hub环境标准化指南.md) |
 
 ### 8.3 需要调整
 

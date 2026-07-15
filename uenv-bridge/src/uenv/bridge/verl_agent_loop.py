@@ -848,7 +848,16 @@ class UEnvAgentLoop(AgentLoopBase):
             sample_kwargs.get("data_source"),
         ]
         lowered = " ".join(str(self._python_value(item) or "").lower() for item in candidates)
-        if "gsm8k" in lowered or "math" in lowered:
+        if any(
+            token in lowered
+            for token in (
+                "gsm8k",
+                "math",
+                "pubmedqa",
+                "scitab",
+                "olymmath",
+            )
+        ):
             return "math"
         if "humaneval" in lowered or "mbpp" in lowered or "code" in lowered:
             return "code"

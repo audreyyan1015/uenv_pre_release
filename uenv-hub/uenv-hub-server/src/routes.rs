@@ -43,6 +43,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/packages/:package_id/versions", post(publish_package))
         .route("/packages/:package_id/versions/:version", get(get_package))
         .route(
+            "/packages/:package_id/versions/:version/interface",
+            get(get_package_interface),
+        )
+        .route(
             "/packages/:package_id/versions/:version/sync-plan",
             get(get_package_sync_plan),
         )
@@ -375,6 +379,20 @@ async fn get_package(
 ) -> ApiResult<Response> {
     let manifest = state.store.get_package_manifest(&package_id, &version).await?;
     Ok(json_with_etag(&headers, &manifest))
+}
+
+/// `GET /packages/{package_id}/versions/{version}/interface` — the OpenEnv-style
+/// Action/Observation/State contract for this package's environment (`latest` ok).
+/// Mirrors the classic env registry's `/envs/{env_type}/versions/{v}/interface`,
+/// so RL frameworks bind uniformly across classic envs and EnvPackages.
+async fn get_package_interface(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((package_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let manifest = state.store.get_package_manifest(&package_id, &version).await?;
+    Ok(json_with_etag(&headers, &manifest.interface))
 }
 
 /// `GET /packages/{package_id}/versions/{version}/sync-plan` — fetch plan.

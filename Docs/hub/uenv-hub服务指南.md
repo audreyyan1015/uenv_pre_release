@@ -1,8 +1,10 @@
 # UEnv-Hub 服务接口对接文档（联调版）
 
-> 面向：L2 Worker、CLI/运维、以及任何需要读取/发布环境元数据的层。
-> 角色：UEnv-Hub = L1 环境元数据注册中心（类比 Docker Hub / npm / HF Hub）。
-> **离线目录服务**，不参与运行时调度，仅持久化环境元数据 / 版本 / 镜像引用 / 资源需求 / 接口 Schema。
+> 面向：L2 Worker、CLI/运维、以及任何需要读取/发布环境制品的层。
+> 角色：UEnv-Hub = **内网环境预缓存与制品分发中心**（类比 Docker Hub / HF Hub，但托管 **manifest + 制品字节**）。
+> **不参与 Episode 运行时调度**；在 **部署/扩缩容期** 向 Worker 提供 manifest、镜像 tar、benchmark 包、catalog 等，使 Worker **无需访问公网** 即可完成环境预制。
+
+> **EnvPackage 与零 egress 能力**（镜像 tar 入库、`uenv env sync --docker-load`、SWE catalog 等）见 **[uenv-hub环境标准化指南.md](./uenv-hub环境标准化指南.md)**。本文侧重 REST API 与经典 env registry；**内网生产不应仅使用 manifest 同步而忽略制品字节**。
 
 ---
 
@@ -291,14 +293,26 @@ curl -X POST -H "Authorization: Bearer $(cat data/.admin_token)" \
 ## 10. 与全链路的关系
 
 ```
-Worker(L2) ──HTTP GET /api/v1/envs/math/versions/latest──► Hub(L1, :8088)
-                                  │ 失败降级
-                                  ▼
-                       本地 plugins/math/manifest.yaml
+[导入机，一次性]  docker save / benchmark 打包 / wheel 收集
+        │
+        ▼ publish / publish-image / artifact POST
+┌───────────────────┐
+│ Hub（内网）        │  manifest + 制品字节（EnvPackage / env registry）
+└─────────┬─────────┘
+          │ 部署期：uenv env sync / GET artifact / GET versions/latest
+          ▼
+┌───────────────────┐
+│ Worker(L2)        │  本地 plugins/、/var/lib/uenv/envs/…
+└─────────┬─────────┘
+          │ Episode 热路径（只读本地，零 egress）
+          ▼
+       Server 调度
 ```
 
-- Hub **不参与** Episode 运行时调度，**不下载镜像**；Worker 仍需本地 `plugins/<env>/`。
-- Server 运行时不依赖 Hub HTTP；Hub 仅在 Worker 启动/spawn 前提供 manifest。
+- Hub **不参与** Episode 运行时调度；**负责部署期的制品分发与预缓存**（含镜像 tar、benchmark 数据包，不仅是 manifest）。
+- Worker 启动/spawn 前：优先 **Hub sync 到本地**；开发态可降级到仓库内 `plugins/<env>/manifest.yaml`。
+- Server 运行时不依赖 Hub HTTP；Hub 在 Worker **部署与预热** 阶段提供制品。
+- EnvPackage（SWE、DSCodeBench 等）完整流程见 **[uenv-hub环境标准化指南.md](./uenv-hub环境标准化指南.md)** §5–§7。
 - 详细全链路接口见 `全链路联调-各层接口与参数字段.md` §5。
 
 ---

@@ -85,6 +85,12 @@ pub fn run_instance(
     let worker_id = std::env::var("UENV_WORKER_ID").unwrap_or_else(|_| "harness-local".to_string());
     let gateway_base_url = std::env::var("UENV_SWE_GATEWAY_PUBLIC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:28999".to_string());
+    // 一次性 harness 路径不经 EnvPackage：镜像 tar 由 `UENV_SWE_IMAGE_TAR` 显式指定（可选），
+    // 否则 None（本地已预置镜像即命中；默认 local_only 下缺失会明确报错，不外拉）。
+    let harness_tar = std::env::var("UENV_SWE_IMAGE_TAR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from);
     let (session, _observation) = SweSession::provision(
         instance,
         episode_id,
@@ -93,6 +99,8 @@ pub fn run_instance(
         opts.keep_container,
         &worker_id,
         &gateway_base_url,
+        harness_tar.as_deref(),
+        None,
     )?;
     if opts.use_gold_patch {
         session.apply_patch(&instance.patch, "gold")?;
