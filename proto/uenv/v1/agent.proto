@@ -1,6 +1,8 @@
 ﻿syntax = "proto3";
 package uenv.v1;
 
+import "uenv/v1/episode.proto";
+
 // Server → Agent pool job contract (design 260629 / 260701).
 // C-layer scheduling state: gateway_url, session_id, run_id are injected per job.
 
@@ -90,6 +92,8 @@ message AgentJobCompleteRequest {
     optional int64 worker_latency_ms = 15;
     optional int64 model_latency_ms = 16;
     map<string, string> metadata = 17;
+    // 结构化 rollout trace；用于传递 response_ids / response_mask。
+    RolloutTrace rollout_trace = 18;
 }
 
 message AgentJobCompleteResponse {

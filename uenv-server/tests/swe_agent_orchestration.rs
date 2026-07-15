@@ -16,7 +16,7 @@ use tonic::Request;
 use uenv_server::agent_pool::{AgentInfo, SyncedAgentBridgeInfo};
 use uenv_server::proto::v1::agent_control_service_server::AgentControlService;
 use uenv_server::proto::v1::{
-    AgentJobCompleteRequest, EpisodeRequest, PollAgentJobRequest,
+    AgentJobCompleteRequest, EpisodeRequest, ErrorCode, PollAgentJobRequest,
 };
 use uenv_server::scheduler::traits::{
     Scheduler, SyncedEnvPackageInfo, WorkerInfo as SchedulerWorkerInfo,
@@ -314,8 +314,21 @@ async fn swe_agent_timeout_cleans_up() {
     // 不模拟 Agent poll/complete：episode 会在 for-episode 建 session 后卡在等待，
     // 直到 deadline 触发超时兜底（cleanup + abandon + destroy_session）。
     let svc = UEnvEpisodeService::new(Arc::clone(&state));
-    let err = svc.submit_episode(req).await.unwrap_err();
-    assert!(err.to_string().contains("timeout"), "unexpected error: {err}");
+    let result = svc
+        .submit_episode(req)
+        .await
+        .expect("timeout should return a terminal result");
+    assert_eq!(result.status, "failed");
+    assert_eq!(result.error_code, Some(ErrorCode::ErrEpisodeTimeout as i32));
+    assert!(
+        result.error_message.contains("timeout"),
+        "unexpected result: {:?}",
+        result
+    );
+    assert_eq!(
+        result.metadata.get("terminal_kind").map(String::as_str),
+        Some("timeout")
+    );
 
     // 超时后：active_episodes 清空、in-flight 清空、Worker 负载回收。
     assert!(state.active_episodes.is_empty());

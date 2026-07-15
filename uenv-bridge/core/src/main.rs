@@ -177,14 +177,6 @@ impl EpisodeService for StaticRolloutEpisodeService {
             .map(|request| {
                 let response_mask = vec![1; self.response_ids.len()];
                 let mut info = std::collections::HashMap::new();
-                info.insert(
-                    "response_ids".to_string(),
-                    serde_json::to_string(&self.response_ids).unwrap_or_default(),
-                );
-                info.insert(
-                    "response_mask".to_string(),
-                    serde_json::to_string(&response_mask).unwrap_or_default(),
-                );
                 info.insert("response_text".to_string(), self.response_text.clone());
                 info.insert("finish_reason".to_string(), "static_rollout".to_string());
 
@@ -195,6 +187,10 @@ impl EpisodeService for StaticRolloutEpisodeService {
                         reward: self.reward,
                         terminated: true,
                         info,
+                        rollout_trace: Some(uenv_server::proto::v1::RolloutTrace {
+                            response_ids: self.response_ids.clone(),
+                            response_mask,
+                        }),
                         ..Default::default()
                     }],
                     total_reward: self.reward,

@@ -1,10 +1,14 @@
+// 文件职责：维护 SWE AgentJob 队列，并实现 AgentControlService 的注册、心跳、poll 和 complete RPC。
+// 主要功能：按 agent_pool_id 保存 pending job，记录 in-flight job，校验 agent/run 身份并回传完成结果。
+// 大致工作流：service 入队 AgentJob；Agent 主动 PollAgentJob 领取；完成后 CompleteAgentJob 通过 oneshot 唤醒等待的 episode。
+
 // agent_job.rs：AgentJob 队列 + AgentControlService 实现（Poll 模式）。
 //
 // 数据流（设计 260701 §2.0.5）：
-//   service.rs 编排逻辑 ── enqueue(AgentJob) ──► 按 agent_pool_id 分组的待领队列
-//                                              │  同时登记 in-flight，持有 oneshot::Sender
-//   Agent(208.77) ── PollAgentJob(pool) ──────► 弹出一个 Job 返回，Agent 执行 tool loop
-//   Agent ── CompleteAgentJob(reward, ...) ───► 通过 oneshot 把结果送回编排逻辑
+//   1. service.rs 调用 enqueue(AgentJob)，把任务放入按 agent_pool_id 分组的待领取队列。
+//   2. enqueue 同时登记 in-flight 记录，保存 oneshot::Sender，供完成时回传结果。
+//   3. Agent 调用 PollAgentJob(pool) 领取一个任务，然后执行 agent 逻辑。
+//   4. Agent 调用 CompleteAgentJob(reward, ...) 上报结果，server 通过 oneshot 返回给 service.rs。
 //
 // 设计要点：
 //   - Poll 模式：Agent 主动拉，Server 不反连（适配 208.77 NAT/跳板）。
@@ -26,12 +30,12 @@ use crate::proto::v1::{
     RegisterAgentResponse,
 };
 
-/// in-flight Job：已被 poll 走、等待 complete 的任务。
+/// in-flight Job：已被 agent 领取、等待 complete 的任务。
 struct InFlightJob {
-    /// ??? Job ? agent_id?complete ????????
+    /// 领取该 Job 的 agent_id。complete 时必须与这里记录的值一致。
     agent_id: String,
     run_id: String,
-    /// ?????complete_agent_job ?????????????
+    /// service.rs 正在等待的结果发送端，complete_agent_job 会通过它回传结果。
     done: oneshot::Sender<AgentJobCompleteRequest>,
 }
 
@@ -192,7 +196,7 @@ impl AgentControlService for AgentControlServiceImpl {
 
     /// Agent 领取一个 Job（Poll 模式）。
     ///
-    /// 并发闸门（① per-agent max_concurrent）：先用 `try_reserve` 原子占用一个未满载的
+    /// 并发限制（per-agent max_concurrent）：先用 `try_reserve` 原子占用一个未满载的
     /// Agent 槽位，成功才从队列弹 Job。若池内无可用槽位（全满/无匹配/掉线）或队列为空，
     /// 返回 has_job=false，Agent 稍后重试。占用与弹队列之间若队列恰好空了，回滚占用。
     async fn poll_agent_job(

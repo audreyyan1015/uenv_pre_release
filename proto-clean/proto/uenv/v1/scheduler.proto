@@ -1,0 +1,98 @@
+syntax = "proto3";
+package uenv.scheduler.v1;
+
+import "uenv/v1/common.proto";
+import "uenv/v1/episode.proto";
+
+// 干净版 proto：保留注册时负载上报字段，用于 server 重启后恢复 worker 负载视图。
+//
+// 控制面服务：Worker 作为客户端连接 Scheduler、Mock 或 Server。
+
+service ControlPlaneService {
+    rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+    rpc WorkerHeartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+    rpc ReportResult(ReportResultRequest) returns (ReportResultResponse);
+    rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+}
+
+message SyncedEnvPackage {
+    string package_id = 1;
+    string version = 2;
+    string bundle_digest = 3;
+}
+
+message RegisterWorkerRequest {
+    string worker_id = 1;
+    repeated string supported_env_types = 2;
+    uenv.v1.ResourceSpec resource = 3;
+    string endpoint = 4;
+    uint32 max_concurrent = 5;
+    // Runtime Gateway 的公网地址，用于注入 AgentJob（C 层）。
+    string gateway_public_url = 6;
+    repeated SyncedEnvPackage synced_env_packages = 7;
+    // 注册时 worker 侧的当前负载。server 重启后可在第一次心跳到达前
+    // 先用这个值恢复负载视图。
+    int32 load = 8;
+    // 注册时 worker 侧真实容量。区别于历史 max_concurrent 配置值。
+    int32 max_load = 9;
+}
+
+message RegisterWorkerResponse {
+    bool accepted = 1;
+    string worker_id = 2;
+    string message = 3;
+    uint64 server_epoch = 4;
+}
+
+message HeartbeatRequest {
+    string worker_id = 1;
+    int32 load = 2;
+    int32 max_load = 3;
+    int64 timestamp_ms = 4;
+    uint64 server_epoch = 5;
+}
+
+message HeartbeatResponse {
+    bool ok = 1;
+    DrainCommand drain = 2;
+    uint64 server_epoch = 3;
+    int32 next_heartbeat_interval_ms = 4;
+}
+
+message DrainCommand {
+    bool drain = 1;
+    int32 grace_period_sec = 2;
+}
+
+message ReportResultRequest {
+    string idempotency_key = 1;
+    string worker_id = 2;
+    uint64 server_epoch = 3;
+    uenv.v1.EpisodeResult result = 4;
+    string dispatch_lease_id = 5;
+    bytes dispatch_token = 6;
+}
+
+message ReportResultResponse {
+    bool ack = 1;
+    bool duplicate = 2;
+    string code = 3;
+    string message = 4;
+}
+
+message ListWorkersRequest {
+    repeated string env_types = 1;
+}
+
+message WorkerInfo {
+    string worker_id = 1;
+    repeated string supported_env_types = 2;
+    int32 load = 3;
+    int32 max_load = 4;
+    string status = 5;
+    string endpoint = 6;
+}
+
+message ListWorkersResponse {
+    repeated WorkerInfo workers = 1;
+}

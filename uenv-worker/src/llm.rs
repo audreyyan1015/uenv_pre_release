@@ -1,5 +1,3 @@
-use serde_json::Value;
-
 pub const DEFAULT_LLM_HTTP_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_LLM_MAX_RETRIES: usize = 3;
 
@@ -109,28 +107,13 @@ pub fn is_valid_llm_endpoint(endpoint: &str) -> bool {
     !rest.is_empty() && !rest.starts_with('/')
 }
 
-pub fn parse_payload_model_endpoint(payload: &Value) -> Option<String> {
-    let raw = payload.get("model_endpoint").and_then(|value| match value {
-        Value::String(text) => Some(text.as_str()),
-        Value::Object(map) => map.get("url").and_then(Value::as_str),
-        _ => None,
-    })?;
-    let trimmed = raw.trim();
-    if is_valid_llm_endpoint(trimmed) {
-        Some(trimmed.to_string())
-    } else {
-        None
-    }
-}
-
 pub fn chat_completions_url_for_endpoint(endpoint: &str) -> String {
     format!("{}/chat/completions", endpoint.trim_end_matches('/'))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_llm_endpoint, parse_payload_model_endpoint, LlmConfig};
-    use serde_json::json;
+    use super::{is_valid_llm_endpoint, LlmConfig};
 
     #[test]
     fn default_config_is_unconfigured() {
@@ -172,17 +155,10 @@ mod tests {
     }
 
     #[test]
-    fn validates_payload_model_endpoint() {
-        assert_eq!(
-            parse_payload_model_endpoint(&json!({"model_endpoint": "http://127.0.0.1:8000/v1"})),
-            Some("http://127.0.0.1:8000/v1".to_string())
-        );
-        assert_eq!(
-            parse_payload_model_endpoint(&json!({"model_endpoint": {"url": "http://runtime:9000/v1"}})),
-            Some("http://runtime:9000/v1".to_string())
-        );
-        assert!(parse_payload_model_endpoint(&json!({"model_endpoint": ""})).is_none());
-        assert!(parse_payload_model_endpoint(&json!({"model_endpoint": "not-a-url"})).is_none());
+    fn validates_llm_endpoint() {
+        assert!(is_valid_llm_endpoint("http://127.0.0.1:8000/v1"));
+        assert!(is_valid_llm_endpoint("http://runtime:9000/v1"));
         assert!(!is_valid_llm_endpoint("http://"));
+        assert!(!is_valid_llm_endpoint("not-a-url"));
     }
 }

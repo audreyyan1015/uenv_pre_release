@@ -19,7 +19,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   name='uenv/v1/adapter_core.proto',
   package='uenv.bridge.v1',
   syntax='proto3',
-  serialized_pb=_b('\n\x1auenv/v1/adapter_core.proto\x12\x0euenv.bridge.v1\"l\n\x13\x45xecuteBatchRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12/\n\x07samples\x18\x03 \x03(\x0b\x32\x1e.uenv.bridge.v1.SampleEnvelope\"k\n\x14\x45xecuteBatchResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12-\n\x07results\x18\x03 \x03(\x0b\x32\x1c.uenv.bridge.v1.SampleResult\"\x9a\x01\n\x0eSampleEnvelope\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x11\n\tframework\x18\x04 \x01(\t\x12\x10\n\x08\x65nv_type\x18\x05 \x01(\t\x12\x14\n\x0cpayload_json\x18\x06 \x01(\x0c\x12\x11\n\tmeta_json\x18\x07 \x01(\x0c\"\xd8\x01\n\x0cSampleResult\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x0e\n\x06status\x18\x04 \x01(\t\x12\x0e\n\x06reward\x18\x05 \x01(\x01\x12\x0c\n\x04\x64one\x18\x06 \x01(\x08\x12\x1a\n\x12termination_reason\x18\x07 \x01(\t\x12\x17\n\x0ftrajectory_json\x18\x08 \x01(\x0c\x12\x12\n\nerror_code\x18\t \x01(\t\x12\x15\n\rerror_message\x18\n \x01(\t\"\x14\n\x12HealthCheckRequest\"2\n\x13HealthCheckResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t2\x9f\x02\n\x12\x41\x64\x61pterCoreService\x12Y\n\x0c\x45xecuteBatch\x12#.uenv.bridge.v1.ExecuteBatchRequest\x1a$.uenv.bridge.v1.ExecuteBatchResponse\x12V\n\x12\x45xecuteBatchStream\x12\x1e.uenv.bridge.v1.SampleEnvelope\x1a\x1c.uenv.bridge.v1.SampleResult(\x01\x30\x01\x12V\n\x0bHealthCheck\x12\".uenv.bridge.v1.HealthCheckRequest\x1a#.uenv.bridge.v1.HealthCheckResponseb\x06proto3')
+  serialized_pb=_b('\n\x1auenv/v1/adapter_core.proto\x12\x0euenv.bridge.v1\"l\n\x13\x45xecuteBatchRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12/\n\x07samples\x18\x03 \x03(\x0b\x32\x1e.uenv.bridge.v1.SampleEnvelope\"k\n\x14\x45xecuteBatchResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12-\n\x07results\x18\x03 \x03(\x0b\x32\x1c.uenv.bridge.v1.SampleResult\"|\n\rModelEndpoint\x12\x15\n\rendpoint_type\x18\x01 \x01(\t\x12\x0b\n\x03url\x18\x02 \x01(\t\x12\x12\n\nmodel_name\x18\x03 \x01(\t\x12\x1e\n\x16generation_config_json\x18\x04 \x01(\x0c\x12\x13\n\x0bmax_retries\x18\x05 \x01(\x05\"\xa6\x03\n\x0eSampleEnvelope\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x11\n\tframework\x18\x04 \x01(\t\x12\x10\n\x08\x65nv_type\x18\x05 \x01(\t\x12\x15\n\rparallel_mode\x18\x08 \x01(\t\x12\x17\n\x0f\x65nv_config_json\x18\t \x01(\x0c\x12\x1b\n\x13\x65pisode_config_json\x18\n \x01(\x0c\x12\x1a\n\x12reward_config_json\x18\x0b \x01(\x0c\x12\x35\n\x0emodel_endpoint\x18\x0c \x01(\x0b\x32\x1d.uenv.bridge.v1.ModelEndpoint\x12\x17\n\x0ftimeout_seconds\x18\r \x01(\x05\x12\x16\n\x0e\x63orrelation_id\x18\x0e \x01(\t\x12\x1b\n\x13sample_context_json\x18\x0f \x01(\x0c\x12\x16\n\x0e\x65nv_package_id\x18\x10 \x01(\t\x12\x1b\n\x13\x65nv_package_version\x18\x11 \x01(\tJ\x04\x08\x06\x10\x07J\x04\x08\x07\x10\x08J\x04\x08\x12\x10\x13\"\xb2\x02\n\x0cSampleResult\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x0e\n\x06status\x18\x04 \x01(\t\x12\x0e\n\x06reward\x18\x05 \x01(\x01\x12\x0c\n\x04\x64one\x18\x06 \x01(\x08\x12\x1a\n\x12termination_reason\x18\x07 \x01(\t\x12\x17\n\x0ftrajectory_json\x18\x08 \x01(\x0c\x12\x12\n\nerror_code\x18\t \x01(\t\x12\x15\n\rerror_message\x18\n \x01(\t\x12\x1d\n\x15rollout_param_version\x18\x0b \x01(\x03\x12\x1e\n\x16rollout_policy_version\x18\x0c \x01(\t\x12\x19\n\x11rollout_log_probs\x18\r \x03(\x02\"\x14\n\x12HealthCheckRequest\"2\n\x13HealthCheckResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t2\x9f\x02\n\x12\x41\x64\x61pterCoreService\x12Y\n\x0c\x45xecuteBatch\x12#.uenv.bridge.v1.ExecuteBatchRequest\x1a$.uenv.bridge.v1.ExecuteBatchResponse\x12V\n\x12\x45xecuteBatchStream\x12\x1e.uenv.bridge.v1.SampleEnvelope\x1a\x1c.uenv.bridge.v1.SampleResult(\x01\x30\x01\x12V\n\x0bHealthCheck\x12\".uenv.bridge.v1.HealthCheckRequest\x1a#.uenv.bridge.v1.HealthCheckResponseb\x06proto3')
 )
 
 
@@ -115,6 +115,65 @@ _EXECUTEBATCHRESPONSE = _descriptor.Descriptor(
 )
 
 
+_MODELENDPOINT = _descriptor.Descriptor(
+  name='ModelEndpoint',
+  full_name='uenv.bridge.v1.ModelEndpoint',
+  filename=None,
+  file=DESCRIPTOR,
+  containing_type=None,
+  fields=[
+    _descriptor.FieldDescriptor(
+      name='endpoint_type', full_name='uenv.bridge.v1.ModelEndpoint.endpoint_type', index=0,
+      number=1, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='url', full_name='uenv.bridge.v1.ModelEndpoint.url', index=1,
+      number=2, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='model_name', full_name='uenv.bridge.v1.ModelEndpoint.model_name', index=2,
+      number=3, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='generation_config_json', full_name='uenv.bridge.v1.ModelEndpoint.generation_config_json', index=3,
+      number=4, type=12, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b(""),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='max_retries', full_name='uenv.bridge.v1.ModelEndpoint.max_retries', index=4,
+      number=5, type=5, cpp_type=1, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+  ],
+  extensions=[
+  ],
+  nested_types=[],
+  enum_types=[
+  ],
+  options=None,
+  is_extendable=False,
+  syntax='proto3',
+  extension_ranges=[],
+  oneofs=[
+  ],
+  serialized_start=265,
+  serialized_end=389,
+)
+
+
 _SAMPLEENVELOPE = _descriptor.Descriptor(
   name='SampleEnvelope',
   full_name='uenv.bridge.v1.SampleEnvelope',
@@ -158,16 +217,72 @@ _SAMPLEENVELOPE = _descriptor.Descriptor(
       is_extension=False, extension_scope=None,
       options=None, file=DESCRIPTOR),
     _descriptor.FieldDescriptor(
-      name='payload_json', full_name='uenv.bridge.v1.SampleEnvelope.payload_json', index=5,
-      number=6, type=12, cpp_type=9, label=1,
+      name='parallel_mode', full_name='uenv.bridge.v1.SampleEnvelope.parallel_mode', index=5,
+      number=8, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='env_config_json', full_name='uenv.bridge.v1.SampleEnvelope.env_config_json', index=6,
+      number=9, type=12, cpp_type=9, label=1,
       has_default_value=False, default_value=_b(""),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       options=None, file=DESCRIPTOR),
     _descriptor.FieldDescriptor(
-      name='meta_json', full_name='uenv.bridge.v1.SampleEnvelope.meta_json', index=6,
-      number=7, type=12, cpp_type=9, label=1,
+      name='episode_config_json', full_name='uenv.bridge.v1.SampleEnvelope.episode_config_json', index=7,
+      number=10, type=12, cpp_type=9, label=1,
       has_default_value=False, default_value=_b(""),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='reward_config_json', full_name='uenv.bridge.v1.SampleEnvelope.reward_config_json', index=8,
+      number=11, type=12, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b(""),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='model_endpoint', full_name='uenv.bridge.v1.SampleEnvelope.model_endpoint', index=9,
+      number=12, type=11, cpp_type=10, label=1,
+      has_default_value=False, default_value=None,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='timeout_seconds', full_name='uenv.bridge.v1.SampleEnvelope.timeout_seconds', index=10,
+      number=13, type=5, cpp_type=1, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='correlation_id', full_name='uenv.bridge.v1.SampleEnvelope.correlation_id', index=11,
+      number=14, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='sample_context_json', full_name='uenv.bridge.v1.SampleEnvelope.sample_context_json', index=12,
+      number=15, type=12, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b(""),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='env_package_id', full_name='uenv.bridge.v1.SampleEnvelope.env_package_id', index=13,
+      number=16, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='env_package_version', full_name='uenv.bridge.v1.SampleEnvelope.env_package_version', index=14,
+      number=17, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       options=None, file=DESCRIPTOR),
@@ -183,8 +298,8 @@ _SAMPLEENVELOPE = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=266,
-  serialized_end=420,
+  serialized_start=392,
+  serialized_end=814,
 )
 
 
@@ -265,6 +380,27 @@ _SAMPLERESULT = _descriptor.Descriptor(
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='rollout_param_version', full_name='uenv.bridge.v1.SampleResult.rollout_param_version', index=10,
+      number=11, type=3, cpp_type=2, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='rollout_policy_version', full_name='uenv.bridge.v1.SampleResult.rollout_policy_version', index=11,
+      number=12, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=_b("").decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='rollout_log_probs', full_name='uenv.bridge.v1.SampleResult.rollout_log_probs', index=12,
+      number=13, type=2, cpp_type=6, label=3,
+      has_default_value=False, default_value=[],
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      options=None, file=DESCRIPTOR),
   ],
   extensions=[
   ],
@@ -277,8 +413,8 @@ _SAMPLERESULT = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=423,
-  serialized_end=639,
+  serialized_start=817,
+  serialized_end=1123,
 )
 
 
@@ -301,8 +437,8 @@ _HEALTHCHECKREQUEST = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=641,
-  serialized_end=661,
+  serialized_start=1125,
+  serialized_end=1145,
 )
 
 
@@ -339,14 +475,16 @@ _HEALTHCHECKRESPONSE = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=663,
-  serialized_end=713,
+  serialized_start=1147,
+  serialized_end=1197,
 )
 
 _EXECUTEBATCHREQUEST.fields_by_name['samples'].message_type = _SAMPLEENVELOPE
 _EXECUTEBATCHRESPONSE.fields_by_name['results'].message_type = _SAMPLERESULT
+_SAMPLEENVELOPE.fields_by_name['model_endpoint'].message_type = _MODELENDPOINT
 DESCRIPTOR.message_types_by_name['ExecuteBatchRequest'] = _EXECUTEBATCHREQUEST
 DESCRIPTOR.message_types_by_name['ExecuteBatchResponse'] = _EXECUTEBATCHRESPONSE
+DESCRIPTOR.message_types_by_name['ModelEndpoint'] = _MODELENDPOINT
 DESCRIPTOR.message_types_by_name['SampleEnvelope'] = _SAMPLEENVELOPE
 DESCRIPTOR.message_types_by_name['SampleResult'] = _SAMPLERESULT
 DESCRIPTOR.message_types_by_name['HealthCheckRequest'] = _HEALTHCHECKREQUEST
@@ -366,6 +504,13 @@ ExecuteBatchResponse = _reflection.GeneratedProtocolMessageType('ExecuteBatchRes
   # @@protoc_insertion_point(class_scope:uenv.bridge.v1.ExecuteBatchResponse)
   ))
 _sym_db.RegisterMessage(ExecuteBatchResponse)
+
+ModelEndpoint = _reflection.GeneratedProtocolMessageType('ModelEndpoint', (_message.Message,), dict(
+  DESCRIPTOR = _MODELENDPOINT,
+  __module__ = 'uenv.v1.adapter_core_pb2'
+  # @@protoc_insertion_point(class_scope:uenv.bridge.v1.ModelEndpoint)
+  ))
+_sym_db.RegisterMessage(ModelEndpoint)
 
 SampleEnvelope = _reflection.GeneratedProtocolMessageType('SampleEnvelope', (_message.Message,), dict(
   DESCRIPTOR = _SAMPLEENVELOPE,
@@ -403,8 +548,8 @@ _ADAPTERCORESERVICE = _descriptor.ServiceDescriptor(
   file=DESCRIPTOR,
   index=0,
   options=None,
-  serialized_start=716,
-  serialized_end=1003,
+  serialized_start=1200,
+  serialized_end=1487,
   methods=[
   _descriptor.MethodDescriptor(
     name='ExecuteBatch',

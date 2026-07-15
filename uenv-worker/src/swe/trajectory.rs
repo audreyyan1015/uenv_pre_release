@@ -53,6 +53,18 @@ pub struct StepTrace {
     pub observation: StepObservation,
     pub timestamp_ms: u64,
     pub duration_ms: u64,
+    /// 可选 typed rollout trace；只有能看到模型 token 的 producer 才应填充。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_trace: Option<StepRolloutTrace>,
+}
+
+/// 和 proto `RolloutTrace` 对齐的 JSON 形态，用于 trajectory bundle。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StepRolloutTrace {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_ids: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_mask: Vec<i32>,
 }
 
 /// 完整 episode 轨迹 bundle。
@@ -288,6 +300,7 @@ mod tests {
                 },
                 timestamp_ms: 1,
                 duration_ms: 2,
+                rollout_trace: None,
             }],
             artifact: EpisodeArtifact::new("sess-1", "inst-a")
                 .with_reward(1.0)
@@ -309,5 +322,25 @@ mod tests {
         let listed = store.list(Some("inst-a"), None, 10).expect("list");
         assert_eq!(listed.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn step_trace_serializes_typed_rollout_trace() {
+        let step = StepTrace {
+            step_index: 0,
+            action: StepAction::Exec {
+                command: "echo ok".into(),
+            },
+            observation: StepObservation::default(),
+            timestamp_ms: 1,
+            duration_ms: 2,
+            rollout_trace: Some(StepRolloutTrace {
+                response_ids: vec![101, 102],
+                response_mask: vec![1, 0],
+            }),
+        };
+        let value = serde_json::to_value(&step).expect("serialize");
+        assert_eq!(value["rollout_trace"]["response_ids"], serde_json::json!([101, 102]));
+        assert_eq!(value["rollout_trace"]["response_mask"], serde_json::json!([1, 0]));
     }
 }

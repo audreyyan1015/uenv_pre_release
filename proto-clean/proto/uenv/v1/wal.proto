@@ -1,0 +1,30 @@
+syntax = "proto3";
+package uenv.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// WAL record schema — M1 冻结，M8 实现持久化（§7.5）
+
+enum ReplayState {
+    REPLAY_STATE_UNSPECIFIED = 0;
+    REPLAY_STATE_PENDING     = 1;
+    REPLAY_STATE_SENT        = 2;
+    REPLAY_STATE_ACKED       = 3;
+}
+
+message WalRecord {
+    string episode_id = 1;
+    uint32 attempt_id = 2;
+    string worker_id = 3;
+    string dispatch_lease_id = 4;
+    uint64 server_epoch = 5;
+    string request_checksum = 6;
+    string result_checksum = 7;
+    string status = 8;
+    bytes protobuf_payload = 9;
+    google.protobuf.Timestamp created_at = 10;
+    ReplayState replay_state = 11;
+    bytes dispatch_token = 12;
+}
+
+// idempotency_key = episode_id + attempt_id + worker_id

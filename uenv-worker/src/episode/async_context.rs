@@ -1,7 +1,5 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
-
 use crate::proto::v1::EpisodeRequest;
 
 pub const PARALLEL_MODE_SYNC: &str = "sync";
@@ -11,29 +9,12 @@ pub const PARALLEL_MODE_FULLY_ASYNC: &str = "fully_async";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedParallelMode(pub String);
 
-/// 从 EpisodeRequest 读取 parallel_mode（与 Server 侧规则一致）。
+/// 从 EpisodeRequest 的 canonical typed field 读取 parallel_mode。
 pub fn extract_parallel_mode(
     episode: &EpisodeRequest,
 ) -> Result<String, UnsupportedParallelMode> {
-    if !episode.parallel_mode.trim().is_empty() {
-        return normalize_parallel_mode(&episode.parallel_mode);
-    }
-    if let Some(mode) = episode.metadata.get("parallel_mode") {
-        return normalize_parallel_mode(mode);
-    }
-    if let Ok(payload) = serde_json::from_slice::<Value>(&episode.payload) {
-        if let Some(mode) = payload
-            .get("metadata")
-            .and_then(Value::as_object)
-            .and_then(|m| m.get("parallel_mode"))
-            .and_then(Value::as_str)
-        {
-            return normalize_parallel_mode(mode);
-        }
-    }
-    Ok(PARALLEL_MODE_SYNC.to_string())
+    normalize_parallel_mode(&episode.parallel_mode)
 }
-
 pub fn normalize_parallel_mode(raw: &str) -> Result<String, UnsupportedParallelMode> {
     match raw.trim() {
         PARALLEL_MODE_SYNC | PARALLEL_MODE_ONE_STEP | PARALLEL_MODE_FULLY_ASYNC => {
@@ -68,40 +49,30 @@ pub fn unix_ts_now() -> f64 {
 mod tests {
     use super::*;
 
-    fn episode_with(mode_top: &str, mode_meta: &str, payload_meta: &str) -> EpisodeRequest {
-        let payload = if payload_meta.is_empty() {
-            b"{}".to_vec()
-        } else {
-            format!(r#"{{"metadata":{{"parallel_mode":"{payload_meta}"}}}}"#).into_bytes()
-        };
-        let mut metadata = std::collections::HashMap::new();
-        if !mode_meta.is_empty() {
-            metadata.insert("parallel_mode".to_string(), mode_meta.to_string());
-        }
+    fn episode_with(mode_top: &str) -> EpisodeRequest {
         EpisodeRequest {
             parallel_mode: mode_top.to_string(),
-            metadata,
-            payload,
             ..Default::default()
         }
     }
 
     #[test]
     fn reads_parallel_mode_from_top_level() {
-        let ep = episode_with("fully_async", "", "");
+        let ep = episode_with("fully_async");
         assert_eq!(extract_parallel_mode(&ep).expect("mode"), "fully_async");
     }
 
     #[test]
-    fn reads_parallel_mode_from_request_metadata() {
-        let ep = episode_with("", "one_step_off_policy", "");
-        assert_eq!(extract_parallel_mode(&ep).expect("mode"), "one_step_off_policy");
-    }
-
-    #[test]
-    fn reads_parallel_mode_from_payload_metadata() {
-        let ep = episode_with("", "", "one_step_off_policy");
-        assert_eq!(extract_parallel_mode(&ep).expect("mode"), "one_step_off_policy");
+    fn ignores_legacy_parallel_mode_sources() {
+        let mut ep = EpisodeRequest {
+            payload: br#"{"metadata":{"parallel_mode":"fully_async"}}"#.to_vec(),
+            ..Default::default()
+        };
+        ep.metadata.insert(
+            "parallel_mode".to_string(),
+            "one_step_off_policy".to_string(),
+        );
+        assert_eq!(extract_parallel_mode(&ep).expect("mode"), "sync");
     }
 
     #[test]
@@ -112,7 +83,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_mode() {
-        let ep = episode_with("invalid_mode", "", "");
+        let ep = episode_with("invalid_mode");
         assert_eq!(
             extract_parallel_mode(&ep).expect_err("unsupported"),
             UnsupportedParallelMode("invalid_mode".to_string())
