@@ -406,10 +406,15 @@ def main() -> int:
     result_log = args.results_log or args.output_dir / "uenv_results.jsonl"
     if args.resume:
         current_qids = {str(example.qid) for example in examples}
-        rows = [
+        existing_rows = [
             row
             for row in dedupe_rows_by_qid(load_existing_result_rows(result_log))
             if str(row["qid"]) in current_qids
+        ]
+        rows = [
+            row
+            for row in existing_rows
+            if row.get("uenv_status") == "completed"
         ]
         completed_qids = {str(row["qid"]) for row in rows}
         requests = [
@@ -421,7 +426,8 @@ def main() -> int:
             json.dumps(
                 {
                     "resume": True,
-                    "existing_results": len(rows),
+                    "existing_results": len(existing_rows),
+                    "existing_completed_results": len(rows),
                     "remaining_requests": len(requests),
                     "request_log": str(request_log),
                     "result_log": str(result_log),

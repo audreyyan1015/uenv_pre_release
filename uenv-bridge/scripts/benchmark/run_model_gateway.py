@@ -20,6 +20,7 @@ def main() -> int:
     parser.add_argument("--disable-thinking", action="store_true")
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument("--preserve-thinking", action="store_true")
+    parser.add_argument("--strip-reasoning", action="store_true")
     parser.add_argument("--thinking-token-budget", type=int, default=None)
     args = parser.parse_args()
 
@@ -34,6 +35,7 @@ def main() -> int:
             disable_thinking=args.disable_thinking,
             force_enable_thinking=args.enable_thinking,
             preserve_thinking=args.preserve_thinking,
+            strip_reasoning=args.strip_reasoning,
             thinking_token_budget=args.thinking_token_budget,
         )
     )

@@ -34,6 +34,7 @@ class ModelGatewayConfig:
     disable_thinking: bool = False
     force_enable_thinking: bool = False
     preserve_thinking: bool = False
+    strip_reasoning: bool = False
     thinking_token_budget: int | None = None
 
 
@@ -269,6 +270,7 @@ class ModelGateway:
         response_headers: dict[str, str],
     ) -> tuple[bytes, dict[str, Any]]:
         response_body = self._response_with_preserved_reasoning(response_body)
+        response_body = self._response_without_reasoning(response_body)
         model_version = self._extract_response_model_version(
             response_body,
             upstream=upstream,
@@ -277,6 +279,31 @@ class ModelGateway:
         if not self._has_bound_model_version(model_version):
             return response_body, {}
         return self._attach_model_version(response_body, upstream=upstream, model_version=model_version), model_version
+
+    def _response_without_reasoning(self, response_body: bytes) -> bytes:
+        if not self.config.strip_reasoning:
+            return response_body
+        try:
+            data = json.loads(response_body.decode("utf-8"))
+        except Exception:
+            return response_body
+        if not isinstance(data, dict):
+            return response_body
+
+        changed = False
+        for choice in data.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            for key in ("reasoning", "reasoning_content", "reasoning_details"):
+                if key in message:
+                    message.pop(key, None)
+                    changed = True
+        if not changed:
+            return response_body
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def _response_with_preserved_reasoning(self, response_body: bytes) -> bytes:
         if not self.config.preserve_thinking:

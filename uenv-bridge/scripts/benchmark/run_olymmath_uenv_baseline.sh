@@ -76,6 +76,7 @@ podman run --rm \
   -v /data/ronghao:/data/ronghao \
   -w "$REPO_DIR" \
   -e PYTHONPATH=src \
+  -e PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
   ${PODMAN_EXTRA_ARGS} \
   "$IMAGE" \
   -lc "python3 scripts/benchmark/evaluate_olymmath_uenv.py ${ARGS[*]@Q}"
