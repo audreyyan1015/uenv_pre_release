@@ -87,6 +87,10 @@ impl UEnvEpisodeService {
         };
 
         let backend = select_execution_backend(&req);
+        crate::obs::try_emit(
+            &self.state,
+            crate::obs::episode_submitted(&req, self.state.epoch()),
+        );
         // 后端选择只决定执行路径，不改变前面建立的 active/cancel/deadline 约束。
         backend
             .execute(self, req, deadline, Arc::clone(&handle), async_context)
@@ -224,6 +228,13 @@ impl UEnvEpisodeService {
                 dispatch_lease_id = %req.dispatch_lease_id,
                 "episode_dispatching"
             );
+            for ev in crate::obs::episode_dispatched(
+                &req,
+                &assignment.worker_id,
+                self.state.epoch(),
+            ) {
+                crate::obs::try_emit(&self.state, ev);
+            }
 
             let retry_reason: Option<String> = tokio::select! {
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
@@ -287,7 +298,7 @@ impl UEnvEpisodeService {
                     }
                 }
 
-                dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone()) => {
+                dispatch_result = dispatch_to_worker(&self.state, &assignment.endpoint, req.clone()) => {
                     match dispatch_result {
                         Err(e) => {
                             // 派发 RPC 失败说明 worker 没有开始执行本次任务，释放 reservation 后可换 worker 重试。

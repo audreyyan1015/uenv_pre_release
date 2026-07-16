@@ -39,6 +39,8 @@ pub mod service;
 pub mod state;
 /// trajectory 上传、查询和存储服务。
 pub mod trajectory;
+/// 可视化观测聚合（Obs）：事件 ingest、ChainState、REST/SSE。
+pub mod obs;
 
 use std::sync::Arc;
 
