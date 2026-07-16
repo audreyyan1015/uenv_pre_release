@@ -336,6 +336,17 @@ fn sample_to_worker_payload(
         if let Some(v) = env_cfg.get("response_text") {
             obj.insert("response_text".to_string(), v.clone());
         }
+        if let Some(endpoint) = sample.model_endpoint.as_ref() {
+            if !endpoint.url.trim().is_empty() {
+                obj.insert("model_endpoint".to_string(), Value::String(endpoint.url.clone()));
+            }
+            if !endpoint.model_name.trim().is_empty() {
+                obj.insert("model_name".to_string(), Value::String(endpoint.model_name.clone()));
+            }
+            if let Some(generation_config) = json_from_bytes(&endpoint.generation_config_json) {
+                obj.insert("generation_config".to_string(), generation_config);
+            }
+        }
     }
     // SWE native: forward instance fields from env_config so the worker can locate the
     // image and grade (the generic mapping above only carries question/dataset).
@@ -810,9 +821,9 @@ mod tests {
             serde_json::from_slice(&model_endpoint_config.generation_config_json)
                 .expect("generation config json");
         assert_eq!(generation_config["max_new_tokens"], 8);
-        assert!(worker_payload.get("model_endpoint").is_none());
-        assert!(worker_payload.get("model_name").is_none());
-        assert!(worker_payload.get("generation_config").is_none());
+        assert_eq!(worker_payload["model_endpoint"], "http://127.0.0.1:18080/v1");
+        assert_eq!(worker_payload["model_name"], "mock-policy");
+        assert_eq!(worker_payload["generation_config"]["max_new_tokens"], 8);
         assert_eq!(worker_reward["type"], "rule_reward");
         assert_eq!(worker_reward["target"], "72");
     }
