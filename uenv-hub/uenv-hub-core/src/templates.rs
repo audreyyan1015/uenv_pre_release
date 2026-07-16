@@ -99,6 +99,8 @@ supported_backends = ["process", "podman"]
 base_image = "uenv-base:latest"
 health_check_path = "/health"
 
+# Runtime image. 内网零外拉：url 必须指向内网可达地址（内部 registry，或经
+# `uenv env publish-image` 托管到 Hub 后再引用），不要写 docker.io/ghcr.io 等公网仓库。
 [image]
 url = "registry.local/uenv/{name}:0.1.0"
 arch = "amd64"
@@ -109,15 +111,27 @@ cpu = 1.0
 memory_mb = 1024
 gpu = 0
 
-# Strongly-typed Action / Observation / State contract (OpenEnv style).
+# Strongly-typed Action / Observation / State contract (OpenEnv style). Keep these
+# JSON Schemas in lock-step with src/models.py so validators/RL frameworks bind
+# to the same shapes the environment actually produces.
 [interface.action]
 type = "object"
+[interface.action.properties.answer]
+type = "string"
 
 [interface.observation]
 type = "object"
+[interface.observation.properties.prompt]
+type = "string"
+[interface.observation.properties.done]
+type = "boolean"
 
 [interface.state]
 type = "object"
+[interface.state.properties.step]
+type = "integer"
+[interface.state.properties.score]
+type = "number"
 
 [dependencies]
 requirements_path = "requirements.txt"
