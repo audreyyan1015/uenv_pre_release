@@ -13,7 +13,7 @@ use crate::episode::async_context::build_idempotency_key;
 use crate::episode::executor::{EpisodeExecutor, ExecuteContext};
 use crate::metrics::MetricsExporter;
 use crate::pool::warmup_pool::WarmupPool;
-use crate::proto::v1::{EpisodeResult, StreamReport};
+use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReportType, StreamReport};
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcService;
 use crate::proto::worker::v1::{
     CancelWorkerEpisodeRequest, CancelWorkerEpisodeResponse, DispatchEpisodeRequest,
@@ -22,7 +22,9 @@ use crate::proto::worker::v1::{
 use crate::wal::WalWriter;
 
 const DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_EPISODE_TIMEOUT_SECS: u64 = 300;
+/// 覆盖 OlymMATH thinking 长输出（数分钟级）并留回传余量；可用 env / EpisodeRequest.timeout_seconds 覆盖。
+const DEFAULT_EPISODE_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_DISPATCH_HEARTBEAT_SECS: u64 = 15;
 
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
@@ -30,6 +32,45 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
         .unwrap_or(default)
+}
+
+fn resolve_episode_timeout(episode: &EpisodeRequest) -> Duration {
+    let env_secs = env_u64(
+        "UENV_WORKER_EPISODE_TIMEOUT_SECS",
+        DEFAULT_EPISODE_TIMEOUT_SECS,
+    );
+    if episode.timeout_seconds > 0 {
+        Duration::from_secs((episode.timeout_seconds as u64).max(env_secs))
+    } else {
+        Duration::from_secs(env_secs)
+    }
+}
+
+fn progress_report(
+    episode: &EpisodeRequest,
+    worker_id: &str,
+    active_episodes: u32,
+    worker_capacity: u32,
+    elapsed_ms: i64,
+    phase: &str,
+) -> StreamReport {
+    StreamReport {
+        episode_id: episode.episode_id.clone(),
+        attempt_id: episode.attempt_id,
+        current_step: 0,
+        total_steps: episode.max_steps.max(1),
+        current_reward: 0.0,
+        phase: phase.to_string(),
+        last_step: None,
+        report_type: ReportType::Progress as i32,
+        step_latency_ms: 0,
+        model_latency_ms: elapsed_ms,
+        worker_active_episodes: active_episodes as i32,
+        worker_capacity: worker_capacity as i32,
+        correlation_id: episode.correlation_id.clone(),
+        worker_id: worker_id.to_string(),
+        ..Default::default()
+    }
 }
 
 #[derive(Clone)]
@@ -221,9 +262,6 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
         };
 
         self.metrics.inc_active();
-        let _active_guard = ActiveEpisodeGuard {
-            metrics: self.metrics.clone(),
-        };
         tracing::info!(
             trace_id = %trace_id,
             episode_id = %episode.episode_id,
@@ -239,148 +277,237 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             worker_capacity: self.max_concurrent,
             active_episodes,
         };
-        let episode_timeout = Duration::from_secs(env_u64(
-            "UENV_WORKER_EPISODE_TIMEOUT_SECS",
-            DEFAULT_EPISODE_TIMEOUT_SECS,
-        ));
-        let exec = tokio::select! {
-            result = tokio::time::timeout(
-                episode_timeout,
-                self.executor.execute_episode(&episode, &exec_ctx),
-            ) => {
-                match result {
-                    Ok(Ok(exec)) => exec,
-                    Ok(Err(err)) => {
-                        clear_active_lease(&self.active_leases, &key).await;
-                        self.active_cancellations.lock().await.remove(&key);
-                        tracing::warn!(
-                            trace_id = %trace_id,
-                            episode_id = %episode.episode_id,
-                            worker_id = %worker_id,
-                            attempt_id = episode.attempt_id,
-                            error = %err,
-                            phase = "dispatch_failed",
-                            msg = "dispatch"
-                        );
-                        return Err(Status::internal(format!("execute_episode_failed: {err}")));
-                    }
-                    Err(_) => {
-                        clear_active_lease(&self.active_leases, &key).await;
-                        self.active_cancellations.lock().await.remove(&key);
-                        tracing::warn!(
-                            trace_id = %trace_id,
-                            episode_id = %episode.episode_id,
-                            worker_id = %worker_id,
-                            attempt_id = episode.attempt_id,
-                            phase = "episode_timeout",
-                            msg = "dispatch"
-                        );
-                        return Err(Status::deadline_exceeded("episode_timeout"));
-                    }
-                }
-            }
-            _ = cancel_token.cancelled() => {
-                clear_active_lease(&self.active_leases, &key).await;
-                self.active_cancellations.lock().await.remove(&key);
-                tracing::info!(
-                    trace_id = %trace_id,
-                    episode_id = %episode.episode_id,
-                    worker_id = %worker_id,
-                    attempt_id = episode.attempt_id,
-                    phase = "episode_cancelled",
-                    msg = "dispatch"
-                );
-                return Err(Status::cancelled("episode_cancelled"));
-            }
-        };
-        self.metrics.observe_episode(
-            exec.duration_ms,
-            exec.env_step_duration_ms,
-            exec.model_callback_duration_ms,
+        let episode_timeout = resolve_episode_timeout(&episode);
+        let heartbeat_secs = env_u64(
+            "UENV_WORKER_DISPATCH_HEARTBEAT_SECS",
+            DEFAULT_DISPATCH_HEARTBEAT_SECS,
         );
-        if exec.warmup_hit {
-            self.metrics.inc_warmup_hit();
-        } else {
-            self.metrics.inc_warmup_miss();
-        }
-        self.metrics.set_pool_sizes(self.warmup_pool.status_counts().await);
-        tracing::info!(
-            trace_id = %trace_id,
-            episode_id = %episode.episode_id,
-            worker_id = %worker_id,
-            attempt_id = episode.attempt_id,
-            warmup_hit = exec.warmup_hit,
-            phase = "dispatch_completed",
-            msg = "dispatch"
-        );
-        drop(_active_guard);
-        drop(permit);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(exec.stream_reports.len().max(1));
-        for report in exec.stream_reports {
-            let _ = tx.send(Ok(report)).await;
-        }
-        drop(tx);
+        // 关键提前返回 streaming Response，并在执行期间发送 progress heartbeat，
+        // 避免 Server 在等待首个 frame 时经历数分钟 HTTP/2 静默而触发 CANCEL/reset。
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let started_at = std::time::Instant::now();
+        let _ = tx
+            .send(Ok(progress_report(
+                &episode,
+                &worker_id,
+                active_episodes,
+                self.max_concurrent,
+                0,
+                "running",
+            )))
+            .await;
 
-        let cp = Arc::clone(&self.control_plane);
-        let episode_id = episode.episode_id.clone();
-        let attempt_id = episode.attempt_id;
-        let reward = exec.reward;
-        let result_for_report: EpisodeResult = exec.result;
-        let episode_for_wal = episode.clone();
-        let completed = self.completed.clone();
-        let active = self.active_leases.clone();
-        let cancellations = self.active_cancellations.clone();
-        let wal = self.wal.clone();
+        let executor = self.executor.clone();
+        let warmup_pool = self.warmup_pool.clone();
         let metrics = self.metrics.clone();
+        let control_plane = Arc::clone(&self.control_plane);
+        let completed = self.completed.clone();
+        let active_leases = self.active_leases.clone();
+        let active_cancellations = self.active_cancellations.clone();
+        let wal = self.wal.clone();
+        let key_for_task = key.clone();
+        let episode_for_task = episode.clone();
+        let trace_id_for_task = trace_id.clone();
+        let worker_id_for_task = worker_id.clone();
+
         tokio::spawn(async move {
-            let identity = cp.identity().read().await.clone();
-            let idempotency_key = build_idempotency_key(
-                &episode_id,
-                attempt_id,
-                &identity.worker_id,
-                &episode_for_wal.dispatch_lease_id,
-            );
-            let persisted = wal.persist_pending(
-                &episode_for_wal,
-                &identity.worker_id,
-                identity.server_epoch,
-                &result_for_report,
-            );
-            if let Err(err) = persisted {
-                tracing::error!(error = %err, msg = "wal_persist_failed");
-                active.lock().await.remove(&(episode_id.clone(), attempt_id));
-                cancellations.lock().await.remove(&(episode_id, attempt_id));
-                return;
-            }
-            metrics.set_wal_pending_records(wal.pending_count());
-            if cp
-                .report_result(
-                    idempotency_key.clone(),
-                    result_for_report,
-                    episode_for_wal.dispatch_lease_id.clone(),
-                    episode_for_wal.dispatch_token.clone(),
+            let _active_guard = ActiveEpisodeGuard {
+                metrics: metrics.clone(),
+            };
+            let _permit = permit;
+
+            let episode_for_exec = episode_for_task.clone();
+            let execute = async {
+                tokio::time::timeout(
+                    episode_timeout,
+                    executor.execute_episode(&episode_for_exec, &exec_ctx),
                 )
                 .await
-                .is_ok()
-            {
-                let _ = wal.mark_acked(&idempotency_key);
-            }
-            metrics.set_wal_pending_records(wal.pending_count());
-            tracing::info!(
-                trace_id = "dispatch",
-                episode_id = %episode_for_wal.episode_id,
-                worker_id = %identity.worker_id,
-                reward = reward,
-                msg = "report_result"
+            };
+            tokio::pin!(execute);
+
+            let mut heartbeat =
+                tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            heartbeat.tick().await; // 跳过立即触发的首 tick（已发 running）
+
+            let outcome = loop {
+                tokio::select! {
+                    biased;
+                    result = &mut execute => break result,
+                    _ = cancel_token.cancelled() => {
+                        clear_active_lease(&active_leases, &key_for_task).await;
+                        active_cancellations.lock().await.remove(&key_for_task);
+                        tracing::info!(
+                            trace_id = %trace_id_for_task,
+                            episode_id = %episode_for_task.episode_id,
+                            worker_id = %worker_id_for_task,
+                            attempt_id = episode_for_task.attempt_id,
+                            phase = "episode_cancelled",
+                            msg = "dispatch"
+                        );
+                        let _ = tx.send(Err(Status::cancelled("episode_cancelled"))).await;
+                        return;
+                    }
+                    _ = heartbeat.tick() => {
+                        let elapsed_ms = started_at.elapsed().as_millis() as i64;
+                        tracing::info!(
+                            trace_id = %trace_id_for_task,
+                            episode_id = %episode_for_task.episode_id,
+                            worker_id = %worker_id_for_task,
+                            attempt_id = episode_for_task.attempt_id,
+                            elapsed_ms,
+                            phase = "dispatch_heartbeat",
+                            msg = "dispatch"
+                        );
+                        let _ = tx
+                            .send(Ok(progress_report(
+                                &episode_for_task,
+                                &worker_id_for_task,
+                                exec_ctx.active_episodes,
+                                exec_ctx.worker_capacity,
+                                elapsed_ms,
+                                "running",
+                            )))
+                            .await;
+                    }
+                }
+            };
+
+            let exec = match outcome {
+                Ok(Ok(exec)) => exec,
+                Ok(Err(err)) => {
+                    clear_active_lease(&active_leases, &key_for_task).await;
+                    active_cancellations.lock().await.remove(&key_for_task);
+                    tracing::warn!(
+                        trace_id = %trace_id_for_task,
+                        episode_id = %episode_for_task.episode_id,
+                        worker_id = %worker_id_for_task,
+                        attempt_id = episode_for_task.attempt_id,
+                        error = %err,
+                        phase = "dispatch_failed",
+                        msg = "dispatch"
+                    );
+                    let _ = tx
+                        .send(Err(Status::internal(format!(
+                            "execute_episode_failed: {err}"
+                        ))))
+                        .await;
+                    return;
+                }
+                Err(_) => {
+                    clear_active_lease(&active_leases, &key_for_task).await;
+                    active_cancellations.lock().await.remove(&key_for_task);
+                    tracing::warn!(
+                        trace_id = %trace_id_for_task,
+                        episode_id = %episode_for_task.episode_id,
+                        worker_id = %worker_id_for_task,
+                        attempt_id = episode_for_task.attempt_id,
+                        timeout_secs = episode_timeout.as_secs(),
+                        phase = "episode_timeout",
+                        msg = "dispatch"
+                    );
+                    let _ = tx
+                        .send(Err(Status::deadline_exceeded("episode_timeout")))
+                        .await;
+                    return;
+                }
+            };
+
+            metrics.observe_episode(
+                exec.duration_ms,
+                exec.env_step_duration_ms,
+                exec.model_callback_duration_ms,
             );
-            completed
-                .lock()
-                .await
-                .insert((episode_for_wal.episode_id.clone(), attempt_id));
-            let cleanup_key = (episode_for_wal.episode_id, attempt_id);
-            active.lock().await.remove(&cleanup_key);
-            cancellations.lock().await.remove(&cleanup_key);
+            if exec.warmup_hit {
+                metrics.inc_warmup_hit();
+            } else {
+                metrics.inc_warmup_miss();
+            }
+            metrics.set_pool_sizes(warmup_pool.status_counts().await);
+
+            let result_bytes = prost::Message::encode_to_vec(&exec.result).len();
+            tracing::info!(
+                trace_id = %trace_id_for_task,
+                episode_id = %episode_for_task.episode_id,
+                worker_id = %worker_id_for_task,
+                attempt_id = episode_for_task.attempt_id,
+                warmup_hit = exec.warmup_hit,
+                duration_ms = exec.duration_ms,
+                model_callback_duration_ms = exec.model_callback_duration_ms,
+                result_bytes,
+                phase = "dispatch_completed",
+                msg = "dispatch"
+            );
+
+            for report in exec.stream_reports {
+                if tx.send(Ok(report)).await.is_err() {
+                    break;
+                }
+            }
+            drop(tx);
+
+            let cp = control_plane;
+            let episode_id = episode_for_task.episode_id.clone();
+            let attempt_id = episode_for_task.attempt_id;
+            let reward = exec.reward;
+            let result_for_report: EpisodeResult = exec.result;
+            let episode_for_wal = episode_for_task;
+            let completed = completed;
+            let active = active_leases;
+            let cancellations = active_cancellations;
+            let wal = wal;
+            let metrics = metrics;
+            tokio::spawn(async move {
+                let identity = cp.identity().read().await.clone();
+                let idempotency_key = build_idempotency_key(
+                    &episode_id,
+                    attempt_id,
+                    &identity.worker_id,
+                    &episode_for_wal.dispatch_lease_id,
+                );
+                let persisted = wal.persist_pending(
+                    &episode_for_wal,
+                    &identity.worker_id,
+                    identity.server_epoch,
+                    &result_for_report,
+                );
+                if let Err(err) = persisted {
+                    tracing::error!(error = %err, msg = "wal_persist_failed");
+                    active.lock().await.remove(&(episode_id.clone(), attempt_id));
+                    cancellations.lock().await.remove(&(episode_id, attempt_id));
+                    return;
+                }
+                metrics.set_wal_pending_records(wal.pending_count());
+                if cp
+                    .report_result(
+                        idempotency_key.clone(),
+                        result_for_report,
+                        episode_for_wal.dispatch_lease_id.clone(),
+                        episode_for_wal.dispatch_token.clone(),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    let _ = wal.mark_acked(&idempotency_key);
+                }
+                metrics.set_wal_pending_records(wal.pending_count());
+                tracing::info!(
+                    trace_id = "dispatch",
+                    episode_id = %episode_for_wal.episode_id,
+                    worker_id = %identity.worker_id,
+                    reward = reward,
+                    msg = "report_result"
+                );
+                completed
+                    .lock()
+                    .await
+                    .insert((episode_for_wal.episode_id.clone(), attempt_id));
+                let cleanup_key = (episode_for_wal.episode_id, attempt_id);
+                active.lock().await.remove(&cleanup_key);
+                cancellations.lock().await.remove(&cleanup_key);
+            });
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))

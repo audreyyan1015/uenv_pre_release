@@ -1,4 +1,4 @@
-pub const DEFAULT_LLM_HTTP_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_LLM_HTTP_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_LLM_MAX_RETRIES: usize = 3;
 
 #[derive(Debug, Clone)]
