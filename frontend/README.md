@@ -1,35 +1,34 @@
 # UEnv 可视化前端
 
-面向 UEnv 分布式训练链路的**观测面消费端**：展示训练 run 的工作流与对象层级树，后续通过 SSE 订阅聚合层推送的 `ChainState` 增量。
+面向 UEnv 分布式训练链路的**观测面消费端**：展示训练 run 的工作流与对象层级树，通过 REST + SSE 订阅 **`uenv-server` 内嵌 Obs 子系统**（Server 侧聚合，`:50053`）推送的 `ChainState` 增量。
 
-设计依据：[Docs/UEnv可视化实现规划v1.0.md](../Docs/UEnv可视化实现规划v1.0.md)
+设计依据：[Docs/discussions/可视化前端相关/2026-07-15-Server侧聚合与前端接入规划.md](../Docs/discussions/可视化前端相关/2026-07-15-Server侧聚合与前端接入规划.md) §4（前端推进路线）；数据模型/事件治理沿用 [260612-前端完整设计.md](../Docs/discussions/可视化前端相关/260612-前端完整设计.md) §5–§6。
+
+> 2026-07-15 变更：观测面**不再是独立聚合层进程**，改为内嵌进 `uenv-server`；前端仍然只连观测面 HTTP（REST + SSE），不直连控制面 gRPC。
 
 ---
 
-## 当前阶段：UI 骨架（Mock）
+## 当前阶段：FE-0 / FE-1（类型 + client + store + 脱 Mock）
 
-本目录已完成 **S0-7 / B-M1** 级别的工程与界面骨架，使用静态 Mock 数据驱动 `TrainingConsole`，**尚未**接入聚合层 REST/SSE 与 `ChainState` 状态层。
+已完成：
 
-### 与规划文档的对齐情况
+| 类别 | 说明 |
+|------|------|
+| **类型层** | `src/lib/types/chain-state.ts`：`ChainState` / `WorkflowGraph` / `TreeGraph` / `StateDelta` / `ClientSnapshot` 等，字段名与 Server JSON snake_case 对齐 |
+| **合并逻辑** | `src/lib/store/apply-delta.ts`：`applyStateDelta` 按 `entity_key`（`run` / `workflow` / `tree` / `episode:{id}` / `worker:{id}`）分派合并，只接受更高 `event_seq` |
+| **本地 store** | `src/lib/store/chain-store.ts`：基于 `useSyncExternalStore` 的最小状态容器（无 zustand），管理连接态、快照列表、live/snapshot 视图切换 |
+| **API 客户端** | `src/lib/api/aggregation-client.ts`：`AggregationClient.getState` / `subscribeStream`（原生 `EventSource` + `fetch`） |
+| **离线演示** | `src/lib/api/fixture.ts`：未配置 `VITE_AGGREGATION_BASE_URL` 时的静态 `ChainState` + `StateDelta[]`，可离线演示状态推进 |
+| **订阅 Hook** | `src/hooks/use-run-stream.ts`：`useRunStream(runId)`，fixture/真实模式自动切换，断线自动重连（带 `Last-Event-ID`） |
+| **主控制台** | `src/components/training-console.tsx`：已脱离静态 Mock 数组，工作流 / 树 / 顶栏 / 快照均绑定 `useRunStream` 返回的真实（或 fixture）`ChainState` |
 
-| 类别 | 规划要求 | 骨架状态 |
-|------|----------|----------|
-| **工程** | 路由、布局、主题（§3.3） | ✅ TanStack Start + React 19 + Tailwind 4 + shadcn/ui |
-| **布局** | 工作流主区 + 侧栏树 + 顶栏控制 + 底部 Tab（§3.3） | ✅ 已实现 |
-| **工作流视图** | submit → dispatch → execute → report 等阶段（§0.4 B） | ✅ UI + Mock；未绑定 `WorkflowGraph` |
-| **树状详情** | run → worker → env_instance → episode → step（§5.5.3） | ✅ UI + Mock；未绑定 `TreeGraph` |
-| **节点详情** | 工作流/树选中联动摘要（§0.4 B 建议） | ⚠️ 部分：工作流选中驱动详情，树选中未联动 |
-| **顶栏 Run 控制** | 开始 / 终止 + 状态展示（§0.4 A） | ⚠️ 仅有「停止」按钮 UI，缺「开始训练」与真实 API |
-| **实时 ↔ 快照** | 抓拍深拷贝 `ChainState`，切换视图（§3.1–3.2） | ⚠️ 有模式切换 UI；抓拍按钮当前仅切换模式，未实现深拷贝与快照列表写入 |
-| **SSE 连接指示** | 连接中 / 重连中 / 已断开（§0.4 G） | ⚠️ 静态展示「SSE 已连接」 |
-| **日志 / Metrics Tab** | P1 独立 Tab（§0.4 E） | ✅ Mock 占位（超前于 P0，便于后续接线） |
-| **历史回放** | P1（§0.4 F） | ❌ 未开始 |
-| **搜索 / 索引跳转** | 建议（§0.4 D） | ⚠️ Tab 空态占位 |
-| **API 客户端** | REST + SSE 封装（§4） | ❌ 未实现 |
-| **ChainState 层** | 本地副本 + `StateDelta` 合并（§5.5、§6.3） | ❌ 未实现 |
-| **鉴权** | Bearer token（§13.1） | ❌ 未实现 |
+P0 明确不做（详见规划 §4.3）：
 
-**结论**：**UI 骨架与 §3.3 布局已对齐**，可作为 P0 开发基线；**功能层面距 P0 MVP（§10）仍有 B-M2～B-M27 等待办**，需等聚合层 stub/正式 API 就绪后逐项接线。
+| 项 | 现状 |
+|----|------|
+| 开始 / 终止训练的真实控制 API | 顶栏按钮已禁用，`title="P0 只读观测：开始/终止训练留待 P1 接入 REST 控制"` |
+| 日志 / Metrics 面板真实数据 | 底部 Tab 为占位说明，标注 P1 |
+| 历史回放 | 未开始（P1） |
 
 ---
 
@@ -74,21 +73,34 @@ npm run dev
 
 ---
 
-## 环境变量
+## 环境变量：Fixture 演示 vs 真实联调
 
-当前骨架**不依赖**环境变量即可运行。接入聚合层后建议新增（命名可在联调时与聚合层对齐）：
+**不配置任何环境变量也能跑起来**——`VITE_AGGREGATION_BASE_URL` 为空时，前端自动回落**离线 fixture 演示模式**（`src/lib/api/fixture.ts`），本地灌入一份静态 `ChainState` 并按固定间隔回放几条 `StateDelta`，无需任何后端即可看到工作流/树状态推进。
 
 | 变量 | 作用域 | 说明 |
 |------|--------|------|
-| `VITE_AGGREGATION_BASE_URL` | 客户端 | 聚合层 REST/SSE 根地址，如 `http://127.0.0.1:8090` |
-| `VITE_AGGREGATION_TOKEN` | 客户端 | start/stop 等控制 API 的 Bearer token（§13.1） |
+| `VITE_AGGREGATION_BASE_URL` | 客户端 | Server Obs 根地址，如 `http://127.0.0.1:50053`；留空 = fixture 模式 |
+| `VITE_AGGREGATION_TOKEN` | 客户端 | Bearer token；`EventSource` 无法带自定义请求头，会作为 `?token=` 查询参数附在 SSE URL 上；`getState` 走 `fetch`，用 `Authorization` 头 |
+| `VITE_DEFAULT_RUN_ID` | 客户端 | 页面未带 `?run=` 时使用的默认 `training_run_id`（联调建议先用 `_orphan`，见规划 §11 拍板项 4） |
 | `NODE_ENV` | 服务端 | `development` / `production` |
 
-在项目根目录创建 `.env.local`（勿提交密钥）：
+复制示例文件后按需修改：
+
+```bash
+cp .env.local.example .env.local
+```
 
 ```env
-VITE_AGGREGATION_BASE_URL=http://127.0.0.1:8090
-VITE_AGGREGATION_TOKEN=your-operator-token
+# .env.local.example
+VITE_AGGREGATION_BASE_URL=http://127.0.0.1:50053
+VITE_AGGREGATION_TOKEN=
+VITE_DEFAULT_RUN_ID=_orphan
+```
+
+`training_run_id` 也可以直接通过 URL 指定，优先级高于 `VITE_DEFAULT_RUN_ID`：
+
+```
+http://localhost:8080/?run=my-training-run
 ```
 
 > 以 `VITE_` 开头的变量会打进客户端包，**不要**把长期密钥写进前端；生产环境应通过网关或短期 token 下发。
@@ -116,7 +128,7 @@ npm run preview
 
 ### 生产部署注意
 
-1. **聚合层 CORS**：若前端与聚合层不同源，需在聚合层配置 CORS（§13.1）。
+1. **Server Obs CORS**：若前端与 `uenv-server` Obs（`:50053`）不同源，需在 Server 侧配置 CORS（规划 §13.1）。
 2. **SSE 代理**：反向代理（Nginx 等）需关闭对 `/api/v1/runs/*/stream` 的响应缓冲，并适当拉长读超时。
 3. **Nitro / Cloudflare**：`vite.config.ts` 使用 `@lovable.dev/vite-tanstack-config`；在非 Lovable 环境构建时 Nitro 部署插件默认跳过。若需 Workers 部署，在 `defineConfig` 中显式启用 `nitro: true` 并按目标平台配置。
 
@@ -128,17 +140,28 @@ npm run preview
 frontend/
 ├── src/
 │   ├── components/
-│   │   ├── training-console.tsx   # 主控制台（当前为 Mock 数据）
+│   │   ├── training-console.tsx   # 主控制台：绑定 useRunStream，脱离静态 Mock
 │   │   └── ui/                    # shadcn/ui 组件
+│   ├── hooks/
+│   │   └── use-run-stream.ts      # 订阅某 training_run_id；fixture/真实模式自动切换
 │   ├── routes/
 │   │   ├── __root.tsx             # 应用壳、QueryClient、全局样式
 │   │   └── index.tsx              # 首页 → TrainingConsole
 │   ├── lib/
 │   │   ├── config.server.ts       # 服务端配置
-│   │   └── api/                   # 预留：聚合层 API 客户端（待实现）
+│   │   ├── types/
+│   │   │   └── chain-state.ts     # ChainState / WorkflowGraph / TreeGraph / StateDelta 等类型
+│   │   ├── store/
+│   │   │   ├── apply-delta.ts     # applyStateDelta / emptyChainState
+│   │   │   └── chain-store.ts     # useSyncExternalStore 兼容的本地状态容器
+│   │   └── api/
+│   │       ├── aggregation-client.ts  # Server Obs REST + SSE 客户端
+│   │       └── fixture.ts             # 离线演示用静态 ChainState + StateDelta[]
+│   ├── vite-env.d.ts              # VITE_* 环境变量类型声明
 │   ├── server.ts                  # SSR 入口包装
 │   ├── start.ts                   # TanStack Start 实例
 │   └── styles.css                 # 设计系统 / 主题变量
+├── .env.local.example
 ├── vite.config.ts
 ├── package.json
 └── README.md
@@ -148,38 +171,53 @@ frontend/
 
 ---
 
-## 与聚合层的接口约定（待接入）
+## 与 Server Obs 的接口约定
 
-实现 P0 时将对接以下端点（详见规划 §4.3）：
+对接以下端点（详见规划 §4.3、§6）：
 
 | 方法 | 路径 | 用途 |
 |------|------|------|
-| `POST` | `/api/v1/runs` | 开始训练 run |
-| `POST` | `/api/v1/runs/{training_run_id}/stop` | 终止 run |
-| `GET` | `/api/v1/runs/{training_run_id}/stream` | SSE：`full_state` / `state_delta` / `run_status` / `ping` |
-| `GET` | `/api/v1/runs/{training_run_id}/state` | 拉取完整 `ChainState` |
+| `GET` | `/api/v1/runs/{training_run_id}/state` | 拉取完整 `ChainState`（`AggregationClient.getState`） |
+| `GET` | `/api/v1/runs/{training_run_id}/stream` | SSE：`full_state` / `state_delta` / `run_status` / `ping`（`AggregationClient.subscribeStream`） |
+| `POST` | `/api/v1/runs` | 开始训练 run（P1，当前前端按钮禁用） |
+| `POST` | `/api/v1/runs/{training_run_id}/stop` | 终止 run（P1，当前前端按钮禁用） |
 
-聚合层服务尚在规划中；开发时可先用 A 侧提供的 SSE stub（实现清单 S0-6）联调。
-
----
-
-## 后续开发顺序（P0）
-
-1. 在 `src/lib/types/` 定义 `ChainState`、`StateDelta`、`EventCursor`（对齐 §5.4–5.5）
-2. 实现 `src/lib/api/aggregation-client.ts`（REST + EventSource/SSE）
-3. 实现 `ChainState` store 与 `StateDelta` 合并 hook
-4. 将 `training-console.tsx` 从 Mock 改为消费 store
-5. 补全「开始训练」、真实快照深拷贝、连接状态与空态/异常态
-
-任务明细见 [Docs/discussions/可视化前端相关/260612-实现清单.md](../Docs/discussions/可视化前端相关/260612-实现清单.md) §5.1。
+`uenv-server` 侧的 Obs 子系统实现见规划 §6（`uenv-server/src/obs/`）。
 
 ---
 
-## 联调前置
+## 如何运行：Fixture 演示 vs 接 Server Obs
 
-1. 聚合层 HTTP 服务已启动并可访问
-2. （可选）至少一条 Adapter → Server → Worker 事件链路向聚合层上报
-3. 前端 `VITE_AGGREGATION_BASE_URL` 指向聚合层
-4. 控制 API token 已配置且具备 operator 权限
+### 方式一：Fixture 离线演示（无需任何后端）
 
-完整联调步骤见实现清单 §6（人员 C）与 [全链路联调文档](../Docs/全链路联调-各层接口与参数字段.md)。
+```bash
+cd frontend
+npm install
+npm run dev   # 不创建 .env.local，或留空 VITE_AGGREGATION_BASE_URL 即可
+```
+
+打开 `http://localhost:8080/`，顶栏会显示「Fixture 演示」标记，工作流/树状态每隔约 1.8 秒推进一次。
+
+### 方式二：接真实 Server Obs
+
+```bash
+# 1) 确认 uenv-server 已启动且 Obs HTTP 监听 :50053（可用 seed run 联调，见规划 §4.5）
+# 2) 前端配置指向该地址
+cd frontend
+cp .env.local.example .env.local
+# 编辑 .env.local：VITE_AGGREGATION_BASE_URL=http://127.0.0.1:50053
+npm install
+npm run dev
+# 打开 http://localhost:8080/?run=<training_run_id>
+```
+
+联调顺序建议（规划 §4.5）：**先 fixture 走通 UI → 接 Obs seed 数据 → 接真实 SubmitEpisode 链路**。
+
+---
+
+## 已知限制（P0 范围）
+
+- 开始 / 终止训练：按钮已接线到禁用态，真实 REST 控制留给 P1（规划 §4.3 FE-1 备注）。
+- 日志 / Metrics Tab：仍是占位说明文案，等 Server Obs 提供对应查询 API 后再接（规划 §0.4 E）。
+- 历史回放：未实现（规划 §0.4 F，P1）。
+- 事件流 Tab 展示的是**当前 `ChainState` 派生**的最近变化列表，不是服务端原始事件重放；完整事件日志查询是 Server 侧 P1 能力。

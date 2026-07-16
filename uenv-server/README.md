@@ -117,6 +117,24 @@ Worker 启动后连接同一端口的 `ControlPlaneService`：
 
 `SubmitEpisode` 流程：调度 Worker → 填充 `dispatch_lease_id` → `DispatchEpisode` → 等待 `ReportResult` → 返回客户端。
 
+## 可视化 Obs（观测聚合）
+
+Obs 内嵌于 Server（由 `uenv-adapter-core` 启动时与 trajectory / admin_http 一并 spawn），默认 HTTP **`:50053`**。前端只连 Obs，不直连 gRPC。
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `UENV_OBS_ENABLED` | `true` | 总开关 |
+| `UENV_OBS_HTTP_LISTEN` | `0.0.0.0:50053` | REST + SSE |
+| `UENV_OBS_DATA_DIR` | `./obs-data` | SQLite `obs.db` 目录 |
+| `UENV_OBS_TOKEN` | 空 | 非空则要求 Bearer / `X-Obs-Token` |
+| `UENV_OBS_QUEUE_CAPACITY` | `8192` | emit 队列；满则丢弃 |
+| `UENV_OBS_SEED_ON_START` | `false` | 启动时 seed `_orphan` run |
+| `UENV_OBS_AUTO_MOCK` | `false` | GET state/stream 时空 run 自动注入 mock worker/episode 占位 |
+
+主要端点：`GET /health`、`POST /api/v1/events`、`GET /api/v1/runs/{id}/state`、`GET /api/v1/runs/{id}/stream`（SSE）、`POST /api/v1/runs/{id}/seed`。
+
+本地冒烟：`scripts/obs/smoke_obs_http.sh`（需 Obs 已监听）。规划见 [Docs/discussions/可视化前端相关/2026-07-15-Server侧聚合与前端接入规划.md](../Docs/discussions/可视化前端相关/2026-07-15-Server侧聚合与前端接入规划.md)。
+
 ## 实机联调
 
 见 [Docs/discussions/a100-server-worker-e2e/README.md](../Docs/discussions/a100-server-worker-e2e/README.md)。

@@ -218,7 +218,14 @@ async fn notify_handle_worker_cancel(handle: &Arc<EpisodeHandle>) {
 /// Broadcast the cancelled terminal result and remember the late ReportResult outcome.
 fn broadcast_cancelled_for_request(state: &ServerState, req: &EpisodeRequest) -> EpisodeResult {
     record_cancel_outcome(state, &req.episode_id);
+    crate::obs::try_emit(
+        state,
+        crate::obs::attempt_closed(req, state.epoch(), "cancelled"),
+    );
     let result = cancelled_result_from_request(req, "episode cancelled", None);
+    for ev in crate::obs::episode_terminal(req, &result, state.epoch()) {
+        crate::obs::try_emit(state, ev);
+    }
     let _ = state.episode_broadcast.send(result.clone());
     result
 }
@@ -246,7 +253,14 @@ fn broadcast_timeout_for_request(
     message: impl Into<String>,
     timing: Option<ResultTiming>,
 ) -> EpisodeResult {
+    crate::obs::try_emit(
+        state,
+        crate::obs::attempt_closed(req, state.epoch(), "timeout"),
+    );
     let result = timeout_result_from_request(req, message, timing);
+    for ev in crate::obs::episode_terminal(req, &result, state.epoch()) {
+        crate::obs::try_emit(state, ev);
+    }
     let _ = state.episode_broadcast.send(result.clone());
     result
 }

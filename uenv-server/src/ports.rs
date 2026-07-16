@@ -226,12 +226,31 @@ impl GatewaySessionPort for ReqwestGatewaySessionClient {
 }
 
 pub(crate) async fn dispatch_to_worker(
+    state: &std::sync::Arc<crate::state::ServerState>,
     endpoint: &str,
     request: EpisodeRequest,
 ) -> anyhow::Result<()> {
-    TonicWorkerDispatchClient
-        .dispatch_episode(endpoint, request)
-        .await
+    // endpoint 来自 worker 注册信息，不包含协议前缀；tonic 需要 http:// 前缀。
+    let mut client: WorkerGrpcServiceClient<Channel> =
+        WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
+    let epoch = state.epoch();
+    let dispatch = DispatchEpisodeRequest {
+        episode: Some(request.clone()),
+    };
+    let mut stream = client.dispatch_episode(dispatch).await?.into_inner();
+    while let Some(report) = stream.message().await? {
+        info!(
+            episode_id = %report.episode_id,
+            attempt_id = report.attempt_id,
+            phase = %report.phase,
+            current_step = report.current_step,
+            "stream_report"
+        );
+        if let Some(ev) = crate::obs::from_stream_report(&report, Some(&request), epoch) {
+            crate::obs::try_emit(state, ev);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn cancel_worker_episode(
