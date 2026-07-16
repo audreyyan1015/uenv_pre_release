@@ -7,5 +7,4 @@ members = [
     "uenv-bridge/core",
     "plugins/math",
     "plugins/code",
-    "tools/scale-bench",
 ]
