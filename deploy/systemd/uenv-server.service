@@ -1,0 +1,29 @@
+[Unit]
+Description=UENV Adapter-Core Server (gRPC control-plane :8088 + trajectory store :8077)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/uenv
+ExecStartPre=/usr/bin/test -x /usr/local/bin/uenv-adapter-core
+ExecStartPre=/usr/bin/test -r /home/uenv/config/server.yaml
+ExecStart=/usr/local/bin/uenv-adapter-core
+Environment=UENV_CONFIG_PATH=/home/uenv/config/server.yaml
+Environment=UENV_ADDR=0.0.0.0:8088
+Environment=UENV_TRAJECTORY_ENABLED=1
+Environment=UENV_TRAJECTORY_HTTP_LISTEN=0.0.0.0:8077
+Environment=UENV_TRAJECTORY_DATA_DIR=/home/uenv/trajectory-data
+Environment=UENV_LOG_FORMAT=json
+StandardOutput=append:/home/uenv/logs/adapter-core.log
+StandardError=append:/home/uenv/logs/adapter-core.log
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=60
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
