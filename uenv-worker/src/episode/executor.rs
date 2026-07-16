@@ -212,7 +212,18 @@ impl EpisodeExecutor {
                 episode_rollout_meta.absorb(meta);
             }
             let action = infer.action;
-            model_callback_duration_ms += model_start.elapsed().as_millis() as u64;
+            let model_ms = model_start.elapsed().as_millis() as u64;
+            model_callback_duration_ms += model_ms;
+            tracing::info!(
+                trace_id = %trace_id,
+                episode_id = %episode.episode_id,
+                worker_id = %ctx.worker_id,
+                step_index,
+                model_ms,
+                action_bytes = action.len(),
+                phase = "model_response_ok",
+                msg = "episode"
+            );
 
             let step_start = Instant::now();
             let step = match self.plugin_host.step(&lease.instance_id, action.clone()).await {
@@ -234,18 +245,19 @@ impl EpisodeExecutor {
             total_reward += reward;
             last_reward = reward;
 
+            // reward 已基于完整 action 计算；同步回传截断/去 think，降低 gRPC EpisodeResult 体积。
+            // 覆盖 plugin 可能写入的完整 response_text。
+            let (report_action, response_text) = prepare_sync_response_fields(&action);
             let mut step_info = step.info;
-            if let Ok(action_text) = std::str::from_utf8(&action) {
-                if !action_text.trim().is_empty() {
-                    step_info
-                        .entry("response_text".to_string())
-                        .or_insert_with(|| action_text.to_string());
-                }
+            if let Some(text) = response_text {
+                step_info.insert("response_text".to_string(), text);
+            } else {
+                step_info.remove("response_text");
             }
             let step_record = StepRecord {
                 step_index,
                 observation: current_observation.clone(),
-                action,
+                action: report_action,
                 reward,
                 terminated: step.terminated,
                 truncated: step.truncated,
@@ -718,6 +730,55 @@ fn log_phase_error(
         error = %err,
         msg = "episode_phase_failed"
     );
+}
+
+fn max_sync_response_chars() -> usize {
+    std::env::var("UENV_WORKER_MAX_RESPONSE_TEXT_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(8_192)
+}
+
+/// 去掉 `<think>...</think>`（含未闭合）并按字符上限截断，供同步 gRPC 回传。
+fn strip_think_blocks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        if let Some(start) = rest.find("<think>") {
+            out.push_str(&rest[..start]);
+            rest = &rest[start + "<think>".len()..];
+            if let Some(end) = rest.find("</think>") {
+                rest = &rest[end + "</think>".len()..];
+            } else {
+                // 未闭合 think：丢弃剩余内容，避免把长 reasoning 塞进回传。
+                break;
+            }
+        } else {
+            out.push_str(rest);
+            break;
+        }
+    }
+    out
+}
+
+fn prepare_sync_response_fields(action: &[u8]) -> (Vec<u8>, Option<String>) {
+    let Ok(text) = std::str::from_utf8(action) else {
+        return (action.to_vec(), None);
+    };
+    if text.trim().is_empty() {
+        return (action.to_vec(), None);
+    }
+    let stripped = strip_think_blocks(text);
+    let max_chars = max_sync_response_chars();
+    let truncated = if stripped.chars().count() > max_chars {
+        let prefix: String = stripped.chars().take(max_chars).collect();
+        format!("{prefix}...[truncated]")
+    } else {
+        stripped
+    };
+    let bytes = truncated.as_bytes().to_vec();
+    (bytes, Some(truncated))
 }
 
 fn checksum_trajectory(
