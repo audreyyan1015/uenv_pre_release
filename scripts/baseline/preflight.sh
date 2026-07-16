@@ -123,6 +123,39 @@ check_ports() {
   done
 }
 
+check_orphan_adapter() {
+  local main_pid adapter_pids listener_pids unexpected_pids
+  main_pid="$(systemctl show "$SERVICE_NAME" -p MainPID --value 2>/dev/null || echo 0)"
+  adapter_pids="$(pgrep -f '/usr/local/bin/uenv-adapter-core' 2>/dev/null | sort -n || true)"
+  listener_pids="$(
+    for port in $REQUIRED_PORTS; do
+      ss -ltnpH "sport = :${port}" 2>/dev/null \
+        | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p'
+    done | sort -n | uniq
+  )"
+
+  unexpected_pids="$(
+    printf '%s\n' "$listener_pids" | while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      if [ "$main_pid" = "0" ] || [ "$pid" != "$main_pid" ]; then
+        printf '%s\n' "$pid"
+      fi
+    done
+  )"
+
+  if [ -z "$adapter_pids" ]; then
+    warn "no /usr/local/bin/uenv-adapter-core process found"
+  else
+    pass "adapter process ids: $(printf '%s' "$adapter_pids" | tr '\n' ' ')"
+  fi
+
+  if [ -z "$unexpected_pids" ]; then
+    pass "adapter listeners are owned by systemd MainPID"
+  else
+    fail "orphan_adapter_detected: listener pid(s) not owned by $SERVICE_NAME MainPID=${main_pid}: $(printf '%s' "$unexpected_pids" | tr '\n' ' ')"
+  fi
+}
+
 check_admin_state() {
   local status agents
   status="$(curl -fsS --max-time 3 "${ADMIN_URL}/status" 2>/dev/null || true)"
@@ -153,6 +186,7 @@ main() {
   check_service
   check_deploy_files
   check_ports
+  check_orphan_adapter
   check_admin_state
   printf 'summary: pass=%s warn=%s fail=%s\n' "$pass_count" "$warn_count" "$fail_count"
   [ "$fail_count" -eq 0 ]

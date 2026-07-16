@@ -1,0 +1,15 @@
+[package]
+name = "scale-bench"
+version = "0.1.0"
+edition = "2024"
+description = "UEnv control-plane scale benchmark load generator"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.14"
+uenv-server = { path = "../../uenv-server" }

@@ -48,6 +48,9 @@ secrets/*
 /logs
 /Docs/scripts
 /tmp
+/baseline-artifacts/
+/trajectory-data/
+**/__pycache__/
 # 含服务器账号密码的联调指南，严禁入库
 /Docs/README.md
 # 联调周报（本地产物，勿入库）

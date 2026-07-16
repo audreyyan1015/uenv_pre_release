@@ -1,0 +1,27 @@
+server:
+  grpc_addr: "http://127.0.0.1:8088"
+  admin_url: "http://127.0.0.1:50052"
+
+run:
+  scenario: "s03-heartbeat-steady"
+  run_id: "s03-heartbeat-steady"
+  worker_prefix: "bench"
+  workers: 1000
+  duration_secs: 300
+  heartbeat_interval_ms: 5000
+  heartbeat_jitter_pct: 20
+  register_rps: 200
+  register_concurrency: 64
+  max_load: 1
+  supported_env_types:
+    - math
+  endpoint_template: "bench://{worker_id}"
+
+loadgen:
+  shard_id: 0
+  shard_count: 1
+  metrics_output: "baseline-artifacts/current/loadgen.jsonl"
+
+safety:
+  require_allow_live: true
+  deny_if_admin_busy: true

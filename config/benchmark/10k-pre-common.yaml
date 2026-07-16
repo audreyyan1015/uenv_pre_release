@@ -1,0 +1,24 @@
+server:
+  grpc_addr: "http://127.0.0.1:8088"
+  admin_url: "http://127.0.0.1:50052"
+
+run:
+  run_id: "10k-pre-local"
+  worker_prefix: "bench"
+  heartbeat_interval_ms: 5000
+  heartbeat_jitter_pct: 20
+  register_rps: 100
+  register_concurrency: 32
+  max_load: 1
+  supported_env_types:
+    - math
+  endpoint_template: "bench://{worker_id}"
+
+loadgen:
+  shard_id: 0
+  shard_count: 1
+  metrics_output: "baseline-artifacts/current/loadgen.jsonl"
+
+safety:
+  require_allow_live: true
+  deny_if_admin_busy: true
