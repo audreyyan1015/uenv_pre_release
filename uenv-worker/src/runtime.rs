@@ -56,6 +56,18 @@ pub struct WorkerRuntime {
 
 impl WorkerRuntime {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 启动巡检：清理上一代 Worker 遗留的插件孤儿进程与陈旧 UDS 文件，
+        // 避免（尤其是非优雅关停后）孤儿进程跨重启累积。必须在 spawn 任何插件之前执行。
+        let reaped_orphans = PluginHost::reap_orphans();
+        if reaped_orphans > 0 {
+            tracing::warn!(
+                trace_id = "runtime",
+                worker_id = %self.worker_id,
+                episode_id = "-",
+                reaped_orphans,
+                msg = "reaped_orphan_plugins_on_startup"
+            );
+        }
         let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
         let hub_endpoint = if self.hub_enabled {
             self.hub_endpoint.clone()
@@ -306,6 +318,9 @@ impl WorkerRuntime {
             });
         }
 
+        // 关停清理句柄：warmup_pool 随后被移动进 service，需先克隆一份用于关停回收。
+        let warmup_pool_for_shutdown = warmup_pool.clone();
+        let plugin_host_for_shutdown = plugin_host.clone();
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
             EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone())
@@ -350,10 +365,15 @@ impl WorkerRuntime {
             .add_service(grpc_service)
             .serve_with_shutdown(addr, shutdown_signal())
             .await?;
+        // 优雅关停：gRPC 入口停止后，批量回收插件池实例，避免子进程被 init 收养成孤儿。
+        let pool_closed = warmup_pool_for_shutdown.shutdown().await;
+        let host_closed = plugin_host_for_shutdown.close_all().await;
         tracing::info!(
             trace_id = "runtime",
             worker_id = "shutdown",
             episode_id = "-",
+            pool_shutdown_closed = pool_closed,
+            host_closed,
             msg = "worker_stop"
         );
         Ok(())

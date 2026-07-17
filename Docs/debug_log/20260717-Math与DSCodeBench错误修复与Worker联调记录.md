@@ -3,9 +3,9 @@
 - 日期：2026-07-17
 - 处理范围：7143 Worker（`219.147.100.43:7143`）
 - 关联报告：
-  - [数学错误排查.md](数学错误排查.md)（OlymMATH `step()` h2 CANCEL）
-  - [DSCodeBench-UEnv评测Worker依赖问题说明.md](DSCodeBench-UEnv评测Worker依赖问题说明.md)（`ModuleNotFoundError: numpy`）
-  - [failed_requests_for_server_worker.md](failed_requests_for_server_worker.md)
+  - [数学错误排查.md](../worker/260717/数学错误排查.md)（OlymMATH `step()` h2 CANCEL）
+  - [DSCodeBench-UEnv评测Worker依赖问题说明.md](../worker/260717/DSCodeBench-UEnv评测Worker依赖问题说明.md)（`ModuleNotFoundError: numpy`）
+  - [failed_requests_for_server_worker.md](../worker/260717/failed_requests_for_server_worker.md)
 
 ---
 
@@ -141,7 +141,7 @@ runtime_gateway_start(gateway_addr=0.0.0.0:28097, catalog=731)
 ## 7. 遗留与后续
 
 - `hub_pull_failed_using_local_manifest`（`swe` env 在 Hub 返回 404，降级本地 manifest）为既有、与本次无关的告警，不阻塞注册/Episode。
-- 全链路正式 smoke（Adapter@7142 → Server → Worker）由 Adapter 侧按 [DSCodeBench-UEnv评测Worker依赖问题说明.md](DSCodeBench-UEnv评测Worker依赖问题说明.md) §6 与 OlymMATH 脚本重跑收口；Worker 侧修复已就绪并生效。
+- 全链路正式 smoke（Adapter@7142 → Server → Worker）由 Adapter 侧按 [DSCodeBench-UEnv评测Worker依赖问题说明.md](../worker/260717/DSCodeBench-UEnv评测Worker依赖问题说明.md) §6 与 OlymMATH 脚本重跑收口；Worker 侧修复已就绪并生效。
 - 若后续 DSCodeBench 依赖需要固化/复现，建议将 venv 依赖清单纳入 EnvPackage 或部署脚本，避免重装。
 
 ---
