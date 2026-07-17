@@ -49,13 +49,15 @@ struct PluginState {
 struct CodePlugin {
     uds_path: PathBuf,
     state: Mutex<PluginState>,
+    shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl CodePlugin {
-    fn new(uds_path: PathBuf) -> Self {
+    fn new(uds_path: PathBuf, shutdown_tx: tokio::sync::oneshot::Sender<()>) -> Self {
         Self {
             uds_path,
             state: Mutex::new(PluginState::default()),
+            shutdown_tx: Mutex::new(Some(shutdown_tx)),
         }
     }
 
@@ -188,8 +190,14 @@ impl PluginService for CodePlugin {
         &self,
         _request: Request<CloseRequest>,
     ) -> Result<Response<CloseResponse>, Status> {
-        let mut s = self.state.lock().await;
-        *s = PluginState::default();
+        {
+            let mut s = self.state.lock().await;
+            *s = PluginState::default();
+        }
+        // 优雅下线：触发 gRPC server 关停，插件进程随后退出，成为正常下线通路。
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
         Ok(Response::new(CloseResponse { ok: true }))
     }
 
@@ -259,10 +267,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::remove_file(&cli.uds_path);
         let uds = UnixListener::bind(&cli.uds_path)?;
         let incoming = UnixListenerStream::new(uds);
-        let plugin = CodePlugin::new(PathBuf::from(cli.uds_path));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let plugin = CodePlugin::new(PathBuf::from(cli.uds_path), shutdown_tx);
         Server::builder()
             .add_service(PluginServiceServer::new(plugin))
-            .serve_with_incoming(incoming)
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_rx.await;
+            })
             .await?;
         Ok(())
     }
