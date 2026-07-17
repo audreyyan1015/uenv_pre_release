@@ -98,8 +98,24 @@ impl PluginService for MathPlugin {
     async fn step(&self, request: Request<StepRequest>) -> Result<Response<StepResponse>, Status> {
         let action = String::from_utf8(request.into_inner().action).unwrap_or_default();
         let s = self.state.lock().await;
-        let reward = score_action(&s.dataset, &action, &s.answer);
         let mut info = HashMap::new();
+        // 判分异常必须转换为结构化返回，而不能让 panic 冒泡到 tonic 处理任务，
+        // 否则 h2 流会被 CANCEL，Server 侧误判为可重试的 dispatch_failed。
+        let reward = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            score_action(&s.dataset, &action, &s.answer)
+        })) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "score_action panicked: dataset={} answer_len={} action_len={}",
+                    s.dataset,
+                    s.answer.len(),
+                    action.len()
+                );
+                info.insert("score_error".to_string(), "score_action_panic".to_string());
+                0.0
+            }
+        };
         info.insert("response_text".to_string(), action.clone());
         info.insert("expected".to_string(), s.answer.clone());
         info.insert("dataset".to_string(), s.dataset.clone());

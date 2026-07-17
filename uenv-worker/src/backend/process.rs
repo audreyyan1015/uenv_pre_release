@@ -34,7 +34,9 @@ impl ProcessBackend {
             .arg(uds_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // 继承 stderr：插件 panic / eprintln 需要在 Worker 日志中可见，
+            // 否则判分异常（如历史上的 UTF-8 切片 panic）无法留下线索。
+            .stderr(Stdio::inherit())
             .spawn()?;
         Ok(child)
     }
