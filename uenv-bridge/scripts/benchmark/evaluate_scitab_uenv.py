@@ -69,11 +69,29 @@ def build_request(
     max_tokens: int,
     temperature: float,
     top_p: float,
+    enable_thinking: bool,
+    preserve_thinking: bool,
+    thinking_token_budget: int | None,
     timeout_seconds: int,
     seed: int,
     metadata: dict[str, Any],
 ) -> EpisodeRequest:
     request_id = f"scitab-{qid}-{uuid.uuid4().hex[:8]}"
+    generation_config: dict[str, Any] = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "max_new_tokens": max_tokens,
+    }
+    if enable_thinking or preserve_thinking:
+        chat_template_kwargs: dict[str, Any] = {}
+        if enable_thinking:
+            chat_template_kwargs["enable_thinking"] = True
+        if preserve_thinking:
+            chat_template_kwargs["preserve_thinking"] = True
+        generation_config["chat_template_kwargs"] = chat_template_kwargs
+    if thinking_token_budget is not None:
+        generation_config["thinking_token_budget"] = thinking_token_budget
     payload = {
         "protocol_version": "1.0",
         "framework": "uenv-benchmark",
@@ -92,12 +110,7 @@ def build_request(
             "endpoint_type": "http",
             "url": model_endpoint,
             "model_name": model_name,
-            "generation_config": {
-                "temperature": temperature,
-                "top_p": top_p,
-                "max_tokens": max_tokens,
-                "max_new_tokens": max_tokens,
-            },
+            "generation_config": generation_config,
             "max_retries": 3,
         },
         "episode_config": {
@@ -254,10 +267,13 @@ def main() -> int:
     parser.add_argument("--model-name", default=os.getenv("UENV_ROLLOUT_MODEL_NAME", "policy-model"))
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--prompt-style", default="strict_label", choices=["default", "strict_label"])
+    parser.add_argument("--prompt-style", default="official", choices=["default", "official", "strict_label"])
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
+    parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument("--preserve-thinking", action="store_true")
+    parser.add_argument("--thinking-token-budget", type=int, default=None)
     parser.add_argument("--timeout-seconds", type=int, default=900)
     parser.add_argument("--client-timeout-seconds", type=float, default=1200.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -286,6 +302,9 @@ def main() -> int:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
+            enable_thinking=args.enable_thinking,
+            preserve_thinking=args.preserve_thinking,
+            thinking_token_budget=args.thinking_token_budget,
             timeout_seconds=args.timeout_seconds,
             seed=args.seed + idx,
             metadata={"claim": example.claim, "table_id": example.table_id, "paper_id": example.paper_id},
@@ -342,6 +361,10 @@ def main() -> int:
             "batch_size": args.batch_size,
             "prompt_style": args.prompt_style,
             "inference_mode": "uenv_generate",
+            "enable_thinking": args.enable_thinking,
+            "preserve_thinking": args.preserve_thinking,
+            "thinking_token_budget": args.thinking_token_budget,
+            "max_tokens": args.max_tokens,
         },
     )
     metrics = json.loads((args.output_dir / "metrics.json").read_text(encoding="utf-8"))

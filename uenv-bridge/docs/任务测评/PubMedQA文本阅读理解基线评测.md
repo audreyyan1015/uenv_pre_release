@@ -1,11 +1,11 @@
 # PubMedQA 文本阅读理解 UEnv 基线评测
 
-> 日期：2026-07-14
+> 日期：2026-07-17
 > 阶段：Eval-first，未进行后训练
 > 任务书条目：1. 文本阅读理解
 > Benchmark：PubMedQA
 > 目标模型：`Qwen/Qwen3.6-35B-A3B`
-> 正式口径：接入 UEnv，thinking 开启，`MAX_TOKENS=1024`
+> 正式口径：接入 UEnv，`official` prompt，thinking 开启，reasoning 以独立字段透传，`MAX_TOKENS=32768`，`THINKING_TOKEN_BUDGET=16384`
 
 ## 1. 任务说明
 
@@ -53,53 +53,75 @@ PubMedQA 样本
 | `env_type` | `math` | 由 Server 调度到 math Worker / plugin |
 | `env_config.dataset` | `pubmedqa` | Worker 内部路由到 PubMedQA 判分逻辑 |
 | `reward_config.target` | `yes/no/maybe` | 当前样本 gold label |
-| `model_endpoint.url` | `http://10.10.20.142:18088/v1` | Worker 访问 adapter model gateway |
-| `generation_config.max_tokens` | `1024` | 本次正式 thinking 口径最大生成长度 |
+| `model_endpoint.url` | `http://10.10.20.142:18096/v1` | Worker 访问 adapter model gateway |
+| `generation_config.max_tokens` | `32768` | 本次 UEnv thinking 口径最大生成长度 |
+| `generation_config.thinking_token_budget` | `16384` | Qwen thinking token budget |
+| `generation_config.chat_template_kwargs.enable_thinking` | `true` | 显式开启 thinking |
+| `generation_config.chat_template_kwargs.preserve_thinking` | `true` | 要求上游保留 reasoning 独立字段 |
 | `temperature` | `0.0` | 确定性生成 |
 | `top_p` | `1.0` | 不额外截断采样分布 |
 
-## 4. 运行命令
+## 4. UEnv Thinking 全量配置
 
-运行前需要先启动 Worker 可访问的 OpenAI-compatible 模型 endpoint。本次使用 adapter model gateway 对外暴露给 Worker，gateway 上游连接本机 vLLM。
+| 配置 | 值 |
+|---|---|
+| 模型 | `Qwen/Qwen3.6-35B-A3B` |
+| 本机推理服务 | vLLM OpenAI-compatible server，镜像 `localhost/vllm-openai:v0.19.0-cu130` |
+| GPU | 8 张 A100 |
+| Tensor parallel | 8 |
+| vLLM `max_model_len` | 65536 |
+| vLLM reasoning parser | `qwen3` |
+| Adapter model gateway | `http://10.10.20.142:18096/v1` |
+| Gateway upstream | `http://127.0.0.1:18081/v1` |
+| Gateway thinking 注入 | `--enable-thinking --preserve-thinking --thinking-token-budget 16384` |
+| AdapterCore endpoint | `8.130.75.157:8088` |
+| UEnv batch size | 1 |
+| Prompt style | `official` |
+| Thinking mode | 开启 |
+| Reasoning 返回方式 | OpenAI message 独立字段，例如 `message.reasoning` |
+| `MAX_TOKENS` | 32768 |
+| `THINKING_TOKEN_BUDGET` | 16384 |
+| `TEMPERATURE` | 0.0 |
+| `TOP_P` | 1.0 |
+| 数据集 | PubMedQA expert-labeled 1000 条 |
+| 后训练 | 未进行 SFT/RL，Eval-first 基线 |
 
-启动 vLLM：
+## 5. 运行命令
+
+本轮复用 OlymMATH 测评阶段已经启动的 8GPU vLLM，监听本机 `18081`。vLLM 启动参数包含：
 
 ```bash
-podman run --rm -d \
-  --name uenv-pubmedqa-vllm \
-  --network host \
-  --device nvidia.com/gpu=all \
-  --pids-limit=-1 \
-  --shm-size=64g \
-  -v /data/ronghao:/data/ronghao \
-  -e MODELSCOPE_CACHE=/data/ronghao/models/modelscope \
-  localhost/vllm-openai:v0.19.0-cu130 \
-  --host 0.0.0.0 \
-  --port 18080 \
+python3 -m vllm.entrypoints.openai.api_server \
   --model /data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B \
   --served-model-name Qwen/Qwen3.6-35B-A3B \
+  --host 0.0.0.0 \
+  --port 18081 \
   --tensor-parallel-size 8 \
-  --max-model-len 8192 \
-  --gpu-memory-utilization 0.88 \
+  --max-model-len 65536 \
+  --gpu-memory-utilization 0.90 \
+  --reasoning-parser qwen3 \
+  --reasoning-config "{\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}" \
   --trust-remote-code
 ```
 
-启动 adapter model gateway：
+启动 Worker 可访问的 adapter model gateway：
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_$(date +%Y%m%d_%H%M%S)
-mkdir -p "$OUTPUT_DIR"
+BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$BASE"
 
-nohup env PYTHONPATH=src \
-scripts/benchmark/run_model_gateway.py \
-  --upstream http://127.0.0.1:18080/v1 \
+PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
+  --upstream http://127.0.0.1:18081/v1 \
   --bind-host 0.0.0.0 \
-  --port 18088 \
-  --public-url http://10.10.20.142:18088/v1 \
-  --log-path "$OUTPUT_DIR/model-gateway.jsonl" \
-  > "$OUTPUT_DIR/model-gateway.out" 2>&1 &
+  --port 18096 \
+  --public-url http://10.10.20.142:18096/v1 \
+  --request-timeout-seconds 7200 \
+  --enable-thinking \
+  --preserve-thinking \
+  --thinking-token-budget 16384 \
+  --log-path "$BASE/model-gateway-official-reasoning-fields-18096-budget16384.jsonl"
 ```
 
 运行 UEnv 全量评测：
@@ -107,87 +129,94 @@ scripts/benchmark/run_model_gateway.py \
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-IMAGE=localhost/uenv-bridge-verl:layer4-build \
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446
+mkdir -p "$OUT"
+
+OUTPUT_DIR="$OUT" \
 UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
-UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18088/v1 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18096/v1 \
 UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
-OUTPUT_DIR="$OUTPUT_DIR" \
 BATCH_SIZE=1 \
-PROMPT_STYLE=strict_label \
-MAX_TOKENS=1024 \
+PROMPT_STYLE=official \
+MAX_TOKENS=32768 \
+ENABLE_THINKING=1 \
+PRESERVE_THINKING=1 \
+THINKING_TOKEN_BUDGET=16384 \
+TEMPERATURE=0.0 \
+TOP_P=1.0 \
+TIMEOUT_SECONDS=7200 \
+CLIENT_TIMEOUT_SECONDS=7800 \
 ./scripts/benchmark/run_pubmedqa_uenv_baseline.sh
 ```
 
 本次正式结果目录：
 
 ```text
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/
 ```
 
-## 5. 正式结果
+## 6. 正式结果
 
 | 模型 | UEnv endpoint | Model endpoint | 样本数 | completed | failed | Parse rate | Accuracy | Macro-F1 | reward accuracy |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | `http://10.10.20.142:18088/v1` | 1000 | 1000 | 0 | 1.0000 | 0.8000 | 0.5802 | 0.8000 |
+| `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | `http://10.10.20.142:18096/v1` | 1000 | 1000 | 0 | 1.0000 | 0.8000 | 0.5912 | 0.8000 |
 
 各类别指标：
 
 | 类别 | Precision | Recall | F1 | Support |
 |---|---:|---:|---:|---:|
-| yes | 0.8122 | 0.9167 | 0.8613 | 552 |
-| no | 0.8039 | 0.8609 | 0.8314 | 338 |
-| maybe | 0.2000 | 0.0273 | 0.0480 | 110 |
+| yes | 0.8158 | 0.9149 | 0.8625 | 552 |
+| no | 0.8192 | 0.8580 | 0.8382 | 338 |
+| maybe | 0.1852 | 0.0455 | 0.0730 | 110 |
 
 预测分布：
 
 | 标签 | Gold | Pred |
 |---|---:|---:|
-| yes | 552 | 623 |
-| no | 338 | 362 |
-| maybe | 110 | 15 |
+| yes | 552 | 619 |
+| no | 338 | 354 |
+| maybe | 110 | 27 |
 
 混淆矩阵：
 
 | Gold \ Pred | yes | no | maybe | unparsed |
 |---|---:|---:|---:|---:|
-| yes | 506 | 37 | 9 | 0 |
-| no | 44 | 291 | 3 | 0 |
-| maybe | 73 | 34 | 3 | 0 |
+| yes | 505 | 32 | 15 | 0 |
+| no | 41 | 290 | 7 | 0 |
+| maybe | 73 | 32 | 5 | 0 |
 
 输出文件：
 
 ```text
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/metrics.json
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/predictions_official.json
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/predictions.jsonl
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/predictions.csv
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/uenv_requests.jsonl
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/uenv_results.jsonl
-temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_thinking_max1024_full_20260713_154812/model-gateway.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/metrics.json
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/predictions_official.json
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/predictions.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/predictions.csv
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/uenv_requests.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/uenv_results.jsonl
+temp/benchmarks/pubmedqa/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_111446/run.log
 ```
 
-## 6. 模型输出截断分析
+## 7. Reasoning 字段说明
 
-当前 `uenv_results.jsonl` 和 `model-gateway.jsonl` 没有保存 vLLM 原始 `finish_reason`，因此这里从模型输出结构判断是否被截断：Qwen thinking 正常情况下应先生成推理内容，再出现 `</think>`，随后给出最终标签。若输出中没有 `</think>`，则可认为该条生成没有完整收束，属于从输出角度可观察到的截断或未完成输出。
+本轮“返回给 Worker 思考过程”的含义是：adapter model gateway 对 Worker 的 OpenAI-compatible HTTP 响应保留 `message.reasoning` / `message.reasoning_content` 等独立字段，而不是把思考过程拼接到 `message.content`。
 
-统计结果：
+抽查 gateway 响应可见：
 
-| 指标 | 数值 |
-|---|---:|
-| 样本数 | 1000 |
-| 未出现 `</think>` 的输出 | 62 |
-| 未出现 `</think>` 占比 | 6.20% |
-| `</think>` 后缺少最终标签的输出 | 62 |
-| adapter 无法解析标签的输出 | 0 |
-| response 字符数中位数 / P90 / P95 / P99 / 最大值 | 1816 / 3748 / 4333 / 4765 / 5058 |
-| response 词数中位数 / P90 / P95 / P99 / 最大值 | 267 / 553 / 651 / 711 / 748 |
+| 项 | 值 |
+|---|---|
+| `message.content` | `"\n\nyes"` |
+| `message` keys | `annotations, audio, content, function_call, reasoning, refusal, role, tool_calls` |
+| `message.reasoning` 长度 | 1328 字符 |
 
-最长的几条输出尾部仍停留在推理过程，例如没有闭合 `</think>`，也没有稳定进入最终答案段。虽然 adapter 仍能从推理文本中解析出 `yes/no/maybe`，因此 parse rate 为 1.0000，但这不代表输出格式完全健康；它只是说明当前解析器可以从未完整收束的文本中提取到标签。
+因此，Worker 访问 gateway 时可以拿到 reasoning 独立字段。当前 Adapter 侧 `uenv_results.jsonl` 中没有 `<think>`，这是因为 Worker 构造 `EpisodeResult` 时只同步回传最终 action/content 字段；`uenv_results.jsonl` 中 1000 条结果的 `response_text` 最大长度为 7，均为最终标签形式，例如 `yes`、`no`、`maybe`。
 
-## 7. 参数是否合适
+如果后续需要在 Adapter 侧证明每个样本的 reasoning 内容，需要 Worker 在 `EpisodeResult.step.info` 中额外写入从 OpenAI 响应获得的 `reasoning` / `reasoning_content` 字段，或者另行记录 Worker 侧原始模型响应日志。
 
-`MAX_TOKENS=1024` 对 PubMedQA 的正式 UEnv thinking 评测基本可用：全量 1000 条均完成，parse rate 为 1.0000，Accuracy 为 0.8000，未闭合 thinking 的比例为 6.20%。从评测跑通和指标稳定性看，这组参数可以作为当前基线结果保留。
+## 8. 结果分析
 
-但如果目标是严格评估 thinking 模式下完整推理与最终答案，`MAX_TOKENS=1024` 仍偏紧。建议后续正式对齐或报告型评测将 `MAX_TOKENS` 提高到 1536 或 2048，并在结果文件中额外保存上游 vLLM 的 `finish_reason`，避免只能通过 `</think>` 做间接判断。
+本轮 UEnv 链路全量 PubMedQA 1000 条样本全部完成，`completed=1000`、`failed=0`，说明 Adapter -> AdapterCore/Server -> Worker -> gateway/vLLM -> Worker 判分 -> Adapter 汇总链路稳定。
 
-当前主要效果短板不是截断，而是类别偏置：模型很少预测 `maybe`，`maybe` recall 只有 0.0273，导致 Macro-F1 明显低于 Accuracy。后续如果进入训练阶段，应重点关注 `maybe` 类召回和类别均衡。
+Accuracy 与 reward accuracy 均为 0.8000，说明 Adapter 自身解析结果与 Worker reward 结果一致。主要短板仍然是 `maybe` 类：gold 中 `maybe` 有 110 条，但模型只预测 27 条，`maybe` recall 为 0.0455。这会拉低 Macro-F1，即使整体 Accuracy 保持在 0.8000。
+
+由于本轮 reasoning 以独立字段返回，Adapter 结果文件不再适合用 `<think>` 闭合情况做截断分析。当前 `content` 只保留最终标签，因此从 Adapter 侧观察不到 reasoning 是否截断；若需要分析 thinking 完整性，应让 Worker 或 gateway 保存原始 OpenAI 响应体中的 `reasoning` 字段和 `finish_reason`。

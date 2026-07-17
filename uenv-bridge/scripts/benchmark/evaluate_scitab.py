@@ -104,20 +104,24 @@ def build_prompt(example: Example, *, prompt_style: str = "default") -> str:
             f"Claim: {example.claim}\n\n"
             "Answer:"
         )
-    return (
-        "Given a scientific paper table and a claim, choose exactly one label: supports, refutes, or not enough info.\n\n"
-        f"Paper: {example.paper}\n"
-        f"Table caption: {example.table_caption}\n"
-        f"Table:\n{table_text}\n\n"
-        f"Claim: {example.claim}\n\n"
-        "Return only one label: supports, refutes, or not enough info."
-    )
+    if prompt_style in {"default", "official"}:
+        return (
+            "Given a scientific paper table and a claim, choose exactly one label: supports, refutes, or not enough info.\n\n"
+            f"Paper: {example.paper}\n"
+            f"Table caption: {example.table_caption}\n"
+            f"Table:\n{table_text}\n\n"
+            f"Claim: {example.claim}\n\n"
+            "Return only one label: supports, refutes, or not enough info."
+        )
+    raise ValueError(f"unknown prompt_style: {prompt_style}")
 
 
 def build_messages(example: Example, *, prompt_style: str = "default") -> list[dict[str, str]]:
     system_content = "You are a scientific table claim verification classifier."
     if prompt_style == "strict_label":
         system_content = "Output only one lowercase label: supports, refutes, or not enough info."
+    elif prompt_style == "official":
+        system_content = "You are a scientific table claim verification classifier."
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": build_prompt(example, prompt_style=prompt_style)},
@@ -409,7 +413,7 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--stop", nargs="*", default=None)
-    parser.add_argument("--prompt-style", choices=("default", "strict_label"), default="default")
+    parser.add_argument("--prompt-style", choices=("default", "official", "strict_label"), default="default")
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--no-chat-template", action="store_true")
     parser.add_argument("--vllm-label-batch-size", type=int, default=64)

@@ -269,7 +269,6 @@ class ModelGateway:
         upstream: str,
         response_headers: dict[str, str],
     ) -> tuple[bytes, dict[str, Any]]:
-        response_body = self._response_with_preserved_reasoning(response_body)
         response_body = self._response_without_reasoning(response_body)
         model_version = self._extract_response_model_version(
             response_body,
@@ -301,37 +300,6 @@ class ModelGateway:
                 if key in message:
                     message.pop(key, None)
                     changed = True
-        if not changed:
-            return response_body
-        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-
-    def _response_with_preserved_reasoning(self, response_body: bytes) -> bytes:
-        if not self.config.preserve_thinking:
-            return response_body
-        data = self._json_object(response_body)
-        choices = data.get("choices") if data else None
-        if not isinstance(choices, list):
-            return response_body
-
-        changed = False
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            message = choice.get("message")
-            if not isinstance(message, dict):
-                continue
-            reasoning = message.get("reasoning")
-            if not isinstance(reasoning, str) or not reasoning:
-                continue
-            content = message.get("content")
-            if isinstance(content, str) and "<think>" in content:
-                continue
-            content_text = content if isinstance(content, str) else ""
-            merged = f"<think>\n{reasoning.strip()}\n</think>"
-            if content_text.strip():
-                merged = f"{merged}\n\n{content_text}"
-            message["content"] = merged
-            changed = True
         if not changed:
             return response_body
         return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

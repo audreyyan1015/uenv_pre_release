@@ -123,9 +123,35 @@ scripts/benchmark/run_swebenchpro_baseline.sh
 
 说明：官方 local Docker evaluator 需要拉取 `jefzda/sweap-images:<dockerhub_tag>` 实例镜像。当前本机 DockerHub 镜像访问存在阻塞，因此还没有得到有效的官方 resolved 分数。
 
-## 5. 运行命令
+## 5. 全量基线配置
 
-### 5.1 数据准备
+| 配置 | 值 |
+|---|---|
+| 评测口径 | 直接 vLLM 生成 patch + 官方 local Docker evaluator 分批按需评测 |
+| 模型 | `Qwen/Qwen3.6-35B-A3B` |
+| 生成镜像 `GEN_IMAGE` | `localhost/vllm-openai:v0.19.0-cu130` |
+| 评测镜像 `EVAL_IMAGE` | `localhost/uenv-bridge-verl:layer4-build` |
+| 模型目录 `MODEL_DIR` | `/data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B` |
+| GPU | 8 张 A100 |
+| Tensor parallel | 8 |
+| `MAX_MODEL_LEN` | 16384 |
+| `MAX_TOKENS` | 4096 |
+| `TEMPERATURE` | 0.2 |
+| `TOP_P` | 1.0 |
+| Thinking mode | 关闭，`DISABLE_THINKING=1` |
+| 数据集 | SWE-bench-Pro public test split，全量 731 条 |
+| 输出目录 | `temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/` |
+| 官方 evaluator 资产 | `/data/ronghao/third_party/SWE-bench_Pro-os` |
+| 主镜像源 | `docker.1panel.live/jefzda` |
+| 重试镜像源 | `hub.rat.dev/jefzda` |
+| 分批大小 | 首轮 `BATCH_SIZE=10`，失败重试 `BATCH_SIZE=5` |
+| evaluator 并发 | `OFFICIAL_NUM_WORKERS=1` |
+| 镜像清理 | `CLEAN_IMAGES_AFTER_BATCH=1` |
+| 后训练 | 未进行 SFT/RL，Eval-first 基线 |
+
+## 6. 运行命令
+
+### 6.1 数据准备
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
@@ -135,7 +161,7 @@ RUN_SUMMARIZE=0 \
 ./scripts/benchmark/run_swebenchpro_baseline.sh
 ```
 
-### 5.2 生成 smoke
+### 6.2 生成 smoke
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
@@ -161,7 +187,7 @@ OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35
 | `TOP_P` | `1.0` |
 | `DISABLE_THINKING` | `1` |
 
-### 5.3 全量 patch 生成命令
+### 6.3 全量 patch 生成命令
 
 该命令只生成 patch 和格式指标，不运行官方 Docker evaluator：
 
@@ -179,7 +205,7 @@ MAX_TOKENS=4096 \
 > /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full.log 2>&1 &
 ```
 
-### 5.4 官方 evaluator 分批按需评测
+### 6.4 官方 evaluator 分批按需评测
 
 SWE-bench-Pro 官方 evaluator 需要按样本拉取 `jefzda/sweap-images:<dockerhub_tag>` 实例镜像。731 个镜像全部预拉会占用 TB 级 Docker root 空间，因此当前采用“分批评测、按需拉取、每批结束清理镜像”的方式。
 
@@ -241,9 +267,9 @@ cat /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_f
 4. 对这些已完成 instance，脚本会按官方逻辑从 output 中重新计算 resolved 结果，并写入该 batch 的 `eval_results.json`。
 5. 只有没有 `*_output.json` 的 instance 会被重新运行。若需要强制重跑全部 case，可设置 `REDO_BATCHES=1` 或 `SKIP_COMPLETED_INSTANCES=0`。
 
-## 6. 当前结果
+## 7. 当前结果
 
-### 6.1 数据准备结果
+### 7.1 数据准备结果
 
 已完成 `ScaleAI/SWE-bench_Pro` public test split 下载和本地落地：
 
@@ -256,7 +282,7 @@ cat /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_f
 | JavaScript 样本数 | 165 |
 | TypeScript 样本数 | 20 |
 
-### 6.2 Qwen patch 生成 smoke
+### 7.2 Qwen patch 生成 smoke
 
 结果路径：
 
@@ -278,7 +304,7 @@ temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_smoke_limit2/generation_metrics.json
 2. 第 1 条样本触达 `MAX_TOKENS=4096`，说明 SWE-bench-Pro patch 生成可能需要更长输出或更强约束。
 3. 第 2 条样本生成内容包含测试文件修改倾向，说明“patch 格式正确”并不代表可通过官方 resolved 评测。
 
-### 6.3 官方 evaluator 验证状态
+### 7.3 官方 evaluator 验证状态
 
 已下载全量官方评测资产：
 
@@ -323,8 +349,8 @@ temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_smoke
 
 后续又使用已失败的 `batch_00011` 目录验证了 case 级断点续跑：该 batch 中已有 5 个 instance 产出 `*_output.json`，重新调度时脚本只提交剩余 5 个 instance，同时把已有 5 个 output 补算进 `eval_results.json`。
 
-## 7. 结论
+## 8. 结论
 
 当前已经完成 SWE-bench-Pro 数据集下载、字段确认、patch 生成脚本编写，以及 Qwen3.6-35B-A3B 的 2 条样本生成 smoke。模型能够生成可抽取的 unified diff patch，但 smoke 中已经出现输出过长和修改测试文件的风险，后续需要依赖官方 evaluator 才能得到真实 resolve rate。
 
-官方 evaluator 侧当前不再采用一次性全量预拉镜像的方案，而是采用第 5.4 节的分批按需评测方案。该方案可以在当前 Docker root 空间有限的情况下继续推进全部 731 个 case，并通过 `pull_failed_instance_ids.txt` 将网络/镜像失败样本与真实未 resolved 样本区分开。
+官方 evaluator 侧当前不再采用一次性全量预拉镜像的方案，而是采用第 6.4 节的分批按需评测方案。该方案可以在当前 Docker root 空间有限的情况下继续推进全部 731 个 case，并通过 `pull_failed_instance_ids.txt` 将网络/镜像失败样本与真实未 resolved 样本区分开。

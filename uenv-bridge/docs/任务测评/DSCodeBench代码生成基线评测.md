@@ -70,7 +70,30 @@
 3. `evaluate` 阶段复用官方 `run_test.py` 中的 `extract_code()`、`get_exec_output()`、`evaluate_outputs()`。
 4. 每道题的执行测试放入独立子进程，超过 `PER_PROBLEM_TIMEOUT` 后记为失败并继续评测后续样本。
 
-## 5. 运行命令
+## 5. 全量官方对齐配置
+
+| 配置 | 值 |
+|---|---|
+| 评测口径 | 直接 vLLM 生成 + 官方代码抽取/测试执行 |
+| 模型 | `Qwen/Qwen3.6-35B-A3B` |
+| 生成镜像 `GEN_IMAGE` | `localhost/vllm-openai:v0.19.0-cu130` |
+| 评测镜像 `EVAL_IMAGE` | `localhost/uenv-bridge-verl:layer4-build` |
+| 模型目录 `MODEL_DIR` | `/data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B` |
+| GPU | 8 张 A100 |
+| Tensor parallel | 8 |
+| `MAX_MODEL_LEN` | 32768 |
+| `MAX_TOKENS` | 2048 |
+| `TEMPERATURE` | 0.2 |
+| `TOP_P` | 1.0 |
+| Thinking mode | 关闭，`DISABLE_THINKING=1` |
+| 数据集 | DSCodeBench 全量 1000 条 |
+| 库过滤 | 不限制，覆盖 10 个数据科学库 |
+| 官方测试用例数 `TEST_CASE_NUMBER` | 200 |
+| 单题外层超时 `PER_PROBLEM_TIMEOUT` | 300s |
+| 输出目录 | `temp/benchmarks/dscodebench/qwen3_6_35b_a3b_full_official_tc200/` |
+| 后训练 | 未进行 SFT/RL，Eval-first 基线 |
+
+## 6. 运行命令
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
@@ -109,23 +132,9 @@ INSTALL_EVAL_DEPS=1 \
 ./scripts/benchmark/run_dscodebench_baseline.sh
 ```
 
-本次最终运行关键参数：
+本次最终运行关键参数见第 5 节。
 
-| 参数 | 值 |
-|---|---|
-| `GEN_IMAGE` | `localhost/vllm-openai:v0.19.0-cu130` |
-| `EVAL_IMAGE` | `localhost/uenv-bridge-verl:layer4-build` |
-| `MODEL_DIR` | `/data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B` |
-| `TENSOR_PARALLEL_SIZE` | `8` |
-| `MAX_MODEL_LEN` | `32768` |
-| `MAX_TOKENS` | `2048` |
-| `TEMPERATURE` | `0.2` |
-| `TOP_P` | `1.0` |
-| `DISABLE_THINKING` | `1` |
-| `TEST_CASE_NUMBER` | `200` |
-| `PER_PROBLEM_TIMEOUT` | `300` |
-
-## 6. 全量官方对齐结果
+## 7. 全量官方对齐结果
 
 本次最终产物路径如下：
 
@@ -205,7 +214,7 @@ INSTALL_EVAL_DEPS=1 \
 
 说明：`error_count` 只统计评测脚本记录了 `error` 字段的样本；另有部分样本因为未解析出代码或未能产出可执行结果而计入未执行完成，但不一定带有 `error` 字段。`case_count=200` 的 877 条样本说明官方对齐测试用例数量已经生效。
 
-## 7. 结论
+## 8. 结论
 
 在全量 1000 条样本、每题 200 个测试用例口径下，`Qwen/Qwen3.6-35B-A3B` 在 DSCodeBench 上的 `pass@1=0.348`，`parse_rate=0.965`，`execution_rate=0.877`。模型输出整体可解析率较高，说明代码块格式基本可用；主要失败来源包括输出代码逻辑未通过测试、少数输出不可解析，以及部分生成代码执行时间过长。
 

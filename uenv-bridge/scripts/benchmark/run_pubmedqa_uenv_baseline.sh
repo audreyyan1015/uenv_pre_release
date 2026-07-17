@@ -10,8 +10,11 @@ UENV_ROLLOUT_MODEL_ENDPOINT=${UENV_ROLLOUT_MODEL_ENDPOINT:-}
 UENV_ROLLOUT_MODEL_NAME=${UENV_ROLLOUT_MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}
 LIMIT=${LIMIT:-}
 BATCH_SIZE=${BATCH_SIZE:-1}
-PROMPT_STYLE=${PROMPT_STYLE:-strict_label}
+PROMPT_STYLE=${PROMPT_STYLE:-official}
 MAX_TOKENS=${MAX_TOKENS:-512}
+ENABLE_THINKING=${ENABLE_THINKING:-0}
+PRESERVE_THINKING=${PRESERVE_THINKING:-0}
+THINKING_TOKEN_BUDGET=${THINKING_TOKEN_BUDGET:-}
 TEMPERATURE=${TEMPERATURE:-0.0}
 TOP_P=${TOP_P:-1.0}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-900}
@@ -48,6 +51,15 @@ ARGS=(
 if [ -n "$LIMIT" ]; then
   ARGS+=(--limit "$LIMIT")
 fi
+if [ "$ENABLE_THINKING" = "1" ]; then
+  ARGS+=(--enable-thinking)
+fi
+if [ "$PRESERVE_THINKING" = "1" ]; then
+  ARGS+=(--preserve-thinking)
+fi
+if [ -n "$THINKING_TOKEN_BUDGET" ]; then
+  ARGS+=(--thinking-token-budget "$THINKING_TOKEN_BUDGET")
+fi
 
 podman run --rm \
   --entrypoint bash \
@@ -58,6 +70,7 @@ podman run --rm \
   -v /data/ronghao:/data/ronghao \
   -w "$REPO_DIR" \
   -e PYTHONPATH=src \
+  -e PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
   ${PODMAN_EXTRA_ARGS} \
   "$IMAGE" \
   -lc "python3 scripts/benchmark/evaluate_pubmedqa_uenv.py ${ARGS[*]@Q}"
