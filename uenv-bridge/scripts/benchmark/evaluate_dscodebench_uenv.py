@@ -65,9 +65,12 @@ def build_inline_harness_test_code(
     num_tests: int,
     random_seed: int,
 ) -> str:
+    # Leave `_result` in the exec namespace for evaluate_code.py to return
+    # structured fields (tests_run/tests_passed) even when passed=false.
+    # Do not raise AssertionError on wrong answers — that used to collapse
+    # metrics to tests_run=0 / inflated error_count.
     return f"""
 import inspect
-import json
 from dscodebench_harness import evaluate_problem
 
 _candidate_source = inspect.currentframe().f_back.f_locals.get("code", "")
@@ -78,8 +81,6 @@ _result = evaluate_problem(
     num_tests={int(num_tests)},
     random_seed={int(random_seed)},
 )
-if not _result.get("passed"):
-    raise AssertionError(json.dumps(_result, ensure_ascii=False))
 """
 
 
@@ -301,6 +302,7 @@ def result_to_row(row: dict[str, Any], result: EpisodeResult, elapsed_ms: int) -
         "worker_task_id": info.get("task_id", ""),
         "worker_library": info.get("library", ""),
         "worker_error": info.get("error", ""),
+        "worker_error_category": info.get("error_category", ""),
         "worker_detail": info.get("detail", ""),
         "response_text": text,
     }
@@ -316,24 +318,56 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     failed = total - completed
     passed = sum(1 for row in rows if row["passed"])
     executed = sum(1 for row in rows if (row.get("tests_run") or 0) > 0)
-    errors = sum(1 for row in rows if row.get("worker_error") or row.get("uenv_error_message"))
+
+    def error_category(row: dict[str, Any]) -> str:
+        cat = str(row.get("worker_error_category") or "").strip()
+        if cat:
+            return cat
+        if row.get("uenv_error_message"):
+            return "uenv_error"
+        if row.get("worker_error"):
+            # Legacy payloads without error_category.
+            return "unclassified_error"
+        return ""
+
+    category_counts = Counter(
+        cat for row in rows if (cat := error_category(row))
+    )
+    wrong_answer_count = int(category_counts.get("wrong_answer", 0))
+    # Infra / runtime failures exclude pure wrong answers.
+    error_count = sum(
+        1
+        for row in rows
+        if (cat := error_category(row)) and cat != "wrong_answer"
+    )
     by_library: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"total": 0, "completed": 0, "executed": 0, "passed": 0, "errors": 0}
+        lambda: {
+            "total": 0,
+            "completed": 0,
+            "executed": 0,
+            "passed": 0,
+            "errors": 0,
+            "wrong_answers": 0,
+        }
     )
     for row in rows:
         stats = by_library[str(row.get("library") or "")]
+        cat = error_category(row)
         stats["total"] += 1
         stats["completed"] += int(row["uenv_status"] == "completed")
         stats["executed"] += int((row.get("tests_run") or 0) > 0)
         stats["passed"] += int(bool(row["passed"]))
-        stats["errors"] += int(bool(row.get("worker_error") or row.get("uenv_error_message")))
+        stats["wrong_answers"] += int(cat == "wrong_answer")
+        stats["errors"] += int(bool(cat) and cat != "wrong_answer")
     return {
         "problem_count": total,
         "completed_count": completed,
         "failed_count": failed,
         "executed_count": executed,
         "passed_count": passed,
-        "error_count": errors,
+        "error_count": error_count,
+        "wrong_answer_count": wrong_answer_count,
+        "error_category_counts": dict(category_counts),
         "completion_rate": safe_div(completed, total),
         "execution_rate": safe_div(executed, total),
         "pass_at_1": safe_div(passed, total),
@@ -346,6 +380,7 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "execution_rate": safe_div(values["executed"], values["total"]),
                 "pass_at_1": safe_div(values["passed"], values["total"]),
                 "error_count": values["errors"],
+                "wrong_answer_count": values["wrong_answers"],
             }
             for library, values in sorted(by_library.items())
         },
@@ -391,6 +426,7 @@ def write_outputs(output_dir: Path, rows: list[dict[str, Any]], metadata: dict[s
             "worker_task_id",
             "worker_library",
             "worker_error",
+            "worker_error_category",
             "response_text",
         ]
         writer = csv.DictWriter(file, fieldnames=fieldnames)
