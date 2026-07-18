@@ -57,6 +57,8 @@ Common overrides:
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
   UENV_MODEL_GATEWAY_ENABLED    Start adapter-side model gateway and send its URL to Worker. Default: 0
   UENV_MODEL_GATEWAY_PUBLIC_URL Worker-visible gateway URL. Default: http://10.10.20.142:<port>/v1
+  UENV_MODEL_GATEWAY_DISABLE_THINKING
+                                  Inject chat_template_kwargs.enable_thinking=false for OpenAI chat requests. Default: 0
   EXTRA_VERL_ARGS               Extra Hydra args appended to main_ppo.
 
 Layer4-aligned 4-GPU comparison example:
@@ -201,6 +203,7 @@ UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED:-0}
 UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST:-0.0.0.0}
 UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18080}
 UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL:-http://10.10.20.142:${UENV_MODEL_GATEWAY_PORT}/v1}
+UENV_MODEL_GATEWAY_DISABLE_THINKING=${UENV_MODEL_GATEWAY_DISABLE_THINKING:-0}
 EXTRA_VERL_ARGS=${EXTRA_VERL_ARGS:-}
 
 mkdir -p "${LOG_DIR}" "${SERVICE_DIR}"
@@ -313,6 +316,7 @@ export UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST}
 export UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT}
 export UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL}
 export UENV_MODEL_GATEWAY_LOG_PATH=\"${MODEL_GATEWAY_LOG_PATH}\"
+export UENV_MODEL_GATEWAY_DISABLE_THINKING=${UENV_MODEL_GATEWAY_DISABLE_THINKING}
 python3 -m verl.experimental.one_step_off_policy.main_ppo \\
   hydra.run.dir=${CONTAINER_LOG_ROOT}/verl_onestep_offpolicy_uenv/hydra_${RUN_ID} \\
   algorithm.adv_estimator=grpo \\

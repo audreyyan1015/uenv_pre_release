@@ -31,6 +31,11 @@ class ModelGatewayConfig:
     public_url: str = ""
     request_timeout_seconds: float = 300.0
     log_path: str = ""
+    disable_thinking: bool = False
+    force_enable_thinking: bool = False
+    preserve_thinking: bool = False
+    strip_reasoning: bool = False
+    thinking_token_budget: int | None = None
 
 
 @dataclass(slots=True)
@@ -180,7 +185,13 @@ class ModelGateway:
             if key.lower() in {"host", "content-length", "connection", "accept-encoding"}:
                 continue
             request_headers[key] = value
-        request = urllib.request.Request(upstream_url, data=body if method != "GET" else None, headers=request_headers, method=method)
+        forward_body = self._forward_request_body(method=method, path=path, headers=headers, body=body)
+        request = urllib.request.Request(
+            upstream_url,
+            data=forward_body if method != "GET" else None,
+            headers=request_headers,
+            method=method,
+        )
         try:
             with urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds) as response:
                 response_headers = dict(response.headers.items())
@@ -213,6 +224,44 @@ class ModelGateway:
         query = f"?{parsed.query}" if parsed.query else ""
         return f"{upstream}{route}{query}"
 
+    def _forward_request_body(self, *, method: str, path: str, headers: Any, body: bytes) -> bytes:
+        should_rewrite = (
+            self.config.disable_thinking
+            or self.config.force_enable_thinking
+            or self.config.preserve_thinking
+            or self.config.thinking_token_budget is not None
+        )
+        if method.upper() == "GET" or not should_rewrite or not body:
+            return body
+        if not self._is_chat_completions_path(path):
+            return body
+        content_type = str(headers.get("Content-Type", "") or headers.get("content-type", "")).lower()
+        if "json" not in content_type:
+            return body
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except Exception:
+            return body
+        if not isinstance(data, dict):
+            return body
+        chat_template_kwargs = data.get("chat_template_kwargs")
+        if not isinstance(chat_template_kwargs, dict):
+            chat_template_kwargs = {}
+            data["chat_template_kwargs"] = chat_template_kwargs
+        if self.config.disable_thinking:
+            chat_template_kwargs["enable_thinking"] = False
+        elif self.config.force_enable_thinking:
+            chat_template_kwargs["enable_thinking"] = True
+        if self.config.preserve_thinking:
+            chat_template_kwargs["preserve_thinking"] = True
+        if self.config.thinking_token_budget is not None:
+            data["thinking_token_budget"] = self.config.thinking_token_budget
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    def _is_chat_completions_path(self, path: str) -> bool:
+        route = urllib.parse.urlsplit(path).path.rstrip("/")
+        return route.endswith("/chat/completions")
+
     def _response_with_model_version(
         self,
         response_body: bytes,
@@ -220,6 +269,7 @@ class ModelGateway:
         upstream: str,
         response_headers: dict[str, str],
     ) -> tuple[bytes, dict[str, Any]]:
+        response_body = self._response_without_reasoning(response_body)
         model_version = self._extract_response_model_version(
             response_body,
             upstream=upstream,
@@ -228,6 +278,31 @@ class ModelGateway:
         if not self._has_bound_model_version(model_version):
             return response_body, {}
         return self._attach_model_version(response_body, upstream=upstream, model_version=model_version), model_version
+
+    def _response_without_reasoning(self, response_body: bytes) -> bytes:
+        if not self.config.strip_reasoning:
+            return response_body
+        try:
+            data = json.loads(response_body.decode("utf-8"))
+        except Exception:
+            return response_body
+        if not isinstance(data, dict):
+            return response_body
+
+        changed = False
+        for choice in data.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+            for key in ("reasoning", "reasoning_content", "reasoning_details"):
+                if key in message:
+                    message.pop(key, None)
+                    changed = True
+        if not changed:
+            return response_body
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def _extract_response_model_version(
         self,

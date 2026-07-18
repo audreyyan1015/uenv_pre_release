@@ -158,6 +158,7 @@ class UEnvAgentLoopConfig:
     model_gateway_port: int = 18080
     model_gateway_public_url: str = ""
     model_gateway_log_path: str = ""
+    model_gateway_disable_thinking: bool = False
     parallel_mode: str = "sync"
 
 
@@ -200,6 +201,7 @@ class UEnvAgentLoop(AgentLoopBase):
         model_gateway_port: int | None = None,
         model_gateway_public_url: str = "",
         model_gateway_log_path: str = "",
+        model_gateway_disable_thinking: bool | None = None,
         parallel_mode: str = "sync",
         **kwargs: Any,
     ) -> None:
@@ -230,6 +232,7 @@ class UEnvAgentLoop(AgentLoopBase):
             model_gateway_port=_int_value(model_gateway_port, 18080),
             model_gateway_public_url=_optional_string(model_gateway_public_url) or "",
             model_gateway_log_path=_optional_string(model_gateway_log_path) or "",
+            model_gateway_disable_thinking=_bool_value(model_gateway_disable_thinking, False),
             parallel_mode=_optional_string(parallel_mode) or "sync",
         )
         self.model_gateway = ModelGateway(
@@ -240,6 +243,7 @@ class UEnvAgentLoop(AgentLoopBase):
                 public_url=self.config_for_uenv.model_gateway_public_url,
                 request_timeout_seconds=self.config_for_uenv.timeout_seconds,
                 log_path=self.config_for_uenv.model_gateway_log_path,
+                disable_thinking=self.config_for_uenv.model_gateway_disable_thinking,
             )
         )
         self.client = client or build_agent_loop_episode_client(
@@ -588,6 +592,7 @@ class UEnvAgentLoop(AgentLoopBase):
         reward_model = sample_kwargs.get("reward_model")
         data_source = self._string_or_none(sample_kwargs.get("data_source"))
         task_name = self._task_name(sample_kwargs, env_type)
+        dataset = self._dataset_name(sample_kwargs, data_source=data_source, task_name=task_name)
         prompt_as_text = prompt_text(raw_prompt)
         model_endpoint = model_endpoint_override or self._model_endpoint(sample_kwargs, sampling_params)
         model_name = model_name_override or self._model_name(sample_kwargs, sampling_params)
@@ -632,6 +637,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "env_config": {
                 "task_name": task_name,
                 "data_source": data_source,
+                "dataset": dataset,
                 "raw_prompt": prompt_as_text,
             },
             "model_endpoint": {
@@ -871,6 +877,31 @@ class UEnvAgentLoop(AgentLoopBase):
             if value:
                 return value
         return env_type
+
+    def _dataset_name(self, sample_kwargs: dict[str, Any], *, data_source: str | None, task_name: str) -> str:
+        explicit = (
+            self._value_from_extra_info(sample_kwargs, "dataset", None)
+            or self._value_from_extra_info(sample_kwargs, "benchmark", None)
+            or data_source
+            or task_name
+        )
+        value = str(self._python_value(explicit) or "").strip()
+        lowered = value.lower()
+        if "pubmedqa" in lowered:
+            return "pubmedqa"
+        if "scitab" in lowered:
+            return "scitab"
+        if "dscodebench" in lowered or "ds-bench" in lowered or "dsbench" in lowered:
+            return "dscodebench"
+        if "olymmath" in lowered:
+            if "hard" in lowered:
+                return "olymmath-hard"
+            if "easy" in lowered:
+                return "olymmath-easy"
+            return "olymmath"
+        if "gsm8k" in lowered:
+            return "gsm8k"
+        return value
 
     def _model_endpoint(self, sample_kwargs: dict[str, Any], sampling_params: dict[str, Any]) -> str:
         endpoint = (
