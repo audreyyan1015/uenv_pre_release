@@ -1,6 +1,6 @@
 # OlymMATH 数学题求解 UEnv 基线评测
 
-> 日期：2026-07-17
+> 日期：2026-07-19
 > 阶段：Eval-first，未进行后训练
 > 任务书条目：5. 数学题求解
 > Benchmark：OlymMATH-EASY / OlymMATH-HARD
@@ -152,7 +152,7 @@ curl --noproxy '*' http://127.0.0.1:18094/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005
 mkdir -p "$OUT"
 
 RESUME=0 \
@@ -166,26 +166,25 @@ PROMPT_STYLE=official \
 MAX_TOKENS=32768 \
 ENABLE_THINKING=1 \
 PRESERVE_THINKING=0 \
-STRIP_REASONING=1 \
 THINKING_TOKEN_BUDGET=16384 \
 TEMPERATURE=0.0 \
 TOP_P=1.0 \
 TIMEOUT_SECONDS=7200 \
 CLIENT_TIMEOUT_SECONDS=7800 \
-./scripts/benchmark/run_olymmath_uenv_baseline.sh 2>&1 | tee "$OUT/full_noresume.log"
+./scripts/benchmark/run_olymmath_uenv_baseline.sh
 ```
 
 本轮正式结果目录：
 
 ```text
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/
 ```
 
 ## 6. 正式结果
 
 | 模型 | 样本数 | requests | results | completed | failed | UEnv reward accuracy | completed-only reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `Qwen/Qwen3.6-35B-A3B` | 400 | 400 | 400 | 251 | 149 | 0.3900 | 0.6215 | 0.6125 |
+| `Qwen/Qwen3.6-35B-A3B` | 400 | 400 | 400 | 378 | 22 | 0.6175 | 0.6534 | 0.8950 |
 
 说明：
 
@@ -194,105 +193,108 @@ temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507
 | `UEnv reward accuracy` | 全量 400 条样本上，Worker 返回 `EpisodeResult.summary.total_reward` 的均值 |
 | `completed-only reward accuracy` | 只在 `uenv_status=completed` 的样本上计算 reward 均值 |
 | `Parse rate` | Adapter 本地从 `raw_output` 中抽取到最终答案的比例；UEnv 正确性主口径仍以 Worker reward 为准 |
+| `parsed accuracy` | 只在 Adapter 成功抽取最终答案的样本上计算正确率，本轮为 0.6899 |
 
 按子集：
 
 | 子集 | 样本数 | completed | failed | UEnv reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|
-| EN-EASY | 100 | 99 | 1 | 0.8300 | 0.9800 |
-| EN-HARD | 100 | 99 | 1 | 0.4600 | 0.9600 |
-| ZH-EASY | 100 | 19 | 81 | 0.1500 | 0.1800 |
-| ZH-HARD | 100 | 34 | 66 | 0.1200 | 0.3300 |
+| EN-EASY | 100 | 78 | 22 | 0.6300 | 0.7600 |
+| EN-HARD | 100 | 100 | 0 | 0.5000 | 0.9600 |
+| ZH-EASY | 100 | 100 | 0 | 0.8000 | 0.9500 |
+| ZH-HARD | 100 | 100 | 0 | 0.5400 | 0.9100 |
 
 按语言：
 
 | 语言 | 样本数 | completed | failed | UEnv reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|
-| EN | 200 | 198 | 2 | 0.6450 | 0.9700 |
-| ZH | 200 | 53 | 147 | 0.1350 | 0.2550 |
+| EN | 200 | 178 | 22 | 0.5650 | 0.8600 |
+| ZH | 200 | 200 | 0 | 0.6700 | 0.9300 |
 
 按难度：
 
 | 难度 | 样本数 | completed | failed | UEnv reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|
-| EASY | 200 | 118 | 82 | 0.4900 | 0.5800 |
-| HARD | 200 | 133 | 67 | 0.2900 | 0.6450 |
+| EASY | 200 | 178 | 22 | 0.7150 | 0.8550 |
+| HARD | 200 | 200 | 0 | 0.5200 | 0.9350 |
 
 按学科：
 
-| 学科 | 样本数 | Parse rate | UEnv reward accuracy |
-|---|---:|---:|---:|
-| Algebra | 50 | 0.9600 | 0.6200 |
-| Combinatorics | 54 | 0.9630 | 0.4815 |
-| Geometry | 58 | 0.9828 | 0.7931 |
-| Number Theory | 38 | 0.9737 | 0.6842 |
-| 代数 | 50 | 0.3200 | 0.2000 |
-| 几何 | 58 | 0.2241 | 0.1552 |
-| 数论 | 38 | 0.2632 | 0.0789 |
-| 组合 | 54 | 0.2222 | 0.0926 |
+| 学科 | 样本数 | completed | failed | Parse rate | UEnv reward accuracy |
+|---|---:|---:|---:|---:|---:|
+| Algebra | 50 | 43 | 7 | 0.8400 | 0.6200 |
+| Combinatorics | 54 | 48 | 6 | 0.8704 | 0.4259 |
+| Geometry | 58 | 49 | 9 | 0.8276 | 0.6034 |
+| Number Theory | 38 | 38 | 0 | 0.9211 | 0.6316 |
+| 代数 | 50 | 50 | 0 | 0.9600 | 0.7400 |
+| 几何 | 58 | 58 | 0 | 0.9310 | 0.7586 |
+| 数论 | 38 | 38 | 0 | 0.8684 | 0.6316 |
+| 组合 | 54 | 54 | 0 | 0.9444 | 0.5370 |
 
 答案抽取与判分分布：
 
 | 项 | 数量 |
 |---|---:|
-| `answer_phrase` 抽取 | 2 |
-| `boxed` 抽取 | 243 |
-| 未抽取到最终答案 | 155 |
-| Worker reward 正确 | 156 |
-| Worker reward 不正确 | 244 |
+| `answer_phrase` 抽取 | 4 |
+| `boxed` 抽取 | 354 |
+| 未抽取到最终答案 | 42 |
+| Worker reward 正确 | 247 |
+| Worker reward 不正确 | 153 |
 
 ## 7. 运行稳定性
 
 | 项 | 值 |
 |---|---:|
-| 总运行时间 | 约 16 小时 18 分钟 |
-| 平均 episode 耗时 | 146.76s |
-| completed 平均 episode 耗时 | 82.29s |
-| failed 平均 episode 耗时 | 255.37s |
+| 总运行时间 | 约 9 小时 26 分钟 |
+| 平均 episode 耗时 | 84.86s |
+| completed 平均 episode 耗时 | 89.63s |
+| failed 平均 episode 耗时 | 3.00s |
 | Worker 并发 / UEnv batch size | 1 |
-| Gateway `/v1/chat/completions` 调用 | 698 |
-| Gateway HTTP 200 | 698 |
+| Gateway `/v1/chat/completions` 调用 | 389 |
+| Gateway `/v1/models` 调用 | 1 |
+| Gateway HTTP 200 | 390 |
 | Gateway error | 0 |
-| Gateway 平均 latency | 83.71s |
-| completed 样本 `raw_output` 字符数均值 | 2477.86 |
-| completed 样本 `raw_output` 字符数范围 | 9 - 8206 |
+| Gateway `/v1/chat/completions` 平均 latency | 82.12s |
+| completed 样本 `raw_output` 字符数均值 | 2450.29 |
+| completed 样本 `raw_output` 字符数范围 | 24 - 8206 |
 
 失败情况：
 
 | 项 | 值 |
 |---|---|
-| 失败样本数 | 149 |
+| 失败样本数 | 22 |
 | 失败错误码 | `5001` |
 | 本地结果中的错误信息 | `episode ... exceeded max attempts (3)` |
-| Gateway 侧情况 | 当前时间窗口内 698 次 `/v1/chat/completions` 均为 HTTP 200，未记录 gateway error |
-| 失败分布 | EN 2 条，ZH 147 条；主要集中在中文 EASY/HARD |
+| Gateway 侧情况 | 本轮时间窗口内 389 次 `/v1/chat/completions` 和 1 次 `/v1/models` 均为 HTTP 200，未记录 gateway error |
+| 失败分布 | 22 条全部来自 EN-EASY，样本编号集中在 `OlymMATH-EASY-64-EN` 至 `OlymMATH-EASY-85-EN` |
 
-因此，本轮失败主要表现为 Server/Worker 侧 episode 三次尝试后仍未完成，而不是 adapter gateway 无法访问 vLLM。中文样本失败比例明显高于英文样本，需要后续结合 Worker 日志继续定位是判分、输出解析、超时控制还是中文 prompt 处理导致。
+因此，本轮失败主要表现为 Server/Worker 侧 episode 三次尝试后仍未完成，而不是 adapter gateway 无法访问 vLLM。失败样本集中出现在 EN-EASY 的连续区间，后续需要结合 Server/Worker 的 request-level 日志确认是否存在该时间段的服务状态、重试上限或任务调度问题。
 
 ## 8. 输出截断与字段缺口
 
 | 观察项 | 数量 |
 |---|---:|
-| completed 样本 | 251 |
-| failed 空输出样本 | 149 |
-| completed 样本中出现 `\boxed{}` | 243 |
-| completed 样本中没有 `\boxed{}` | 8 |
-| completed 样本中出现 `</think>` | 0 |
+| completed 样本 | 378 |
+| failed 空输出样本 | 22 |
+| completed 样本中出现 `\boxed{}` | 354 |
+| completed 样本中没有 `\boxed{}` | 24 |
+| completed 样本中出现 `</think>` | 2 |
 
-本轮 gateway 使用 `--strip-reasoning`，因此 completed 样本的 `raw_output` 中没有 `</think>` 是预期现象，不能据此判断 thinking 是否被截断。当前 `EpisodeResult` 和 `model-gateway.jsonl` 没有保存 vLLM 原始 `finish_reason`，后续需要 Worker 将 vLLM 的 `finish_reason` 写回 `EpisodeResult.trajectory.steps[i].info.finish_reason`，才能准确区分 `stop`、`length` 和传输失败。
+本轮 gateway 使用 `--strip-reasoning`，绝大多数 completed 样本的 `raw_output` 中不再包含独立 reasoning 内容。仍有 2 条 completed 样本出现字面量 `</think>`，需要后续结合原始 vLLM 响应确认是模型把标签写入最终 content，还是 reasoning 字段剥离仍有边界情况。当前 `EpisodeResult` 和 `model-gateway.jsonl` 没有保存 vLLM 原始 `finish_reason`，后续需要 Worker 将 vLLM 的 `finish_reason` 写回 `EpisodeResult.trajectory.steps[i].info.finish_reason`，才能准确区分 `stop`、`length` 和传输失败。
 
 当前 UEnv driver 的 `avg_output_tokens` 为 0，是因为 Worker 返回的 `EpisodeResult` 未携带 token id 数组；该项在 UEnv 口径下暂不作为有效指标。
 
 ## 9. 输出文件
 
 ```text
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/metrics.json
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/predictions_official.json
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/predictions.jsonl
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/predictions.csv
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/uenv_requests.jsonl
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/uenv_results.jsonl
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/full_noresume.log
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/metrics.json
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/predictions_official.json
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/predictions.jsonl
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/predictions.csv
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/uenv_requests.jsonl
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/uenv_results.jsonl
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/full.log
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/run_full_olymmath_uenv.sh
 temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_reasoning_budget_20260715_111008/model-gateway-thinking-strip-reasoning-18094-budget16384.jsonl
 ```
 
@@ -300,6 +302,6 @@ temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_reasoning_budget_20260715_111008/m
 
 本轮已经完成 OlymMATH 400 题 UEnv thinking 全量非 resume 评测，Adapter 侧成功记录 400 条 request 和 400 条 result，说明全量请求和结果聚合链路是闭合的。
 
-从指标看，整体 UEnv reward accuracy 为 0.3900；如果只看 completed 样本，reward accuracy 为 0.6215。英文子集结果明显好于中文子集：EN reward accuracy 为 0.6450，ZH reward accuracy 为 0.1350。主要限制不是模型 endpoint 或 gateway 失败，而是 149 条 episode 在 Server/Worker 侧达到三次尝试上限后失败，且失败几乎全部集中在中文样本。
+从指标看，整体 UEnv reward accuracy 为 0.6175；如果只看 completed 样本，reward accuracy 为 0.6534。中文子集本轮表现高于英文子集：ZH reward accuracy 为 0.6700，EN reward accuracy 为 0.5650；主要差异来自 EN-EASY 中 22 条连续样本发生 Server/Worker 侧 `max attempts (3)` 失败。
 
-因此，本轮结果可以作为“UEnv 链路全量 OlymMATH thinking 口径”的阶段性基线，但不能只按 0.3900 评价模型能力；后续应优先定位中文样本 failed 的根因，并补充 `finish_reason`、Worker 原始错误和 retry attempt 级日志，区分模型答案质量、输出解析和服务稳定性三类问题。
+因此，本轮结果可以作为“UEnv 链路全量 OlymMATH thinking 口径”的正式基线。链路层面，Adapter 侧完成 400 条 request 和 400 条 result 聚合，gateway 时间窗口内没有 HTTP error；稳定性层面，仍需要定位 22 条连续 EN-EASY failed 的 Server/Worker 原因，并补充 `finish_reason`、Worker 原始错误和 retry attempt 级日志，区分模型答案质量、输出解析和服务稳定性三类问题。
