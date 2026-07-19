@@ -192,6 +192,24 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
         "env_package_version",
     )?;
 
+    let mut metadata = std::collections::HashMap::new();
+    if let Some(obj) = sample_context.as_object() {
+        if let Some(v) = obj.get("training_run_id").and_then(|x| x.as_str()) {
+            metadata.insert("training_run_id".to_string(), v.to_string());
+        }
+        if let Some(v) = obj.get("batch_id").and_then(|x| x.as_str()) {
+            metadata.insert("batch_id".to_string(), v.to_string());
+        }
+        if let Some(v) = obj.get("run_id").and_then(|x| x.as_str()) {
+            metadata.entry("training_run_id".to_string()).or_insert_with(|| v.to_string());
+        }
+    }
+    if !sample.batch_id.is_empty() {
+        metadata
+            .entry("batch_id".to_string())
+            .or_insert_with(|| sample.batch_id.clone());
+    }
+
     Ok(ProtoEpisodeRequest {
         episode_id: sample.request_id,
         env_type: sample.env_type,
@@ -209,6 +227,7 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
         env_package_id,
         env_package_version,
         model_endpoint_config,
+        metadata,
         ..Default::default()
     })
 }
