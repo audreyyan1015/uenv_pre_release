@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "gate3": {
+    "enabled": true,
+    "duration_seconds_per_mode": 1,
+    "workers": 1,
+    "capacity_per_worker": 1,
+    "dataset_jsonl": "/home/uenv-scale-bench-merge/uenv-bridge/data/benchmarks/dscodebench/DSCodeBench.json",
+    "dataset_limit": 6,
+    "dataset_offset": 0,
+    "exact_batches_per_mode": 1,
+    "min_steps": 3,
+    "max_steps": 6,
+    "modes": [
+      "sync",
+      "one_step_off_policy",
+      "fully_async"
+    ],
+    "model_mode": "real"
+  },
+  "gate4": {
+    "enabled": true,
+    "mode": "llm",
+    "concurrencies": [1, 2],
+    "max_steps": 10,
+    "openhands_max_iterations": 10
+  },
+  "worker_scale": {
+    "enabled": true,
+    "tiers": [32, 512, 1024],
+    "capacity_per_worker": 1,
+    "dataset_jsonl": "/home/uenv-scale-bench-merge/uenv-bridge/data/benchmarks/dscodebench/DSCodeBench.json",
+    "dataset_limit": 1000,
+    "dataset_offset": 0,
+    "exact_batches": 1,
+    "max_steps": 1,
+    "registration_timeout_seconds": 600,
+    "batch_timeout_seconds": 900,
+    "simulator_latency_ms": 10,
+    "minimum_mem_available_bytes": 2147483648,
+    "maximum_projected_host_memory_fraction": 0.85,
+    "model_mode": "deterministic_dataset_oracle",
+    "evidence_boundary": "real Worker processes, real Code plugins and real DSCodeBench inputs; deterministic oracle model isolates control-plane scale and is not real-LLM quality evidence"
+  }
+}

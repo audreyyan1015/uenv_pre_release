@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 import time
 import uuid
 from typing import Iterable
@@ -72,6 +73,94 @@ def code_env_payload(task_id: str) -> dict:
 def code_reward_config() -> dict:
     """生成 Code 任务的 reward_config_json 内容。"""
     return {"type": "code_tests", "entry_point": CODE_ENTRY_POINT}
+
+
+def load_dscodebench_jsonl(path: str, *, limit: int = 0, offset: int = 0) -> list[dict]:
+    """Load real DSCodeBench JSONL rows without loading the entire corpus."""
+    rows = []
+    with Path(path).open("r", encoding="utf-8") as source:
+        for line_index, line in enumerate(source):
+            if line_index < offset or not line.strip():
+                continue
+            row = json.loads(line)
+            required = {"problem_id", "library", "code_problem", "ground_truth_code", "test_script"}
+            missing = sorted(required - set(row))
+            if missing:
+                raise ValueError(f"DSCodeBench row {line_index} missing fields: {missing}")
+            rows.append(row)
+            if limit > 0 and len(rows) >= limit:
+                break
+    if not rows:
+        raise ValueError(f"no DSCodeBench rows loaded from {path!r} offset={offset} limit={limit}")
+    return rows
+
+
+def dscodebench_prompt(row: dict) -> str:
+    return (
+        "You are a careful Python data science coding assistant.\n"
+        "Please generate a Python3 solution for the following code problem description:\n\n"
+        "# Code problem description #\n"
+        f"{row['code_problem']}\n\n"
+        "# Response #\n"
+        "Return only one Python markdown code block containing the solution. "
+        "Do not add a __main__ block."
+    )
+
+
+def dscodebench_inline_test_code(row: dict, *, num_tests: int, random_seed: int) -> str:
+    """Build the same inline harness used by the DSCodeBench UEnv evaluator."""
+    return f"""
+import inspect
+from dscodebench_harness import evaluate_problem
+
+_candidate_source = inspect.currentframe().f_back.f_locals.get("code", "")
+_result = evaluate_problem(
+    ground_truth_code={str(row['ground_truth_code'])!r},
+    candidate_code=_candidate_source,
+    test_script={str(row['test_script'])!r},
+    num_tests={int(num_tests)},
+    random_seed={int(random_seed)},
+)
+"""
+
+
+def dscodebench_env_payload(
+    row: dict,
+    *,
+    task_id: str,
+    min_steps_before_terminate: int,
+    num_tests: int = 20,
+    random_seed: int = 42,
+    timeout_secs: int = 120,
+) -> dict:
+    """Map one real DSCodeBench row to the Code Worker contract."""
+    problem_id = str(row["problem_id"])
+    question = (
+        f"{dscodebench_prompt(row)}\n"
+        f"Dataset Problem ID: {problem_id}\n"
+        f"Task ID: {task_id}"
+    )
+    return {
+        "question": question,
+        "dataset": "dscodebench",
+        "task_id": task_id,
+        "library": str(row.get("library", "")),
+        "ground_truth_code": str(row["ground_truth_code"]),
+        "test_code": dscodebench_inline_test_code(
+            row,
+            num_tests=num_tests,
+            random_seed=random_seed,
+        ),
+        "num_tests": num_tests,
+        "random_seed": random_seed,
+        "timeout_secs": timeout_secs,
+        "min_steps_before_terminate": min_steps_before_terminate,
+        "dataset_problem_id": problem_id,
+    }
+
+
+def dscodebench_reward_config() -> dict:
+    return {"type": "code_tests"}
 
 
 def swe_openhands_env_payload(

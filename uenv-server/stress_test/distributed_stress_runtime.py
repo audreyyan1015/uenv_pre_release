@@ -235,6 +235,24 @@ def put_text(client: paramiko.SSHClient, path: str, text: str, mode: int = 0o644
         sftp.chmod(path, mode)
 
 
+def put_texts(
+    client: paramiko.SSHClient,
+    documents: dict[str, tuple[str, int]],
+) -> None:
+    """Write many small owned files through one SFTP session.
+
+    A 1024-Worker fleet needs one YAML per real Worker.  Opening a fresh SFTP
+    session for every YAML turns startup into thousands of SSH round trips, so
+    the scale path batches those writes without changing file ownership or
+    permissions.
+    """
+    with client.open_sftp() as sftp:
+        for path, (content, mode) in documents.items():
+            with sftp.open(path, "wb") as remote:
+                remote.write(content.encode())
+            sftp.chmod(path, mode)
+
+
 def get_text(client: paramiko.SSHClient, path: str) -> str:
     """通过 SFTP 读取远端文本文件。
 
@@ -288,6 +306,18 @@ def assert_port_free(client: paramiko.SSHClient, port: int, host: str) -> None:
     for line in listeners(client).splitlines():
         if f":{port} " in line:
             raise RuntimeError(f"{host}: port {port} is already occupied: {line}")
+
+
+def assert_ports_free(client: paramiko.SSHClient, ports: list[int], host: str) -> None:
+    """Check a complete port set from one listener snapshot."""
+    expected = set(ports)
+    occupied = []
+    for line in listeners(client).splitlines():
+        for port in expected:
+            if f":{port} " in line:
+                occupied.append({"port": port, "listener": line})
+    if occupied:
+        raise RuntimeError(f"{host}: requested ports are occupied: {occupied[:20]}")
 
 
 def _listener_pid(lines: str, port: int) -> tuple[int, str]:

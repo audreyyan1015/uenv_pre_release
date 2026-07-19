@@ -1,8 +1,8 @@
 # 万 worker 控制面规模化差距与落地验收方案
 
-更新时间：2026-07-16
+更新时间：2026-07-19
 
-评估基线：远端 `/home/uenv`，源码 HEAD `229700b`。本文档描述的是 UEnv server 控制面从当前单进程内存调度架构演进到 `10000` 个 worker / agent、`10000+` 并发 episode 的差距、改造边界和验收门槛。
+评估基线：远端 `/home/uenv-scale-bench-merge`，分支 `feature/scale-bench-10k-workers`。本文档描述的是 UEnv server 控制面从当前单进程内存调度架构演进到 `10000` 个 worker / agent、`10000+` 并发 episode 的差距、改造边界和验收门槛。每次验收以 suite manifest 中记录的实际 Git SHA 与二进制 SHA256 为准，不再依赖本文档中的静态 HEAD 文本。
 
 ## 结论摘要
 
@@ -19,19 +19,27 @@
 
 ## 当前自动化入口
 
-`/home/uenv/uenv-server/stress_test/run_stress_suite.py` 是统一入口，场景定义在同目录的 `stress_suite.json`。默认执行全部场景的严格预检，不启动任何服务；严格预检失败时会自动追加仅忽略二进制时间戳的诊断预检，以便一次性汇总代码版本和环境依赖问题。
+`uenv-server/stress_test/run_stress_suite.py` 是 Gate3/Gate4 真实训练式验收的统一入口，场景定义在同目录的 `stress_suite.json`。它必须在能够通过 SSH 访问 Server/Worker 的控制机上运行。默认只执行只读预检，不启动服务；只有显式传入 `--execute` 才会依次启动隔离 Gate3 与 Gate4。
+
+统一入口固定要求：源码目录、Server/Worker/Code Plugin 二进制、受保护生产 PID/端口、真实 LLM 配置和所有主机地址均显式传入；运行产物记录 Git SHA、二进制 SHA256、数据集 SHA256、配置摘要和受保护进程前后快照。Gate3 从真实 DSCodeBench JSONL 取题，使用真实 Ark LLM、多轮并覆盖 sync/one-step off-policy/fully-async；Gate4 使用 SWE-bench Verified 实例和真实 OpenHands LLM，并依次验证容器并发 1、2 及 trajectory、response IDs/mask/logprobs。
 
 ```bash
-cd /home/uenv/uenv-server/stress_test
+# 控制机上：一次完成只读预检，不启动隔离进程
+python uenv-server/stress_test/run_stress_suite.py \
+  --source-repo /home/uenv-scale-bench-merge \
+  --server-bin /home/uenv-scale-bench-merge/target/release/uenv-adapter-core \
+  --worker-bin /home/uenv-scale-bench-merge/target/debug/uenv-worker \
+  --code-plugin-bin /home/uenv-scale-bench-merge/target/debug/uenv-code-plugin \
+  --protected-pid 3321160 --protected-port 50052 --protected-port 8077 --protected-port 8088 \
+  --llm-config /opt/uenv-stress/secrets/openhands-llm.json \
+  --private-worker-port-range 8000-9023
 
-# 一次完成全部场景预检，不启动服务
-python3 run_stress_suite.py
-
-# 所有严格预检通过后，一次顺序执行整套真实环境压测
-python3 run_stress_suite.py --execute --confirm-execute --confirm-swe-run
+# 预检通过后，加 --execute 一次顺序执行 Gate3 -> Gate4 -> 32 -> 512 -> 1024 Worker
 ```
 
-suite 自动保存运行前后主机快照、配置、命令日志、每个 runner 的 manifest/results/config 和总 `summary.json`。超过本地 worker 安全阈值的场景仍需独立压测集群和 `--confirm-large-run`；该确认不会绕过真实二进制、OpenHands SDK、容器运行时或其他环境门禁。
+suite 自动保存运行前后保护进程快照、配置、命令日志、每个 runner 的 manifest/results/config 和总 `summary.json`，并将“基础设施通过”与“模型 reward”分开汇总。32/512/1024 档使用真实 Worker 进程、真实 Code Plugin 和真实 DSCodeBench 输入；为隔离控制面容量，模型侧使用确定性数据集 oracle，因此其结果只属于基础设施容量证据，不属于真实 LLM 质量证据。每档记录 fleet 峰值 RSS、进程数、FD 和最低可用内存；当前档失败或对下一档的内存投影不安全时立即停止扩容。多 Worker 场景必须显式提供已经开放并核验的 `--private-worker-port-range`，统一入口不会绕过端口和资源门禁。
+
+2026-07-19 的代码级 P0（显式路径/二进制参数、Git/二进制哈希、生产 PID 保护、真实 LLM 配置预检、Gate3 实际 step、Gate4 完整轨迹字段、基础设施与 reward 分离）已进入统一入口。下文 P0-1 至 P0-8 的有界背压、索引/分片、连接复用、持久化、重启恢复、HA 与安全治理仍是生产万 Worker 的独立架构缺口，不能以单 Worker Gate3/Gate4 通过替代。
 
 ## 当前实现基线：已经具备什么、还缺什么
 
@@ -60,13 +68,13 @@ suite 自动保存运行前后主机快照、配置、命令日志、每个 runn
 | 维度 | 当前实现 | 真实训练要求 | 差距与风险 |
 |---|---|---|---|
 | 构建与部署基线 | 分布式脚本仍硬编码旧的生产 PID、可执行文件路径以及 `/home/uenv/target/...` 下的 Server/Worker/插件二进制。 | 每次运行必须显式指定源码工作树和二进制，记录 Git SHA、binary SHA、配置、PID、启动时间及端口归属；压测前后动态核对被保护的正式进程。 | 可能测到 WIP 或旧二进制；硬编码 PID 失效后只能失败退出，无法形成可复现证据。 |
-| 端口与网络拓扑 | Gate3 为每个 Worker 使用 `20000+`，并预留 `21000+` OBS 端口；模型模拟器使用 `18001`。 | 当前允许的隔离链路应使用 `8099`（Server）、`8000`（Worker）、`8777`（Runtime Gateway）和必要时的 `8888`（模型端点）；`8077/8088` 属于正式服务，不得占用或重启。多独立 Worker 必须有明确的私网端口范围或单端口复用/主动出站协议。 | 现有 Gate3 端口方案不满足当前云主机开放范围，禁止直接运行。仅靠现有端口不能证明 32 个或更多独立 Worker。 |
+| 端口与网络拓扑 | 隔离 Server、模型和 Gateway 分别使用 `8099`、`8888`、`8777`；单 Worker 从 `8000` 起，多 Worker 为每个真实 Worker 分配独立私网端口。 | 当前 1024 Worker 档需要 Worker 私网 `8000-9023` 全范围可监听且 Server 可达；`8077/8088` 属于正式服务，不得占用或重启。长期方案应考虑单端口复用或主动出站协议。 | 云安全组与私网路由仍须在运行前做端点和代表性高端口实测；主机防火墙静态配置不能替代连通性证明。 |
 | 训练闭环 | Gate3 通过 `ExecuteBatch` 直接提交 Episode，并在 payload 中填写 `framework=verl`；没有实际 Trainer。 | 真实 veRL Trainer 应参与 batch 生成、rollout 消费、梯度/优化器更新、checkpoint、策略发布和流控，至少形成“提交 → rollout → reward/trace → Trainer 消费 → policy version 推进”的闭环。 | 填写 framework 字段不代表真实训练；当前无法验证 Trainer backlog、更新节奏、checkpoint 或训练侧反压。 |
 | 策略版本与异步语义 | 确定性模型模拟器返回固定的 policy/version，one-step-off-policy 和 fully-async 主要检查字段存在。 | 训练过程中 policy version 应持续推进，并记录 rollout 版本、当前训练版本、staleness 分布、丢弃/重放策略和最大允许落后窗口。 | 当前无法证明 off-policy 数据是否按预期被接受、拒绝或降权，也无法验证异步训练中的版本滞后。 |
-| 模型和任务负载 | Gate3 使用固定的 `add(a, b)` 小题，模型前若干次返回固定错误、随后返回固定正确代码，token 数、延迟和 reward 高度稳定。 | 应使用真实模型服务或来自真实训练的负载分布，覆盖 prompt/response token 长度、step 数、模型延迟、reward、超时和错误的长尾；任务应包含多个数据集和难度档位。 | 当前适合测调度吞吐，不代表真实模型排队、动态 batching、网络传输、上下文增长或复杂工具调用成本。 |
-| 多轮真实性 | Gate3 已设置 `max_steps` 并让模拟器先错后对；Gate4 可配置 OpenHands `max_iterations`。结果文件尚未逐 Episode 记录和断言实际 step/模型调用次数。 | 必须保存每个 Episode 的 step 数、每步模型请求、环境反馈、终止原因和最终 reward，并断言至少发生预期轮数，而不是只检查 `max_steps` 配置存在。 | 即使脚本配置为多轮，也可能因提前终止、Task ID 识别或执行器行为而退化为单轮，当前结果无法排除该情况。 |
-| Rollout 与训练字段 | Gate3 为减小干扰关闭 trajectory/OBS；Gate4 结果主要检查 status/reward，没有强制 `trajectory_id`、response IDs、mask、logprobs 和时间戳完整。 | 用于训练的成功 Episode 必须产生完整、可关联、顺序正确的 trajectory/rollout 字段；异步路径还要检查 policy/version、时间戳和去重语义。 | 当前能证明任务完成，但不能证明产物可以被 Trainer 正确消费，也不能发现 trace 静默缺失或错配。 |
-| Gate4 真实 LLM 与任务覆盖 | Gate4 代码支持 `mode=llm`，但当前 Worker 主机没有已验证的 OpenHands LLM 配置；并发仅为 1/2，重复同一个 `astropy__astropy-7166` 实例。 | LLM 配置必须通过 schema、鉴权和端点连通性检查；应使用多个不同仓库/镜像/难度的 SWE 实例，覆盖多轮、长尾时延和失败任务。 | 现有 `gold` 产物只能证明容器和 Agent 基线；没有真实 LLM 运行产物。单实例和极小并发也不能代表训练工作负载。 |
+| 模型和任务负载 | Gate3 已改为真实 DSCodeBench 输入和真实 Ark LLM；Gate4 使用真实 SWE-bench Verified 输入和 OpenHands LLM。32/512/1024 容量档复用真实 DSCodeBench 输入，但模型为确定性 oracle。 | 还应覆盖多个数据集和难度档位，以及 prompt/response token、模型延迟、reward、超时和错误的长尾分布。 | Gate3/Gate4 可作为小并发真实模型证据；容量档只隔离证明调度、Worker 和插件规模，不能代表真实模型排队、动态 batching 或成本。 |
+| 多轮真实性 | Gate3 对实际 Episode step 和模型调用次数做上下界断言；Gate4 对 OpenHands 多轮运行做产物检查。 | 必须持续保存每个 Episode 的 step、模型请求、环境反馈、终止原因和最终 reward，并覆盖成功与失败长尾。 | 当前样本数和并发仍小，尚不能代表长时间训练中的 step 分布与提前终止比例。 |
+| Rollout 与训练字段 | Gate3 异步模式断言 response token trace；Gate4 强制检查 trajectory、response IDs、mask、logprobs 对齐与非空。 | Trainer 还应实际消费这些字段，并验证 policy/version、时间戳、去重和 staleness 语义。 | 字段存在且对齐不等于真实 Trainer 已正确消费。 |
+| Gate4 真实 LLM 与任务覆盖 | Worker 上的 mode-0600 OpenHands LLM 配置会先做 schema、鉴权、tokenization 和最小模型调用预检；Gate4 以真实 LLM 跑并发 1/2。 | 应扩展多个不同仓库、镜像和难度的 SWE 实例，覆盖长尾时延与失败任务。 | 单实例和极小并发仍不能代表训练工作负载。 |
 | 验收口径 | Gate4 将平均 reward `< 0.999` 视为失败。 | 基础设施验收与模型质量必须拆分：基础设施看任务收敛、协议、trace、资源回收和错误率；模型质量单独报告 reward、成功率、step/token 和成本。 | 真实 LLM 未解题不等于基础设施故障；反之 reward 为 1 也不能替代协议、轨迹和资源回收验证。 |
 | 规模、故障与长稳 | 当前最高实测为 32 个真实 Worker、128 个并发槽位，每种模式约 30 秒；Gate4 仅并发 1/2。 | 应逐级覆盖 64/128/256 及更高真实 Worker、多机网络、百万 Episode 完整闭环、超载、断连、重启、取消、慢存储和至少 24 小时 soak。 | 当前只能算小规模功能与短时吞吐验证，不能证明万 Worker、百万 Episode、资源无泄漏或故障恢复。 |
 

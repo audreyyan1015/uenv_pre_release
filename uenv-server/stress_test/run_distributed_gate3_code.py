@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import time
 import uuid
@@ -32,6 +33,7 @@ MODES = ("sync", "one_step_off_policy", "fully_async")
 COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text(encoding="utf-8")
 REAL_LLM_PROXY_SOURCE = Path(__file__).with_name("ark_real_llm_proxy.py").read_text(encoding="utf-8")
 REAL_LLM_PREFLIGHT_SOURCE = Path(__file__).with_name("ark_real_llm_preflight.py").read_text(encoding="utf-8")
+FLEET_SUPERVISOR_SOURCE = Path(__file__).with_name("worker_fleet_supervisor.py").read_text(encoding="utf-8")
 
 
 MODEL_SIMULATOR = r'''#!/usr/bin/env python3
@@ -50,9 +52,17 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
 parser.add_argument("--latency-ms", type=int, default=1000)
 parser.add_argument("--wrong-steps", type=int, default=2)
+parser.add_argument("--dataset-jsonl", default="")
 args = parser.parse_args()
 attempts_by_task = {}
 attempts_lock = threading.Lock()
+dataset_oracle = {}
+if args.dataset_jsonl:
+    with open(args.dataset_jsonl, "r", encoding="utf-8") as source:
+        for line in source:
+            if line.strip():
+                row = json.loads(line)
+                dataset_oracle[str(row["problem_id"])] = str(row["ground_truth_code"])
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -93,21 +103,27 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(size)
         time.sleep(args.latency_ms / 1000)
         task_id = "unknown"
+        dataset_problem_id = ""
         try:
             request = json.loads(raw.decode() if raw else "{}")
             message = request.get("messages", [{}])[0].get("content", "")
             found = re.search(r"Task ID: ([A-Za-z0-9_.:-]+)", message)
             if found:
                 task_id = found.group(1)
+            dataset_found = re.search(r"Dataset Problem ID: ([A-Za-z0-9_.:-]+)", message)
+            if dataset_found:
+                dataset_problem_id = dataset_found.group(1)
         except Exception:
             pass
         with attempts_lock:
             attempt = attempts_by_task.get(task_id, 0) + 1
             attempts_by_task[task_id] = attempt
         if attempt <= args.wrong_steps:
-            content = "def add(a, b):\n    return a - b"
+            content = "```python\nraise NotImplementedError('deterministic scale warmup')\n```"
+        elif dataset_problem_id in dataset_oracle:
+            content = "```python\n" + dataset_oracle[dataset_problem_id] + "\n```"
         else:
-            content = "def add(a, b):\n    return a + b"
+            content = "```python\ndef add(a, b):\n    return a + b\n```"
         body = json.dumps({
             "choices": [{
                 "message": {"role": "assistant", "content": content},
@@ -161,7 +177,18 @@ parser.add_argument("--code-wrong-steps", type=int, required=True)
 parser.add_argument("--min-steps", type=int, required=True)
 parser.add_argument("--model-name", required=True)
 parser.add_argument("--model-mode", choices=("real", "simulator"), required=True)
+parser.add_argument("--dataset-jsonl", required=True)
+parser.add_argument("--dataset-limit", type=int, default=8)
+parser.add_argument("--dataset-offset", type=int, default=0)
+parser.add_argument("--registration-timeout", type=int, default=180)
+parser.add_argument("--batch-timeout", type=int, default=180)
+parser.add_argument("--exact-batches", type=int, default=0)
 args = parser.parse_args()
+dataset_rows = stress_common.load_dscodebench_jsonl(
+    args.dataset_jsonl,
+    limit=args.dataset_limit,
+    offset=args.dataset_offset,
+)
 
 async def main():
     channel = grpc_aio.insecure_channel(args.server, options=[
@@ -185,7 +212,7 @@ async def main():
     )
     # 等待本次压测启动的 worker 全部注册。只统计带本次 run_id 前缀的 worker，
     # 避免把其它服务里的 worker 算进去。
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + args.registration_timeout
     registered = []
     while time.monotonic() < deadline:
         try:
@@ -211,12 +238,21 @@ async def main():
     semaphore = asyncio.Semaphore(args.slots)
     tasks = set()
 
-    def make_sample(batch_id, index):
-        # 每个样本都是同一个小 Code 题，但 task_id 不同，便于日志排查。
+    batch_sequence = 0
+
+    def make_sample(batch_id, index, sample_ordinal):
         task_id = f"gate3-{args.run_id}-{args.mode}-{batch_id}-{index}"
-        env_config = stress_common.code_env_payload(task_id)
-        env_config["question"] = f"{env_config['question']}\nTask ID: {task_id}"
-        env_config["min_steps_before_terminate"] = args.min_steps
+        mode_offset = {
+            "sync": 0,
+            "one_step_off_policy": args.workers,
+            "fully_async": args.workers * 2,
+        }.get(args.mode, 0)
+        row = dataset_rows[(mode_offset + sample_ordinal) % len(dataset_rows)]
+        env_config = stress_common.dscodebench_env_payload(
+            row,
+            task_id=task_id,
+            min_steps_before_terminate=args.min_steps,
+        )
         return stress_common.make_sample_envelope(
             adapter_core_pb2,
             batch_id=batch_id,
@@ -224,9 +260,15 @@ async def main():
             env_type="code",
             parallel_mode=args.mode,
             env_config=env_config,
-            reward_config=stress_common.code_reward_config(),
-            sample_context={"stress_run_id": args.run_id, "gate": 3, "max_steps": args.max_steps},
-            timeout_seconds=120,
+            reward_config=stress_common.dscodebench_reward_config(),
+            sample_context={
+                "stress_run_id": args.run_id,
+                "gate": 3,
+                "max_steps": args.max_steps,
+                "dataset": "DSCodeBench",
+                "dataset_problem_id": row["problem_id"],
+            },
+            timeout_seconds=args.batch_timeout,
             max_steps=args.max_steps,
             model_url=args.model_url,
             model_name=args.model_name,
@@ -235,9 +277,14 @@ async def main():
     async def send_batch():
         # 一次 ExecuteBatch 发送 args.workers 个样本。外层 semaphore 控制同时在飞的
         # batch 数，args.slots 表示每个 worker 的并发容量。
-        nonlocal submitted, completed, failed, rpc_errors, protocol_errors
+        nonlocal submitted, completed, failed, rpc_errors, protocol_errors, batch_sequence
         batch_id = str(uuid.uuid4())
-        samples = [make_sample(batch_id, index) for index in range(args.workers)]
+        current_batch = batch_sequence
+        batch_sequence += 1
+        samples = [
+            make_sample(batch_id, index, current_batch * args.workers + index)
+            for index in range(args.workers)
+        ]
         async with lock:
             submitted += len(samples)
         started = time.monotonic()
@@ -245,7 +292,7 @@ async def main():
             response = await execute(
                 adapter_core_pb2.ExecuteBatchRequest(
                     request_id=batch_id, batch_id=batch_id, samples=samples
-                ), timeout=180,
+                ), timeout=args.batch_timeout,
             )
             elapsed = (time.monotonic() - started) * 1000
             async with lock:
@@ -270,7 +317,11 @@ async def main():
 
     # 在 duration 时间窗口内持续补充 batch。时间到后等待已经发出的 batch 收尾。
     started = time.monotonic()
-    while time.monotonic() - started < args.duration:
+    while (
+        batch_sequence < args.exact_batches
+        if args.exact_batches > 0
+        else time.monotonic() - started < args.duration
+    ):
         await semaphore.acquire()
         task = asyncio.create_task(send_batch())
         tasks.add(task)
@@ -297,6 +348,14 @@ async def main():
     document["code_wrong_steps"] = args.code_wrong_steps
     document["min_steps"] = args.min_steps
     document["model_mode"] = args.model_mode
+    document["dataset"] = {
+        "name": "DSCodeBench",
+        "path": args.dataset_jsonl,
+        "loaded_rows": len(dataset_rows),
+        "offset": args.dataset_offset,
+        "problem_ids": [str(row["problem_id"]) for row in dataset_rows],
+        "real_input": True,
+    }
     document["actual_step_stats"] = {
         "task_count": len(actual_step_counts),
         "min_steps": min(actual_step_counts) if actual_step_counts else 0,
@@ -428,6 +487,21 @@ def _model_step_stats(worker, prefix: str) -> dict:
     return json.loads(output)
 
 
+def _completed_worker_coverage(server, log_path: str, worker_prefix: str) -> dict:
+    worker_ids = set()
+    for line in base.get_text(server, log_path).splitlines():
+        if "episode_completed" not in line:
+            continue
+        match = re.search(r"worker_id=([^\s]+)", line)
+        worker_id = match.group(1).strip('"') if match else ""
+        if worker_id.startswith(worker_prefix):
+            worker_ids.add(worker_id)
+    return {
+        "unique_completed_workers": len(worker_ids),
+        "worker_ids": sorted(worker_ids),
+    }
+
+
 def run_scale(
     workers_count: int,
     capacity: int,
@@ -441,6 +515,15 @@ def run_scale(
     min_steps: int,
     model_mode: str,
     llm_config: str,
+    dataset_jsonl: str,
+    dataset_limit: int,
+    dataset_offset: int,
+    exact_batches: int,
+    registration_timeout: int,
+    batch_timeout: int,
+    fleet_supervisor_threshold: int,
+    simulator_latency_ms: int,
+    acceptance_purpose: str,
 ) -> dict:
     """执行一组 Gate3 规模。
 
@@ -459,8 +542,11 @@ def run_scale(
     local_run = artifacts / run_id
     local_run.mkdir(parents=True)
     server = worker = None
-    server_pid = model_pid = None
+    server_pid = model_pid = fleet_supervisor_pid = None
     worker_pids: list[tuple[int, str]] = []
+    fleet_pid_document: dict = {}
+    fleet_metrics_path = ""
+    fleet_resource_metrics: dict = {}
     before = None
     cleanup_errors: list[str] = []
     results: list[dict] = []
@@ -476,10 +562,12 @@ def run_scale(
         worker = base.connect(base.WORKER_HOST, password)
         before = base.protected_snapshot(server)
         base.assert_port_free(server, base.SERVER_PORT, base.SERVER_HOST)
-        for port in ports + obs_ports + [base.MODEL_PORT]:
-            base.assert_port_free(worker, port, base.WORKER_HOST)
+        base.assert_ports_free(worker, ports + obs_ports + [base.MODEL_PORT], base.WORKER_HOST)
         print(f"[gate3:{workers_count}x{capacity}] preflight ports={ports[0]}-{ports[-1]}", flush=True)
         build = base.source_and_binary_manifest(server, include_code_plugin=True)
+        base.run(server, f"test -f {base.q(dataset_jsonl)}", timeout=20)
+        _, dataset_hash_out, _ = base.run(server, f"sha256sum {base.q(dataset_jsonl)}", timeout=30)
+        dataset_sha256 = dataset_hash_out.split()[0]
 
         # bundle 先在 server 机器上制作，再通过本地临时文件转传到 worker 机器。
         # 这样 worker 机器不需要直接访问 /home/uenv 源码目录。
@@ -507,9 +595,26 @@ def run_scale(
         base.put_text(worker, f"{worker_run}/model_simulator.py", MODEL_SIMULATOR, 0o755)
         base.put_text(worker, f"{worker_run}/ark_real_llm_proxy.py", REAL_LLM_PROXY_SOURCE, 0o700)
         base.put_text(worker, f"{worker_run}/ark_real_llm_preflight.py", REAL_LLM_PREFLIGHT_SOURCE, 0o700)
+        base.put_text(worker, f"{worker_run}/worker_fleet_supervisor.py", FLEET_SUPERVISOR_SOURCE, 0o700)
+        worker_dataset = f"{worker_run}/DSCodeBench.json"
+        if model_mode == "simulator":
+            with tempfile.NamedTemporaryFile(prefix=run_id, suffix="-dscodebench.json", delete=False) as tmp:
+                local_dataset = Path(tmp.name)
+            try:
+                with server.open_sftp() as sftp:
+                    sftp.get(dataset_jsonl, str(local_dataset))
+                with worker.open_sftp() as sftp:
+                    sftp.put(str(local_dataset), worker_dataset)
+            finally:
+                local_dataset.unlink(missing_ok=True)
+        worker_documents = {}
         for i, (port, obs_port) in enumerate(zip(ports, obs_ports)):
             worker_id = f"stress-{run_id}-worker-{i:04d}"
-            base.put_text(worker, f"{worker_run}/worker-{i:04d}.yaml", worker_config(worker_run, worker_id, port, obs_port, capacity))
+            worker_documents[f"{worker_run}/worker-{i:04d}.yaml"] = (
+                worker_config(worker_run, worker_id, port, obs_port, capacity),
+                0o600,
+            )
+        base.put_texts(worker, worker_documents)
         # load_client.py 需要 Python 版 protobuf message，所以每次用当前 proto 生成。
         proto_root = f"{base.SOURCE_REPO}/proto"
         proto = " ".join([
@@ -520,9 +625,11 @@ def run_scale(
         base.run(server, proto)
         base.run(server, f"touch {base.q(server_run)}/generated/uenv/__init__.py {base.q(server_run)}/generated/uenv/v1/__init__.py")
         # 关闭 trajectory/obs，减少压测以外的写入和背景工作。
+        server_log_filter = "uenv_server::service::episode=info,warn" if acceptance_purpose == "worker-scale" else "warn"
         server_cmd = " ".join([
             "env", "UENV_SERVER_CONFIG_STRICT=1", "UENV_TRAJECTORY_ENABLED=0", "UENV_OBS_ENABLED=0", "UENV_LOG_ANSI=0",
-            f"UENV_ADDR={base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}", f"UENV_CONFIG_PATH={server_run}/server.yaml", "RUST_LOG=warn", base.SERVER_BIN,
+            f"UENV_ADDR={base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}", f"UENV_CONFIG_PATH={server_run}/server.yaml",
+            f"RUST_LOG={server_log_filter}", base.SERVER_BIN,
         ])
         server_pid = base.start_owned(server, server_cmd, f"{server_run}/server.log", base.SERVER_BIN, base.SERVER_BIN)
         if model_mode == "real":
@@ -537,9 +644,11 @@ def run_scale(
                 f"--config {base.q(llm_config)}"
             )
         else:
+            model_script = "model_simulator.py"
             model_command = (
                 f"python3 -B {worker_run}/model_simulator.py --port {base.MODEL_PORT} "
-                f"--latency-ms 1000 --wrong-steps {code_wrong_steps}"
+                f"--latency-ms {simulator_latency_ms} --wrong-steps {code_wrong_steps} "
+                f"--dataset-jsonl {base.q(worker_dataset)}"
             )
         model_pid = base.start_owned(
             worker,
@@ -557,25 +666,99 @@ def run_scale(
             )
             print(f"[gate3:{workers_count}x{capacity}] {preflight_out.strip()}", flush=True)
         # 每个 worker 都有独立 yaml、独立 WAL 和独立日志，方便定位某个 worker 的问题。
-        for i, port in enumerate(ports):
-            config = f"{worker_run}/worker-{i:04d}.yaml"
-            cmd = " ".join([
-                "env", "UENV_SERVER_CONFIG_STRICT=1", "UENV_TRAJECTORY_ENABLED=0", "UENV_OBS_ENABLED=0", "UENV_LOG_ANSI=0",
-                "UENV_WORKER_EPISODE_TIMEOUT_SECS=180", "UENV_LLM_HTTP_TIMEOUT_SECS=180",
-                f"UENV_CODE_PLUGIN_BIN={worker_run}/bundle/uenv-code-plugin",
-                f"UENV_CODE_EVAL_SCRIPT={worker_run}/bundle/plugins/code/scripts/evaluate_code.py",
-                "RUST_LOG=error", f"{worker_run}/bundle/uenv-worker", "--config", config, "serve",
-            ])
-            pid = base.start_owned(worker, cmd, f"{worker_run}/logs/worker-{i:04d}.log", f"{worker_run}/bundle/uenv-worker", config)
-            worker_pids.append((pid, config))
-            if i == 0:
-                base.run(server, f"python3 -B {server_run}/tcp_probe.py {base.WORKER_PRIVATE_IP} {port}", timeout=15)
-                print(f"[gate3:{workers_count}x{capacity}] private worker TCP reachable", flush=True)
+        worker_env = {
+            "UENV_SERVER_CONFIG_STRICT": "1",
+            "UENV_TRAJECTORY_ENABLED": "0",
+            "UENV_OBS_ENABLED": "0",
+            "UENV_LOG_ANSI": "0",
+            "UENV_WORKER_EPISODE_TIMEOUT_SECS": str(batch_timeout),
+            "UENV_LLM_HTTP_TIMEOUT_SECS": str(batch_timeout),
+            "UENV_CODE_PLUGIN_BIN": f"{worker_run}/bundle/uenv-code-plugin",
+            "UENV_CODE_EVAL_SCRIPT": f"{worker_run}/bundle/plugins/code/scripts/evaluate_code.py",
+            "RUST_LOG": "error",
+        }
+        if workers_count >= fleet_supervisor_threshold:
+            fleet_spec = {
+                "workers": [
+                    {
+                        "worker_id": f"stress-{run_id}-worker-{i:04d}",
+                        "config": f"{worker_run}/worker-{i:04d}.yaml",
+                        "argv": [
+                            f"{worker_run}/bundle/uenv-worker",
+                            "--config",
+                            f"{worker_run}/worker-{i:04d}.yaml",
+                            "serve",
+                        ],
+                        "env": worker_env,
+                        "log": f"{worker_run}/logs/worker-{i:04d}.log",
+                    }
+                    for i in range(workers_count)
+                ]
+            }
+            fleet_spec_path = f"{worker_run}/fleet.json"
+            fleet_pid_path = f"{worker_run}/fleet-pids.json"
+            fleet_metrics_path = f"{worker_run}/fleet-metrics.json"
+            base.put_text(worker, fleet_spec_path, json.dumps(fleet_spec, sort_keys=True), 0o600)
+            fleet_command = (
+                f"python3 -B {worker_run}/worker_fleet_supervisor.py "
+                f"--spec {fleet_spec_path} --pid-file {fleet_pid_path} "
+                f"--metrics-file {fleet_metrics_path}"
+            )
+            fleet_supervisor_pid = base.start_owned(
+                worker,
+                fleet_command,
+                f"{worker_run}/fleet-supervisor.log",
+                "/usr/bin/python3.12",
+                f"{worker_run}/worker_fleet_supervisor.py",
+            )
+            fleet_deadline = time.monotonic() + max(60, workers_count // 2)
+            while time.monotonic() < fleet_deadline:
+                status, _, _ = base.run(worker, f"test -s {base.q(fleet_pid_path)}", check=False)
+                if status == 0:
+                    fleet_pid_document = json.loads(base.get_text(worker, fleet_pid_path))
+                    break
+                time.sleep(0.5)
+            else:
+                raise RuntimeError("real Worker fleet supervisor did not publish its PID manifest")
+            if fleet_pid_document.get("worker_count") != workers_count:
+                raise RuntimeError(f"fleet PID manifest count mismatch: {fleet_pid_document}")
+            worker_pids = [
+                (int(item["pid"]), str(item["config"]))
+                for item in fleet_pid_document["workers"]
+            ]
+        else:
+            for i in range(workers_count):
+                config = f"{worker_run}/worker-{i:04d}.yaml"
+                env_parts = [f"{key}={value}" for key, value in worker_env.items()]
+                cmd = " ".join([
+                    "env",
+                    *env_parts,
+                    f"{worker_run}/bundle/uenv-worker",
+                    "--config",
+                    config,
+                    "serve",
+                ])
+                pid = base.start_owned(
+                    worker,
+                    cmd,
+                    f"{worker_run}/logs/worker-{i:04d}.log",
+                    f"{worker_run}/bundle/uenv-worker",
+                    config,
+                )
+                worker_pids.append((pid, config))
+        for port in sorted({ports[0], ports[-1]}):
+            base.run(
+                server,
+                f"python3 -B {server_run}/tcp_probe.py {base.WORKER_PRIVATE_IP} {port}",
+                timeout=15,
+            )
+        print(f"[gate3:{workers_count}x{capacity}] private Worker range endpoints reachable", flush=True)
         base.assert_protected_unchanged(server, before)
         # manifest 记录本轮实际启动的端口、PID 和受保护 server 快照。
         # 后续排查时先看 manifest，再看 result/log。
         manifest = {
-            "run_id": run_id, "gate": 3, "environment": "code", "real_workers": workers_count,
+            "run_id": run_id, "gate": 3, "acceptance_purpose": acceptance_purpose,
+            "environment": "code", "real_workers": workers_count,
             "worker_capacity": capacity, "worker_slots": workers_count * capacity,
             "requested_episode_concurrency": workers_count * capacity, "modes": list(modes),
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
@@ -584,12 +767,27 @@ def run_scale(
             "model_kind": (
                 "real-ark-chat-completions+ark-tokenization"
                 if model_mode == "real"
-                else "deterministic-openai-compatible"
+                else "deterministic-dataset-oracle-for-control-plane-scale"
             ),
+            "dataset": {
+                "name": "DSCodeBench",
+                "path": dataset_jsonl,
+                "sha256": dataset_sha256,
+                "limit": dataset_limit,
+                "offset": dataset_offset,
+                "real_input": True,
+            },
             "llm_config": llm_config if model_mode == "real" else "",
             "llm_config_sha256": llm_config_sha256,
             "source_and_binaries": build,
-            "protected_server": before, "owned_pids": {"server": server_pid, "model": model_pid, "workers": [p for p, _ in worker_pids]},
+            "protected_server": before,
+            "owned_pids": {
+                "server": server_pid,
+                "model": model_pid,
+                "fleet_supervisor": fleet_supervisor_pid,
+                "workers": [p for p, _ in worker_pids],
+            },
+            "fleet_metrics_path": fleet_metrics_path,
         }
         base.put_text(server, f"{server_run}/manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
         base.put_text(worker, f"{worker_run}/manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
@@ -604,10 +802,17 @@ def run_scale(
                 "--model-url", f"http://127.0.0.1:{base.MODEL_PORT}/v1", "--run-id", run_id, "--output", remote_result,
                 "--max-steps", str(max_steps), "--code-wrong-steps", str(code_wrong_steps),
                 "--min-steps", str(min_steps), "--model-mode", model_mode,
+                "--dataset-jsonl", dataset_jsonl,
+                "--dataset-limit", str(dataset_limit),
+                "--dataset-offset", str(dataset_offset),
+                "--registration-timeout", str(registration_timeout),
+                "--batch-timeout", str(batch_timeout),
+                "--exact-batches", str(exact_batches),
                 "--model-name", ("proxy-selected-versioned-model" if model_mode == "real" else "gate3-code-model"),
             ])
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} start", flush=True)
-            _, out, err = base.run(server, command, timeout=duration + 240)
+            command_timeout = registration_timeout + max(batch_timeout, duration + 240)
+            _, out, err = base.run(server, command, timeout=command_timeout)
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
             step_stats = _model_step_stats(worker, f"gate3-{run_id}-{mode}-")
@@ -633,11 +838,36 @@ def run_scale(
             result["step_validation"] = step_validation
             if not step_validation["passed"]:
                 raise RuntimeError(f"actual multi-step validation failed: {step_validation}")
+            if acceptance_purpose == "worker-scale":
+                coverage = _completed_worker_coverage(
+                    server,
+                    f"{server_run}/server.log",
+                    f"stress-{run_id}-worker-",
+                )
+                coverage["expected_workers"] = workers_count
+                coverage["passed"] = coverage["unique_completed_workers"] == workers_count
+                result["worker_dispatch_coverage"] = coverage
+                if not coverage["passed"]:
+                    raise RuntimeError(
+                        "not every real Worker completed an episode: "
+                        f"expected={workers_count} actual={coverage['unique_completed_workers']}"
+                    )
             results.append(result)
             (local_run / f"result-{mode}.json").write_text(json.dumps(result, indent=2, sort_keys=True))
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} PASS throughput={result['throughput_eps']:.2f} ep/s", flush=True)
         (local_run / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
-        outcome = {"run_id": run_id, "scale": f"{workers_count}x{capacity}", "results": results, "status": "passed"}
+        if fleet_metrics_path:
+            fleet_resource_metrics = json.loads(base.get_text(worker, fleet_metrics_path))
+            (local_run / "fleet-metrics.json").write_text(
+                json.dumps(fleet_resource_metrics, indent=2, sort_keys=True)
+            )
+        outcome = {
+            "run_id": run_id,
+            "scale": f"{workers_count}x{capacity}",
+            "results": results,
+            "status": "passed",
+            "fleet_resource_metrics": fleet_resource_metrics,
+        }
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         (local_run / "error.txt").write_text(error)
@@ -656,14 +886,26 @@ def run_scale(
             try: server = base.connect(base.SERVER_HOST, password)
             except Exception as exc: cleanup_errors.append(f"server reconnect: {exc}")
         if worker:
-            for pid, config in reversed(worker_pids):
-                try: base.stop_owned(worker, pid, f"{worker_run}/bundle/uenv-worker", config)
-                except Exception as exc: cleanup_errors.append(str(exc))
+            if fleet_supervisor_pid:
+                try:
+                    base.stop_owned(
+                        worker,
+                        fleet_supervisor_pid,
+                        "/usr/bin/python3.12",
+                        f"{worker_run}/worker_fleet_supervisor.py",
+                    )
+                except Exception as exc:
+                    cleanup_errors.append(str(exc))
+            else:
+                for pid, config in reversed(worker_pids):
+                    try: base.stop_owned(worker, pid, f"{worker_run}/bundle/uenv-worker", config)
+                    except Exception as exc: cleanup_errors.append(str(exc))
             try: base.stop_owned(worker, model_pid, "/usr/bin/python3.12", f"{worker_run}/{model_script}")
             except Exception as exc: cleanup_errors.append(str(exc))
-            for port in ports + obs_ports + [base.MODEL_PORT]:
-                try: base.assert_port_free(worker, port, base.WORKER_HOST)
-                except Exception as exc: cleanup_errors.append(str(exc))
+            try:
+                base.assert_ports_free(worker, ports + obs_ports + [base.MODEL_PORT], base.WORKER_HOST)
+            except Exception as exc:
+                cleanup_errors.append(str(exc))
         if server:
             try: base.stop_owned(server, server_pid, base.SERVER_BIN, base.SERVER_BIN)
             except Exception as exc: cleanup_errors.append(str(exc))
@@ -727,6 +969,19 @@ def main() -> int:
         "--code-wrong-steps", type=int, default=2,
         help="Code model simulator returns wrong code this many times per task before returning the correct solution.",
     )
+    parser.add_argument("--dataset-jsonl", required=True, help="Absolute DSCodeBench JSONL path on the Server source host.")
+    parser.add_argument("--dataset-limit", type=int, default=8)
+    parser.add_argument("--dataset-offset", type=int, default=0)
+    parser.add_argument("--exact-batches", type=int, default=0)
+    parser.add_argument("--registration-timeout", type=int, default=180)
+    parser.add_argument("--batch-timeout", type=int, default=180)
+    parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
+    parser.add_argument("--simulator-latency-ms", type=int, default=10)
+    parser.add_argument(
+        "--acceptance-purpose",
+        choices=("gate3-real-llm", "worker-scale"),
+        default="gate3-real-llm",
+    )
     parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-gate-artifacts")
     base.add_runtime_arguments(parser, require_code_plugin=True)
     args = parser.parse_args()
@@ -749,13 +1004,26 @@ def main() -> int:
         raise SystemExit("--min-steps must be positive and no greater than --max-steps")
     if args.model_mode == "real" and not args.llm_config:
         raise SystemExit("--llm-config is required for --model-mode real")
+    if not args.dataset_jsonl.startswith("/"):
+        raise SystemExit("--dataset-jsonl must be an absolute path on the Server host")
+    if args.dataset_limit <= 0 or args.dataset_offset < 0:
+        raise SystemExit("--dataset-limit must be positive and --dataset-offset non-negative")
+    if args.exact_batches < 0 or args.registration_timeout <= 0 or args.batch_timeout <= 0:
+        raise SystemExit("batch and timeout arguments must be non-negative/positive")
+    if args.fleet_supervisor_threshold < 2 or args.simulator_latency_ms < 0:
+        raise SystemExit("invalid fleet supervisor threshold or simulator latency")
+    modes = tuple(args.mode or MODES)
+    if args.acceptance_purpose == "gate3-real-llm" and args.model_mode != "real":
+        raise SystemExit("Gate3 acceptance requires --model-mode real")
+    if args.acceptance_purpose == "worker-scale":
+        if args.model_mode != "simulator" or modes != ("sync",) or args.exact_batches <= 0:
+            raise SystemExit("worker-scale requires simulator, exactly --mode sync, and --exact-batches > 0")
     if args.code_wrong_steps < 0 or args.code_wrong_steps >= args.max_steps:
         raise SystemExit("--code-wrong-steps must be >=0 and smaller than --max-steps")
     password = os.environ.get("UENV_PASS")
     if not password: raise SystemExit("UENV_PASS is required")
     args.artifacts.mkdir(parents=True, exist_ok=True)
     worker_ports = _parse_private_port_range(args.private_worker_port_range, args.workers)
-    modes = tuple(args.mode or MODES)
     summary = run_scale(
         args.workers,
         args.capacity,
@@ -769,6 +1037,15 @@ def main() -> int:
         args.min_steps,
         args.model_mode,
         args.llm_config,
+        args.dataset_jsonl,
+        args.dataset_limit,
+        args.dataset_offset,
+        args.exact_batches,
+        args.registration_timeout,
+        args.batch_timeout,
+        args.fleet_supervisor_threshold,
+        args.simulator_latency_ms,
+        args.acceptance_purpose,
     )
     summaries = [summary]
     summary_path = args.artifacts / f"gate3-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"
