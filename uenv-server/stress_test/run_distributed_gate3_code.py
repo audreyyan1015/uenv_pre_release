@@ -323,6 +323,15 @@ async def main():
         else time.monotonic() - started < args.duration
     ):
         await semaphore.acquire()
+        # The condition above may have been evaluated before acquire blocked.
+        # Recheck after a previous task releases the slot, otherwise an exact
+        # one-batch run can enqueue a second batch with stale loop state.
+        if args.exact_batches > 0 and batch_sequence >= args.exact_batches:
+            semaphore.release()
+            break
+        if args.exact_batches == 0 and time.monotonic() - started >= args.duration:
+            semaphore.release()
+            break
         task = asyncio.create_task(send_batch())
         tasks.add(task)
         task.add_done_callback(tasks.discard)

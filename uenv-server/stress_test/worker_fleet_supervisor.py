@@ -82,6 +82,7 @@ mem_total, mem_available = memory_bytes()
 metrics = {
     "sample_count": 0,
     "mem_total_bytes": mem_total,
+    "initial_mem_available_bytes": mem_available,
     "min_mem_available_bytes": mem_available,
     "peak_processes": 0,
     "peak_rss_bytes": 0,

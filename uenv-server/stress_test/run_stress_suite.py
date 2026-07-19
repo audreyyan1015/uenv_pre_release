@@ -286,7 +286,7 @@ def scale_resource_gate(
         return {"passed": False, "reason": f"expected one fleet metric record, found {len(candidates)}"}
     metrics = candidates[0]
     required = {
-        "mem_total_bytes", "min_mem_available_bytes", "peak_rss_bytes",
+        "mem_total_bytes", "initial_mem_available_bytes", "min_mem_available_bytes", "peak_rss_bytes",
         "peak_processes", "peak_open_fds", "sample_count",
     }
     missing = sorted(required - metrics.keys())
@@ -294,12 +294,24 @@ def scale_resource_gate(
         return {"passed": False, "reason": f"fleet metrics missing fields: {missing}", "metrics": metrics}
     minimum_available = int(config["minimum_mem_available_bytes"])
     available_ok = int(metrics["min_mem_available_bytes"]) >= minimum_available
+    measured_available_drop = max(
+        0,
+        int(metrics["initial_mem_available_bytes"]) - int(metrics["min_mem_available_bytes"]),
+    )
     projected_bytes = None
+    projected_available_bytes = None
     projected_ok = True
     if next_workers is not None:
-        projected_bytes = int(int(metrics["peak_rss_bytes"]) / current_workers * next_workers)
-        projected_ok = projected_bytes <= int(
-            int(metrics["mem_total_bytes"]) * float(config["maximum_projected_host_memory_fraction"])
+        # Summed RSS double-counts shared executable/library pages across the
+        # fleet. Use the host-level MemAvailable drop for the safety decision;
+        # retain peak_rss_bytes only as an observational metric.
+        projected_bytes = int(measured_available_drop / current_workers * next_workers)
+        projected_available_bytes = int(metrics["initial_mem_available_bytes"]) - projected_bytes
+        projected_ok = (
+            projected_bytes <= int(
+                int(metrics["mem_total_bytes"]) * float(config["maximum_projected_host_memory_fraction"])
+            )
+            and projected_available_bytes >= minimum_available
         )
     passed = available_ok and projected_ok and int(metrics["sample_count"]) > 0
     return {
@@ -308,7 +320,9 @@ def scale_resource_gate(
         "next_workers": next_workers,
         "metrics": metrics,
         "minimum_mem_available_bytes": minimum_available,
-        "projected_next_fleet_rss_bytes": projected_bytes,
+        "measured_mem_available_drop_bytes": measured_available_drop,
+        "projected_next_fleet_memory_bytes": projected_bytes,
+        "projected_next_mem_available_bytes": projected_available_bytes,
         "maximum_projected_host_memory_fraction": config["maximum_projected_host_memory_fraction"],
         "available_memory_gate_passed": available_ok,
         "projected_memory_gate_passed": projected_ok,

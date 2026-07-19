@@ -48,7 +48,8 @@ class StressSuiteTests(unittest.TestCase):
             "result": {
                 "fleet_resource_metrics": {
                     "mem_total_bytes": 16 * 1024**3,
-                    "min_mem_available_bytes": 8 * 1024**3,
+                    "initial_mem_available_bytes": 12 * 1024**3,
+                    "min_mem_available_bytes": 12 * 1024**3 - 256 * 1024**2,
                     "peak_rss_bytes": 256 * 1024**2,
                     "peak_processes": 65,
                     "peak_open_fds": 512,
@@ -66,7 +67,15 @@ class StressSuiteTests(unittest.TestCase):
             },
         )
         self.assertTrue(decision["passed"])
-        self.assertEqual(decision["projected_next_fleet_rss_bytes"], 4 * 1024**3)
+        self.assertEqual(decision["projected_next_fleet_memory_bytes"], 4 * 1024**3)
+
+    def test_exact_batch_loop_rechecks_after_semaphore_wait(self):
+        import run_distributed_gate3_code
+
+        self.assertIn(
+            "if args.exact_batches > 0 and batch_sequence >= args.exact_batches",
+            run_distributed_gate3_code.LOAD_CLIENT,
+        )
 
     def test_single_worker_gate3_does_not_receive_scale_port_range(self):
         config = run_stress_suite.load_suite_config(
