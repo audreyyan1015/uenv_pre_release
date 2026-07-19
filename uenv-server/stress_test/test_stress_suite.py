@@ -20,7 +20,8 @@ class StressSuiteTests(unittest.TestCase):
         self.assertEqual(config["worker_scale"]["tiers"], [32, 512, 1024])
         self.assertEqual(config["worker_scale"]["model_port"], 6379)
         self.assertEqual(config["worker_scale"]["episode_batch_size"], 32)
-        self.assertEqual(config["worker_scale"]["episodes_per_worker"], 1)
+        self.assertEqual(config["worker_scale"]["episodes_per_worker"], 4)
+        self.assertEqual(config["worker_scale"]["simulator_latency_ms"], 5000)
         self.assertEqual(config["worker_scale"]["plugin_ready_timeout_seconds"], 30)
         self.assertEqual(config["worker_scale"]["worker_register_max_attempts"], 20)
         self.assertEqual(config["worker_scale"]["worker_register_retry_backoff_ms"], 100)
@@ -104,7 +105,7 @@ class StressSuiteTests(unittest.TestCase):
         batch_size_index = scale_command.index("--episode-batch-size")
         self.assertEqual(scale_command[batch_size_index + 1], "32")
         exact_batches_index = scale_command.index("--exact-batches")
-        self.assertEqual(scale_command[exact_batches_index + 1], "32")
+        self.assertEqual(scale_command[exact_batches_index + 1], "128")
         concurrent_batches_index = scale_command.index("--concurrent-batches")
         self.assertEqual(scale_command[concurrent_batches_index + 1], "32")
 
