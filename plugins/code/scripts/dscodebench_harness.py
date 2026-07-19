@@ -332,6 +332,32 @@ def _allclose(a: Any, b: Any) -> bool:
         return False
 
 
+def _as_bool_equal(eq: Any) -> bool:
+    """Convert equality results to a scalar bool without ambiguous truth-value errors."""
+    if isinstance(eq, bool):
+        return eq
+    try:
+        import numpy as np
+
+        if isinstance(eq, np.ndarray):
+            return bool(eq.all()) if eq.size else True
+        if isinstance(eq, np.generic):
+            return bool(eq.item())
+    except ImportError:
+        pass
+    try:
+        import pandas as pd
+
+        if isinstance(eq, (pd.Series, pd.DataFrame, pd.Index)):
+            return bool(eq.all().all() if isinstance(eq, pd.DataFrame) else eq.all())
+    except Exception:
+        return False
+    try:
+        return bool(eq)
+    except Exception:
+        return False
+
+
 def values_equal(result: Any, ans: Any) -> bool:
     """Compare harness outputs; heavy libs are optional."""
     try:
@@ -353,7 +379,7 @@ def values_equal(result: Any, ans: Any) -> bool:
 
             if isinstance(result, np.ndarray) or isinstance(ans, np.ndarray):
                 return _allclose(result, ans)
-            if isinstance(result, np.ma.MaskedArray):
+            if isinstance(result, np.ma.MaskedArray) or isinstance(ans, np.ma.MaskedArray):
                 return bool(np.ma.allclose(result, ans))
         except ImportError:
             pass
@@ -361,11 +387,15 @@ def values_equal(result: Any, ans: Any) -> bool:
         try:
             import pandas as pd
 
-            if isinstance(result, pd.DataFrame):
+            if isinstance(result, pd.DataFrame) or isinstance(ans, pd.DataFrame):
                 pd.testing.assert_frame_equal(result, ans)
                 return True
+            if isinstance(result, pd.Series) or isinstance(ans, pd.Series):
+                pd.testing.assert_series_equal(result, ans, check_names=False)
+                return True
         except Exception:
-            if "pandas" in type(result).__module__:
+            module = getattr(type(result), "__module__", "") or ""
+            if "pandas" in module:
                 return False
 
         try:
@@ -384,7 +414,7 @@ def values_equal(result: Any, ans: Any) -> bool:
                 return True
             return math.isclose(float(result), float(ans), rel_tol=1e-6, abs_tol=1e-8)
 
-        return result == ans
+        return _as_bool_equal(result == ans)
     except Exception:
         return False
 
@@ -401,6 +431,31 @@ def evaluate_outputs(
     return results
 
 
+def _classify_harness_error(error: str | None) -> str | None:
+    if not error:
+        return None
+    lower = error.lower()
+    if any(
+        key in lower
+        for key in (
+            "modulenotfounderror",
+            "no module named",
+            "importerror",
+            "cannot import name",
+        )
+    ):
+        return "dependency_error"
+    if "candidate produced no outputs" in lower:
+        return "candidate_runtime_error"
+    if "some tests failed" in lower:
+        return "wrong_answer"
+    if "harness exec failed" in lower or "ground-truth produced no outputs" in lower:
+        return "harness_error"
+    if "empty candidate" in lower:
+        return "candidate_runtime_error"
+    return "harness_error"
+
+
 def evaluate_problem(
     *,
     ground_truth_code: str,
@@ -412,27 +467,31 @@ def evaluate_problem(
     """Run official-style evaluation for one DSCodeBench problem."""
     is_plot = "output.png" in ground_truth_code
     candidate_code = extract_code(candidate_code).strip() or candidate_code
+
+    def _fail(
+        error: str,
+        *,
+        tests_run: int = 0,
+        tests_passed: int = 0,
+        error_category: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "passed": False,
+            "tests_run": tests_run,
+            "tests_passed": tests_passed,
+            "error": error,
+            "error_category": error_category or _classify_harness_error(error),
+        }
+
     if not candidate_code.strip():
-        return {
-            "passed": False,
-            "tests_run": 0,
-            "tests_passed": 0,
-            "error": "empty candidate code",
-        }
+        return _fail("empty candidate code", error_category="candidate_runtime_error")
     if not ground_truth_code.strip():
-        return {
-            "passed": False,
-            "tests_run": 0,
-            "tests_passed": 0,
-            "error": "empty ground_truth_code",
-        }
+        return _fail("empty ground_truth_code", error_category="harness_error")
     if "test_case_input_generator" not in test_script:
-        return {
-            "passed": False,
-            "tests_run": 0,
-            "tests_passed": 0,
-            "error": "test_script missing test_case_input_generator",
-        }
+        return _fail(
+            "test_script missing test_case_input_generator",
+            error_category="harness_error",
+        )
 
     try:
         _inputs, gt_out, sol_out = get_exec_output(
@@ -444,34 +503,25 @@ def evaluate_problem(
             random_seed=random_seed,
         )
     except Exception as exc:  # noqa: BLE001
-        return {
-            "passed": False,
-            "tests_run": 0,
-            "tests_passed": 0,
-            "error": f"harness exec failed: {exc}",
-        }
+        return _fail(f"harness exec failed: {exc}")
 
     if not gt_out:
-        return {
-            "passed": False,
-            "tests_run": 0,
-            "tests_passed": 0,
-            "error": "ground-truth produced no outputs (syntax/runtime error?)",
-        }
+        return _fail("ground-truth produced no outputs (syntax/runtime error?)")
     if not sol_out:
-        return {
-            "passed": False,
-            "tests_run": len(gt_out),
-            "tests_passed": 0,
-            "error": "candidate produced no outputs (syntax/runtime error?)",
-        }
+        return _fail(
+            "candidate produced no outputs (syntax/runtime error?)",
+            tests_run=len(gt_out),
+            error_category="candidate_runtime_error",
+        )
 
     flags = evaluate_outputs(gt_out, sol_out)
     tests_run = len(flags)
     tests_passed = sum(flags)
+    passed = tests_run > 0 and tests_passed == tests_run
     return {
-        "passed": tests_run > 0 and tests_passed == tests_run,
+        "passed": passed,
         "tests_run": tests_run,
         "tests_passed": tests_passed,
-        "error": None if tests_run > 0 and tests_passed == tests_run else "some tests failed",
+        "error": None if passed else "some tests failed",
+        "error_category": None if passed else "wrong_answer",
     }
