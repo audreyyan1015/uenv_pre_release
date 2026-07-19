@@ -43,7 +43,12 @@ pub fn build_reset_config(
             config[key] = v.clone();
         }
     }
-    for key in ["num_tests", "random_seed", "timeout_secs"] {
+    for key in [
+        "num_tests",
+        "random_seed",
+        "timeout_secs",
+        "min_steps_before_terminate",
+    ] {
         if let Some(v) = payload_json.get(key) {
             config[key] = v.clone();
         }
@@ -134,7 +139,8 @@ mod tests {
             "entry_point": "add",
             "num_tests": 10,
             "random_seed": 42,
-            "timeout_secs": 60
+            "timeout_secs": 60,
+            "min_steps_before_terminate": 3
         }"#;
         let cfg: serde_json::Value =
             serde_json::from_slice(&build_reset_config(payload, b"{}", Some(7)).unwrap()).unwrap();
@@ -142,6 +148,7 @@ mod tests {
         assert_eq!(cfg["task_id"], "ds_001");
         assert_eq!(cfg["library"], "pandas");
         assert_eq!(cfg["num_tests"], 10);
+        assert_eq!(cfg["min_steps_before_terminate"], 3);
         assert_eq!(cfg["seed"], 7);
     }
 }

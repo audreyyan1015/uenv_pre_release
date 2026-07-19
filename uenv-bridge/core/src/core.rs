@@ -390,6 +390,7 @@ fn sample_to_worker_payload(
                 "timeout_secs",
                 "benchmark_root",
                 "response_text",
+                "min_steps_before_terminate",
             ] {
                 if let Some(v) = env_cfg.get(key) {
                     obj.insert(key.to_string(), v.clone());
@@ -826,6 +827,37 @@ mod tests {
         assert_eq!(worker_payload["generation_config"]["max_new_tokens"], 8);
         assert_eq!(worker_reward["type"], "rule_reward");
         assert_eq!(worker_reward["target"], "72");
+    }
+
+    #[tokio::test]
+    async fn execute_batch_forwards_code_minimum_interaction_steps() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core = AdapterCore::new(RecordingEpisodeService {
+            requests: Arc::clone(&recorded),
+        });
+        let payload = br#"{
+            "env_config":{
+                "question":"Write add(a, b).",
+                "dataset":"gate3-code",
+                "task_id":"gate3-real-1",
+                "min_steps_before_terminate":3
+            }
+        }"#;
+        let mut sample = make_sample("episode-code", 0, payload);
+        sample.env_type = "code".to_string();
+
+        core.execute_batch(ExecuteBatchRequest {
+            request_id: "request-code".to_string(),
+            batch_id: "batch-code".to_string(),
+            samples: vec![sample],
+        })
+        .await
+        .unwrap();
+
+        let episode_requests = recorded.lock().unwrap().pop().unwrap();
+        let worker_payload: Value =
+            serde_json::from_slice(&episode_requests[0].payload).expect("worker payload json");
+        assert_eq!(worker_payload["min_steps_before_terminate"], 3);
     }
 
     #[tokio::test]
