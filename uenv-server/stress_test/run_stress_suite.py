@@ -150,7 +150,7 @@ def gate3_command(args: argparse.Namespace, config: dict[str, Any], artifacts: P
     ]
     for mode in gate["modes"]:
         command.extend(["--mode", mode])
-    if args.private_worker_port_range:
+    if int(gate["workers"]) > 1 and args.private_worker_port_range:
         command.extend(["--private-worker-port-range", args.private_worker_port_range])
     return command + common_child_args(args)
 

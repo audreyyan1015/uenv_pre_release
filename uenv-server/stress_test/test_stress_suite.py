@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import run_stress_suite
@@ -66,6 +67,21 @@ class StressSuiteTests(unittest.TestCase):
         )
         self.assertTrue(decision["passed"])
         self.assertEqual(decision["projected_next_fleet_rss_bytes"], 4 * 1024**3)
+
+    def test_single_worker_gate3_does_not_receive_scale_port_range(self):
+        config = run_stress_suite.load_suite_config(
+            Path(__file__).with_name("stress_suite.json")
+        )
+        args = SimpleNamespace(
+            source_repo="/repo", server_bin="/server", worker_bin="/worker",
+            code_plugin_bin="/plugin", protected_pid=1, protected_port=[8077, 8088],
+            server_host="server", worker_host="worker", server_private_ip="10.0.0.1",
+            worker_private_ip="10.0.0.2", server_port=8099, worker_port=8000,
+            model_port=8888, obs_port=18002, llm_config="/secret/config.json",
+            private_worker_port_range="8000-9023",
+        )
+        command = run_stress_suite.gate3_command(args, config, Path("/artifacts"))
+        self.assertNotIn("--private-worker-port-range", command)
 
 
 if __name__ == "__main__":
