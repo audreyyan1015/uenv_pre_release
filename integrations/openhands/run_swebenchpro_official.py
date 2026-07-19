@@ -35,6 +35,7 @@ sys.path.insert(0, str(_INTEGRATION))
 from uenv_runtime.client import UEnvGatewayClient, GatewayError  # noqa: E402
 from uenv_runtime.agent_job import load_agent_job  # noqa: E402
 from uenv_runtime.gateway_tools import patch_openhands_tools_for_uenv  # noqa: E402
+from uenv_runtime.llm_rollout import RolloutTraceCollector  # noqa: E402
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
 
 
@@ -300,11 +301,15 @@ def main() -> int:
         client = UEnvGatewayClient("http://127.0.0.1:1", api_key=args.api_key, run_id=run_id)
 
     llm = None
+    rollout_collector = None
+    rollout_fields: dict[str, Any] = {}
     if args.mode == "llm":
         if not args.llm_config:
             print("--llm-config required for llm mode", file=sys.stderr)
             return 1
         llm = load_llm_config(args.llm_config)
+        rollout_collector = RolloutTraceCollector(args.llm_config)
+        rollout_collector.install(llm)
         logger.info("LLM model=%s", llm.model)
 
     session_id = agent_job.session_id if agent_job else None
@@ -372,6 +377,10 @@ def main() -> int:
                     out / "conversation_events.json",
                     {"count": len(list(conversation.state.events))},
                 )
+                if rollout_collector is None:
+                    raise RuntimeError("LLM rollout collector was not initialized")
+                rollout_fields = rollout_collector.finalize()
+                _save_json(out / "llm_rollout_trace.json", rollout_fields)
                 result = ws.submit()
 
         elapsed = time.time() - t0
@@ -385,6 +394,7 @@ def main() -> int:
             "trajectory_ref": result.trajectory_ref,
             "elapsed_sec": elapsed,
         }
+        submit_doc.update(rollout_fields)
         _save_json(out / "submit_result.json", submit_doc)
 
         ref = result.trajectory_ref

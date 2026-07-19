@@ -490,7 +490,7 @@ def run_one(
         # 在 server 机器打包需要的 worker、plugins、integrations 和 SWE 配置，
         # 再传到 worker 机器解包运行。
         base.run(server, f"install -d -m 0755 {base.q(server_run)}/bundle {base.q(server_run)}/generated/uenv/v1")
-        base.run(worker, f"install -d -m 0755 {base.q(worker_run)} {base.q(worker_run)}/wal {base.q(worker_run)}/openhands")
+        base.run(worker, f"install -d -m 0755 {base.q(worker_run)} {base.q(worker_run)}/wal {base.q(worker_run)}/openhands {base.q(worker_run)}/trajectory")
         base.run(
             server,
             " && ".join([
@@ -592,6 +592,7 @@ def run_one(
             "env", "UENV_SERVER_CONFIG_STRICT=1", "UENV_TRAJECTORY_ENABLED=0",
             "UENV_OBS_ENABLED=0", "UENV_LOG_ANSI=0",
             "UENV_WORKER_EPISODE_TIMEOUT_SECS=900", "UENV_LLM_HTTP_TIMEOUT_SECS=900",
+            f"UENV_SWE_ARTIFACT_DIR={worker_run}/trajectory",
             f"UENV_SWE_INSTANCES={worker_run}/bundle/config/swe/verified.json",
             "UENV_SWE_RUNTIME=docker",
             f"UENV_SWE_GATEWAY_API_KEY=stress-gateway-{run_id}",
@@ -633,6 +634,7 @@ def run_one(
             "OPENHANDS_SDK_DIR": "/opt/openhands/benchmarks/vendor/software-agent-sdk",
             "OPENHANDS_BENCHMARKS_DIR": "/opt/openhands/benchmarks",
             "OPENHANDS_PYTHON": "/opt/openhands/benchmarks/.venv/bin/python",
+            "OPENHANDS_SUPPRESS_BANNER": "1",
             "OPENHANDS_MODE": args.mode,
             "OPENHANDS_MAX_ITERATIONS": str(args.openhands_max_iterations),
             "OPENHANDS_RUN_TIMEOUT_SEC": "900",

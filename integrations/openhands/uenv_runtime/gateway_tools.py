@@ -174,7 +174,7 @@ def patch_openhands_tools_for_uenv() -> None:
     from collections.abc import Sequence
 
     from openhands.sdk.conversation.state import ConversationState
-    from openhands.sdk.tool import ToolDefinition, ToolExecutor
+    from openhands.sdk.tool import ToolDefinition, ToolExecutor, register_tool
     from openhands.tools.file_editor.definition import FileEditorTool
     from openhands.tools.terminal.definition import TerminalTool
 
@@ -300,3 +300,7 @@ def patch_openhands_tools_for_uenv() -> None:
     os.path.isdir = _isdir  # type: ignore[assignment]
     TerminalTool.create = _terminal_create  # type: ignore[method-assign]
     FileEditorTool.create = _file_create  # type: ignore[method-assign]
+    # Registry resolvers capture ``create`` at registration time, so replacing the
+    # classmethod alone leaves the old local executors active.
+    register_tool(TerminalTool.name, TerminalTool)
+    register_tool(FileEditorTool.name, FileEditorTool)
