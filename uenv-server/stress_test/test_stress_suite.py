@@ -18,6 +18,7 @@ class StressSuiteTests(unittest.TestCase):
         self.assertEqual(config["gate3"]["model_mode"], "real")
         self.assertEqual(config["gate4"]["mode"], "llm")
         self.assertEqual(config["worker_scale"]["tiers"], [32, 512, 1024])
+        self.assertEqual(config["worker_scale"]["model_port"], 6379)
         self.assertEqual(config["worker_scale"]["plugin_ready_timeout_seconds"], 30)
         self.assertEqual(config["worker_scale"]["worker_register_max_attempts"], 20)
         self.assertEqual(config["worker_scale"]["worker_register_retry_backoff_ms"], 100)
@@ -93,6 +94,11 @@ class StressSuiteTests(unittest.TestCase):
         )
         command = run_stress_suite.gate3_command(args, config, Path("/artifacts"))
         self.assertNotIn("--private-worker-port-range", command)
+        scale_command = run_stress_suite.worker_scale_command(
+            args, config, 1024, Path("/scale-artifacts")
+        )
+        model_port_index = scale_command.index("--model-port")
+        self.assertEqual(scale_command[model_port_index + 1], "6379")
 
     def test_newest_summary_finds_child_output_under_absolute_root(self):
         with tempfile.TemporaryDirectory() as directory:

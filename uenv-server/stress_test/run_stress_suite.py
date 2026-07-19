@@ -93,7 +93,15 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
         raise ValueError(f"isolated suite ports overlap protected ports: {sorted(overlap)}")
     gate3 = config["gate3"]
     workers = int(gate3["workers"])
-    max_scale_workers = max(int(value) for value in config["worker_scale"]["tiers"])
+    worker_scale = config["worker_scale"]
+    max_scale_workers = max(int(value) for value in worker_scale["tiers"])
+    scale_model_port = int(worker_scale["model_port"])
+    if scale_model_port not in ALLOWED_EXPOSED_PORTS:
+        raise ValueError(
+            f"worker-scale model port {scale_model_port} is not in the explicitly allowed exposed-port set"
+        )
+    if scale_model_port in protected:
+        raise ValueError(f"worker-scale model port {scale_model_port} overlaps a protected port")
     if (workers > 1 or config["worker_scale"].get("enabled", True)) and not args.private_worker_port_range:
         raise ValueError("multi-Worker execution requires --private-worker-port-range")
     if args.private_worker_port_range:
@@ -106,9 +114,13 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
             raise ValueError(
                 f"private Worker range must start at {args.worker_port} and contain at least {max_scale_workers} ports"
             )
+        if start <= scale_model_port < start + max_scale_workers:
+            raise ValueError(
+                f"worker-scale model port {scale_model_port} overlaps the {max_scale_workers}-Worker port range"
+            )
 
 
-def common_child_args(args: argparse.Namespace) -> list[str]:
+def common_child_args(args: argparse.Namespace, *, model_port: int | None = None) -> list[str]:
     command = [
         "--source-repo", args.source_repo,
         "--server-bin", args.server_bin,
@@ -121,7 +133,7 @@ def common_child_args(args: argparse.Namespace) -> list[str]:
         "--worker-private-ip", args.worker_private_ip,
         "--server-port", str(args.server_port),
         "--worker-port", str(args.worker_port),
-        "--model-port", str(args.model_port),
+        "--model-port", str(args.model_port if model_port is None else model_port),
         "--obs-port", str(args.obs_port),
     ]
     for port in args.protected_port:
@@ -162,7 +174,7 @@ def worker_scale_command(
     artifacts: Path,
 ) -> list[str]:
     gate = config["worker_scale"]
-    return [
+    command = [
         sys.executable,
         str(HERE / "run_distributed_gate3_code.py"),
         "--duration", "1",
@@ -186,7 +198,8 @@ def worker_scale_command(
         "--acceptance-purpose", "worker-scale",
         "--private-worker-port-range", args.private_worker_port_range,
         "--artifacts", str(artifacts),
-    ] + common_child_args(args)
+    ]
+    return command + common_child_args(args, model_port=int(gate["model_port"]))
 
 
 def gate4_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
