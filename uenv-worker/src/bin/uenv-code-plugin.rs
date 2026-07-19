@@ -175,6 +175,9 @@ impl PluginService for CodePlugin {
         if let Some(err) = &result.error {
             info.insert("error".to_string(), err.clone());
         }
+        if let Some(category) = &result.error_category {
+            info.insert("error_category".to_string(), category.clone());
+        }
         info.insert("detail".to_string(), info_json);
 
         Ok(Response::new(StepResponse {

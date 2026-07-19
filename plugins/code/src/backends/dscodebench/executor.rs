@@ -43,19 +43,26 @@ pub struct EvaluationResult {
     pub execution_time_ms: u64,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub error_category: Option<String>,
+}
+
+fn fail_result(started: Instant, error: impl Into<String>, category: &str) -> EvaluationResult {
+    EvaluationResult {
+        passed: false,
+        tests_run: 0,
+        tests_passed: 0,
+        execution_time_ms: started.elapsed().as_millis() as u64,
+        error: Some(error.into()),
+        error_category: Some(category.to_string()),
+    }
 }
 
 pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationResult {
     let started = Instant::now();
     let code = extract_python_code(raw_action);
     if code.trim().is_empty() {
-        return EvaluationResult {
-            passed: false,
-            tests_run: 0,
-            tests_passed: 0,
-            execution_time_ms: started.elapsed().as_millis() as u64,
-            error: Some("empty code after extraction".into()),
-        };
+        return fail_result(started, "empty code after extraction", "candidate_runtime_error");
     }
 
     let script = evaluator_script_path();
@@ -65,25 +72,21 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
     eval_req.code = code.to_string();
 
     if eval_req.test_code.is_none() && eval_req.test_script_path.is_none() {
-        return EvaluationResult {
-            passed: false,
-            tests_run: 0,
-            tests_passed: 0,
-            execution_time_ms: started.elapsed().as_millis() as u64,
-            error: Some("missing test_code or test_script_path".into()),
-        };
+        return fail_result(
+            started,
+            "missing test_code or test_script_path",
+            "harness_error",
+        );
     }
 
     let input_json = match serde_json::to_string(&eval_req) {
         Ok(v) => v,
         Err(e) => {
-            return EvaluationResult {
-                passed: false,
-                tests_run: 0,
-                tests_passed: 0,
-                execution_time_ms: started.elapsed().as_millis() as u64,
-                error: Some(format!("serialize eval request: {e}")),
-            };
+            return fail_result(
+                started,
+                format!("serialize eval request: {e}"),
+                "harness_error",
+            );
         }
     };
 
@@ -101,13 +104,11 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
     {
         Ok(c) => c,
         Err(e) => {
-            return EvaluationResult {
-                passed: false,
-                tests_run: 0,
-                tests_passed: 0,
-                execution_time_ms: started.elapsed().as_millis() as u64,
-                error: Some(format!("spawn python ({python}): {e}")),
-            };
+            return fail_result(
+                started,
+                format!("spawn python ({python}): {e}"),
+                "harness_error",
+            );
         }
     };
 
@@ -125,13 +126,7 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
     {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
-            return EvaluationResult {
-                passed: false,
-                tests_run: 0,
-                tests_passed: 0,
-                execution_time_ms: started.elapsed().as_millis() as u64,
-                error: Some(format!("python wait: {e}")),
-            };
+            return fail_result(started, format!("python wait: {e}"), "harness_error");
         }
         Err(_) => {
             if let Some(pid) = pid {
@@ -141,13 +136,11 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
                     .status()
                     .await;
             }
-            return EvaluationResult {
-                passed: false,
-                tests_run: 0,
-                tests_passed: 0,
-                execution_time_ms: started.elapsed().as_millis() as u64,
-                error: Some(format!("evaluation timed out after {timeout_secs}s")),
-            };
+            return fail_result(
+                started,
+                format!("evaluation timed out after {timeout_secs}s"),
+                "timeout",
+            );
         }
     };
 
@@ -160,17 +153,15 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
         } else {
             stderr.trim().to_string()
         };
-        return EvaluationResult {
-            passed: false,
-            tests_run: 0,
-            tests_passed: 0,
-            execution_time_ms: started.elapsed().as_millis() as u64,
-            error: Some(if err.is_empty() {
+        return fail_result(
+            started,
+            if err.is_empty() {
                 format!("python exited with {}", output.status)
             } else {
                 err
-            }),
-        };
+            },
+            "harness_error",
+        );
     }
 
     // Prefer the last non-empty line (evaluator prints one JSON object).
@@ -187,15 +178,11 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
             }
             result
         }
-        Err(e) => EvaluationResult {
-            passed: false,
-            tests_run: 0,
-            tests_passed: 0,
-            execution_time_ms: started.elapsed().as_millis() as u64,
-            error: Some(format!(
-                "parse evaluator output: {e}; stdout={stdout}; stderr={stderr}"
-            )),
-        },
+        Err(e) => fail_result(
+            started,
+            format!("parse evaluator output: {e}; stdout={stdout}; stderr={stderr}"),
+            "harness_error",
+        ),
     }
 }
 
