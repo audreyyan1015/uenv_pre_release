@@ -290,10 +290,40 @@ impl UEnvEpisodeService {
                 dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone()) => {
                     match dispatch_result {
                         Err(e) => {
-                            // 派发 RPC 失败说明 worker 没有开始执行本次任务，释放 reservation 后可换 worker 重试。
+                            // 连接/派发失败可以换 worker 重试；但 Worker 已执行后返回的确定性
+                            // env step 失败必须直接形成终态，避免重复昂贵的模型生成。
                             self.state.pending_results.remove(&pending_key);
                             self.state.active_episodes.remove(&episode_id);
                             worker_lease.release();
+                            if let Some(error_code) = deterministic_dispatch_error_code(&e) {
+                                tracing::warn!(
+                                    episode_id = %episode_id,
+                                    attempt_id = attempt_id,
+                                    worker_id = %assignment.worker_id,
+                                    error = %e,
+                                    "episode_non_retryable_worker_failure"
+                                );
+                                let mut result = failed_result_from_request(
+                                    &req,
+                                    "failed",
+                                    format!("non-retryable worker execution failure: {e}"),
+                                    error_code,
+                                    Some(ResultTiming {
+                                        enqueue_at: async_context.enqueue_at,
+                                        dispatch_at: Some(dispatch_at),
+                                        dispatch_ts: Some(dispatch_ts),
+                                    }),
+                                );
+                                result.metadata.insert(
+                                    "terminal_kind".to_string(),
+                                    "worker_execution_failed".to_string(),
+                                );
+                                result
+                                    .metadata
+                                    .insert("retryable".to_string(), "false".to_string());
+                                let _ = self.state.episode_broadcast.send(result.clone());
+                                return Ok(result);
+                            }
                             Some(format!("dispatch_failed: {e}"))
                         }
                         Ok(()) => {

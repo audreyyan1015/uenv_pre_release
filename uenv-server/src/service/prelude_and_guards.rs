@@ -342,6 +342,28 @@ fn is_retryable_schedule_error(error: &ScheduleError) -> bool {
     )
 }
 
+/// 识别 Worker 已经开始执行后返回的确定性环境 step 失败。
+///
+/// 新版 Worker 应在错误文本中带回 `ERR_ENV_STEP_FAILED`。兼容旧版 Worker 时，
+/// 插件 panic 会先表现为 h2 RESET/CANCEL，再被 Worker 包装为
+/// `execute_episode_failed`；只有这两个特征同时出现才按确定性 step 失败处理，
+/// 避免把模型调用失败、连接失败或容量不足误判为不可重试。
+fn deterministic_dispatch_error_code(error: &anyhow::Error) -> Option<ErrorCode> {
+    let normalized = format!("{error:#}").to_ascii_lowercase();
+    if normalized.contains("err_env_step_failed") {
+        return Some(ErrorCode::ErrEnvStepFailed);
+    }
+
+    let worker_execution_failed = normalized.contains("execute_episode_failed");
+    let h2_stream_failed = normalized.contains("h2")
+        && (normalized.contains("cancel") || normalized.contains("reset"));
+    if worker_execution_failed && h2_stream_failed {
+        return Some(ErrorCode::ErrEnvStepFailed);
+    }
+
+    None
+}
+
 fn sweep_completed_async(state: &ServerState) {
     // completed_async 是异步提交后的短期结果缓存。按 TTL 和最大条数清理，防止长期运行后内存持续增长。
     if state.completed_async_ttl_secs > 0 {
