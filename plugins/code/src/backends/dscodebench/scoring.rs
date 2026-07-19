@@ -22,6 +22,8 @@ pub struct StepInfo {
     pub execution_time_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_category: Option<String>,
 }
 
 impl StepInfo {
@@ -35,6 +37,7 @@ impl StepInfo {
             tests_passed: result.tests_passed,
             execution_time_ms: result.execution_time_ms,
             error: result.error.clone(),
+            error_category: result.error_category.clone(),
         }
     }
 }
@@ -53,6 +56,7 @@ mod tests {
                 tests_passed: 1,
                 execution_time_ms: 10,
                 error: None,
+                error_category: None,
             }),
             1.0
         );
@@ -63,6 +67,7 @@ mod tests {
                 tests_passed: 0,
                 execution_time_ms: 10,
                 error: Some("fail".into()),
+                error_category: Some("wrong_answer".into()),
             }),
             0.0
         );
