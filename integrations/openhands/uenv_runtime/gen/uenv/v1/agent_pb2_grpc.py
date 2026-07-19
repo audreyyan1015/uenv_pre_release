@@ -5,7 +5,7 @@ import warnings
 
 from uenv.v1 import agent_pb2 as uenv_dot_v1_dot_agent__pb2
 
-GRPC_GENERATED_VERSION = '1.81.0'
+GRPC_GENERATED_VERSION = '1.67.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,14 +18,14 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in uenv/v1/agent_pb2_grpc.py depends on'
+        + f' but the generated code in uenv/v1/agent_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
     )
 
 
-class AgentControlServiceStub:
+class AgentControlServiceStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -56,7 +56,7 @@ class AgentControlServiceStub:
                 _registered_method=True)
 
 
-class AgentControlServiceServicer:
+class AgentControlServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def RegisterAgent(self, request, context):
@@ -114,7 +114,7 @@ def add_AgentControlServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class AgentControlService:
+class AgentControlService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod

@@ -559,6 +559,21 @@ def run_one(
             f"install -m 0644 {base.q(worker_run)}/agent_pb2_grpc.py {base.q(worker_run)}/generated/uenv/v1/agent_pb2_grpc.py && "
             f"touch {base.q(worker_run)}/generated/uenv/__init__.py {base.q(worker_run)}/generated/uenv/v1/__init__.py",
         )
+        agent_pythonpath = f"{worker_run}/generated:{worker_run}/bundle/integrations/openhands"
+        _, grpc_import_output, _ = base.run(
+            worker,
+            " ".join([
+                f"PYTHONPATH={base.q(agent_pythonpath)}",
+                OPENHANDS_PYTHON,
+                "-c",
+                base.q(
+                    "from uenv_runtime.agent_client import _load_grpc_modules; "
+                    "grpc, _, _ = _load_grpc_modules(); "
+                    "print('agent_grpc_compatible=' + grpc.__version__)"
+                ),
+            ]),
+        )
+        print(f"[preflight] {grpc_import_output.strip()}")
 
         # 启动隔离 server。关闭 trajectory/obs，减少与压测目标无关的额外工作。
         server_command = " ".join([
@@ -601,7 +616,7 @@ def run_one(
         # OpenHands agent 通过轮询 server 获取任务。下面这些环境变量告诉它：
         # 去哪个 server 拉任务、使用哪个 agent_id、运行目录在哪里、如何访问 gateway。
         agent_env = {
-            "PYTHONPATH": f"{worker_run}/generated:{worker_run}/bundle/integrations/openhands",
+            "PYTHONPATH": agent_pythonpath,
             "UENV_SERVER_ENDPOINT": f"{base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}",
             "OPENHANDS_AGENT_POLL": "1",
             "OPENHANDS_AGENT_ID": agent_id,

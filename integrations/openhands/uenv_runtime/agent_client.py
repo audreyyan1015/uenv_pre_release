@@ -38,6 +38,7 @@ def _load_grpc_modules() -> tuple[Any, Any, Any]:
     # 生成的 stub 位于 gen/uenv/v1/（包名 uenv.v1）；旧文档曾写扁平 gen/agent_pb2。
     pb2 = None
     pb2_grpc = None
+    import_errors: list[str] = []
     for pkg in (
         "uenv.v1",
         "uenv_runtime.gen.uenv.v1",
@@ -51,12 +52,17 @@ def _load_grpc_modules() -> tuple[Any, Any, Any]:
             sys.modules.setdefault("agent_pb2", pb2)
             pb2_grpc = importlib.import_module(f"{prefix}agent_pb2_grpc")
             break
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            import_errors.append(
+                f"{prefix or '<root>'}agent_pb2_grpc: "
+                f"{type(exc).__name__}: {exc}"
+            )
             continue
     if pb2 is None or pb2_grpc is None:
         raise AgentControlUnavailable(
             "agent gRPC stub not found; run `make proto-agent-python` to generate "
-            "integrations/openhands/uenv_runtime/gen/agent_pb2*.py"
+            "integrations/openhands/uenv_runtime/gen/agent_pb2*.py; "
+            "import failures: " + " | ".join(import_errors)
         )
     return grpc, pb2, pb2_grpc
 
