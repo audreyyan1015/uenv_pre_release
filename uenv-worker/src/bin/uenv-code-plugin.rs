@@ -13,7 +13,7 @@ use tonic::{Request, Response, Status};
 #[cfg(unix)]
 use tonic::transport::Server;
 use uenv_code_env::dscodebench::{
-    evaluate, reward_from_result, EvaluationRequest, StepInfo,
+    evaluate, reward_from_result, EvaluationRequest, EvaluationResult, StepInfo,
 };
 use uenv_worker::proto::plugin::v1::plugin_service_server::PluginService;
 #[cfg(unix)]
@@ -98,6 +98,19 @@ fn normalize_dataset(value: &str) -> String {
     value.trim().to_string()
 }
 
+fn step_outcome(result: &EvaluationResult) -> (Vec<u8>, bool) {
+    // A failed candidate is feedback for the next model turn, not an episode terminal.
+    // The worker owns max_steps and will stop the episode when its retry budget is spent.
+    let observation = serde_json::to_vec(result).unwrap_or_else(|_| {
+        if result.passed {
+            b"{\"passed\":true}".to_vec()
+        } else {
+            b"{\"passed\":false}".to_vec()
+        }
+    });
+    (observation, result.passed)
+}
+
 #[tonic::async_trait]
 impl PluginService for CodePlugin {
     async fn reset(
@@ -157,6 +170,7 @@ impl PluginService for CodePlugin {
 
         let result = evaluate(&action, &eval_req).await;
         let reward = reward_from_result(&result);
+        let (observation, terminated) = step_outcome(&result);
         let step_info = StepInfo::from_result(&result, &s.dataset, &s.task_id, &s.library);
         let info_json = serde_json::to_string(&step_info).unwrap_or_default();
 
@@ -181,9 +195,9 @@ impl PluginService for CodePlugin {
         info.insert("detail".to_string(), info_json);
 
         Ok(Response::new(StepResponse {
-            observation: b"done".to_vec(),
+            observation,
             reward,
-            terminated: true,
+            terminated,
             truncated: false,
             info,
         }))
@@ -255,6 +269,39 @@ impl PluginService for CodePlugin {
                 message: issues.join("; "),
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn evaluation(passed: bool) -> EvaluationResult {
+        EvaluationResult {
+            passed,
+            tests_run: 1,
+            tests_passed: u32::from(passed),
+            execution_time_ms: 1,
+            error: (!passed).then(|| "assertion failed".to_string()),
+            error_category: (!passed).then(|| "wrong_answer".to_string()),
+        }
+    }
+
+    #[test]
+    fn failed_candidate_returns_feedback_and_keeps_episode_open() {
+        let (observation, terminated) = step_outcome(&evaluation(false));
+        assert!(!terminated);
+        let payload: EvaluationResult = serde_json::from_slice(&observation).unwrap();
+        assert!(!payload.passed);
+        assert_eq!(payload.error.as_deref(), Some("assertion failed"));
+    }
+
+    #[test]
+    fn passing_candidate_terminates_episode() {
+        let (observation, terminated) = step_outcome(&evaluation(true));
+        assert!(terminated);
+        let payload: EvaluationResult = serde_json::from_slice(&observation).unwrap();
+        assert!(payload.passed);
     }
 }
 
