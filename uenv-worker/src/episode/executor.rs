@@ -160,18 +160,21 @@ impl EpisodeExecutor {
         let mut model_callback_duration_ms = 0u64;
         let mut env_step_duration_ms = 0u64;
         let mut current_observation = observation;
+        let mut previous_action: Option<Vec<u8>> = None;
         let mut terminate_reason = "max_steps_reached".to_string();
         let mut last_reward = 0.0;
 
         for step_index in 1..=max_steps as i32 {
             let model_start = Instant::now();
-            let step_require_rollout = require_rollout && step_index == 1;
+            let step_require_rollout = require_rollout;
             let infer = self
                 .model_client
-                .infer_with_rollout_meta(
+                .infer_with_rollout_context(
                     &episode.payload,
                     &episode.reward_config,
                     step_index as u32,
+                    &current_observation,
+                    previous_action.as_deref(),
                     step_require_rollout,
                     episode.model_endpoint_config.as_ref(),
                 )
@@ -265,6 +268,7 @@ impl EpisodeExecutor {
                 duration_ms: step_duration_ms as i64,
                 rollout_trace: None,
             };
+            previous_action = Some(action.clone());
             current_observation = step.observation;
             steps.push(step_record.clone());
 

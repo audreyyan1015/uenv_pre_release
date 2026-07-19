@@ -30,6 +30,8 @@ MODES = ("sync", "one_step_off_policy", "fully_async")
 # load_client.py 会被写入远端 /tmp/uenv-<run_id>/ 运行目录。
 # 它需要导入 stress_test_common.py，所以这里提前读取文件内容，后面一并下发。
 COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text(encoding="utf-8")
+REAL_LLM_PROXY_SOURCE = Path(__file__).with_name("ark_real_llm_proxy.py").read_text(encoding="utf-8")
+REAL_LLM_PREFLIGHT_SOURCE = Path(__file__).with_name("ark_real_llm_preflight.py").read_text(encoding="utf-8")
 
 
 MODEL_SIMULATOR = r'''#!/usr/bin/env python3
@@ -156,6 +158,9 @@ parser.add_argument("--run-id", required=True)
 parser.add_argument("--output", required=True)
 parser.add_argument("--max-steps", type=int, required=True)
 parser.add_argument("--code-wrong-steps", type=int, required=True)
+parser.add_argument("--min-steps", type=int, required=True)
+parser.add_argument("--model-name", required=True)
+parser.add_argument("--model-mode", choices=("real", "simulator"), required=True)
 args = parser.parse_args()
 
 async def main():
@@ -200,6 +205,8 @@ async def main():
     submitted = completed = failed = rpc_errors = protocol_errors = 0
     rewards = []
     latencies = []
+    actual_step_counts = []
+    training_trace_token_counts = []
     lock = asyncio.Lock()
     semaphore = asyncio.Semaphore(args.slots)
     tasks = set()
@@ -209,6 +216,7 @@ async def main():
         task_id = f"gate3-{args.run_id}-{args.mode}-{batch_id}-{index}"
         env_config = stress_common.code_env_payload(task_id)
         env_config["question"] = f"{env_config['question']}\nTask ID: {task_id}"
+        env_config["min_steps_before_terminate"] = args.min_steps
         return stress_common.make_sample_envelope(
             adapter_core_pb2,
             batch_id=batch_id,
@@ -221,7 +229,7 @@ async def main():
             timeout_seconds=120,
             max_steps=args.max_steps,
             model_url=args.model_url,
-            model_name="gate3-code-model",
+            model_name=args.model_name,
         )
 
     async def send_batch():
@@ -246,10 +254,12 @@ async def main():
                     rewards.append(result.reward)
                     if result.status in {"completed", "success"}:
                         completed += 1
-                        if args.mode != "sync" and (
-                            not result.rollout_policy_version or not result.rollout_log_probs
-                        ):
-                            protocol_errors += 1
+                        parsed = stress_common.sample_result_dict(result)
+                        actual_step_counts.append(parsed["actual_steps"])
+                        if args.mode != "sync":
+                            if not parsed["training_trace_valid"]:
+                                protocol_errors += 1
+                            training_trace_token_counts.append(len(parsed["response_ids"]))
                     else:
                         failed += 1
         except grpc.RpcError:
@@ -285,6 +295,20 @@ async def main():
     )
     document["max_steps"] = args.max_steps
     document["code_wrong_steps"] = args.code_wrong_steps
+    document["min_steps"] = args.min_steps
+    document["model_mode"] = args.model_mode
+    document["actual_step_stats"] = {
+        "task_count": len(actual_step_counts),
+        "min_steps": min(actual_step_counts) if actual_step_counts else 0,
+        "max_steps": max(actual_step_counts) if actual_step_counts else 0,
+        "total_steps": sum(actual_step_counts),
+    }
+    document["training_trace_stats"] = {
+        "required": args.mode != "sync",
+        "task_count": len(training_trace_token_counts),
+        "min_response_tokens": min(training_trace_token_counts) if training_trace_token_counts else 0,
+        "total_response_tokens": sum(training_trace_token_counts),
+    }
     with open(args.output, "w", encoding="utf-8") as target:
         json.dump(document, target, indent=2, sort_keys=True)
     print(json.dumps(document, indent=2, sort_keys=True), flush=True)
@@ -414,6 +438,9 @@ def run_scale(
     password: str,
     max_steps: int,
     code_wrong_steps: int,
+    min_steps: int,
+    model_mode: str,
+    llm_config: str,
 ) -> dict:
     """执行一组 Gate3 规模。
 
@@ -441,6 +468,8 @@ def run_scale(
     outcome: dict | None = None
     ports = worker_ports
     obs_ports = [base.OBS_PORT + i for i in range(workers_count)]
+    model_script = "model_simulator.py"
+    llm_config_sha256 = ""
     try:
         # 连接两台机器后，第一件事是记录正式 server 快照。
         server = base.connect(base.SERVER_HOST, password)
@@ -476,6 +505,8 @@ def run_scale(
         base.put_text(server, f"{server_run}/stress_test_common.py", COMMON_SOURCE)
         base.put_text(server, f"{server_run}/tcp_probe.py", TCP_PROBE, 0o755)
         base.put_text(worker, f"{worker_run}/model_simulator.py", MODEL_SIMULATOR, 0o755)
+        base.put_text(worker, f"{worker_run}/ark_real_llm_proxy.py", REAL_LLM_PROXY_SOURCE, 0o700)
+        base.put_text(worker, f"{worker_run}/ark_real_llm_preflight.py", REAL_LLM_PREFLIGHT_SOURCE, 0o700)
         for i, (port, obs_port) in enumerate(zip(ports, obs_ports)):
             worker_id = f"stress-{run_id}-worker-{i:04d}"
             base.put_text(worker, f"{worker_run}/worker-{i:04d}.yaml", worker_config(worker_run, worker_id, port, obs_port, capacity))
@@ -494,14 +525,37 @@ def run_scale(
             f"UENV_ADDR={base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}", f"UENV_CONFIG_PATH={server_run}/server.yaml", "RUST_LOG=warn", base.SERVER_BIN,
         ])
         server_pid = base.start_owned(server, server_cmd, f"{server_run}/server.log", base.SERVER_BIN, base.SERVER_BIN)
+        if model_mode == "real":
+            _, mode_out, _ = base.run(worker, f"stat -c %a {base.q(llm_config)}")
+            if mode_out.strip() != "600":
+                raise RuntimeError("real LLM config must have mode 0600")
+            _, hash_out, _ = base.run(worker, f"sha256sum {base.q(llm_config)}")
+            llm_config_sha256 = hash_out.split()[0]
+            model_script = "ark_real_llm_proxy.py"
+            model_command = (
+                f"python3 -B {worker_run}/{model_script} --port {base.MODEL_PORT} "
+                f"--config {base.q(llm_config)}"
+            )
+        else:
+            model_command = (
+                f"python3 -B {worker_run}/model_simulator.py --port {base.MODEL_PORT} "
+                f"--latency-ms 1000 --wrong-steps {code_wrong_steps}"
+            )
         model_pid = base.start_owned(
             worker,
-            f"python3 -B {worker_run}/model_simulator.py --port {base.MODEL_PORT} "
-            f"--latency-ms 1000 --wrong-steps {code_wrong_steps}",
+            model_command,
             f"{worker_run}/model.log",
             "/usr/bin/python3.12",
-            f"{worker_run}/model_simulator.py",
+            f"{worker_run}/{model_script}",
         )
+        if model_mode == "real":
+            _, preflight_out, _ = base.run(
+                worker,
+                f"python3 -B {worker_run}/ark_real_llm_preflight.py "
+                f"--url http://127.0.0.1:{base.MODEL_PORT}/v1",
+                timeout=240,
+            )
+            print(f"[gate3:{workers_count}x{capacity}] {preflight_out.strip()}", flush=True)
         # 每个 worker 都有独立 yaml、独立 WAL 和独立日志，方便定位某个 worker 的问题。
         for i, port in enumerate(ports):
             config = f"{worker_run}/worker-{i:04d}.yaml"
@@ -525,8 +579,15 @@ def run_scale(
             "worker_capacity": capacity, "worker_slots": workers_count * capacity,
             "requested_episode_concurrency": workers_count * capacity, "modes": list(modes),
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
-            "code_wrong_steps": code_wrong_steps, "worker_ports": ports,
-            "model_kind": "deterministic-openai-compatible; workers/plugins/evaluator are real",
+            "code_wrong_steps": code_wrong_steps, "min_steps": min_steps, "worker_ports": ports,
+            "model_mode": model_mode,
+            "model_kind": (
+                "real-ark-chat-completions+ark-tokenization"
+                if model_mode == "real"
+                else "deterministic-openai-compatible"
+            ),
+            "llm_config": llm_config if model_mode == "real" else "",
+            "llm_config_sha256": llm_config_sha256,
             "source_and_binaries": build,
             "protected_server": before, "owned_pids": {"server": server_pid, "model": model_pid, "workers": [p for p, _ in worker_pids]},
         }
@@ -542,13 +603,15 @@ def run_scale(
                 "--slots", str(capacity), "--mode", mode, "--duration", str(duration),
                 "--model-url", f"http://127.0.0.1:{base.MODEL_PORT}/v1", "--run-id", run_id, "--output", remote_result,
                 "--max-steps", str(max_steps), "--code-wrong-steps", str(code_wrong_steps),
+                "--min-steps", str(min_steps), "--model-mode", model_mode,
+                "--model-name", ("proxy-selected-versioned-model" if model_mode == "real" else "gate3-code-model"),
             ])
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} start", flush=True)
             _, out, err = base.run(server, command, timeout=duration + 240)
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
             step_stats = _model_step_stats(worker, f"gate3-{run_id}-{mode}-")
-            expected_min_steps = code_wrong_steps + 1
+            expected_min_steps = min_steps if model_mode == "real" else code_wrong_steps + 1
             step_validation = {
                 "expected_min_steps": expected_min_steps,
                 "max_allowed_steps": max_steps,
@@ -558,6 +621,13 @@ def run_scale(
                     step_stats["task_count"] == result["completed"]
                     and step_stats["min_steps"] >= expected_min_steps
                     and step_stats["max_steps"] <= max_steps
+                    and result["actual_step_stats"]["task_count"] == result["completed"]
+                    and result["actual_step_stats"]["min_steps"] >= expected_min_steps
+                    and result["actual_step_stats"]["max_steps"] <= max_steps
+                    and (
+                        mode == "sync"
+                        or result["training_trace_stats"]["min_response_tokens"] > 0
+                    )
                 ),
             }
             result["step_validation"] = step_validation
@@ -589,7 +659,7 @@ def run_scale(
             for pid, config in reversed(worker_pids):
                 try: base.stop_owned(worker, pid, f"{worker_run}/bundle/uenv-worker", config)
                 except Exception as exc: cleanup_errors.append(str(exc))
-            try: base.stop_owned(worker, model_pid, "/usr/bin/python3.12", f"{worker_run}/model_simulator.py")
+            try: base.stop_owned(worker, model_pid, "/usr/bin/python3.12", f"{worker_run}/{model_script}")
             except Exception as exc: cleanup_errors.append(str(exc))
             for port in ports + obs_ports + [base.MODEL_PORT]:
                 try: base.assert_port_free(worker, port, base.WORKER_HOST)
@@ -637,6 +707,23 @@ def main() -> int:
     )
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument(
+        "--model-mode",
+        choices=("real", "simulator"),
+        default="real",
+        help="Gate3 defaults to the real Ark LLM; simulator must be explicitly selected.",
+    )
+    parser.add_argument(
+        "--llm-config",
+        default="",
+        help="Mode-0600 OpenHands LLM JSON path on the Worker; required for --model-mode real.",
+    )
+    parser.add_argument(
+        "--min-steps",
+        type=int,
+        default=3,
+        help="Minimum real model/environment interactions before a passing Code episode can terminate.",
+    )
+    parser.add_argument(
         "--code-wrong-steps", type=int, default=2,
         help="Code model simulator returns wrong code this many times per task before returning the correct solution.",
     )
@@ -648,7 +735,7 @@ def main() -> int:
     for label, port in {
         "isolated server": base.SERVER_PORT,
         "single Worker": base.WORKER_PORT,
-        "model simulator": base.MODEL_PORT,
+        "model endpoint": base.MODEL_PORT,
     }.items():
         if port not in allowed_exposed_ports:
             raise SystemExit(f"{label} port {port} is outside the explicitly allowed cloud ports")
@@ -658,6 +745,10 @@ def main() -> int:
         raise SystemExit("--workers and --capacity must be positive")
     if args.max_steps <= 0:
         raise SystemExit("--max-steps must be positive")
+    if args.min_steps <= 0 or args.min_steps > args.max_steps:
+        raise SystemExit("--min-steps must be positive and no greater than --max-steps")
+    if args.model_mode == "real" and not args.llm_config:
+        raise SystemExit("--llm-config is required for --model-mode real")
     if args.code_wrong_steps < 0 or args.code_wrong_steps >= args.max_steps:
         raise SystemExit("--code-wrong-steps must be >=0 and smaller than --max-steps")
     password = os.environ.get("UENV_PASS")
@@ -675,6 +766,9 @@ def main() -> int:
         password,
         args.max_steps,
         args.code_wrong_steps,
+        args.min_steps,
+        args.model_mode,
+        args.llm_config,
     )
     summaries = [summary]
     summary_path = args.artifacts / f"gate3-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"

@@ -44,6 +44,8 @@ struct PluginState {
     random_seed: Option<i64>,
     timeout_secs: Option<u64>,
     benchmark_root: Option<String>,
+    min_steps_before_terminate: u32,
+    current_step: u32,
 }
 
 struct CodePlugin {
@@ -81,6 +83,7 @@ struct EpisodeConfig {
     random_seed: Option<i64>,
     timeout_secs: Option<u64>,
     benchmark_root: Option<String>,
+    min_steps_before_terminate: Option<u32>,
 }
 
 async fn load_episode_config(path: &PathBuf) -> EpisodeConfig {
@@ -98,17 +101,39 @@ fn normalize_dataset(value: &str) -> String {
     value.trim().to_string()
 }
 
-fn step_outcome(result: &EvaluationResult) -> (Vec<u8>, bool) {
+fn step_outcome(
+    result: &EvaluationResult,
+    current_step: u32,
+    min_steps_before_terminate: u32,
+) -> (Vec<u8>, bool) {
     // A failed candidate is feedback for the next model turn, not an episode terminal.
     // The worker owns max_steps and will stop the episode when its retry budget is spent.
-    let observation = serde_json::to_vec(result).unwrap_or_else(|_| {
+    let required_steps = min_steps_before_terminate.max(1);
+    let terminated = result.passed && current_step >= required_steps;
+    let mut payload = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("interaction_step".to_string(), current_step.into());
+        object.insert("minimum_interaction_steps".to_string(), required_steps.into());
+        object.insert("continuation_required".to_string(), (!terminated).into());
+        if result.passed && !terminated {
+            object.insert(
+                "feedback".to_string(),
+                format!(
+                    "The candidate passes the tests, but this environment requires at least \
+                     {required_steps} model interactions. Return a complete revised implementation."
+                )
+                .into(),
+            );
+        }
+    }
+    let observation = serde_json::to_vec(&payload).unwrap_or_else(|_| {
         if result.passed {
             b"{\"passed\":true}".to_vec()
         } else {
             b"{\"passed\":false}".to_vec()
         }
     });
-    (observation, result.passed)
+    (observation, terminated)
 }
 
 #[tonic::async_trait]
@@ -139,6 +164,8 @@ impl PluginService for CodePlugin {
         s.random_seed = config.random_seed;
         s.timeout_secs = config.timeout_secs;
         s.benchmark_root = config.benchmark_root;
+        s.min_steps_before_terminate = config.min_steps_before_terminate.unwrap_or(1).max(1);
+        s.current_step = 0;
 
         Ok(Response::new(ResetResponse {
             observation: s.question.as_bytes().to_vec(),
@@ -152,7 +179,8 @@ impl PluginService for CodePlugin {
 
     async fn step(&self, request: Request<StepRequest>) -> Result<Response<StepResponse>, Status> {
         let action = String::from_utf8(request.into_inner().action).unwrap_or_default();
-        let s = self.state.lock().await;
+        let mut s = self.state.lock().await;
+        s.current_step += 1;
 
         let eval_req = EvaluationRequest {
             code: String::new(),
@@ -169,8 +197,12 @@ impl PluginService for CodePlugin {
         };
 
         let result = evaluate(&action, &eval_req).await;
-        let reward = reward_from_result(&result);
-        let (observation, terminated) = step_outcome(&result);
+        let (observation, terminated) = step_outcome(
+            &result,
+            s.current_step,
+            s.min_steps_before_terminate,
+        );
+        let reward = if terminated { reward_from_result(&result) } else { 0.0 };
         let step_info = StepInfo::from_result(&result, &s.dataset, &s.task_id, &s.library);
         let info_json = serde_json::to_string(&step_info).unwrap_or_default();
 
@@ -180,6 +212,12 @@ impl PluginService for CodePlugin {
         info.insert("task_id".to_string(), s.task_id.clone());
         info.insert("library".to_string(), s.library.clone());
         info.insert("passed".to_string(), result.passed.to_string());
+        info.insert("accepted".to_string(), terminated.to_string());
+        info.insert("interaction_step".to_string(), s.current_step.to_string());
+        info.insert(
+            "minimum_interaction_steps".to_string(),
+            s.min_steps_before_terminate.to_string(),
+        );
         info.insert("tests_run".to_string(), result.tests_run.to_string());
         info.insert("tests_passed".to_string(), result.tests_passed.to_string());
         info.insert(
@@ -289,7 +327,7 @@ mod tests {
 
     #[test]
     fn failed_candidate_returns_feedback_and_keeps_episode_open() {
-        let (observation, terminated) = step_outcome(&evaluation(false));
+        let (observation, terminated) = step_outcome(&evaluation(false), 1, 1);
         assert!(!terminated);
         let payload: EvaluationResult = serde_json::from_slice(&observation).unwrap();
         assert!(!payload.passed);
@@ -298,10 +336,22 @@ mod tests {
 
     #[test]
     fn passing_candidate_terminates_episode() {
-        let (observation, terminated) = step_outcome(&evaluation(true));
+        let (observation, terminated) = step_outcome(&evaluation(true), 1, 1);
         assert!(terminated);
         let payload: EvaluationResult = serde_json::from_slice(&observation).unwrap();
         assert!(payload.passed);
+    }
+
+    #[test]
+    fn passing_candidate_waits_for_required_real_model_interactions() {
+        let (observation, terminated) = step_outcome(&evaluation(true), 1, 3);
+        assert!(!terminated);
+        let payload: serde_json::Value = serde_json::from_slice(&observation).unwrap();
+        assert_eq!(payload["continuation_required"], true);
+        assert_eq!(payload["minimum_interaction_steps"], 3);
+
+        let (_, terminated) = step_outcome(&evaluation(true), 3, 3);
+        assert!(terminated);
     }
 }
 
