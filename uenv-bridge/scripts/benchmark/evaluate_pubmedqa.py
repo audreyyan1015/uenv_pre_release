@@ -54,18 +54,37 @@ def build_prompt(example: Example, *, prompt_style: str = "default") -> str:
             f"Question: {example.question}\n\n"
             "Answer:"
         )
-    return (
-        "Read the abstract context and answer the biomedical question with exactly one label: yes, no, or maybe.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question: {example.question}\n\n"
-        "Return only one word: yes, no, or maybe."
-    )
+    if prompt_style == "thinking_label":
+        return (
+            "Read the abstract context and answer the biomedical question.\n"
+            "First write a concise reasoning process inside <think>...</think>.\n"
+            "After </think>, output only the final answer as exactly one lowercase word from this set: yes, no, maybe.\n"
+            "Do not write any other text outside the think block.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {example.question}\n\n"
+            "Answer:"
+        )
+    if prompt_style in {"default", "official"}:
+        return (
+            "Read the abstract context and answer the biomedical question with exactly one label: yes, no, or maybe.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {example.question}\n\n"
+            "Return only one word: yes, no, or maybe."
+        )
+    raise ValueError(f"unknown prompt_style: {prompt_style}")
 
 
 def build_messages(example: Example, *, prompt_style: str = "default") -> list[dict[str, str]]:
     system_content = "You are answering PubMedQA biomedical reading comprehension questions."
     if prompt_style == "strict_label":
         system_content = "You are a PubMedQA label classifier. Output only one lowercase label: yes, no, or maybe."
+    elif prompt_style == "official":
+        system_content = "You are answering PubMedQA biomedical reading comprehension questions."
+    elif prompt_style == "thinking_label":
+        system_content = (
+            "You are answering PubMedQA biomedical reading comprehension questions. "
+            "Put concise reasoning inside <think>...</think>, then output the final lowercase label."
+        )
     return [
         {
             "role": "system",
@@ -436,7 +455,7 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--stop", nargs="*", default=None)
-    parser.add_argument("--prompt-style", choices=("default", "strict_label"), default="default")
+    parser.add_argument("--prompt-style", choices=("default", "official", "strict_label", "thinking_label"), default="default")
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--no-chat-template", action="store_true")
     parser.add_argument("--transformers-device-map", default="auto")

@@ -30,6 +30,12 @@ VeRL AgentLoop
 | Result 必选新增字段 | `parallel_mode`、`rollout_param_version`、`rollout_policy_version`、`rollout_log_probs` |
 | 可选字段 | 仅保留时间戳 / latency 字段，用于观测 |
 
+## Fully Async 接入与 VeRL 执行流程
+
+下图仅说明 `fully_async` 模式。UEnv 在 VeRL 的 `AgentLoopWorker.generate_sequences()` 接出，完成单条 episode 的 request / result 往返后，经 `AgentLoopWorker._agent_loop_postprocess()` 回接为 VeRL `DataProto`。异步生产和消费复用 VeRL `fully_async_policy` 的 `MessageQueue`，UEnv 不额外实现 queue 或 result pool。图源可在 draw.io / diagrams.net 中继续编辑：[verl-uenv-async-flow.drawio](asset/verl-uenv-async-flow.drawio)。
+
+![VeRL 异步模式接入 UEnv 流程图](asset/verl-uenv-async-flow.svg)
+
 ## 2. 必选字段
 
 ### 2.1 Request Metadata

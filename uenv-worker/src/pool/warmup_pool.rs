@@ -311,7 +311,14 @@ impl WarmupPool {
                     tracked.status = InstanceStatus::Evicting;
                 }
             }
-            let _ = self.plugin_host.close(instance_id).await;
+            if let Err(err) = self.plugin_host.close(instance_id).await {
+                tracing::warn!(
+                    trace_id = "pool",
+                    instance_id = %instance_id,
+                    error = %err,
+                    msg = "plugin_close_failed"
+                );
+            }
             let mut state = self.state.lock().await;
             if let Some(queue) = state.warm_queues.get_mut(&env_type) {
                 queue.retain(|id| id != instance_id);
@@ -319,6 +326,20 @@ impl WarmupPool {
             state.active.remove(instance_id);
             state.tracked.remove(instance_id);
         }
+    }
+
+    /// 关停时批量销毁池内所有实例（warm / active / tracked），确保插件进程被回收。
+    /// 返回处理的实例数量。
+    pub async fn shutdown(&self) -> usize {
+        let ids: Vec<String> = {
+            let state = self.state.lock().await;
+            state.tracked.keys().cloned().collect()
+        };
+        let count = ids.len();
+        for id in &ids {
+            self.destroy_instance(id).await;
+        }
+        count
     }
 
     async fn wait_plugin_ready(

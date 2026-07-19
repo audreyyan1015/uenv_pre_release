@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,23 +13,21 @@ from tqdm import tqdm
 
 
 LABELS = ("supports", "refutes", "not enough info")
-LABEL_ALIASES = {
-    "support": "supports",
-    "supports": "supports",
-    "supported": "supports",
-    "entails": "supports",
-    "entailment": "supports",
-    "refute": "refutes",
-    "refutes": "refutes",
-    "refuted": "refutes",
-    "contradicts": "refutes",
-    "contradiction": "refutes",
-    "not enough info": "not enough info",
-    "not enough information": "not enough info",
-    "insufficient information": "not enough info",
-    "neutral": "not enough info",
-    "unknown": "not enough info",
-}
+SCITAB_PHRASES = (
+    ("not enough info", "not enough info"),
+    ("not enough info", "not enough information"),
+    ("not enough info", "insufficient information"),
+    ("not enough info", "insufficient evidence"),
+)
+SCITAB_WORDS = (
+    ("supports", "supports"),
+    ("supports", "support"),
+    ("supports", "supported"),
+    ("refutes", "refutes"),
+    ("refutes", "refute"),
+    ("refutes", "refuted"),
+    ("not enough info", "nei"),
+)
 
 
 @dataclass(slots=True)
@@ -107,39 +104,101 @@ def build_prompt(example: Example, *, prompt_style: str = "default") -> str:
             f"Claim: {example.claim}\n\n"
             "Answer:"
         )
-    return (
-        "Given a scientific paper table and a claim, choose exactly one label: supports, refutes, or not enough info.\n\n"
-        f"Paper: {example.paper}\n"
-        f"Table caption: {example.table_caption}\n"
-        f"Table:\n{table_text}\n\n"
-        f"Claim: {example.claim}\n\n"
-        "Return only one label: supports, refutes, or not enough info."
-    )
+    if prompt_style in {"default", "official"}:
+        return (
+            "Given a scientific paper table and a claim, choose exactly one label: supports, refutes, or not enough info.\n\n"
+            f"Paper: {example.paper}\n"
+            f"Table caption: {example.table_caption}\n"
+            f"Table:\n{table_text}\n\n"
+            f"Claim: {example.claim}\n\n"
+            "Return only one label: supports, refutes, or not enough info."
+        )
+    raise ValueError(f"unknown prompt_style: {prompt_style}")
 
 
 def build_messages(example: Example, *, prompt_style: str = "default") -> list[dict[str, str]]:
     system_content = "You are a scientific table claim verification classifier."
     if prompt_style == "strict_label":
         system_content = "Output only one lowercase label: supports, refutes, or not enough info."
+    elif prompt_style == "official":
+        system_content = "You are a scientific table claim verification classifier."
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": build_prompt(example, prompt_style=prompt_style)},
     ]
 
 
+def _is_ascii_alnum(value: str) -> bool:
+    return value.isascii() and value.isalnum()
+
+
+def _find_last_phrase(text: str, phrase: str) -> int | None:
+    if not phrase:
+        return None
+    lower = text.lower()
+    needle = phrase.lower()
+    last = None
+    start = 0
+    while True:
+        pos = lower.find(needle, start)
+        if pos < 0:
+            return last
+        last = pos
+        start = pos + 1
+
+
+def _find_last_word(text: str, word: str) -> int | None:
+    if not word:
+        return None
+    lower = text.lower()
+    needle = word.lower()
+    last = None
+    start = 0
+    while True:
+        pos = lower.find(needle, start)
+        if pos < 0:
+            return last
+        before_ok = pos == 0 or not _is_ascii_alnum(lower[pos - 1])
+        end = pos + len(needle)
+        after_ok = end >= len(lower) or not _is_ascii_alnum(lower[end])
+        if before_ok and after_ok:
+            last = pos
+        start = pos + 1
+
+
+def _extract_canonical_label(text: str) -> str | None:
+    best: tuple[int, str] | None = None
+    for canonical, phrase in SCITAB_PHRASES:
+        pos = _find_last_phrase(text, phrase)
+        if pos is not None and (best is None or pos >= best[0]):
+            best = (pos, canonical)
+    for canonical, word in SCITAB_WORDS:
+        pos = _find_last_word(text, word)
+        if pos is not None and (best is None or pos >= best[0]):
+            best = (pos, canonical)
+    return best[1] if best is not None else None
+
+
 def parse_label(text: str) -> str | None:
-    normalized = text.strip().lower()
-    normalized = normalized.replace("**", "").replace("`", "")
-    if "</think>" in normalized:
-        normalized = normalized.split("</think>")[-1]
-    normalized = re.sub(r"[_-]+", " ", normalized)
-    for label in LABELS:
-        if re.search(rf"\b{re.escape(label)}\b", normalized):
-            return label
-    for alias, label in LABEL_ALIASES.items():
-        if re.search(rf"\b{re.escape(alias)}\b", normalized):
-            return label
-    return None
+    # Keep this aligned with plugins/math/src/backends/scitab/scoring.rs.
+    trimmed = text.strip()
+    if not trimmed:
+        return None
+    lower = trimmed.lower()
+    if lower in {"supports", "support", "supported", "true"}:
+        return "supports"
+    if lower in {"refutes", "refute", "refuted", "false"}:
+        return "refutes"
+    if lower in {
+        "not enough info",
+        "not enough information",
+        "nei",
+        "insufficient",
+        "insufficient information",
+        "unverifiable",
+    }:
+        return "not enough info"
+    return _extract_canonical_label(trimmed)
 
 
 def safe_div(num: float, den: float) -> float:
@@ -354,7 +413,7 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--stop", nargs="*", default=None)
-    parser.add_argument("--prompt-style", choices=("default", "strict_label"), default="default")
+    parser.add_argument("--prompt-style", choices=("default", "official", "strict_label"), default="default")
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--no-chat-template", action="store_true")
     parser.add_argument("--vllm-label-batch-size", type=int, default=64)
