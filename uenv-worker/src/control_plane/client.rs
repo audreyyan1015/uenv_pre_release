@@ -89,6 +89,29 @@ pub fn detect_resource_spec() -> ResourceSpec {
     }
 }
 
+fn bounded_env_u32(name: &str, default: u32, minimum: u32, maximum: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(default)
+        .clamp(minimum, maximum)
+}
+
+fn bounded_env_u64(name: &str, default: u64, minimum: u64, maximum: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+        .clamp(minimum, maximum)
+}
+
+fn register_retry_delay_ms(base_ms: u64, failed_attempt: u32, process_id: u32) -> u64 {
+    let exponent = failed_attempt.saturating_sub(1).min(5);
+    let exponential_delay = base_ms.saturating_mul(1_u64 << exponent);
+    let process_jitter = u64::from(process_id % 101);
+    exponential_delay.saturating_add(process_jitter).min(10_000)
+}
+
 impl SchedulerControlPlaneClient {
     pub fn new(
         mode: SchedulerMode,
@@ -127,9 +150,9 @@ impl SchedulerControlPlaneClient {
         }
     }
 
-    pub async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn register_once(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
-        let identity = self.identity.read().await;
+        let identity = self.identity.read().await.clone();
         let active_load = self.metrics.active_episode_count() as i32;
         let response = client
             .register_worker(RegisterWorkerRequest {
@@ -145,7 +168,6 @@ impl SchedulerControlPlaneClient {
             })
             .await?
             .into_inner();
-        drop(identity);
 
         let mut identity = self.identity.write().await;
         if !response.worker_id.is_empty() {
@@ -161,6 +183,37 @@ impl SchedulerControlPlaneClient {
             msg = "register"
         );
         Ok(())
+    }
+
+    pub async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let max_attempts = bounded_env_u32("UENV_WORKER_REGISTER_MAX_ATTEMPTS", 5, 1, 100);
+        let retry_backoff_ms =
+            bounded_env_u64("UENV_WORKER_REGISTER_RETRY_BACKOFF_MS", 200, 10, 10_000);
+        for attempt in 1..=max_attempts {
+            match self.register_once().await {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt < max_attempts => {
+                    self.connected.store(false, Ordering::Relaxed);
+                    let delay_ms =
+                        register_retry_delay_ms(retry_backoff_ms, attempt, std::process::id());
+                    tracing::warn!(
+                        trace_id = "control_plane",
+                        episode_id = "-",
+                        attempt,
+                        max_attempts,
+                        delay_ms,
+                        error = %err,
+                        msg = "register_failed_retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                Err(err) => {
+                    self.connected.store(false, Ordering::Relaxed);
+                    return Err(err);
+                }
+            }
+        }
+        unreachable!("registration attempt range is non-empty")
     }
 
     pub fn spawn_heartbeat_loop(&self) {
@@ -389,5 +442,18 @@ impl ControlPlane for SchedulerControlPlaneClient {
 
     fn spawn_replay_loop(&self, wal: WalWriter, metrics: MetricsExporter) {
         SchedulerControlPlaneClient::spawn_replay_loop(self, wal, metrics);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::register_retry_delay_ms;
+
+    #[test]
+    fn registration_retry_delay_is_exponential_jittered_and_bounded() {
+        assert_eq!(register_retry_delay_ms(100, 1, 7), 107);
+        assert_eq!(register_retry_delay_ms(100, 2, 7), 207);
+        assert_eq!(register_retry_delay_ms(100, 6, 7), 3_207);
+        assert_eq!(register_retry_delay_ms(10_000, 100, 100), 10_000);
     }
 }

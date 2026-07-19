@@ -19,6 +19,8 @@ class StressSuiteTests(unittest.TestCase):
         self.assertEqual(config["gate4"]["mode"], "llm")
         self.assertEqual(config["worker_scale"]["tiers"], [32, 512, 1024])
         self.assertEqual(config["worker_scale"]["plugin_ready_timeout_seconds"], 30)
+        self.assertEqual(config["worker_scale"]["worker_register_max_attempts"], 20)
+        self.assertEqual(config["worker_scale"]["worker_register_retry_backoff_ms"], 100)
 
     def test_real_dscodebench_row_maps_to_worker_contract(self):
         row = {

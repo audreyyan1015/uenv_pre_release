@@ -390,9 +390,19 @@ asyncio.run(main())
 
 TCP_PROBE = r'''#!/usr/bin/env python3
 # server 机器用这个脚本主动连 worker 内网地址，确认 worker advertise_endpoint 可达。
-import argparse, socket
+import argparse, socket, time
 p = argparse.ArgumentParser(); p.add_argument("host"); p.add_argument("port", type=int)
-a = p.parse_args(); socket.create_connection((a.host, a.port), 5).close(); print("tcp_probe=ok")
+p.add_argument("--wait-seconds", type=float, default=60)
+a = p.parse_args(); deadline = time.monotonic() + a.wait_seconds
+while True:
+    try:
+        socket.create_connection((a.host, a.port), 2).close()
+        print("tcp_probe=ok")
+        break
+    except OSError:
+        if time.monotonic() >= deadline:
+            raise
+        time.sleep(0.25)
 '''
 
 
@@ -533,6 +543,8 @@ def run_scale(
     fleet_supervisor_threshold: int,
     simulator_latency_ms: int,
     plugin_ready_timeout_seconds: int,
+    worker_register_max_attempts: int,
+    worker_register_retry_backoff_ms: int,
     acceptance_purpose: str,
 ) -> dict:
     """执行一组 Gate3 规模。
@@ -689,6 +701,8 @@ def run_scale(
             "UENV_CODE_PLUGIN_BIN": f"{worker_run}/bundle/uenv-code-plugin",
             "UENV_CODE_EVAL_SCRIPT": f"{worker_run}/bundle/plugins/code/scripts/evaluate_code.py",
             "UENV_PLUGIN_READY_TIMEOUT_SECS": str(plugin_ready_timeout_seconds),
+            "UENV_WORKER_REGISTER_MAX_ATTEMPTS": str(worker_register_max_attempts),
+            "UENV_WORKER_REGISTER_RETRY_BACKOFF_MS": str(worker_register_retry_backoff_ms),
             "RUST_LOG": "error",
         }
         if workers_count >= fleet_supervisor_threshold:
@@ -760,11 +774,13 @@ def run_scale(
                     config,
                 )
                 worker_pids.append((pid, config))
+        endpoint_ready_timeout = min(registration_timeout, max(60, workers_count // 4))
         for port in sorted({ports[0], ports[-1]}):
             base.run(
                 server,
-                f"python3 -B {server_run}/tcp_probe.py {base.WORKER_PRIVATE_IP} {port}",
-                timeout=15,
+                f"python3 -B {server_run}/tcp_probe.py {base.WORKER_PRIVATE_IP} {port} "
+                f"--wait-seconds {endpoint_ready_timeout}",
+                timeout=endpoint_ready_timeout + 15,
             )
         print(f"[gate3:{workers_count}x{capacity}] private Worker range endpoints reachable", flush=True)
         base.assert_protected_unchanged(server, before)
@@ -778,6 +794,10 @@ def run_scale(
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
             "code_wrong_steps": code_wrong_steps, "min_steps": min_steps, "worker_ports": ports,
             "plugin_ready_timeout_seconds": plugin_ready_timeout_seconds,
+            "worker_registration_retry": {
+                "max_attempts": worker_register_max_attempts,
+                "backoff_ms": worker_register_retry_backoff_ms,
+            },
             "model_mode": model_mode,
             "model_kind": (
                 "real-ark-chat-completions+ark-tokenization"
@@ -993,6 +1013,8 @@ def main() -> int:
     parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
     parser.add_argument("--simulator-latency-ms", type=int, default=10)
     parser.add_argument("--plugin-ready-timeout-seconds", type=int, default=2)
+    parser.add_argument("--worker-register-max-attempts", type=int, default=5)
+    parser.add_argument("--worker-register-retry-backoff-ms", type=int, default=200)
     parser.add_argument(
         "--acceptance-purpose",
         choices=("gate3-real-llm", "worker-scale"),
@@ -1002,6 +1024,10 @@ def main() -> int:
     base.add_runtime_arguments(parser, require_code_plugin=True)
     args = parser.parse_args()
     base.configure_from_args(args)
+    if not 1 <= args.worker_register_max_attempts <= 100:
+        parser.error("--worker-register-max-attempts must be between 1 and 100")
+    if not 10 <= args.worker_register_retry_backoff_ms <= 10_000:
+        parser.error("--worker-register-retry-backoff-ms must be between 10 and 10000")
     allowed_exposed_ports = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
     for label, port in {
         "isolated server": base.SERVER_PORT,
@@ -1064,6 +1090,8 @@ def main() -> int:
         args.fleet_supervisor_threshold,
         args.simulator_latency_ms,
         args.plugin_ready_timeout_seconds,
+        args.worker_register_max_attempts,
+        args.worker_register_retry_backoff_ms,
         args.acceptance_purpose,
     )
     summaries = [summary]
