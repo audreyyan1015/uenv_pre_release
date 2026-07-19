@@ -183,6 +183,7 @@ parser.add_argument("--dataset-offset", type=int, default=0)
 parser.add_argument("--registration-timeout", type=int, default=180)
 parser.add_argument("--batch-timeout", type=int, default=180)
 parser.add_argument("--exact-batches", type=int, default=0)
+parser.add_argument("--episode-batch-size", type=int, default=0)
 args = parser.parse_args()
 dataset_rows = stress_common.load_dscodebench_jsonl(
     args.dataset_jsonl,
@@ -229,7 +230,11 @@ async def main():
     else:
         raise RuntimeError(f"workers not ready expected={args.workers} registered={registered}")
 
+    episode_batch_size = args.episode_batch_size or args.workers
+    if episode_batch_size < 1:
+        raise ValueError("episode batch size must be positive")
     submitted = completed = failed = rpc_errors = protocol_errors = 0
+    rpc_error_details = []
     rewards = []
     latencies = []
     actual_step_counts = []
@@ -275,15 +280,15 @@ async def main():
         )
 
     async def send_batch():
-        # 一次 ExecuteBatch 发送 args.workers 个样本。外层 semaphore 控制同时在飞的
+        # 一次 ExecuteBatch 发送显式数量的样本。外层 semaphore 控制同时在飞的
         # batch 数，args.slots 表示每个 worker 的并发容量。
         nonlocal submitted, completed, failed, rpc_errors, protocol_errors, batch_sequence
         batch_id = str(uuid.uuid4())
         current_batch = batch_sequence
         batch_sequence += 1
         samples = [
-            make_sample(batch_id, index, current_batch * args.workers + index)
-            for index in range(args.workers)
+            make_sample(batch_id, index, current_batch * episode_batch_size + index)
+            for index in range(episode_batch_size)
         ]
         async with lock:
             submitted += len(samples)
@@ -309,9 +314,16 @@ async def main():
                             training_trace_token_counts.append(len(parsed["response_ids"]))
                     else:
                         failed += 1
-        except grpc.RpcError:
+        except grpc.RpcError as exc:
             async with lock:
                 rpc_errors += len(samples)
+                if len(rpc_error_details) < 10:
+                    rpc_error_details.append({
+                        "code": exc.code().name if exc.code() else "UNKNOWN",
+                        "details": exc.details() or "",
+                        "batch_id": batch_id,
+                        "sample_count": len(samples),
+                    })
         finally:
             semaphore.release()
 
@@ -357,6 +369,9 @@ async def main():
     document["code_wrong_steps"] = args.code_wrong_steps
     document["min_steps"] = args.min_steps
     document["model_mode"] = args.model_mode
+    document["batch_size"] = episode_batch_size
+    document["requested_episode_concurrency"] = episode_batch_size * args.slots
+    document["rpc_error_details"] = rpc_error_details
     document["dataset"] = {
         "name": "DSCodeBench",
         "path": args.dataset_jsonl,
@@ -545,6 +560,7 @@ def run_scale(
     plugin_ready_timeout_seconds: int,
     worker_register_max_attempts: int,
     worker_register_retry_backoff_ms: int,
+    episode_batch_size: int,
     acceptance_purpose: str,
 ) -> dict:
     """执行一组 Gate3 规模。
@@ -790,7 +806,8 @@ def run_scale(
             "run_id": run_id, "gate": 3, "acceptance_purpose": acceptance_purpose,
             "environment": "code", "real_workers": workers_count,
             "worker_capacity": capacity, "worker_slots": workers_count * capacity,
-            "requested_episode_concurrency": workers_count * capacity, "modes": list(modes),
+            "requested_episode_concurrency": episode_batch_size * capacity, "modes": list(modes),
+            "episode_batch_size": episode_batch_size,
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
             "code_wrong_steps": code_wrong_steps, "min_steps": min_steps, "worker_ports": ports,
             "plugin_ready_timeout_seconds": plugin_ready_timeout_seconds,
@@ -843,6 +860,7 @@ def run_scale(
                 "--registration-timeout", str(registration_timeout),
                 "--batch-timeout", str(batch_timeout),
                 "--exact-batches", str(exact_batches),
+                "--episode-batch-size", str(episode_batch_size),
                 "--model-name", ("proxy-selected-versioned-model" if model_mode == "real" else "gate3-code-model"),
             ])
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} start", flush=True)
@@ -1008,6 +1026,10 @@ def main() -> int:
     parser.add_argument("--dataset-limit", type=int, default=8)
     parser.add_argument("--dataset-offset", type=int, default=0)
     parser.add_argument("--exact-batches", type=int, default=0)
+    parser.add_argument(
+        "--episode-batch-size", type=int, default=0,
+        help="Episodes per ExecuteBatch; defaults to the Worker count.",
+    )
     parser.add_argument("--registration-timeout", type=int, default=180)
     parser.add_argument("--batch-timeout", type=int, default=180)
     parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
@@ -1028,6 +1050,8 @@ def main() -> int:
         parser.error("--worker-register-max-attempts must be between 1 and 100")
     if not 10 <= args.worker_register_retry_backoff_ms <= 10_000:
         parser.error("--worker-register-retry-backoff-ms must be between 10 and 10000")
+    if args.episode_batch_size < 0:
+        parser.error("--episode-batch-size must be zero (auto) or positive")
     allowed_exposed_ports = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
     for label, port in {
         "isolated server": base.SERVER_PORT,
@@ -1062,6 +1086,9 @@ def main() -> int:
     if args.acceptance_purpose == "worker-scale":
         if args.model_mode != "simulator" or modes != ("sync",) or args.exact_batches <= 0:
             raise SystemExit("worker-scale requires simulator, exactly --mode sync, and --exact-batches > 0")
+        resolved_batch_size = args.episode_batch_size or args.workers
+        if resolved_batch_size * args.exact_batches < args.workers:
+            raise SystemExit("worker-scale must submit at least one episode per Worker")
     if args.code_wrong_steps < 0 or args.code_wrong_steps >= args.max_steps:
         raise SystemExit("--code-wrong-steps must be >=0 and smaller than --max-steps")
     password = os.environ.get("UENV_PASS")
@@ -1092,6 +1119,7 @@ def main() -> int:
         args.plugin_ready_timeout_seconds,
         args.worker_register_max_attempts,
         args.worker_register_retry_backoff_ms,
+        args.episode_batch_size or args.workers,
         args.acceptance_purpose,
     )
     summaries = [summary]

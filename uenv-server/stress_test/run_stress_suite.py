@@ -54,6 +54,15 @@ def load_suite_config(path: Path) -> dict[str, Any]:
     tiers = worker_scale.get("tiers")
     if tiers != [32, 512, 1024]:
         raise ValueError("worker_scale tiers must be exactly [32, 512, 1024]")
+    episode_batch_size = int(worker_scale.get("episode_batch_size", 0))
+    episodes_per_worker = int(worker_scale.get("episodes_per_worker", 0))
+    if episode_batch_size < 1 or episodes_per_worker < 1:
+        raise ValueError("worker_scale episode_batch_size and episodes_per_worker must be positive")
+    for workers in tiers:
+        if int(workers) * episodes_per_worker % episode_batch_size:
+            raise ValueError(
+                f"worker_scale tier {workers} does not divide evenly into episode batches"
+            )
     if int(worker_scale.get("minimum_mem_available_bytes", 0)) < 1024 * 1024 * 1024:
         raise ValueError("worker_scale minimum_mem_available_bytes must be at least 1 GiB")
     fraction = float(worker_scale.get("maximum_projected_host_memory_fraction", 0))
@@ -174,6 +183,8 @@ def worker_scale_command(
     artifacts: Path,
 ) -> list[str]:
     gate = config["worker_scale"]
+    episode_batch_size = int(gate["episode_batch_size"])
+    exact_batches = workers * int(gate["episodes_per_worker"]) // episode_batch_size
     command = [
         sys.executable,
         str(HERE / "run_distributed_gate3_code.py"),
@@ -188,7 +199,8 @@ def worker_scale_command(
         "--dataset-jsonl", str(gate["dataset_jsonl"]),
         "--dataset-limit", str(gate["dataset_limit"]),
         "--dataset-offset", str(gate["dataset_offset"]),
-        "--exact-batches", str(gate["exact_batches"]),
+        "--exact-batches", str(exact_batches),
+        "--episode-batch-size", str(episode_batch_size),
         "--registration-timeout", str(gate["registration_timeout_seconds"]),
         "--batch-timeout", str(gate["batch_timeout_seconds"]),
         "--simulator-latency-ms", str(gate["simulator_latency_ms"]),
