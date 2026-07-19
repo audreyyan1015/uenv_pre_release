@@ -75,7 +75,6 @@ import argparse
 import json
 from pathlib import Path
 import stat
-import urllib.request
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", required=True)
@@ -93,26 +92,30 @@ api_key = str(raw.get("api_key") or "")
 model = str(raw.get("model") or getattr(llm, "model", "") or "")
 if not base_url or not api_key or not model:
     raise SystemExit("LLM config must contain non-empty base_url, api_key and model")
-url = base_url if base_url.endswith("/chat/completions") else base_url + "/chat/completions"
-payload = json.dumps({
-    "model": model,
-    "messages": [{"role": "user", "content": "Reply with OK."}],
-    "temperature": 0,
-    "max_tokens": 4,
-}).encode()
-request = urllib.request.Request(url, data=payload, method="POST")
-request.add_header("Content-Type", "application/json")
-request.add_header("Authorization", f"Bearer {api_key}")
-with urllib.request.urlopen(request, timeout=90) as response:
-    document = json.loads(response.read().decode())
-if not isinstance(document.get("choices"), list) or not document["choices"]:
-    raise SystemExit("minimal authenticated LLM call returned no choices")
+placeholder_keys = {
+    "replace_me", "changeme", "change_me", "your_api_key", "api_key",
+    "placeholder", "dummy", "test",
+}
+if api_key.strip().lower() in placeholder_keys:
+    raise SystemExit("LLM config contains a placeholder api_key")
+
+# Exercise the exact OpenHands SDK transport used by the real agent.  A raw HTTP
+# request can pass while LiteLLM/OpenHands model routing still rejects the config.
+from openhands.sdk import Message, TextContent
+response = llm.completion([
+    Message(role="user", content=[TextContent(text="Reply with OK.")]),
+], temperature=0, max_tokens=4)
+content = getattr(getattr(response, "message", None), "content", ())
+if not any(str(getattr(item, "text", "")).strip() for item in content):
+    raise SystemExit("minimal authenticated OpenHands LLM call returned no text")
+raw_response = getattr(response, "raw_response", None)
 print(json.dumps({
     "schema_valid": True,
     "auth_and_minimal_call_valid": True,
+    "transport": "openhands.sdk.LLM.completion",
     "model": model,
     "base_url": base_url,
-    "response_id_present": bool(document.get("id")),
+    "response_id_present": bool(getattr(raw_response, "id", None)),
 }, sort_keys=True))
 '''
 
