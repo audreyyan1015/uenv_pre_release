@@ -180,6 +180,7 @@ def worker_scale_command(
         "--registration-timeout", str(gate["registration_timeout_seconds"]),
         "--batch-timeout", str(gate["batch_timeout_seconds"]),
         "--simulator-latency-ms", str(gate["simulator_latency_ms"]),
+        "--plugin-ready-timeout-seconds", str(gate["plugin_ready_timeout_seconds"]),
         "--acceptance-purpose", "worker-scale",
         "--private-worker-port-range", args.private_worker_port_range,
         "--artifacts", str(artifacts),

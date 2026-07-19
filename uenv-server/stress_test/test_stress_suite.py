@@ -18,6 +18,7 @@ class StressSuiteTests(unittest.TestCase):
         self.assertEqual(config["gate3"]["model_mode"], "real")
         self.assertEqual(config["gate4"]["mode"], "llm")
         self.assertEqual(config["worker_scale"]["tiers"], [32, 512, 1024])
+        self.assertEqual(config["worker_scale"]["plugin_ready_timeout_seconds"], 30)
 
     def test_real_dscodebench_row_maps_to_worker_contract(self):
         row = {

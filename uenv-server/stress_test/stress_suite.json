@@ -37,6 +37,7 @@
     "registration_timeout_seconds": 600,
     "batch_timeout_seconds": 900,
     "simulator_latency_ms": 10,
+    "plugin_ready_timeout_seconds": 30,
     "minimum_mem_available_bytes": 2147483648,
     "maximum_projected_host_memory_fraction": 0.85,
     "model_mode": "deterministic_dataset_oracle",

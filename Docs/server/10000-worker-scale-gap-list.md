@@ -37,7 +37,7 @@ python uenv-server/stress_test/run_stress_suite.py \
 # 预检通过后，加 --execute 一次顺序执行 Gate3 -> Gate4 -> 32 -> 512 -> 1024 Worker
 ```
 
-suite 自动保存运行前后保护进程快照、配置、命令日志、每个 runner 的 manifest/results/config 和总 `summary.json`，并将“基础设施通过”与“模型 reward”分开汇总。32/512/1024 档使用真实 Worker 进程、真实 Code Plugin 和真实 DSCodeBench 输入；为隔离控制面容量，模型侧使用确定性数据集 oracle，因此其结果只属于基础设施容量证据，不属于真实 LLM 质量证据。每档记录 fleet 峰值 RSS、进程数、FD 和最低可用内存；当前档失败或对下一档的内存投影不安全时立即停止扩容。多 Worker 场景必须显式提供已经开放并核验的 `--private-worker-port-range`，统一入口不会绕过端口和资源门禁。
+suite 自动保存运行前后保护进程快照、配置、命令日志、每个 runner 的 manifest/results/config 和总 `summary.json`，并将“基础设施通过”与“模型 reward”分开汇总。32/512/1024 档使用真实 Worker 进程、真实 Code Plugin 和真实 DSCodeBench 输入；为隔离控制面容量，模型侧使用确定性数据集 oracle，因此其结果只属于基础设施容量证据，不属于真实 LLM 质量证据。每档记录 fleet 峰值 RSS、进程数、FD 和最低可用内存；当前档失败或对下一档的内存投影不安全时立即停止扩容。多 Worker 场景必须显式提供已经开放并核验的 `--private-worker-port-range`，统一入口不会绕过端口和资源门禁。插件进程就绪等待通过有界参数 `UENV_PLUGIN_READY_TIMEOUT_SECS` 控制，默认仍为 2 秒，规模档显式使用 30 秒并记录到 manifest，以容纳同机数百/上千插件并发冷启动，而不是依赖无界等待。
 
 2026-07-19 的代码级 P0（显式路径/二进制参数、Git/二进制哈希、生产 PID 保护、真实 LLM 配置预检、Gate3 实际 step、Gate4 完整轨迹字段、基础设施与 reward 分离）已进入统一入口。下文 P0-1 至 P0-8 的有界背压、索引/分片、连接复用、持久化、重启恢复、HA 与安全治理仍是生产万 Worker 的独立架构缺口，不能以单 Worker Gate3/Gate4 通过替代。
 

@@ -532,6 +532,7 @@ def run_scale(
     batch_timeout: int,
     fleet_supervisor_threshold: int,
     simulator_latency_ms: int,
+    plugin_ready_timeout_seconds: int,
     acceptance_purpose: str,
 ) -> dict:
     """执行一组 Gate3 规模。
@@ -687,6 +688,7 @@ def run_scale(
             "UENV_LLM_HTTP_TIMEOUT_SECS": str(batch_timeout),
             "UENV_CODE_PLUGIN_BIN": f"{worker_run}/bundle/uenv-code-plugin",
             "UENV_CODE_EVAL_SCRIPT": f"{worker_run}/bundle/plugins/code/scripts/evaluate_code.py",
+            "UENV_PLUGIN_READY_TIMEOUT_SECS": str(plugin_ready_timeout_seconds),
             "RUST_LOG": "error",
         }
         if workers_count >= fleet_supervisor_threshold:
@@ -775,6 +777,7 @@ def run_scale(
             "requested_episode_concurrency": workers_count * capacity, "modes": list(modes),
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
             "code_wrong_steps": code_wrong_steps, "min_steps": min_steps, "worker_ports": ports,
+            "plugin_ready_timeout_seconds": plugin_ready_timeout_seconds,
             "model_mode": model_mode,
             "model_kind": (
                 "real-ark-chat-completions+ark-tokenization"
@@ -989,6 +992,7 @@ def main() -> int:
     parser.add_argument("--batch-timeout", type=int, default=180)
     parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
     parser.add_argument("--simulator-latency-ms", type=int, default=10)
+    parser.add_argument("--plugin-ready-timeout-seconds", type=int, default=2)
     parser.add_argument(
         "--acceptance-purpose",
         choices=("gate3-real-llm", "worker-scale"),
@@ -1024,6 +1028,8 @@ def main() -> int:
         raise SystemExit("batch and timeout arguments must be non-negative/positive")
     if args.fleet_supervisor_threshold < 2 or args.simulator_latency_ms < 0:
         raise SystemExit("invalid fleet supervisor threshold or simulator latency")
+    if not 1 <= args.plugin_ready_timeout_seconds <= 300:
+        raise SystemExit("--plugin-ready-timeout-seconds must be between 1 and 300")
     modes = tuple(args.mode or MODES)
     if args.acceptance_purpose == "gate3-real-llm" and args.model_mode != "real":
         raise SystemExit("Gate3 acceptance requires --model-mode real")
@@ -1057,6 +1063,7 @@ def main() -> int:
         args.batch_timeout,
         args.fleet_supervisor_threshold,
         args.simulator_latency_ms,
+        args.plugin_ready_timeout_seconds,
         args.acceptance_purpose,
     )
     summaries = [summary]
