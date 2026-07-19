@@ -70,11 +70,10 @@ class StressSuiteTests(unittest.TestCase):
         self.assertEqual(decision["projected_next_fleet_memory_bytes"], 4 * 1024**3)
 
     def test_exact_batch_loop_rechecks_after_semaphore_wait(self):
-        import run_distributed_gate3_code
-
+        source = Path(__file__).with_name("run_distributed_gate3_code.py").read_text(encoding="utf-8")
         self.assertIn(
             "if args.exact_batches > 0 and batch_sequence >= args.exact_batches",
-            run_distributed_gate3_code.LOAD_CLIENT,
+            source,
         )
 
     def test_single_worker_gate3_does_not_receive_scale_port_range(self):
