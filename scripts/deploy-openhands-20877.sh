@@ -26,40 +26,60 @@ SSH_JUMP=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$KEY" -p 
 SSH_OH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ProxyCommand="ssh -i $KEY -p $JUMP_PORT -W %h:22 root@$JUMP_HOST" root@"$OH_HOST")
 
 echo "== tar sync integrations + config + scripts -> 208.77:$REMOTE_UENV =="
-tar -C "$REPO_ROOT" -czf /tmp/uenv-oh-sync.tgz \
-  integrations/openhands \
-  config/openhands-20877.env.example \
+# 仅打包存在的路径，避免缺文件导致 tar 失败
+TAR_LIST=(
+  integrations/openhands
+  config/openhands-20877.env.example
+  scripts/run-openhands-pro-20877.sh
+  scripts/openhands
+  scripts/gen-openhands-llm-config.py
+  proto/uenv/v1/agent.proto
+)
+for opt in \
   config/openhands-llm-20877.json.example \
   config/uenv-trajectory.env.example \
   config/swe/pro-python-smoke.json \
-  scripts/run-openhands-pro-20877.sh \
   scripts/verify-openhands-trajectory-e2e-20877.sh \
   scripts/verify-swe-agent-orchestration-e2e.sh \
-  scripts/swe_agent_orchestration_e2e.py \
-  scripts/openhands \
-  scripts/gen-openhands-llm-config.py
+  scripts/swe_agent_orchestration_e2e.py
+do
+  [[ -e "$REPO_ROOT/$opt" ]] && TAR_LIST+=("$opt")
+done
+COPYFILE_DISABLE=1 tar -C "$REPO_ROOT" --exclude='__pycache__' --exclude='._*' \
+  -czf /tmp/uenv-oh-sync.tgz "${TAR_LIST[@]}"
 
-"${SSH_OH[@]}" "mkdir -p $REMOTE_UENV"
-cat /tmp/uenv-oh-sync.tgz | "${SSH_OH[@]}" "tar -xzf - -C $REMOTE_UENV"
+"${SSH_OH[@]}" "mkdir -p $REMOTE_UENV /root/UEnv"
+cat /tmp/uenv-oh-sync.tgz | "${SSH_OH[@]}" "tar -xzf - -C /root/UEnv && cp -a /root/UEnv/. $REMOTE_UENV/ 2>/dev/null || true"
 
 "${SSH_OH[@]}" bash -s <<REMOTE
 set -euo pipefail
 cd /root/UEnv
-chmod +x scripts/run-openhands-pro-20877.sh scripts/verify-openhands-trajectory-e2e-20877.sh \
-  scripts/verify-swe-agent-orchestration-e2e.sh scripts/swe_agent_orchestration_e2e.py \
-  scripts/openhands/*.py 2>/dev/null || true
+chmod +x scripts/run-openhands-pro-20877.sh scripts/openhands/*.py 2>/dev/null || true
+chmod +x scripts/verify-openhands-trajectory-e2e-20877.sh \
+  scripts/verify-swe-agent-orchestration-e2e.sh scripts/swe_agent_orchestration_e2e.py 2>/dev/null || true
 if [[ ! -f /root/.openhands-20877.env ]]; then
   cp config/openhands-20877.env.example /root/.openhands-20877.env
   chmod 600 /root/.openhands-20877.env
 fi
-if [[ ! -f /root/.uenv-trajectory.env ]]; then
+if [[ -f config/uenv-trajectory.env.example && ! -f /root/.uenv-trajectory.env ]]; then
   cp config/uenv-trajectory.env.example /root/.uenv-trajectory.env
   chmod 600 /root/.uenv-trajectory.env
 fi
 
-# grpcio for AgentControlService client（Debian 包，避免 pip externally-managed-environment）
-apt-get install -y python3-grpcio 2>&1 | tail -3 || true
-python3 -c 'import grpc; print("grpc ok")' 2>/dev/null || echo "WARN: grpc import failed"
+# Agent poller 使用独立 venv（系统 protobuf 过旧，无法生成/导入含 optional 的 agent stub）
+if [[ ! -x /root/uenv-agent-venv/bin/python ]]; then
+  python3 -m venv /root/uenv-agent-venv
+  /root/uenv-agent-venv/bin/pip -q install -U pip
+  /root/uenv-agent-venv/bin/pip -q install "grpcio>=1.60" "grpcio-tools>=1.60" "protobuf>=4.25"
+fi
+mkdir -p integrations/openhands/uenv_runtime/gen
+/root/uenv-agent-venv/bin/python -m grpc_tools.protoc \
+  -I=proto proto/uenv/v1/agent.proto \
+  --python_out=integrations/openhands/uenv_runtime/gen \
+  --grpc_python_out=integrations/openhands/uenv_runtime/gen
+touch integrations/openhands/uenv_runtime/gen/__init__.py \
+  integrations/openhands/uenv_runtime/gen/uenv/__init__.py \
+  integrations/openhands/uenv_runtime/gen/uenv/v1/__init__.py
 
 ENABLE_POLL="${ENABLE_POLL}"
 if [[ "\$ENABLE_POLL" == "1" ]]; then
@@ -75,7 +95,15 @@ if [[ "\$ENABLE_POLL" == "1" ]]; then
     echo 'UENV_GATEWAY_LOCAL=http://127.0.0.1:28097' >> /root/.openhands-20877.env
   grep -q '^UENV_GATEWAY_API_KEY=' /root/.openhands-20877.env || \
     echo 'UENV_GATEWAY_API_KEY=swe-pro-secret' >> /root/.openhands-20877.env
+  grep -q '^OPENHANDS_RUN_TIMEOUT_SEC=' /root/.openhands-20877.env || \
+    echo 'OPENHANDS_RUN_TIMEOUT_SEC=7200' >> /root/.openhands-20877.env
+  grep -q '^OPENHANDS_MAX_OUTPUT_TOKENS=' /root/.openhands-20877.env || \
+    echo 'OPENHANDS_MAX_OUTPUT_TOKENS=32768' >> /root/.openhands-20877.env
+  grep -q '^OPENHANDS_AGENT_MAX_CONCURRENT=' /root/.openhands-20877.env || \
+    echo 'OPENHANDS_AGENT_MAX_CONCURRENT=1' >> /root/.openhands-20877.env
   cp scripts/openhands/uenv-agent-poller.service /etc/systemd/system/uenv-agent-poller.service
+  sed -i 's|^ExecStart=.*|ExecStart=/root/uenv-agent-venv/bin/python /root/UEnv/scripts/openhands/openhands_runner.py|' \
+    /etc/systemd/system/uenv-agent-poller.service
   systemctl daemon-reload
   systemctl stop openhands-runner.service 2>/dev/null || true
   systemctl disable openhands-runner.service 2>/dev/null || true

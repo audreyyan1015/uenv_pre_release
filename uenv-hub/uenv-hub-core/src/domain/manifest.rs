@@ -30,6 +30,38 @@ pub fn validate_env_type(env_type: &str, report: &mut ValidationReport) {
     }
 }
 
+/// Well-known **public** container registries. Referencing any of these means a
+/// worker would pull from the internet at runtime, which breaks the intranet
+/// "zero external pull" (零外拉) guarantee. Detection is host-exact to avoid
+/// false positives on internal registries (`registry.local`, private IPs) and
+/// bare local names (`uenv-base:latest`).
+const PUBLIC_REGISTRIES: &[&str] = &[
+    "docker.io",
+    "registry-1.docker.io",
+    "index.docker.io",
+    "ghcr.io",
+    "quay.io",
+    "gcr.io",
+    "k8s.gcr.io",
+    "registry.k8s.io",
+    "public.ecr.aws",
+    "mcr.microsoft.com",
+    "nvcr.io",
+    "docker.elastic.co",
+];
+
+/// If `image_ref`'s registry host is a known public registry, return it. Only
+/// the explicit host component (text before the first `/`) is matched, so
+/// `registry.local/uenv/x:1` and `uenv-base:latest` pass while
+/// `docker.io/library/python:3.11` is flagged.
+pub fn public_registry_of(image_ref: &str) -> Option<&'static str> {
+    let host = image_ref.trim().split('/').next().unwrap_or("");
+    PUBLIC_REGISTRIES
+        .iter()
+        .copied()
+        .find(|reg| host.eq_ignore_ascii_case(reg))
+}
+
 /// Full structural validation of a publish request. Does not touch the DB.
 pub fn validate_publish(req: &PublishVersionRequest) -> ValidationReport {
     let mut report = ValidationReport::ok();
@@ -52,6 +84,67 @@ pub fn validate_publish(req: &PublishVersionRequest) -> ValidationReport {
                 );
             }
         }
+        // Zero-egress: the runtime image is what a worker pulls; a public
+        // registry reference here defeats intranet deployment.
+        if let Some(reg) = public_registry_of(&image.url) {
+            report.push_warning(
+                "image.url",
+                format!(
+                    "references public registry '{reg}'; for 内网零外拉 host the image on the Hub \
+                     (`uenv env publish-image`) or an internal registry and reference that instead"
+                ),
+            );
+        }
+    }
+
+    // Zero-egress: build-time base images should also resolve internally. These
+    // are staged during the air-gap offline build, so this is a guidance
+    // warning rather than a hard error.
+    for (loc, base) in [
+        ("version.base_image", req.base_image.as_deref()),
+        (
+            "image.base_image_ref",
+            req.image.as_ref().and_then(|i| i.base_image_ref.as_deref()),
+        ),
+    ] {
+        if let Some(reg) = base.and_then(public_registry_of) {
+            report.push_warning(
+                loc,
+                format!(
+                    "base image references public registry '{reg}'; mirror it internally (air-gap \
+                     offline build) so the image build never pulls from the internet"
+                ),
+            );
+        }
+    }
+
+    // OpenEnv standardization: a fully-standardized environment declares the
+    // Action / Observation / State contract and a launch entrypoint. Missing
+    // pieces are surfaced as guidance (non-fatal) so authors converge on the
+    // standard without blocking early scaffolds.
+    if req.interface.action.is_none() {
+        report.push_warning(
+            "interface.action",
+            "standardized environments should declare an OpenEnv `action` JSON Schema",
+        );
+    }
+    if req.interface.observation.is_none() {
+        report.push_warning(
+            "interface.observation",
+            "standardized environments should declare an OpenEnv `observation` JSON Schema",
+        );
+    }
+    if req.interface.state.is_none() {
+        report.push_warning(
+            "interface.state",
+            "standardized environments should declare an OpenEnv `state` JSON Schema",
+        );
+    }
+    if req.entrypoint.as_deref().unwrap_or("").trim().is_empty() && req.image.is_none() {
+        report.push_warning(
+            "entrypoint",
+            "declare a version.entrypoint or an [image] so the worker knows how to launch the environment",
+        );
     }
 
     // health_check_path should start with '/'.
@@ -189,6 +282,66 @@ mod tests {
         req.config_schema = Some(json!({"type": "object", "required": ["x"]}));
         req.default_config = Some(json!({}));
         assert!(!validate_publish(&req).valid);
+    }
+
+    #[test]
+    fn public_registry_detection() {
+        assert_eq!(public_registry_of("docker.io/library/python:3.11"), Some("docker.io"));
+        assert_eq!(public_registry_of("ghcr.io/org/img:1"), Some("ghcr.io"));
+        assert_eq!(public_registry_of("Quay.io/x:2"), Some("quay.io"));
+        // Internal / local references pass.
+        assert_eq!(public_registry_of("registry.local/uenv/math:0.2.0"), None);
+        assert_eq!(public_registry_of("uenv-base:latest"), None);
+        assert_eq!(public_registry_of("10.0.0.5:5000/uenv/x:1"), None);
+    }
+
+    #[test]
+    fn public_registry_image_is_warned_not_failed() {
+        let mut req = base_req();
+        req.image = Some(ImageSpec {
+            url: "docker.io/library/python:3.11".into(),
+            digest: None,
+            size_bytes: None,
+            arch: None,
+            base_image_ref: None,
+        });
+        let report = validate_publish(&req);
+        assert!(report.valid, "zero-egress lint must be a warning, not an error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|i| i.location == "image.url" && i.message.contains("public registry")));
+    }
+
+    #[test]
+    fn internal_registry_image_has_no_zero_egress_warning() {
+        let mut req = base_req();
+        req.image = Some(ImageSpec {
+            url: "registry.local/uenv/math:0.2.0".into(),
+            digest: None,
+            size_bytes: None,
+            arch: None,
+            base_image_ref: Some("uenv-base:latest".into()),
+        });
+        let report = validate_publish(&req);
+        assert!(report.valid);
+        assert!(!report
+            .issues
+            .iter()
+            .any(|i| i.message.contains("public registry")));
+    }
+
+    #[test]
+    fn missing_openenv_interface_is_guidance_only() {
+        // base_req has no interface schemas → three guidance warnings, still valid.
+        let report = validate_publish(&base_req());
+        assert!(report.valid);
+        for loc in ["interface.action", "interface.observation", "interface.state"] {
+            assert!(
+                report.issues.iter().any(|i| i.location == loc),
+                "expected guidance warning at {loc}"
+            );
+        }
     }
 
     #[test]

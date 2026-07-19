@@ -195,9 +195,19 @@ impl ModelClient {
                                     "model client: response missing choices[0].message.content".to_string(),
                                 )
                             })?;
+                        let model_ms = model_start.elapsed().as_millis() as u64;
+                        tracing::info!(
+                            endpoint = %endpoint_base,
+                            model = %model_name,
+                            model_ms,
+                            content_bytes = content.len(),
+                            attempt = attempt + 1,
+                            phase = "model_http_ok",
+                            msg = "model_client"
+                        );
                         let rollout_meta = if require_rollout_meta {
                             let mut meta = RolloutModelMeta {
-                                model_latency_ms: model_start.elapsed().as_millis() as i64,
+                                model_latency_ms: model_ms as i64,
                                 ..Default::default()
                             };
                             let (param, policy) =
