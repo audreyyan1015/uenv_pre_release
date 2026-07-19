@@ -152,8 +152,16 @@ class AgentControlClient:
         model_latency_ms: int | None = None,
         response_ids: list[int] | None = None,
         response_mask: list[int] | None = None,
+        *,
+        agent_id: str,
     ) -> bool:
-        """回填结果；返回 Server 是否 ack。"""
+        """回填结果；返回 Server 是否 ack。
+
+        ``agent_id`` 必须与 PollAgentJob 领取该 job 时使用的注册 id 一致，
+        否则 Server 返回 ``AGENT_MISMATCH`` 且不释放 in-flight job。
+        """
+        if not agent_id:
+            raise ValueError("agent_id is required for CompleteAgentJob")
         ids = [int(item) for item in (response_ids or [])]
         mask = [int(item) for item in (response_mask or [])]
         log_probs = [float(item) for item in (rollout_log_probs or [])]
@@ -164,6 +172,7 @@ class AgentControlClient:
             "reward": float(reward),
             "trajectory_id": trajectory_id,
             "error_message": error_message,
+            "agent_id": agent_id,
             "parallel_mode": parallel_mode,
             "rollout_log_probs": log_probs,
         }
@@ -188,6 +197,14 @@ class AgentControlClient:
             req.rollout_trace.response_ids.extend(ids)
             req.rollout_trace.response_mask.extend(mask)
         resp = self._stub.CompleteAgentJob(req, timeout=self.timeout_sec)
+        if not resp.ack:
+            code = getattr(resp, "code", "") or ""
+            message = getattr(resp, "message", "") or ""
+            print(
+                f"[agent-client] CompleteAgentJob not acked job={job_id} "
+                f"agent_id={agent_id} code={code} message={message}",
+                flush=True,
+            )
         return bool(resp.ack)
 
     def agent_heartbeat(self, agent_id: str, active_jobs: int, timestamp_ms: int = 0) -> int:

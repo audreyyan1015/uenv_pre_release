@@ -371,12 +371,12 @@ def _read_reward(out_dir: Path) -> tuple[str, float, str, dict[str, Any]]:
     return status, reward, trajectory_id, rollout_fields
 
 
-def _run_agent_job(client: Any, job: Any) -> None:
+def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
     """跑一个 AgentJob：写 job 文件 → 调 run 脚本 → 读结果 → CompleteAgentJob。
 
     全程包在 try/finally 内：无论 setup（mkdir/write）还是执行阶段抛错，都保证
     _active_jobs 被回收（否则 max_concurrent=1 时 poller 会永久卡死），并尽力把
-    结果回填 Server。
+    结果回填 Server。``agent_id`` 必须与领取 job 时的注册 id 一致。
     """
     global _active_jobs
     status, reward, trajectory_id, err = "failed", 0.0, "", ""
@@ -440,13 +440,14 @@ def _run_agent_job(client: Any, job: Any) -> None:
                 reward=reward,
                 trajectory_id=trajectory_id,
                 error_message=err,
+                agent_id=agent_id,
                 **rollout_fields,
             )
             response_ids = rollout_fields.get("response_ids") or []
             print(
                 f"[agent-poll] completed job={job.job_id} status={status} "
                 f"reward={reward} trajectory_id={trajectory_id} "
-                f"response_ids={len(response_ids)} acked={acked}",
+                f"agent_id={agent_id} response_ids={len(response_ids)} acked={acked}",
                 flush=True,
             )
         except Exception as exc:  # noqa: BLE001
@@ -573,7 +574,9 @@ def _poll_loop() -> None:
         )
         with _active_lock:
             _active_jobs += 1
-        threading.Thread(target=_run_agent_job, args=(client, job), daemon=True).start()
+        threading.Thread(
+            target=_run_agent_job, args=(client, job, agent_id), daemon=True
+        ).start()
 
 
 def main() -> None:

@@ -157,7 +157,9 @@ impl PluginHost {
                 },
             );
         }
-        self.spawn_exit_watcher(instance_id);
+        // 注意：不再在此处启动“夺取 Child 句柄”的 exit watcher。句柄必须留在
+        // ManagedInstance 中，`close()` 才能真正 kill 子进程。异常退出的实例由
+        // 复用前的 health_check 检出并销毁（见 WarmupPool::acquire/release）。
         Ok(instance)
     }
 
@@ -215,17 +217,85 @@ impl PluginHost {
             return Ok(());
         };
 
+        // 1) 先发 gRPC close 作为优雅下线信号（best-effort，带超时，避免卡死）。
         if managed.metadata.state == PluginInstanceState::Running {
             if let Ok(mut client) = PluginRpcClient::connect_uds(&managed.metadata.uds_path).await {
-                let _ = client.close().await;
+                let _ = tokio::time::timeout(Duration::from_secs(2), client.close()).await;
             }
         }
+        // 2) 无论优雅下线是否成功，都强制终止进程并回收，杜绝残留孤儿。
         if let Some(mut child) = managed.child.take() {
-            let _ = child.kill().await;
+            let _ = child.start_kill();
             let _ = child.wait().await;
         }
+        managed.metadata.state = PluginInstanceState::Closed;
+        // 3) 清理 UDS socket 及其伴随的 episode 配置文件。
         let _ = fs::remove_file(&managed.metadata.uds_path);
+        let episode_cfg = format!("{}.episode.json", managed.metadata.uds_path.display());
+        let _ = fs::remove_file(&episode_cfg);
         Ok(())
+    }
+
+    /// 关停 / 巡检时批量下线所有实例。返回成功处理的实例数量。
+    pub async fn close_all(&self) -> usize {
+        let ids: Vec<String> = {
+            let state = self.state.lock().await;
+            state.instances.keys().cloned().collect()
+        };
+        let mut closed = 0;
+        for id in ids {
+            if self.close(&id).await.is_ok() {
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// 启动巡检：清理上一代 Worker 遗留的插件孤儿进程与陈旧 UDS 文件。
+    ///
+    /// 只应在 Worker 尚未 spawn 任何插件之前调用；此时所有仍存活的
+    /// `uenv-*-plugin` 进程必然是历史遗留，可安全终止。返回终止的进程数。
+    pub fn reap_orphans() -> usize {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut reaped = 0usize;
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(entries) = fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let Some(pid_str) = name.to_str() else { continue };
+                    let Ok(pid) = pid_str.parse::<i32>() else { continue };
+                    let Ok(bytes) = fs::read(format!("/proc/{pid}/cmdline")) else {
+                        continue;
+                    };
+                    let cmdline = String::from_utf8_lossy(&bytes);
+                    if cmdline.contains("uenv-math-plugin") || cmdline.contains("uenv-code-plugin")
+                    {
+                        let killed = std::process::Command::new("kill")
+                            .arg("-9")
+                            .arg(pid.to_string())
+                            .status()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        if killed {
+                            reaped += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // 清理陈旧 socket / episode 配置文件（跨 unix 平台）。
+        let tmp = std::env::temp_dir();
+        if let Ok(entries) = fs::read_dir(&tmp) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let Some(f) = fname.to_str() else { continue };
+                if f.starts_with("uenv-") && f.contains(".sock") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        reaped
     }
 
     pub async fn terminate_for_test(
@@ -267,26 +337,6 @@ impl PluginHost {
         Ok(managed.metadata.uds_path.clone())
     }
 
-    fn spawn_exit_watcher(&self, instance_id: String) {
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            let maybe_child = {
-                let mut guard = state.lock().await;
-                if let Some(managed) = guard.instances.get_mut(&instance_id) {
-                    managed.child.take()
-                } else {
-                    None
-                }
-            };
-            if let Some(mut child) = maybe_child {
-                let _ = child.wait().await;
-                let mut guard = state.lock().await;
-                if let Some(instance) = guard.instances.get_mut(&instance_id) {
-                    instance.metadata.state = PluginInstanceState::Broken;
-                }
-            }
-        });
-    }
 }
 
 fn scan_manifests(

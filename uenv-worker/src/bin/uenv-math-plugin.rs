@@ -37,13 +37,15 @@ struct PluginState {
 struct MathPlugin {
     uds_path: PathBuf,
     state: Mutex<PluginState>,
+    shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl MathPlugin {
-    fn new(uds_path: PathBuf) -> Self {
+    fn new(uds_path: PathBuf, shutdown_tx: tokio::sync::oneshot::Sender<()>) -> Self {
         Self {
             uds_path,
             state: Mutex::new(PluginState::default()),
+            shutdown_tx: Mutex::new(Some(shutdown_tx)),
         }
     }
 
@@ -98,8 +100,24 @@ impl PluginService for MathPlugin {
     async fn step(&self, request: Request<StepRequest>) -> Result<Response<StepResponse>, Status> {
         let action = String::from_utf8(request.into_inner().action).unwrap_or_default();
         let s = self.state.lock().await;
-        let reward = score_action(&s.dataset, &action, &s.answer);
         let mut info = HashMap::new();
+        // 判分异常必须转换为结构化返回，而不能让 panic 冒泡到 tonic 处理任务，
+        // 否则 h2 流会被 CANCEL，Server 侧误判为可重试的 dispatch_failed。
+        let reward = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            score_action(&s.dataset, &action, &s.answer)
+        })) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "score_action panicked: dataset={} answer_len={} action_len={}",
+                    s.dataset,
+                    s.answer.len(),
+                    action.len()
+                );
+                info.insert("score_error".to_string(), "score_action_panic".to_string());
+                0.0
+            }
+        };
         info.insert("response_text".to_string(), action.clone());
         info.insert("expected".to_string(), s.answer.clone());
         info.insert("dataset".to_string(), s.dataset.clone());
@@ -116,6 +134,10 @@ impl PluginService for MathPlugin {
         &self,
         _request: Request<CloseRequest>,
     ) -> Result<Response<CloseResponse>, Status> {
+        // 优雅下线：触发 gRPC server 关停，插件进程随后退出，成为正常下线通路。
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
         Ok(Response::new(CloseResponse { ok: true }))
     }
 
@@ -142,10 +164,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::remove_file(&cli.uds_path);
         let uds = UnixListener::bind(&cli.uds_path)?;
         let incoming = UnixListenerStream::new(uds);
-        let plugin = MathPlugin::new(PathBuf::from(cli.uds_path));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let plugin = MathPlugin::new(PathBuf::from(cli.uds_path), shutdown_tx);
         Server::builder()
             .add_service(PluginServiceServer::new(plugin))
-            .serve_with_incoming(incoming)
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_rx.await;
+            })
             .await?;
         Ok(())
     }

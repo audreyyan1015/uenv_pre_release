@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::routing::get;
@@ -55,6 +56,18 @@ pub struct WorkerRuntime {
 
 impl WorkerRuntime {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 启动巡检：清理上一代 Worker 遗留的插件孤儿进程与陈旧 UDS 文件，
+        // 避免（尤其是非优雅关停后）孤儿进程跨重启累积。必须在 spawn 任何插件之前执行。
+        let reaped_orphans = PluginHost::reap_orphans();
+        if reaped_orphans > 0 {
+            tracing::warn!(
+                trace_id = "runtime",
+                worker_id = %self.worker_id,
+                episode_id = "-",
+                reaped_orphans,
+                msg = "reaped_orphan_plugins_on_startup"
+            );
+        }
         let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
         let hub_endpoint = if self.hub_enabled {
             self.hub_endpoint.clone()
@@ -305,6 +318,9 @@ impl WorkerRuntime {
             });
         }
 
+        // 关停清理句柄：warmup_pool 随后被移动进 service，需先克隆一份用于关停回收。
+        let warmup_pool_for_shutdown = warmup_pool.clone();
+        let plugin_host_for_shutdown = plugin_host.clone();
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
             EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone())
@@ -318,18 +334,66 @@ impl WorkerRuntime {
         );
         spawn_observability_server(metrics, self.metrics_listen.clone(), self.health_listen.clone()).await?;
         let addr: SocketAddr = self.listen.parse()?;
+        // 长耗时 episode（OlymMATH thinking 可达数分钟）期间 DispatchEpisode 可能长时间
+        // 只有 progress/heartbeat frame。开启 HTTP/2 + TCP keepalive，避免中间层/对端空闲重置。
+        let http2_keepalive_interval =
+            Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS", 30));
+        let http2_keepalive_timeout =
+            Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS", 10));
+        let tcp_keepalive =
+            Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_TCP_KEEPALIVE_SECS", 60));
+        let max_message_bytes =
+            env_usize_default("UENV_WORKER_GRPC_MAX_MESSAGE_BYTES", 16 * 1024 * 1024);
+        tracing::info!(
+            trace_id = "runtime",
+            worker_id = %self.worker_id,
+            episode_id = "-",
+            listen = %self.listen,
+            http2_keepalive_interval_secs = http2_keepalive_interval.as_secs(),
+            http2_keepalive_timeout_secs = http2_keepalive_timeout.as_secs(),
+            tcp_keepalive_secs = tcp_keepalive.as_secs(),
+            max_message_bytes,
+            msg = "grpc_server_start"
+        );
+        let grpc_service = WorkerGrpcServiceServer::new(service)
+            .max_decoding_message_size(max_message_bytes)
+            .max_encoding_message_size(max_message_bytes);
         Server::builder()
-            .add_service(WorkerGrpcServiceServer::new(service))
+            .http2_keepalive_interval(Some(http2_keepalive_interval))
+            .http2_keepalive_timeout(Some(http2_keepalive_timeout))
+            .tcp_keepalive(Some(tcp_keepalive))
+            .add_service(grpc_service)
             .serve_with_shutdown(addr, shutdown_signal())
             .await?;
+        // 优雅关停：gRPC 入口停止后，批量回收插件池实例，避免子进程被 init 收养成孤儿。
+        let pool_closed = warmup_pool_for_shutdown.shutdown().await;
+        let host_closed = plugin_host_for_shutdown.close_all().await;
         tracing::info!(
             trace_id = "runtime",
             worker_id = "shutdown",
             episode_id = "-",
+            pool_shutdown_closed = pool_closed,
+            host_closed,
             msg = "worker_stop"
         );
         Ok(())
     }
+}
+
+fn env_u64_default(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(default)
+}
+
+fn env_usize_default(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(default)
 }
 
 fn allow_degraded_start() -> bool {
