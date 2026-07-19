@@ -625,7 +625,10 @@ def run_scale(
         base.run(server, proto)
         base.run(server, f"touch {base.q(server_run)}/generated/uenv/__init__.py {base.q(server_run)}/generated/uenv/v1/__init__.py")
         # 关闭 trajectory/obs，减少压测以外的写入和背景工作。
-        server_log_filter = "uenv_server::service::episode=info,warn" if acceptance_purpose == "worker-scale" else "warn"
+        # Scale acceptance needs the assignment.worker_id on every completion
+        # to prove that all real Workers, rather than only N registry entries,
+        # actually executed an episode.
+        server_log_filter = "info" if acceptance_purpose == "worker-scale" else "warn"
         server_cmd = " ".join([
             "env", "UENV_SERVER_CONFIG_STRICT=1", "UENV_TRAJECTORY_ENABLED=0", "UENV_OBS_ENABLED=0", "UENV_LOG_ANSI=0",
             f"UENV_ADDR={base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}", f"UENV_CONFIG_PATH={server_run}/server.yaml",

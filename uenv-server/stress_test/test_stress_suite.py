@@ -83,6 +83,17 @@ class StressSuiteTests(unittest.TestCase):
         command = run_stress_suite.gate3_command(args, config, Path("/artifacts"))
         self.assertNotIn("--private-worker-port-range", command)
 
+    def test_newest_summary_finds_child_output_under_absolute_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "nested" / "gate3-summary-test.json"
+            target.parent.mkdir()
+            target.write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                run_stress_suite.newest_summary(root, "gate3-summary-*.json"),
+                target,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

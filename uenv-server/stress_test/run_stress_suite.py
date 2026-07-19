@@ -399,6 +399,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    # Child runners use HERE as cwd, so relative artifact roots would otherwise
+    # be written under the source tree and become invisible to this collector.
+    args.artifacts = args.artifacts.resolve()
     config = load_suite_config(args.config)
     validate_arguments(args, config)
     args.artifacts.mkdir(parents=True, exist_ok=True)
