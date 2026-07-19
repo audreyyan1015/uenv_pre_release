@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+import re
 import shlex
 import time
 
@@ -33,13 +36,12 @@ WORKER_PRIVATE_IP = "192.168.0.132"
 # 分布式压测使用的固定隔离端口。它们必须提前确认空闲。
 SERVER_PORT = 8099
 WORKER_PORT = 8000
-MODEL_PORT = 18001
+MODEL_PORT = 8888
 OBS_PORT = 18002
 
 # 这是正式运行中的 adapter-core。压测脚本可以另起隔离 server，
 # 但不能误停这个 PID，也不能让它的监听端口发生变化。
-PROTECTED_PID = 3093343
-PROTECTED_EXE = "/usr/local/bin/uenv-adapter-core"
+PROTECTED_PID = 0
 PROTECTED_PORTS = (50052, 8088, 8077)
 
 # SSH 主机指纹用于确认“连上的确实是预期机器”。如果云主机重装或换机，
@@ -48,9 +50,112 @@ EXPECTED_HOST_FINGERPRINTS = {
     SERVER_HOST: "SHA256:rhrO15uNM5EoSY/4coio0s2iYkV7e+t2vaSE0G5Uqf8",
     WORKER_HOST: "SHA256:jdrwqK/dSZkw5qhBxTyhj2CqfMpXAiSXrZfpujSUD3c",
 }
-SERVER_BIN = "/home/uenv/target/release/uenv-adapter-core"
-SOURCE_WORKER_BIN = "/home/uenv/target/debug/uenv-worker"
-SOURCE_CODE_BIN = "/home/uenv/target/debug/uenv-code-plugin"
+SOURCE_REPO = ""
+SERVER_BIN = ""
+SOURCE_WORKER_BIN = ""
+SOURCE_CODE_BIN = ""
+
+
+def add_runtime_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    require_code_plugin: bool,
+) -> None:
+    """Add explicit deployment, process-protection and port arguments."""
+    parser.add_argument("--source-repo", required=True)
+    parser.add_argument("--server-bin", required=True)
+    parser.add_argument("--worker-bin", required=True)
+    if require_code_plugin:
+        parser.add_argument("--code-plugin-bin", required=True)
+    else:
+        parser.add_argument("--code-plugin-bin", default="")
+    parser.add_argument("--protected-pid", type=int, required=True)
+    parser.add_argument(
+        "--protected-port",
+        type=int,
+        action="append",
+        help="Production adapter listener to lock. Repeat for each port; defaults to 50052/8077/8088.",
+    )
+    parser.add_argument("--server-host", default=SERVER_HOST)
+    parser.add_argument("--worker-host", default=WORKER_HOST)
+    parser.add_argument("--server-private-ip", default=SERVER_PRIVATE_IP)
+    parser.add_argument("--worker-private-ip", default=WORKER_PRIVATE_IP)
+    parser.add_argument("--server-port", type=int, default=8099)
+    parser.add_argument("--worker-port", type=int, default=8000)
+    parser.add_argument("--model-port", type=int, default=8888)
+    parser.add_argument("--obs-port", type=int, default=18002)
+
+
+def configure_from_args(args: argparse.Namespace) -> None:
+    """Apply CLI values once before any SSH connection or process action."""
+    global SERVER_HOST, WORKER_HOST, SERVER_PRIVATE_IP, WORKER_PRIVATE_IP
+    global SERVER_PORT, WORKER_PORT, MODEL_PORT, OBS_PORT
+    global PROTECTED_PID, PROTECTED_PORTS, SOURCE_REPO
+    global SERVER_BIN, SOURCE_WORKER_BIN, SOURCE_CODE_BIN
+
+    if args.protected_pid <= 1:
+        raise ValueError("--protected-pid must be greater than 1")
+    for name in ("source_repo", "server_bin", "worker_bin"):
+        value = str(getattr(args, name, "")).strip()
+        if not value.startswith("/"):
+            raise ValueError(f"--{name.replace('_', '-')} must be an absolute path")
+    code_bin = str(getattr(args, "code_plugin_bin", "")).strip()
+    if code_bin and not code_bin.startswith("/"):
+        raise ValueError("--code-plugin-bin must be an absolute path")
+
+    SERVER_HOST = args.server_host
+    WORKER_HOST = args.worker_host
+    SERVER_PRIVATE_IP = args.server_private_ip
+    WORKER_PRIVATE_IP = args.worker_private_ip
+    SERVER_PORT = args.server_port
+    WORKER_PORT = args.worker_port
+    MODEL_PORT = args.model_port
+    OBS_PORT = args.obs_port
+    PROTECTED_PID = args.protected_pid
+    PROTECTED_PORTS = tuple(args.protected_port or (50052, 8077, 8088))
+    SOURCE_REPO = args.source_repo.rstrip("/")
+    SERVER_BIN = args.server_bin
+    SOURCE_WORKER_BIN = args.worker_bin
+    SOURCE_CODE_BIN = code_bin
+
+
+def source_and_binary_manifest(
+    client: paramiko.SSHClient,
+    *,
+    include_code_plugin: bool,
+) -> dict:
+    """Return the exact Git revision and hashes of binaries used by a run."""
+    paths = {
+        "server": SERVER_BIN,
+        "worker": SOURCE_WORKER_BIN,
+    }
+    if include_code_plugin:
+        paths["code_plugin"] = SOURCE_CODE_BIN
+    required = [SOURCE_REPO, *paths.values()]
+    tests = [f"test -d {q(required[0])}"] + [f"test -x {q(path)}" for path in required[1:]]
+    run(client, " && ".join(tests), timeout=20)
+    _, git_sha, _ = run(client, f"git -C {q(SOURCE_REPO)} rev-parse HEAD", timeout=20)
+    _, git_status, _ = run(
+        client,
+        f"git -C {q(SOURCE_REPO)} status --porcelain --untracked-files=normal",
+        timeout=20,
+    )
+    binaries = {}
+    for name, path in paths.items():
+        _, output, _ = run(client, f"sha256sum {q(path)} && stat -c %s {q(path)}", timeout=30)
+        lines = output.splitlines()
+        binaries[name] = {
+            "path": path,
+            "sha256": lines[0].split()[0],
+            "size_bytes": int(lines[1]),
+        }
+    return {
+        "source_repo": SOURCE_REPO,
+        "git_sha": git_sha.strip(),
+        "git_clean": not bool(git_status.strip()),
+        "git_status": git_status.splitlines(),
+        "binaries": binaries,
+    }
 
 
 def q(value: str) -> str:
@@ -185,26 +290,42 @@ def assert_port_free(client: paramiko.SSHClient, port: int, host: str) -> None:
             raise RuntimeError(f"{host}: port {port} is already occupied: {line}")
 
 
+def _listener_pid(lines: str, port: int) -> tuple[int, str]:
+    matching = [line for line in lines.splitlines() if f":{port} " in line]
+    if len(matching) != 1:
+        raise RuntimeError(f"protected port {port} must have exactly one listener: {matching}")
+    pids = {int(value) for value in re.findall(r"pid=(\d+)", matching[0])}
+    if len(pids) != 1:
+        raise RuntimeError(f"protected port {port} listener PID is ambiguous: {matching[0]}")
+    return pids.pop(), matching[0]
+
+
 def protected_snapshot(client: paramiko.SSHClient) -> dict:
     """记录正式 adapter-core 的身份和端口状态。
 
     这个快照包含 PID、可执行文件、命令行、启动时间和监听端口。
     压测前后各检查一次，用来证明压测没有影响正式 server。
     """
-    exe = process_exe(client, PROTECTED_PID)
-    if exe != PROTECTED_EXE:
-        raise RuntimeError(f"protected PID {PROTECTED_PID} exe={exe!r}, expected {PROTECTED_EXE!r}")
     current_listeners = listeners(client)
+    listener_records = {}
+    observed_pids = set()
     for port in PROTECTED_PORTS:
-        matching = [line for line in current_listeners.splitlines() if f":{port} " in line]
-        if len(matching) != 1 or f"pid={PROTECTED_PID}," not in matching[0]:
-            raise RuntimeError(f"protected port {port} ownership mismatch: {matching}")
+        observed_pid, line = _listener_pid(current_listeners, port)
+        observed_pids.add(observed_pid)
+        listener_records[str(port)] = line
+    if observed_pids != {PROTECTED_PID}:
+        raise RuntimeError(
+            f"protected listeners are not all owned by expected PID {PROTECTED_PID}: "
+            f"observed={sorted(observed_pids)}"
+        )
+    exe = process_exe(client, PROTECTED_PID)
     return {
         "pid": PROTECTED_PID,
         "exe": exe,
         "cmdline": process_cmdline(client, PROTECTED_PID),
         "starttime_ticks": process_starttime(client, PROTECTED_PID),
         "ports": list(PROTECTED_PORTS),
+        "listener_records": listener_records,
     }
 
 
@@ -212,7 +333,11 @@ def assert_protected_unchanged(client: paramiko.SSHClient, before: dict) -> None
     """确认正式 adapter-core 和压测前完全一致。"""
     after = protected_snapshot(client)
     if after != before:
-        raise RuntimeError(f"protected server changed: before={before}, after={after}")
+        raise RuntimeError(
+            "protected server changed: "
+            f"before={json.dumps(before, sort_keys=True)}, "
+            f"after={json.dumps(after, sort_keys=True)}"
+        )
 
 
 def start_owned(

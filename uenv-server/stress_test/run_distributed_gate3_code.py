@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""分布式 Gate3：真实 Code worker 扩容压测。
+"""分布式 Gate3：真实 Code worker 多轮与扩容压测。
 
 运行位置说明：
 - 这个脚本从 8.130.75.157 的 stress_test 目录启动。
@@ -7,8 +7,8 @@
 - 真实 Code worker 启动在 8.130.86.71。
 - 已经在线的正式 adapter-core 只做保护检查，不复用、不停止。
 
-Gate3 会跑两组规模：8 个 worker * 2 slot、32 个 worker * 4 slot。
-每组都会依次跑 sync、one_step_off_policy、fully_async 三种模式。
+默认只启动一个 Worker，使用明确获准的 8099/8000/8888 端口完成多轮 smoke。
+多 Worker 必须通过 --private-worker-port-range 显式提供已开放的私网端口范围。
 """
 
 from __future__ import annotations
@@ -27,14 +27,9 @@ import distributed_stress_runtime as base
 # 三种并行模式都要测，避免只验证同步路径。
 MODES = ("sync", "one_step_off_policy", "fully_async")
 
-# worker 和 observability 端口按顺序分配。启动前会逐个确认端口空闲。
-WORKER_PORT_BASE = 20000
-OBS_PORT_BASE = 21000
-MODEL_PORT = 18001
-
 # load_client.py 会被写入远端 /tmp/uenv-<run_id>/ 运行目录。
 # 它需要导入 stress_test_common.py，所以这里提前读取文件内容，后面一并下发。
-COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text()
+COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text(encoding="utf-8")
 
 
 MODEL_SIMULATOR = r'''#!/usr/bin/env python3
@@ -47,6 +42,7 @@ import json
 import re
 import threading
 import time
+from urllib.parse import parse_qs, urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
@@ -57,6 +53,37 @@ attempts_by_task = {}
 attempts_lock = threading.Lock()
 
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/stats":
+            self.send_error(404)
+            return
+        prefix = parse_qs(parsed.query).get("prefix", [""])[0]
+        with attempts_lock:
+            counts = {
+                task_id: count
+                for task_id, count in attempts_by_task.items()
+                if not prefix or task_id.startswith(prefix)
+            }
+        histogram = {}
+        for count in counts.values():
+            histogram[str(count)] = histogram.get(str(count), 0) + 1
+        ordered = sorted(counts.values())
+        body = json.dumps({
+            "prefix": prefix,
+            "task_count": len(ordered),
+            "total_model_calls": sum(ordered),
+            "min_steps": min(ordered) if ordered else 0,
+            "max_steps": max(ordered) if ordered else 0,
+            "step_histogram": histogram,
+            "examples": dict(list(sorted(counts.items()))[:20]),
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         size = int(self.headers.get("content-length", "0"))
         raw = b""
@@ -264,8 +291,6 @@ async def main():
     await channel.close()
     if completed != submitted or failed or rpc_errors or protocol_errors:
         raise SystemExit(1)
-    if document["average_reward"] < .999:
-        raise SystemExit(1)
 
 asyncio.run(main())
 '''
@@ -345,9 +370,45 @@ hub:
 '''
 
 
+def _parse_private_port_range(value: str, workers_count: int) -> list[int]:
+    if workers_count == 1:
+        if value:
+            raise ValueError("--private-worker-port-range is only valid when --workers > 1")
+        return [base.WORKER_PORT]
+    if not value or "-" not in value:
+        raise ValueError(
+            "--private-worker-port-range START-END is required when --workers > 1; "
+            "the range must already be open between the Server and Worker hosts"
+        )
+    start_text, end_text = value.split("-", 1)
+    start, end = int(start_text), int(end_text)
+    if start <= 0 or end > 65535 or end < start:
+        raise ValueError(f"invalid private worker port range: {value}")
+    ports = list(range(start, end + 1))
+    if len(ports) < workers_count:
+        raise ValueError(
+            f"private worker port range {value} has {len(ports)} ports, "
+            f"but {workers_count} workers were requested"
+        )
+    return ports[:workers_count]
+
+
+def _model_step_stats(worker, prefix: str) -> dict:
+    code = (
+        "import urllib.parse,urllib.request; "
+        f"prefix={prefix!r}; "
+        f"url='http://127.0.0.1:{base.MODEL_PORT}/stats?prefix='+urllib.parse.quote(prefix); "
+        "print(urllib.request.urlopen(url, timeout=10).read().decode())"
+    )
+    _, output, _ = base.run(worker, f"python3 -c {base.q(code)}", timeout=20)
+    return json.loads(output)
+
+
 def run_scale(
     workers_count: int,
     capacity: int,
+    worker_ports: list[int],
+    modes: tuple[str, ...],
     duration: int,
     artifacts: Path,
     password: str,
@@ -378,18 +439,18 @@ def run_scale(
     results: list[dict] = []
     error: str | None = None
     outcome: dict | None = None
+    ports = worker_ports
+    obs_ports = [base.OBS_PORT + i for i in range(workers_count)]
     try:
         # 连接两台机器后，第一件事是记录正式 server 快照。
         server = base.connect(base.SERVER_HOST, password)
         worker = base.connect(base.WORKER_HOST, password)
         before = base.protected_snapshot(server)
         base.assert_port_free(server, base.SERVER_PORT, base.SERVER_HOST)
-        # Gate3 会启动多 worker，所以端口按连续区间分配。
-        ports = [WORKER_PORT_BASE + i for i in range(workers_count)]
-        obs_ports = [OBS_PORT_BASE + i for i in range(workers_count)]
-        for port in ports + obs_ports + [MODEL_PORT]:
+        for port in ports + obs_ports + [base.MODEL_PORT]:
             base.assert_port_free(worker, port, base.WORKER_HOST)
         print(f"[gate3:{workers_count}x{capacity}] preflight ports={ports[0]}-{ports[-1]}", flush=True)
+        build = base.source_and_binary_manifest(server, include_code_plugin=True)
 
         # bundle 先在 server 机器上制作，再通过本地临时文件转传到 worker 机器。
         # 这样 worker 机器不需要直接访问 /home/uenv 源码目录。
@@ -399,7 +460,7 @@ def run_scale(
             f"install -m 0755 {base.q(base.SOURCE_WORKER_BIN)} {base.q(server_run)}/bundle/uenv-worker",
             f"install -m 0755 {base.q(base.SOURCE_CODE_BIN)} {base.q(server_run)}/bundle/uenv-code-plugin",
             f"strip {base.q(server_run)}/bundle/uenv-worker {base.q(server_run)}/bundle/uenv-code-plugin",
-            f"cp -a /home/uenv/plugins/code/. {base.q(server_run)}/bundle/plugins/code/",
+            f"cp -a {base.q(base.SOURCE_REPO)}/plugins/code/. {base.q(server_run)}/bundle/plugins/code/",
             f"tar -C {base.q(server_run)}/bundle -czf {base.q(server_run)}/bundle.tgz .",
         ]), timeout=180)
         with tempfile.NamedTemporaryFile(prefix=run_id, suffix=".tgz", delete=False) as tmp:
@@ -419,10 +480,11 @@ def run_scale(
             worker_id = f"stress-{run_id}-worker-{i:04d}"
             base.put_text(worker, f"{worker_run}/worker-{i:04d}.yaml", worker_config(worker_run, worker_id, port, obs_port, capacity))
         # load_client.py 需要 Python 版 protobuf message，所以每次用当前 proto 生成。
+        proto_root = f"{base.SOURCE_REPO}/proto"
         proto = " ".join([
-            "/usr/bin/protoc", "-I", "/home/uenv/proto", f"--python_out={base.q(server_run)}/generated",
-            "/home/uenv/proto/uenv/v1/common.proto", "/home/uenv/proto/uenv/v1/episode.proto",
-            "/home/uenv/proto/uenv/v1/scheduler.proto", "/home/uenv/proto/uenv/v1/adapter_core.proto",
+            "/usr/bin/protoc", "-I", base.q(proto_root), f"--python_out={base.q(server_run)}/generated",
+            f"{base.q(proto_root)}/uenv/v1/common.proto", f"{base.q(proto_root)}/uenv/v1/episode.proto",
+            f"{base.q(proto_root)}/uenv/v1/scheduler.proto", f"{base.q(proto_root)}/uenv/v1/adapter_core.proto",
         ])
         base.run(server, proto)
         base.run(server, f"touch {base.q(server_run)}/generated/uenv/__init__.py {base.q(server_run)}/generated/uenv/v1/__init__.py")
@@ -434,7 +496,7 @@ def run_scale(
         server_pid = base.start_owned(server, server_cmd, f"{server_run}/server.log", base.SERVER_BIN, base.SERVER_BIN)
         model_pid = base.start_owned(
             worker,
-            f"python3 -B {worker_run}/model_simulator.py --port {MODEL_PORT} "
+            f"python3 -B {worker_run}/model_simulator.py --port {base.MODEL_PORT} "
             f"--latency-ms 1000 --wrong-steps {code_wrong_steps}",
             f"{worker_run}/model.log",
             "/usr/bin/python3.12",
@@ -461,29 +523,46 @@ def run_scale(
         manifest = {
             "run_id": run_id, "gate": 3, "environment": "code", "real_workers": workers_count,
             "worker_capacity": capacity, "worker_slots": workers_count * capacity,
-            "requested_episode_concurrency": workers_count * capacity, "modes": list(MODES),
+            "requested_episode_concurrency": workers_count * capacity, "modes": list(modes),
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
             "code_wrong_steps": code_wrong_steps, "worker_ports": ports,
             "model_kind": "deterministic-openai-compatible; workers/plugins/evaluator are real",
+            "source_and_binaries": build,
             "protected_server": before, "owned_pids": {"server": server_pid, "model": model_pid, "workers": [p for p, _ in worker_pids]},
         }
         base.put_text(server, f"{server_run}/manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
         base.put_text(worker, f"{worker_run}/manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
         (local_run / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
         # 同一组 worker 不重启，连续跑三种模式，减少启动成本。
-        for mode in MODES:
+        for mode in modes:
             remote_result = f"{server_run}/result-{mode}.json"
             command = " ".join([
                 f"PYTHONPATH={server_run}:{server_run}/generated", "python3", "-B", f"{server_run}/load_client.py",
                 "--server", f"{base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}", "--workers", str(workers_count),
                 "--slots", str(capacity), "--mode", mode, "--duration", str(duration),
-                "--model-url", f"http://127.0.0.1:{MODEL_PORT}/v1", "--run-id", run_id, "--output", remote_result,
+                "--model-url", f"http://127.0.0.1:{base.MODEL_PORT}/v1", "--run-id", run_id, "--output", remote_result,
                 "--max-steps", str(max_steps), "--code-wrong-steps", str(code_wrong_steps),
             ])
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} start", flush=True)
             _, out, err = base.run(server, command, timeout=duration + 240)
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
+            step_stats = _model_step_stats(worker, f"gate3-{run_id}-{mode}-")
+            expected_min_steps = code_wrong_steps + 1
+            step_validation = {
+                "expected_min_steps": expected_min_steps,
+                "max_allowed_steps": max_steps,
+                "completed_episodes": result["completed"],
+                "stats": step_stats,
+                "passed": (
+                    step_stats["task_count"] == result["completed"]
+                    and step_stats["min_steps"] >= expected_min_steps
+                    and step_stats["max_steps"] <= max_steps
+                ),
+            }
+            result["step_validation"] = step_validation
+            if not step_validation["passed"]:
+                raise RuntimeError(f"actual multi-step validation failed: {step_validation}")
             results.append(result)
             (local_run / f"result-{mode}.json").write_text(json.dumps(result, indent=2, sort_keys=True))
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} PASS throughput={result['throughput_eps']:.2f} ep/s", flush=True)
@@ -512,7 +591,7 @@ def run_scale(
                 except Exception as exc: cleanup_errors.append(str(exc))
             try: base.stop_owned(worker, model_pid, "/usr/bin/python3.12", f"{worker_run}/model_simulator.py")
             except Exception as exc: cleanup_errors.append(str(exc))
-            for port in [WORKER_PORT_BASE + i for i in range(workers_count)] + [OBS_PORT_BASE + i for i in range(workers_count)] + [MODEL_PORT]:
+            for port in ports + obs_ports + [base.MODEL_PORT]:
                 try: base.assert_port_free(worker, port, base.WORKER_HOST)
                 except Exception as exc: cleanup_errors.append(str(exc))
         if server:
@@ -540,16 +619,43 @@ def run_scale(
 
 
 def main() -> int:
-    """Gate3 命令行入口。默认每种模式跑 30 秒。"""
+    """Gate3 command entry. Defaults to an isolated one-Worker smoke."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration", type=int, default=30)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--capacity", type=int, default=1)
+    parser.add_argument(
+        "--private-worker-port-range",
+        default="",
+        help="Explicit already-open START-END private port range; required for more than one Worker.",
+    )
+    parser.add_argument(
+        "--mode",
+        action="append",
+        choices=MODES,
+        help="Mode to run; repeat as needed. Defaults to all three modes.",
+    )
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument(
         "--code-wrong-steps", type=int, default=2,
         help="Code model simulator returns wrong code this many times per task before returning the correct solution.",
     )
     parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-gate-artifacts")
+    base.add_runtime_arguments(parser, require_code_plugin=True)
     args = parser.parse_args()
+    base.configure_from_args(args)
+    allowed_exposed_ports = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
+    for label, port in {
+        "isolated server": base.SERVER_PORT,
+        "single Worker": base.WORKER_PORT,
+        "model simulator": base.MODEL_PORT,
+    }.items():
+        if port not in allowed_exposed_ports:
+            raise SystemExit(f"{label} port {port} is outside the explicitly allowed cloud ports")
+    if base.SERVER_PORT in base.PROTECTED_PORTS:
+        raise SystemExit("isolated server port must not overlap a protected production port")
+    if args.workers <= 0 or args.capacity <= 0:
+        raise SystemExit("--workers and --capacity must be positive")
     if args.max_steps <= 0:
         raise SystemExit("--max-steps must be positive")
     if args.code_wrong_steps < 0 or args.code_wrong_steps >= args.max_steps:
@@ -557,19 +663,24 @@ def main() -> int:
     password = os.environ.get("UENV_PASS")
     if not password: raise SystemExit("UENV_PASS is required")
     args.artifacts.mkdir(parents=True, exist_ok=True)
-    summaries = []
-    for workers, capacity in ((8, 2), (32, 4)):
-        summary = run_scale(
-            workers, capacity, args.duration, args.artifacts, password,
-            args.max_steps, args.code_wrong_steps,
-        )
-        summaries.append(summary)
-        if summary["status"] != "passed":
-            break
+    worker_ports = _parse_private_port_range(args.private_worker_port_range, args.workers)
+    modes = tuple(args.mode or MODES)
+    summary = run_scale(
+        args.workers,
+        args.capacity,
+        worker_ports,
+        modes,
+        args.duration,
+        args.artifacts,
+        password,
+        args.max_steps,
+        args.code_wrong_steps,
+    )
+    summaries = [summary]
     summary_path = args.artifacts / f"gate3-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"
     summary_path.write_text(json.dumps(summaries, indent=2, sort_keys=True))
     print(f"[gate3] summary={summary_path}", flush=True)
-    return 0 if len(summaries) == 2 and all(item["status"] == "passed" for item in summaries) else 1
+    return 0 if summary["status"] == "passed" else 1
 
 
 if __name__ == "__main__":

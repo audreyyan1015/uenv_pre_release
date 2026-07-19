@@ -175,14 +175,58 @@ def make_sample_envelope(
 
 
 def sample_result_dict(result) -> dict:
-    """把 proto result 转成普通 dict，方便写入 JSON 文件。"""
+    """Convert SampleResult and expose the complete typed training trace."""
+    trajectory = {}
+    raw_trajectory = bytes(getattr(result, "trajectory_json", b"") or b"")
+    if raw_trajectory:
+        try:
+            value = json.loads(raw_trajectory.decode("utf-8"))
+            if isinstance(value, dict):
+                trajectory = value
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            trajectory = {}
+    response_ids: list[int] = []
+    response_mask: list[int] = []
+    steps = trajectory.get("steps") if isinstance(trajectory, dict) else None
+    if isinstance(steps, list):
+        for step in steps:
+            trace = step.get("rollout_trace") if isinstance(step, dict) else None
+            if not isinstance(trace, dict):
+                continue
+            response_ids.extend(int(item) for item in (trace.get("response_ids") or []))
+            response_mask.extend(int(item) for item in (trace.get("response_mask") or []))
+    log_probs = [float(item) for item in getattr(result, "rollout_log_probs", [])]
+    trace_errors = []
+    if not trajectory:
+        trace_errors.append("missing trajectory_json")
+    if not response_ids:
+        trace_errors.append("missing response_ids")
+    if not response_mask:
+        trace_errors.append("missing response_mask")
+    if len(response_ids) != len(response_mask):
+        trace_errors.append("response_ids/response_mask length mismatch")
+    if not log_probs:
+        trace_errors.append("missing rollout_log_probs")
+    if response_ids and len(log_probs) != len(response_ids):
+        trace_errors.append("rollout_log_probs/response_ids length mismatch")
     return {
+        "request_id": result.request_id,
         "sample_index": result.sample_index,
         "status": result.status,
         "reward": result.reward,
+        "done": result.done,
+        "termination_reason": result.termination_reason,
         "error_code": result.error_code,
         "error_message": result.error_message,
-        "trajectory_id": getattr(result, "trajectory_id", ""),
+        "trajectory": trajectory,
+        "actual_steps": int(trajectory.get("total_steps", 0) or 0),
+        "response_ids": response_ids,
+        "response_mask": response_mask,
+        "rollout_param_version": result.rollout_param_version,
+        "rollout_policy_version": result.rollout_policy_version,
+        "rollout_log_probs": log_probs,
+        "training_trace_valid": not trace_errors,
+        "training_trace_errors": trace_errors,
     }
 
 
@@ -209,8 +253,16 @@ def gate3_result_document(
     """
     rewards = list(rewards)
     resolved = completed + failed + rpc_error_episodes
+    infrastructure_passed = bool(
+        submitted
+        and completed == submitted
+        and not failed
+        and not rpc_error_episodes
+        and not protocol_errors
+    )
+    average_reward = sum(rewards) / len(rewards) if rewards else 0.0
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "mode": mode,
         "configured_workers": configured_workers,
@@ -233,7 +285,16 @@ def gate3_result_document(
             "p95": percentile(latencies_ms, 0.95),
             "p99": percentile(latencies_ms, 0.99),
         },
-        "average_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+        "infrastructure": {
+            "status": "passed" if infrastructure_passed else "failed",
+            "passed": infrastructure_passed,
+        },
+        "model_quality": {
+            "average_reward": average_reward,
+            "successful_rewards": sum(1 for reward in rewards if reward >= 0.999),
+            "sample_count": len(rewards),
+        },
+        "average_reward": average_reward,
     }
 
 
@@ -253,8 +314,13 @@ def gate4_swe_result_document(
 ) -> dict:
     """生成 Gate4 SWE/OpenHands 容器压测的结果 JSON。"""
     average_reward = sum(item["reward"] for item in results) / len(results) if results else 0.0
+    statuses_ok = bool(
+        results and all(item["status"] in {"completed", "success"} for item in results)
+    )
+    traces_ok = bool(results and all(item["training_trace_valid"] for item in results))
+    infrastructure_passed = statuses_ok and traces_ok
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "server": server,
         "worker_id": worker_id,
@@ -265,11 +331,18 @@ def gate4_swe_result_document(
         "max_steps": max_steps,
         "openhands_max_iterations": openhands_max_iterations,
         "elapsed_seconds": elapsed_seconds,
-        "status": (
-            "completed"
-            if results and all(item["status"] in {"completed", "success"} for item in results)
-            else "failed"
-        ),
+        "status": "completed" if infrastructure_passed else "failed",
+        "infrastructure": {
+            "status": "passed" if infrastructure_passed else "failed",
+            "passed": infrastructure_passed,
+            "statuses_valid": statuses_ok,
+            "training_traces_valid": traces_ok,
+        },
+        "model_quality": {
+            "average_reward": average_reward,
+            "successful_rewards": sum(1 for item in results if item["reward"] >= 0.999),
+            "sample_count": len(results),
+        },
         "average_reward": average_reward,
         "results": results,
     }

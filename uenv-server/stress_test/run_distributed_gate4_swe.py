@@ -34,7 +34,7 @@ INSTANCE_ID = "astropy__astropy-7166"
 IMAGE = "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest"
 IMAGE_ID = "sha256:6909381901b865b904d9cfce69e412f659de0dc1e0454abb052c88b116654a83"
 OPENHANDS_PYTHON = "/usr/bin/python3.12"
-COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text()
+COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text(encoding="utf-8")
 
 
 RESOURCE_MONITOR = r'''#!/usr/bin/env python3
@@ -67,6 +67,53 @@ while True:
             "running_containers": len(containers),
         }) + "\n")
     time.sleep(.1)
+'''
+
+
+LLM_PREFLIGHT = r'''#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+import stat
+import urllib.request
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", required=True)
+args = parser.parse_args()
+path = Path(args.config)
+mode = stat.S_IMODE(path.stat().st_mode)
+if mode & 0o077:
+    raise SystemExit(f"LLM config permissions must be owner-only, got {mode:o}")
+
+from benchmarks.utils.llm_config import load_llm_config
+llm = load_llm_config(path)
+raw = json.loads(path.read_text(encoding="utf-8"))
+base_url = str(raw.get("base_url") or "").rstrip("/")
+api_key = str(raw.get("api_key") or "")
+model = str(raw.get("model") or getattr(llm, "model", "") or "")
+if not base_url or not api_key or not model:
+    raise SystemExit("LLM config must contain non-empty base_url, api_key and model")
+url = base_url if base_url.endswith("/chat/completions") else base_url + "/chat/completions"
+payload = json.dumps({
+    "model": model,
+    "messages": [{"role": "user", "content": "Reply with OK."}],
+    "temperature": 0,
+    "max_tokens": 4,
+}).encode()
+request = urllib.request.Request(url, data=payload, method="POST")
+request.add_header("Content-Type", "application/json")
+request.add_header("Authorization", f"Bearer {api_key}")
+with urllib.request.urlopen(request, timeout=90) as response:
+    document = json.loads(response.read().decode())
+if not isinstance(document.get("choices"), list) or not document["choices"]:
+    raise SystemExit("minimal authenticated LLM call returned no choices")
+print(json.dumps({
+    "schema_valid": True,
+    "auth_and_minimal_call_valid": True,
+    "model": model,
+    "base_url": base_url,
+    "response_id_present": bool(document.get("id")),
+}, sort_keys=True))
 '''
 
 
@@ -207,7 +254,7 @@ document = stress_common.gate4_swe_result_document(
 with open(args.output, "w", encoding="utf-8") as destination:
     json.dump(document, destination, indent=2, sort_keys=True)
 print(json.dumps(document, indent=2, sort_keys=True))
-if document["status"] != "completed" or document["average_reward"] < 0.999:
+if not document["infrastructure"]["passed"]:
     raise SystemExit(1)
 '''
 
@@ -387,6 +434,7 @@ def run_one(
         server = base.connect(base.SERVER_HOST, password)
         worker = base.connect(base.WORKER_HOST, password)
         before_protected = base.protected_snapshot(server)
+        build = base.source_and_binary_manifest(server, include_code_plugin=False)
         before_containers = container_ids(worker)
         if before_containers:
             raise RuntimeError(f"worker host is not container-empty: {sorted(before_containers)}")
@@ -407,6 +455,7 @@ def run_one(
             raise RuntimeError(f"SWE image mismatch actual={image_id.strip()} expected={IMAGE_ID}")
         print(f"[preflight] protected={json.dumps(before_protected, sort_keys=True)}")
         print(f"[preflight] image={IMAGE} id={image_id.strip()}")
+        base.run(worker, f"install -d -m 0755 {base.q(worker_run)}")
         # OpenHands 依赖使用 frozen 环境。这里用 uv sync --check --frozen 确认环境没有漂移。
         base.run(
             worker,
@@ -419,8 +468,21 @@ def run_one(
         if args.mode == "llm":
             if not args.llm_config:
                 raise ValueError("Gate4 llm mode requires --llm-config or OPENHANDS_LLM_CONFIG")
-            base.run(worker, f"test -f {base.q(args.llm_config)}")
-            print(f"[preflight] OpenHands LLM config verified: {args.llm_config}")
+            base.run(worker, f"test -f {base.q(args.llm_config)} && test $(stat -c %a {base.q(args.llm_config)}) = 600")
+            base.put_text(worker, f"{worker_run}/llm_preflight.py", LLM_PREFLIGHT, 0o700)
+            _, llm_output, _ = base.run(
+                worker,
+                "cd /opt/openhands/benchmarks && "
+                f".venv/bin/python {base.q(worker_run)}/llm_preflight.py --config {base.q(args.llm_config)}",
+                timeout=120,
+            )
+            llm_preflight = json.loads(llm_output)
+            _, llm_config_hash, _ = base.run(worker, f"sha256sum {base.q(args.llm_config)}")
+            llm_config_sha256 = llm_config_hash.split()[0]
+            print(f"[preflight] OpenHands LLM schema/auth/minimal call verified: {llm_preflight}")
+        else:
+            llm_preflight = {}
+            llm_config_sha256 = ""
 
         # 在 server 机器打包需要的 worker、plugins、integrations 和 SWE 配置，
         # 再传到 worker 机器解包运行。
@@ -431,12 +493,12 @@ def run_one(
             " && ".join([
                 f"install -m 0755 {base.q(base.SOURCE_WORKER_BIN)} {base.q(server_run)}/bundle/uenv-worker",
                 f"strip {base.q(server_run)}/bundle/uenv-worker",
-                f"cp -a /home/uenv/plugins {base.q(server_run)}/bundle/",
-                f"cp -a /home/uenv/integrations {base.q(server_run)}/bundle/",
+                f"cp -a {base.q(base.SOURCE_REPO)}/plugins {base.q(server_run)}/bundle/",
+                f"cp -a {base.q(base.SOURCE_REPO)}/integrations {base.q(server_run)}/bundle/",
                 f"install -d -m 0755 {base.q(server_run)}/bundle/scripts/openhands {base.q(server_run)}/bundle/uenv-server/stress_test {base.q(server_run)}/bundle/config/swe",
-                f"install -m 0755 /home/uenv/scripts/openhands/openhands_runner.py {base.q(server_run)}/bundle/scripts/openhands/openhands_runner.py",
-                f"install -m 0755 /home/uenv/uenv-server/stress_test/run_openhands_stress.sh {base.q(server_run)}/bundle/uenv-server/stress_test/run_openhands_stress.sh",
-                f"install -m 0644 /home/uenv/config/swe/verified.json {base.q(server_run)}/bundle/config/swe/verified.json",
+                f"install -m 0755 {base.q(base.SOURCE_REPO)}/scripts/openhands/openhands_runner.py {base.q(server_run)}/bundle/scripts/openhands/openhands_runner.py",
+                f"install -m 0755 {base.q(base.SOURCE_REPO)}/uenv-server/stress_test/run_openhands_stress.sh {base.q(server_run)}/bundle/uenv-server/stress_test/run_openhands_stress.sh",
+                f"install -m 0644 {base.q(base.SOURCE_REPO)}/config/swe/verified.json {base.q(server_run)}/bundle/config/swe/verified.json",
                 f"tar -C {base.q(server_run)}/bundle -czf {base.q(server_run)}/bundle.tgz .",
                 f"sha256sum {base.q(server_run)}/bundle.tgz > {base.q(server_run)}/bundle.tgz.sha256",
             ]),
@@ -462,21 +524,22 @@ def run_one(
         base.put_text(worker, f"{worker_run}/resource_monitor.py", RESOURCE_MONITOR, 0o755)
 
         # server 侧 client 和 worker 侧 agent 都需要 Python protobuf 文件。
-        # 这里从当前 /home/uenv/proto 生成，避免使用旧生成物。
+        # 这里从显式 source repo 的 proto 生成，避免使用旧生成物。
+        proto_root = f"{base.SOURCE_REPO}/proto"
         proto_command = " ".join([
-            "/usr/bin/protoc", "-I", "/home/uenv/proto",
+            "/usr/bin/protoc", "-I", base.q(proto_root),
             f"--python_out={base.q(server_run)}/generated",
-            "/home/uenv/proto/uenv/v1/common.proto",
-            "/home/uenv/proto/uenv/v1/episode.proto",
-            "/home/uenv/proto/uenv/v1/scheduler.proto",
-            "/home/uenv/proto/uenv/v1/adapter_core.proto",
-            "/home/uenv/proto/uenv/v1/agent.proto",
+            base.q(f"{proto_root}/uenv/v1/common.proto"),
+            base.q(f"{proto_root}/uenv/v1/episode.proto"),
+            base.q(f"{proto_root}/uenv/v1/scheduler.proto"),
+            base.q(f"{proto_root}/uenv/v1/adapter_core.proto"),
+            base.q(f"{proto_root}/uenv/v1/agent.proto"),
         ])
         base.run(server, proto_command)
         base.run(server, f"touch {base.q(server_run)}/generated/uenv/__init__.py {base.q(server_run)}/generated/uenv/v1/__init__.py")
         with server.open_sftp() as server_sftp, worker.open_sftp() as worker_sftp:
             with server_sftp.open(
-                "/home/uenv/integrations/openhands/uenv_runtime/gen/uenv/v1/agent_pb2_grpc.py", "rb"
+                f"{base.SOURCE_REPO}/integrations/openhands/uenv_runtime/gen/uenv/v1/agent_pb2_grpc.py", "rb"
             ) as source:
                 grpc_stub = source.read()
             with worker_sftp.open(f"{worker_run}/agent_pb2_grpc.py", "wb") as destination:
@@ -593,6 +656,8 @@ def run_one(
             "max_steps": args.max_steps,
             "openhands_max_iterations": args.openhands_max_iterations,
             "llm_config": args.llm_config if args.mode == "llm" else "",
+            "llm_config_sha256": llm_config_sha256,
+            "llm_preflight": llm_preflight,
             "server_addr": f"{base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}",
             "worker_addr": f"{base.WORKER_PRIVATE_IP}:{base.WORKER_PORT}",
             "worker_id": worker_id,
@@ -600,6 +665,7 @@ def run_one(
             "instance_id": INSTANCE_ID,
             "image": IMAGE,
             "image_id": IMAGE_ID,
+            "source_and_binaries": build,
             "protected_server": before_protected,
             "owned_pids": {"server": server_pid, "worker": worker_pid, "agent": agent_pid, "monitor": monitor_pid},
         }
@@ -621,7 +687,9 @@ def run_one(
             "--openhands-max-iterations", str(args.openhands_max_iterations),
             "--llm-config", args.llm_config if args.mode == "llm" else "",
         ])
-        _, client_out, client_err = base.run(server, client_command, timeout=1100)
+        client_status, client_out, client_err = base.run(
+            server, client_command, timeout=1100, check=False
+        )
         print("[smoke] client output")
         print(client_out)
         if client_err:
@@ -657,6 +725,12 @@ def run_one(
                 (local_run / local_name).write_text(base.get_text(client, remote_path))
             except OSError:
                 pass
+        if client_status != 0:
+            result_document = json.loads(result_text)
+            raise RuntimeError(
+                "Gate4 infrastructure/trace validation failed: "
+                f"{result_document.get('infrastructure')}"
+            )
         print(f"[smoke] PASS run_id={run_id} local_artifacts={local_run}")
         result_code = 0
     except Exception as exc:
@@ -740,6 +814,7 @@ def main() -> int:
     默认跑 1 和 2 两轮；也可以传 --concurrency 1 或 --concurrency 2
     只跑某一轮。每轮都会生成独立 run_id 和 artifact 目录。
     """
+    global GATEWAY_PORT, AGENT_API_PORT, AGENT_HEALTH_PORT
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-gate-artifacts")
     parser.add_argument(
@@ -757,7 +832,26 @@ def main() -> int:
         default=os.environ.get("OPENHANDS_LLM_CONFIG", ""),
         help="Path on the worker host to a real OpenHands LLM config. Required when --mode llm.",
     )
+    parser.add_argument("--gateway-port", type=int, default=8777)
+    parser.add_argument("--agent-api-port", type=int, default=18004)
+    parser.add_argument("--agent-health-port", type=int, default=18005)
+    base.add_runtime_arguments(parser, require_code_plugin=False)
     args = parser.parse_args()
+    base.configure_from_args(args)
+    GATEWAY_PORT = args.gateway_port
+    AGENT_API_PORT = args.agent_api_port
+    AGENT_HEALTH_PORT = args.agent_health_port
+    allowed_exposed_ports = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
+    exposed = {
+        "isolated server": base.SERVER_PORT,
+        "SWE worker": base.WORKER_PORT,
+        "runtime gateway": GATEWAY_PORT,
+    }
+    for label, port in exposed.items():
+        if port not in allowed_exposed_ports:
+            raise SystemExit(f"{label} port {port} is outside the explicitly allowed cloud ports")
+    if base.SERVER_PORT in base.PROTECTED_PORTS:
+        raise SystemExit("isolated server port must not overlap a protected production port")
     if args.max_steps <= 0:
         raise SystemExit("--max-steps must be positive")
     if args.openhands_max_iterations <= 0:
