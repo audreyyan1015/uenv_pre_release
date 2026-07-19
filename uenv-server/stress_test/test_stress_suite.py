@@ -105,6 +105,8 @@ class StressSuiteTests(unittest.TestCase):
         self.assertEqual(scale_command[batch_size_index + 1], "32")
         exact_batches_index = scale_command.index("--exact-batches")
         self.assertEqual(scale_command[exact_batches_index + 1], "32")
+        concurrent_batches_index = scale_command.index("--concurrent-batches")
+        self.assertEqual(scale_command[concurrent_batches_index + 1], "32")
 
     def test_newest_summary_finds_child_output_under_absolute_root(self):
         with tempfile.TemporaryDirectory() as directory:

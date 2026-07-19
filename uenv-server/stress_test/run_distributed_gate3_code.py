@@ -184,6 +184,7 @@ parser.add_argument("--registration-timeout", type=int, default=180)
 parser.add_argument("--batch-timeout", type=int, default=180)
 parser.add_argument("--exact-batches", type=int, default=0)
 parser.add_argument("--episode-batch-size", type=int, default=0)
+parser.add_argument("--concurrent-batches", type=int, default=0)
 args = parser.parse_args()
 dataset_rows = stress_common.load_dscodebench_jsonl(
     args.dataset_jsonl,
@@ -231,6 +232,7 @@ async def main():
         raise RuntimeError(f"workers not ready expected={args.workers} registered={registered}")
 
     episode_batch_size = args.episode_batch_size or args.workers
+    concurrent_batches = args.concurrent_batches or args.slots
     if episode_batch_size < 1:
         raise ValueError("episode batch size must be positive")
     submitted = completed = failed = rpc_errors = protocol_errors = 0
@@ -240,7 +242,7 @@ async def main():
     actual_step_counts = []
     training_trace_token_counts = []
     lock = asyncio.Lock()
-    semaphore = asyncio.Semaphore(args.slots)
+    semaphore = asyncio.Semaphore(concurrent_batches)
     tasks = set()
 
     batch_sequence = 0
@@ -370,7 +372,8 @@ async def main():
     document["min_steps"] = args.min_steps
     document["model_mode"] = args.model_mode
     document["batch_size"] = episode_batch_size
-    document["requested_episode_concurrency"] = episode_batch_size * args.slots
+    document["concurrent_batches"] = concurrent_batches
+    document["requested_episode_concurrency"] = episode_batch_size * concurrent_batches
     document["rpc_error_details"] = rpc_error_details
     document["dataset"] = {
         "name": "DSCodeBench",
@@ -561,6 +564,7 @@ def run_scale(
     worker_register_max_attempts: int,
     worker_register_retry_backoff_ms: int,
     episode_batch_size: int,
+    concurrent_batches: int,
     acceptance_purpose: str,
 ) -> dict:
     """执行一组 Gate3 规模。
@@ -806,8 +810,9 @@ def run_scale(
             "run_id": run_id, "gate": 3, "acceptance_purpose": acceptance_purpose,
             "environment": "code", "real_workers": workers_count,
             "worker_capacity": capacity, "worker_slots": workers_count * capacity,
-            "requested_episode_concurrency": episode_batch_size * capacity, "modes": list(modes),
+            "requested_episode_concurrency": episode_batch_size * concurrent_batches, "modes": list(modes),
             "episode_batch_size": episode_batch_size,
+            "concurrent_batches": concurrent_batches,
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
             "code_wrong_steps": code_wrong_steps, "min_steps": min_steps, "worker_ports": ports,
             "plugin_ready_timeout_seconds": plugin_ready_timeout_seconds,
@@ -861,6 +866,7 @@ def run_scale(
                 "--batch-timeout", str(batch_timeout),
                 "--exact-batches", str(exact_batches),
                 "--episode-batch-size", str(episode_batch_size),
+                "--concurrent-batches", str(concurrent_batches),
                 "--model-name", ("proxy-selected-versioned-model" if model_mode == "real" else "gate3-code-model"),
             ])
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} start", flush=True)
@@ -1030,6 +1036,10 @@ def main() -> int:
         "--episode-batch-size", type=int, default=0,
         help="Episodes per ExecuteBatch; defaults to the Worker count.",
     )
+    parser.add_argument(
+        "--concurrent-batches", type=int, default=0,
+        help="ExecuteBatch RPCs allowed in flight; defaults to Worker capacity.",
+    )
     parser.add_argument("--registration-timeout", type=int, default=180)
     parser.add_argument("--batch-timeout", type=int, default=180)
     parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
@@ -1050,8 +1060,8 @@ def main() -> int:
         parser.error("--worker-register-max-attempts must be between 1 and 100")
     if not 10 <= args.worker_register_retry_backoff_ms <= 10_000:
         parser.error("--worker-register-retry-backoff-ms must be between 10 and 10000")
-    if args.episode_batch_size < 0:
-        parser.error("--episode-batch-size must be zero (auto) or positive")
+    if args.episode_batch_size < 0 or args.concurrent_batches < 0:
+        parser.error("batch size/concurrency must be zero (auto) or positive")
     allowed_exposed_ports = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
     for label, port in {
         "isolated server": base.SERVER_PORT,
@@ -1089,6 +1099,9 @@ def main() -> int:
         resolved_batch_size = args.episode_batch_size or args.workers
         if resolved_batch_size * args.exact_batches < args.workers:
             raise SystemExit("worker-scale must submit at least one episode per Worker")
+        resolved_concurrent_batches = args.concurrent_batches or args.capacity
+        if resolved_batch_size * resolved_concurrent_batches > args.workers * args.capacity:
+            raise SystemExit("worker-scale requested concurrency exceeds total Worker slots")
     if args.code_wrong_steps < 0 or args.code_wrong_steps >= args.max_steps:
         raise SystemExit("--code-wrong-steps must be >=0 and smaller than --max-steps")
     password = os.environ.get("UENV_PASS")
@@ -1120,6 +1133,7 @@ def main() -> int:
         args.worker_register_max_attempts,
         args.worker_register_retry_backoff_ms,
         args.episode_batch_size or args.workers,
+        args.concurrent_batches or args.capacity,
         args.acceptance_purpose,
     )
     summaries = [summary]
