@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import random
 import sys
 import tempfile
 import time
@@ -29,10 +30,9 @@ GATEWAY_PORT = 8777
 AGENT_API_PORT = 18004
 AGENT_HEALTH_PORT = 18005
 
-# Gate4 使用一个固定的 SWEBench verified 实例，便于每次结果可对比。
-INSTANCE_ID = "astropy__astropy-7166"
-IMAGE = "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest"
-IMAGE_ID = "sha256:6909381901b865b904d9cfce69e412f659de0dc1e0454abb052c88b116654a83"
+DEFAULT_INSTANCE_ID = "astropy__astropy-7166"
+DEFAULT_KNOWN_IMAGE = "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest"
+DEFAULT_KNOWN_IMAGE_ID = "sha256:6909381901b865b904d9cfce69e412f659de0dc1e0454abb052c88b116654a83"
 OPENHANDS_PYTHON = "/usr/bin/python3.12"
 COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text(encoding="utf-8")
 
@@ -120,6 +120,110 @@ print(json.dumps({
 '''
 
 
+LLM_SIMULATOR = r'''#!/usr/bin/env python3
+import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import time
+from urllib.parse import urlparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--port", type=int, required=True)
+parser.add_argument("--latency-ms", type=float, default=250)
+parser.add_argument("--model", default="openai/uenv-swe-simulator")
+args = parser.parse_args()
+calls = 0
+tokenization_calls = 0
+
+
+class Handler(BaseHTTPRequestHandler):
+    def send_json(self, status, document):
+        body = json.dumps(document, separators=(",", ":")).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            self.send_json(200, {"ok": True, "model": args.model})
+            return
+        if parsed.path == "/stats":
+            self.send_json(200, {
+                "calls": calls,
+                "tokenization_calls": tokenization_calls,
+                "model": args.model,
+                "latency_ms": args.latency_ms,
+            })
+            return
+        self.send_error(404)
+
+    def do_POST(self):
+        global calls, tokenization_calls
+        parsed_path = urlparse(self.path).path
+        size = int(self.headers.get("content-length", "0"))
+        raw_body = b""
+        if size:
+            raw_body = self.rfile.read(size)
+        if parsed_path.endswith("/tokenization"):
+            tokenization_calls += 1
+            try:
+                document = json.loads(raw_body.decode() or "{}")
+            except Exception:
+                document = {}
+            texts = document.get("text", [])
+            if isinstance(texts, str):
+                texts = [texts]
+            if not isinstance(texts, list):
+                self.send_json(400, {"error": {"message": "text must be a string or list"}})
+                return
+            self.send_json(200, {
+                "data": [
+                    {"index": index, "token_ids": [1001 + index]}
+                    for index, _text in enumerate(texts)
+                ],
+                "model": args.model,
+            })
+            return
+        if not parsed_path.endswith("/chat/completions"):
+            self.send_error(404)
+            return
+        calls += 1
+        time.sleep(args.latency_ms / 1000)
+        content = (
+            "Inspect the repository, make the smallest safe change, run the relevant "
+            "tests, and report the result. If a confident patch is not available in "
+            "this bounded stress iteration, finish with a concise summary."
+        )
+        self.send_json(200, {
+            "id": f"chatcmpl-uenv-swe-sim-{calls}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": args.model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+                "logprobs": {"content": [{"token": content, "token_id": 1001, "logprob": -0.1}]},
+            }],
+            "usage": {"prompt_tokens": 16, "completion_tokens": 32, "total_tokens": 48},
+            "uenv_response_ids": [1001],
+            "uenv_model_version": {
+                "rollout_param_version": 0,
+                "rollout_policy_version": args.model,
+            },
+        })
+
+    def log_message(self, *_args):
+        pass
+
+
+ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+'''
+
+
 SWE_CLIENT = r'''#!/usr/bin/env python3
 # 这个脚本会临时写到 server 机器上运行。
 # 它等待 SWE worker 注册后，向 AdapterCore ExecuteBatch 提交真实 SWE episode。
@@ -142,12 +246,18 @@ parser.add_argument("--run-id", required=True)
 parser.add_argument("--driver", required=True)
 parser.add_argument("--catalog", required=True)
 parser.add_argument("--output", required=True)
-parser.add_argument("--concurrency", type=int, choices=(1, 2), required=True)
+parser.add_argument("--concurrency", type=int, required=True)
 parser.add_argument("--mode", choices=("gold", "llm"), required=True)
 parser.add_argument("--max-steps", type=int, required=True)
 parser.add_argument("--openhands-max-iterations", type=int, required=True)
 parser.add_argument("--llm-config", default="")
+parser.add_argument("--instance-ids-json", required=True)
 args = parser.parse_args()
+instance_ids = json.loads(args.instance_ids_json)
+if not isinstance(instance_ids, list) or not instance_ids:
+    raise SystemExit("--instance-ids-json must be a non-empty JSON list")
+if args.concurrency <= 0:
+    raise SystemExit("--concurrency must be positive")
 
 channel = grpc.insecure_channel(args.server, options=[
     ("grpc.max_receive_message_length", 64 * 1024 * 1024),
@@ -187,12 +297,12 @@ while time.monotonic() < deadline:
 else:
     raise SystemExit(f"worker did not register: expected={args.worker_id} registered={registered}")
 
-def env_config():
+def env_config(instance_id):
     # 这里生成的 env_config_json 会交给 SWE worker。
     # driver 是 official runner，catalog 是 verified.json。
     # mode=llm 表示真实 OpenHands agent 多轮执行；mode=gold 只用于必要的基线排查。
     return stress_common.swe_openhands_env_payload(
-        instance_id="astropy__astropy-7166",
+        instance_id=instance_id,
         benchmark_variant="verified",
         command_mode="FullShell",
         mode=args.mode,
@@ -214,7 +324,7 @@ samples = [
         sample_index=index,
         env_type="swe",
         parallel_mode="sync",
-        env_config=env_config(),
+        env_config=env_config(instance_ids[index % len(instance_ids)]),
         reward_config=stress_common.swe_reward_config(),
         sample_context={
             "stress_run_id": args.run_id,
@@ -223,6 +333,8 @@ samples = [
             "mode": args.mode,
             "max_steps": args.max_steps,
             "openhands_max_iterations": args.openhands_max_iterations,
+            "dataset": "SWE-bench Verified",
+            "instance_id": instance_ids[index % len(instance_ids)],
         },
         timeout_seconds=900,
         max_steps=args.max_steps,
@@ -246,7 +358,7 @@ document = stress_common.gate4_swe_result_document(
     server=args.server,
     worker_id=args.worker_id,
     registered_workers=registered,
-    instance_id="astropy__astropy-7166",
+    instance_id=instance_ids[0],
     mode=args.mode,
     concurrency=args.concurrency,
     max_steps=args.max_steps,
@@ -254,6 +366,13 @@ document = stress_common.gate4_swe_result_document(
     elapsed_seconds=elapsed,
     results=results,
 )
+document["dataset"] = {
+    "name": "SWE-bench Verified",
+    "selected_instance_ids": instance_ids,
+    "unique_instance_count": len(set(instance_ids)),
+    "submitted_episodes": args.concurrency,
+    "sampling_unit": "episode",
+}
 with open(args.output, "w", encoding="utf-8") as destination:
     json.dump(document, destination, indent=2, sort_keys=True)
 print(json.dumps(document, indent=2, sort_keys=True))
@@ -365,6 +484,90 @@ def wait_for_log(client, path: str, needle: str, timeout: int) -> str:
     raise TimeoutError(f"did not find {needle!r} in {path}; tail={latest[-4000:]}")
 
 
+def sample_swe_instances(catalog_path: str, catalog_text: str, count: int, seed: int) -> tuple[list[str], dict]:
+    """Sample multiple SWE-bench Verified instances from the configured catalog."""
+    data = json.loads(catalog_text)
+    rows = list(data.values()) if isinstance(data, dict) else list(data)
+    ids = [str(row["instance_id"]) for row in rows]
+    if not ids:
+        raise ValueError(f"empty SWE catalog: {catalog_path}")
+    rng = random.Random(seed)
+    shuffled = ids[:]
+    rng.shuffle(shuffled)
+    selected = [shuffled[index % len(shuffled)] for index in range(count)]
+    return selected, {
+        "catalog_path": str(catalog_path),
+        "catalog_size": len(ids),
+        "seed": seed,
+        "selected_instance_ids": selected,
+        "unique_instance_count": len(set(selected)),
+        "requested_episodes": count,
+        "reused_instances": count > len(set(selected)),
+        "catalog_has_image_fields": any(
+            bool(row.get("image") or row.get("docker_image")) for row in rows
+            if isinstance(row, dict)
+        ),
+    }
+
+
+def docker_image_inventory(client) -> dict:
+    """Record cached Docker images without assuming every SWE instance has one image field."""
+    _, out, _ = base.run(
+        client,
+        "docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}'",
+        timeout=60,
+    )
+    images = [line.strip() for line in out.splitlines() if line.strip()]
+    known_status, known_id, _ = base.run(
+        client,
+        f"docker image inspect {base.q(DEFAULT_KNOWN_IMAGE)} --format '{{{{.Id}}}}'",
+        timeout=30,
+        check=False,
+    )
+    return {
+        "cached_images": images,
+        "known_astropy_image": DEFAULT_KNOWN_IMAGE,
+        "known_astropy_image_present": known_status == 0,
+        "known_astropy_image_id": known_id.strip() if known_status == 0 else "",
+        "known_astropy_image_id_matches_prior": known_id.strip() == DEFAULT_KNOWN_IMAGE_ID if known_status == 0 else False,
+        "note": "Catalog entries do not carry docker image names here; the real OpenHands/official runner resolves environments at runtime.",
+    }
+
+
+def swebench_image_for_instance(instance_id: str) -> str:
+    namespace, repo_issue = instance_id.split("__", 1)
+    return f"swebench/sweb.eval.x86_64.{namespace}_1776_{repo_issue}:latest"
+
+
+def docker_image_presence(client, instance_ids: list[str]) -> dict:
+    records = []
+    missing = []
+    for instance_id in instance_ids:
+        image = swebench_image_for_instance(instance_id)
+        status, image_id, _ = base.run(
+            client,
+            f"docker image inspect {base.q(image)} --format '{{{{.Id}}}}'",
+            timeout=30,
+            check=False,
+        )
+        present = status == 0
+        record = {
+            "instance_id": instance_id,
+            "image": image,
+            "present": present,
+            "image_id": image_id.strip() if present else "",
+        }
+        records.append(record)
+        if not present:
+            missing.append(record)
+    return {
+        "records": records,
+        "missing": missing,
+        "all_present": not missing,
+        "image_pull_policy": "local_only",
+    }
+
+
 class RunArgs:
     """给 run_one 传参的小对象，避免把 argparse 结果传进内部逻辑。"""
     def __init__(
@@ -376,6 +579,10 @@ class RunArgs:
         max_steps: int,
         openhands_max_iterations: int,
         llm_config: str,
+        llm_kind: str,
+        instance_count: int,
+        instance_seed: int,
+        simulator_latency_ms: float,
     ) -> None:
         self.concurrency = concurrency
         self.artifacts = artifacts
@@ -383,6 +590,10 @@ class RunArgs:
         self.max_steps = max_steps
         self.openhands_max_iterations = openhands_max_iterations
         self.llm_config = llm_config
+        self.llm_kind = llm_kind
+        self.instance_count = instance_count
+        self.instance_seed = instance_seed
+        self.simulator_latency_ms = simulator_latency_ms
 
 
 def run_one(
@@ -392,6 +603,10 @@ def run_one(
     max_steps: int,
     openhands_max_iterations: int,
     llm_config: str,
+    llm_kind: str,
+    instance_count: int,
+    instance_seed: int,
+    simulator_latency_ms: float,
 ) -> int:
     """执行一轮 Gate4。
 
@@ -411,6 +626,10 @@ def run_one(
         max_steps=max_steps,
         openhands_max_iterations=openhands_max_iterations,
         llm_config=llm_config,
+        llm_kind=llm_kind,
+        instance_count=instance_count,
+        instance_seed=instance_seed,
+        simulator_latency_ms=simulator_latency_ms,
     )
     password = os.environ.get("UENV_PASS")
     if not password:
@@ -426,7 +645,7 @@ def run_one(
     local_run.mkdir()
 
     server = worker = None
-    server_pid = worker_pid = agent_pid = monitor_pid = None
+    server_pid = worker_pid = agent_pid = monitor_pid = llm_simulator_pid = None
     before_protected = None
     before_containers: set[str] = set()
     error: str | None = None
@@ -438,6 +657,14 @@ def run_one(
         worker = base.connect(base.WORKER_HOST, password)
         before_protected = base.protected_snapshot(server)
         build = base.source_and_binary_manifest(server, include_code_plugin=False)
+        catalog_path = f"{base.SOURCE_REPO}/config/swe/verified.json"
+        catalog_text = base.get_text(server, catalog_path)
+        selected_instances, instance_sampling = sample_swe_instances(
+            catalog_path,
+            catalog_text,
+            max(args.concurrency, args.instance_count),
+            args.instance_seed,
+        )
         before_containers = container_ids(worker)
         if before_containers:
             raise RuntimeError(f"worker host is not container-empty: {sorted(before_containers)}")
@@ -450,14 +677,19 @@ def run_one(
             (GATEWAY_PORT, base.WORKER_HOST, worker),
             (AGENT_API_PORT, base.WORKER_HOST, worker),
             (AGENT_HEALTH_PORT, base.WORKER_HOST, worker),
+            (base.MODEL_PORT, base.WORKER_HOST, worker),
         ):
             base.assert_port_free(client, port, host)
-        # 镜像 ID 必须匹配预期值，避免使用同名但内容不同的镜像。
-        _, image_id, _ = base.run(worker, f"docker image inspect {base.q(IMAGE)} --format '{{{{.Id}}}}'")
-        if image_id.strip() != IMAGE_ID:
-            raise RuntimeError(f"SWE image mismatch actual={image_id.strip()} expected={IMAGE_ID}")
+        image_inventory = docker_image_inventory(worker)
+        selected_image_presence = docker_image_presence(worker, selected_instances)
+        if not selected_image_presence["all_present"]:
+            raise RuntimeError(
+                "selected SWE-bench images are not cached locally under local_only policy: "
+                + json.dumps(selected_image_presence["missing"], sort_keys=True)
+            )
         print(f"[preflight] protected={json.dumps(before_protected, sort_keys=True)}")
-        print(f"[preflight] image={IMAGE} id={image_id.strip()}")
+        print(f"[preflight] selected_instances={json.dumps(selected_instances, sort_keys=True)}")
+        print(f"[preflight] docker_images={len(image_inventory['cached_images'])}")
         base.run(worker, f"install -d -m 0755 {base.q(worker_run)}")
         # OpenHands 依赖使用 frozen 环境。这里用 uv sync --check --frozen 确认环境没有漂移。
         base.run(
@@ -468,19 +700,37 @@ def run_one(
             timeout=60,
         )
         print("[preflight] OpenHands frozen environment and imports verified")
+        effective_llm_config = args.llm_config
+        if args.mode == "llm" and args.llm_kind == "simulator":
+            base.put_text(worker, f"{worker_run}/llm_simulator.py", LLM_SIMULATOR, 0o700)
+            simulator_config = {
+                "model": "openai/uenv-swe-simulator",
+                "base_url": f"http://127.0.0.1:{base.MODEL_PORT}/v1",
+                "api_key": f"uenv-simulator-{run_id}",
+                "timeout": 900,
+            }
+            effective_llm_config = f"{worker_run}/openhands-llm-simulator.json"
+            base.put_text(worker, effective_llm_config, json.dumps(simulator_config, sort_keys=True), 0o600)
+            llm_simulator_pid = base.start_owned(
+                worker,
+                f"python3 -B {worker_run}/llm_simulator.py --port {base.MODEL_PORT} --latency-ms {args.simulator_latency_ms}",
+                f"{worker_run}/llm-simulator.log",
+                "/usr/bin/python3.12",
+                f"{worker_run}/llm_simulator.py",
+            )
         if args.mode == "llm":
-            if not args.llm_config:
+            if not effective_llm_config:
                 raise ValueError("Gate4 llm mode requires --llm-config or OPENHANDS_LLM_CONFIG")
-            base.run(worker, f"test -f {base.q(args.llm_config)} && test $(stat -c %a {base.q(args.llm_config)}) = 600")
+            base.run(worker, f"test -f {base.q(effective_llm_config)} && test $(stat -c %a {base.q(effective_llm_config)}) = 600")
             base.put_text(worker, f"{worker_run}/llm_preflight.py", LLM_PREFLIGHT, 0o700)
             _, llm_output, _ = base.run(
                 worker,
                 "cd /opt/openhands/benchmarks && "
-                f".venv/bin/python {base.q(worker_run)}/llm_preflight.py --config {base.q(args.llm_config)}",
+                f".venv/bin/python {base.q(worker_run)}/llm_preflight.py --config {base.q(effective_llm_config)}",
                 timeout=120,
             )
             llm_preflight = json.loads(llm_output)
-            _, llm_config_hash, _ = base.run(worker, f"sha256sum {base.q(args.llm_config)}")
+            _, llm_config_hash, _ = base.run(worker, f"sha256sum {base.q(effective_llm_config)}")
             llm_config_sha256 = llm_config_hash.split()[0]
             print(f"[preflight] OpenHands LLM schema/auth/minimal call verified: {llm_preflight}")
         else:
@@ -646,7 +896,7 @@ def run_one(
             "RUST_LOG": "warn",
         }
         if args.mode == "llm":
-            agent_env["OPENHANDS_LLM_CONFIG"] = args.llm_config
+            agent_env["OPENHANDS_LLM_CONFIG"] = effective_llm_config
         agent_command = "env " + " ".join(
             f"{key}={base.q(value)}" for key, value in agent_env.items()
         ) + f" /opt/openhands/benchmarks/.venv/bin/python -B {base.q(worker_run)}/bundle/scripts/openhands/openhands_runner.py"
@@ -675,19 +925,31 @@ def run_one(
             "container_concurrency": args.concurrency,
             "max_steps": args.max_steps,
             "openhands_max_iterations": args.openhands_max_iterations,
-            "llm_config": args.llm_config if args.mode == "llm" else "",
+            "llm_kind": args.llm_kind,
+            "llm_config": effective_llm_config if args.mode == "llm" else "",
             "llm_config_sha256": llm_config_sha256,
             "llm_preflight": llm_preflight,
             "server_addr": f"{base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}",
             "worker_addr": f"{base.WORKER_PRIVATE_IP}:{base.WORKER_PORT}",
             "worker_id": worker_id,
             "agent_id": agent_id,
-            "instance_id": INSTANCE_ID,
-            "image": IMAGE,
-            "image_id": IMAGE_ID,
+            "dataset": {
+                "name": "SWE-bench Verified",
+                "sampling": instance_sampling,
+            },
+            "selected_instance_ids": selected_instances,
+            "docker_image_inventory": image_inventory,
+            "selected_image_presence": selected_image_presence,
+            "execution_boundary": "real OpenHands runner + real UEnv AgentControl/runtime gateway/container path; only the LLM endpoint is simulated when llm_kind=simulator",
             "source_and_binaries": build,
             "protected_server": before_protected,
-            "owned_pids": {"server": server_pid, "worker": worker_pid, "agent": agent_pid, "monitor": monitor_pid},
+            "owned_pids": {
+                "server": server_pid,
+                "worker": worker_pid,
+                "agent": agent_pid,
+                "monitor": monitor_pid,
+                "llm_simulator": llm_simulator_pid,
+            },
         }
         base.put_text(server, f"{server_run}/manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
         base.put_text(worker, f"{worker_run}/manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
@@ -705,7 +967,8 @@ def run_one(
             "--mode", args.mode,
             "--max-steps", str(args.max_steps),
             "--openhands-max-iterations", str(args.openhands_max_iterations),
-            "--llm-config", args.llm_config if args.mode == "llm" else "",
+            "--llm-config", effective_llm_config if args.mode == "llm" else "",
+            "--instance-ids-json", base.q(json.dumps(selected_instances)),
         ])
         client_status, client_out, client_err = base.run(
             server, client_command, timeout=1100, check=False
@@ -780,6 +1043,7 @@ def run_one(
                 (monitor_pid, "/usr/bin/python3.12", f"{worker_run}/resource_monitor.py"),
                 (agent_pid, OPENHANDS_PYTHON, f"{worker_run}/bundle/scripts/openhands/openhands_runner.py"),
                 (worker_pid, f"{worker_run}/bundle/uenv-worker", f"{worker_run}/worker.yaml"),
+                (llm_simulator_pid, "/usr/bin/python3.12", f"{worker_run}/llm_simulator.py"),
             ):
                 try:
                     base.stop_owned(worker, pid, exe, fragment)
@@ -809,7 +1073,7 @@ def run_one(
         if worker:
             for port in (
                 base.WORKER_PORT, base.OBS_PORT, GATEWAY_PORT,
-                AGENT_API_PORT, AGENT_HEALTH_PORT,
+                AGENT_API_PORT, AGENT_HEALTH_PORT, base.MODEL_PORT,
             ):
                 try:
                     base.assert_port_free(worker, port, base.WORKER_HOST)
@@ -840,13 +1104,16 @@ def main() -> int:
     parser.add_argument(
         "--concurrency",
         type=int,
-        choices=(1, 2),
         action="append",
-        help="Run only the selected container concurrency. Omit to run Gate4's 1 then 2 sequence.",
+        help="Run selected container concurrency. Repeat as needed. Omit to run the safe 1 then 2 sequence.",
     )
     parser.add_argument("--mode", choices=("gold", "llm"), default="llm")
+    parser.add_argument("--llm-kind", choices=("real", "simulator"), default="simulator")
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--openhands-max-iterations", type=int, default=10)
+    parser.add_argument("--instance-count", type=int, default=4)
+    parser.add_argument("--instance-seed", type=int, default=20260720)
+    parser.add_argument("--simulator-latency-ms", type=float, default=250)
     parser.add_argument(
         "--llm-config",
         default=os.environ.get("OPENHANDS_LLM_CONFIG", ""),
@@ -865,6 +1132,7 @@ def main() -> int:
     exposed = {
         "isolated server": base.SERVER_PORT,
         "SWE worker": base.WORKER_PORT,
+        "LLM simulator": base.MODEL_PORT,
         "runtime gateway": GATEWAY_PORT,
     }
     for label, port in exposed.items():
@@ -876,8 +1144,12 @@ def main() -> int:
         raise SystemExit("--max-steps must be positive")
     if args.openhands_max_iterations <= 0:
         raise SystemExit("--openhands-max-iterations must be positive")
-    if args.mode == "llm" and not args.llm_config:
-        raise SystemExit("--mode llm requires --llm-config or OPENHANDS_LLM_CONFIG")
+    if args.mode == "llm" and args.llm_kind == "real" and not args.llm_config:
+        raise SystemExit("--mode llm --llm-kind real requires --llm-config or OPENHANDS_LLM_CONFIG")
+    if args.instance_count <= 0:
+        raise SystemExit("--instance-count must be positive")
+    if args.simulator_latency_ms < 0:
+        raise SystemExit("--simulator-latency-ms must be non-negative")
     args.artifacts.mkdir(parents=True, exist_ok=True)
 
     concurrencies = args.concurrency or [1, 2]
@@ -893,6 +1165,10 @@ def main() -> int:
             args.max_steps,
             args.openhands_max_iterations,
             args.llm_config,
+            args.llm_kind,
+            args.instance_count,
+            args.instance_seed,
+            args.simulator_latency_ms,
         )
         item = {
             "container_concurrency": concurrency,

@@ -11,20 +11,32 @@ import stress_test_common
 
 
 class StressSuiteTests(unittest.TestCase):
-    def test_acceptance_config_requires_real_llm_and_1024_tier(self):
+    def test_scale_config_requires_1024_simulator_and_10_waves(self):
         config = run_stress_suite.load_suite_config(
             Path(__file__).with_name("stress_suite.json")
         )
-        self.assertEqual(config["gate3"]["model_mode"], "real")
+        self.assertEqual(config["gate3"]["model_mode"], "simulator")
+        self.assertEqual(config["gate3"]["workers"], 1024)
+        self.assertEqual(
+            config["gate3"]["episode_batch_size"] * config["gate3"]["exact_batches_per_mode"],
+            config["gate3"]["workers"] * config["gate3"]["capacity_per_worker"] * config["gate3"]["min_episode_waves"],
+        )
+        self.assertEqual(config["gate3"]["simulator_wrong_steps"]["mean"], 2.0)
+        self.assertEqual(config["gate3"]["simulator_wrong_steps"]["std"], 1.0)
+        self.assertEqual(config["gate3"]["code_python"], "/opt/uenv-stress/venvs/dscodebench/bin/python")
         self.assertEqual(config["gate4"]["mode"], "llm")
-        self.assertEqual(config["worker_scale"]["tiers"], [32, 512, 1024])
+        self.assertEqual(config["gate4"]["llm_kind"], "simulator")
+        self.assertGreaterEqual(config["gate4"]["instance_count"], 2)
+        self.assertFalse(config["worker_scale"]["enabled"])
+        self.assertEqual(config["worker_scale"]["tiers"], [1024])
         self.assertEqual(config["worker_scale"]["model_port"], 6379)
-        self.assertEqual(config["worker_scale"]["episode_batch_size"], 32)
-        self.assertEqual(config["worker_scale"]["episodes_per_worker"], 4)
-        self.assertEqual(config["worker_scale"]["simulator_latency_ms"], 5000)
+        self.assertEqual(config["worker_scale"]["episode_batch_size"], 256)
+        self.assertEqual(config["worker_scale"]["episodes_per_worker"], 10)
+        self.assertEqual(config["worker_scale"]["simulator_latency_ms"]["mean"], 500.0)
         self.assertEqual(config["worker_scale"]["plugin_ready_timeout_seconds"], 30)
         self.assertEqual(config["worker_scale"]["worker_register_max_attempts"], 20)
         self.assertEqual(config["worker_scale"]["worker_register_retry_backoff_ms"], 100)
+        self.assertEqual(config["worker_scale"]["code_python"], "/opt/uenv-stress/venvs/dscodebench/bin/python")
 
     def test_real_dscodebench_row_maps_to_worker_contract(self):
         row = {
@@ -83,7 +95,7 @@ class StressSuiteTests(unittest.TestCase):
             source,
         )
 
-    def test_single_worker_gate3_does_not_receive_scale_port_range(self):
+    def test_gate3_scale_command_receives_private_range_and_distribution(self):
         config = run_stress_suite.load_suite_config(
             Path(__file__).with_name("stress_suite.json")
         )
@@ -96,18 +108,24 @@ class StressSuiteTests(unittest.TestCase):
             private_worker_port_range="8000-9023",
         )
         command = run_stress_suite.gate3_command(args, config, Path("/artifacts"))
-        self.assertNotIn("--private-worker-port-range", command)
+        self.assertIn("--private-worker-port-range", command)
+        self.assertIn("--simulator-wrong-steps-mean", command)
+        self.assertIn("--min-scale-episode-waves", command)
+        self.assertIn("--code-python", command)
+        exact_batches_index = command.index("--exact-batches")
+        self.assertEqual(command[exact_batches_index + 1], "40")
         scale_command = run_stress_suite.worker_scale_command(
             args, config, 1024, Path("/scale-artifacts")
         )
         model_port_index = scale_command.index("--model-port")
         self.assertEqual(scale_command[model_port_index + 1], "6379")
         batch_size_index = scale_command.index("--episode-batch-size")
-        self.assertEqual(scale_command[batch_size_index + 1], "32")
+        self.assertEqual(scale_command[batch_size_index + 1], "256")
         exact_batches_index = scale_command.index("--exact-batches")
-        self.assertEqual(scale_command[exact_batches_index + 1], "128")
+        self.assertEqual(scale_command[exact_batches_index + 1], "40")
         concurrent_batches_index = scale_command.index("--concurrent-batches")
-        self.assertEqual(scale_command[concurrent_batches_index + 1], "32")
+        self.assertEqual(scale_command[concurrent_batches_index + 1], "4")
+        self.assertIn("--code-python", scale_command)
 
     def test_newest_summary_finds_child_output_under_absolute_root(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -119,6 +137,22 @@ class StressSuiteTests(unittest.TestCase):
                 run_stress_suite.newest_summary(root, "gate3-summary-*.json"),
                 target,
             )
+
+    def test_validate_arguments_rejects_model_port_inside_worker_range(self):
+        config = run_stress_suite.load_suite_config(
+            Path(__file__).with_name("stress_suite.json")
+        )
+        args = SimpleNamespace(
+            source_repo="/repo", server_bin="/server", worker_bin="/worker",
+            code_plugin_bin="/plugin", protected_pid=1, protected_port=[8077, 8088],
+            server_host="server", worker_host="worker", server_private_ip="10.0.0.1",
+            worker_private_ip="10.0.0.2", server_port=8099, worker_port=8000,
+            model_port=8888, gateway_port=8777, agent_api_port=18004,
+            agent_health_port=18005, obs_port=18002, llm_config="",
+            private_worker_port_range="8000-9023",
+        )
+        with self.assertRaisesRegex(ValueError, "model port 8888 overlaps"):
+            run_stress_suite.validate_arguments(args, config)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Gate3 and Gate4 as one protected, reproducible real-LLM suite.
+"""Run Gate3 and Gate4 as one protected, reproducible scale-stress suite.
 
 The suite is an orchestrator.  It must run on a control machine that can SSH to
 the Server and Worker hosts.  It never installs or restarts the protected
@@ -38,22 +38,34 @@ def load_suite_config(path: Path) -> dict[str, Any]:
     modes = gate3.get("modes")
     if not isinstance(modes, list) or not modes or set(modes) - GATE3_MODES:
         raise ValueError(f"invalid Gate3 modes: {modes!r}")
-    if gate3.get("model_mode") != "real":
-        raise ValueError("the integrated acceptance suite requires Gate3 model_mode=real")
+    if gate3.get("model_mode") != "simulator":
+        raise ValueError("scale stress requires Gate3 model_mode=simulator")
+    if int(gate3.get("workers", 0)) < 1024:
+        raise ValueError("Gate3 pressure evidence requires at least 1024 Workers")
+    capacity = int(gate3.get("capacity_per_worker", 0))
+    batch_size = int(gate3.get("episode_batch_size", gate3.get("workers", 0)))
+    exact_batches = int(gate3.get("exact_batches_per_mode", 0))
+    min_waves = int(gate3.get("min_episode_waves", 10))
+    if batch_size * exact_batches < int(gate3["workers"]) * capacity * min_waves:
+        raise ValueError("Gate3 total episodes per mode must be at least workers * capacity * min_episode_waves")
     if gate4.get("mode") != "llm":
         raise ValueError("the integrated acceptance suite requires Gate4 mode=llm")
+    if gate4.get("llm_kind") != "simulator":
+        raise ValueError("Gate4 scale stress should use llm_kind=simulator unless explicitly changed")
     concurrencies = gate4.get("concurrencies")
-    if concurrencies != [1, 2]:
-        raise ValueError("the integrated acceptance suite requires Gate4 concurrencies [1, 2]")
+    if not isinstance(concurrencies, list) or not concurrencies or any(int(value) <= 0 for value in concurrencies):
+        raise ValueError("Gate4 concurrencies must be positive integers")
     min_steps = int(gate3.get("min_steps", 0))
     max_steps = int(gate3.get("max_steps", 0))
     if min_steps < 2 or max_steps < min_steps:
         raise ValueError("Gate3 requires 2 <= min_steps <= max_steps")
-    if worker_scale.get("model_mode") != "deterministic_dataset_oracle":
-        raise ValueError("worker_scale must explicitly use deterministic_dataset_oracle")
+    if not worker_scale.get("enabled", False):
+        return document
+    if worker_scale.get("model_mode") != "normal_wrong_steps_simulator":
+        raise ValueError("worker_scale must explicitly use normal_wrong_steps_simulator")
     tiers = worker_scale.get("tiers")
-    if tiers != [32, 512, 1024]:
-        raise ValueError("worker_scale tiers must be exactly [32, 512, 1024]")
+    if not isinstance(tiers, list) or not tiers or min(int(value) for value in tiers) < 1024:
+        raise ValueError("worker_scale tiers must all be at least 1024")
     episode_batch_size = int(worker_scale.get("episode_batch_size", 0))
     episodes_per_worker = int(worker_scale.get("episodes_per_worker", 0))
     if episode_batch_size < 1 or episodes_per_worker < 1:
@@ -89,8 +101,10 @@ def require_absolute(label: str, value: str) -> None:
 
 
 def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None:
-    for label in ("source_repo", "server_bin", "worker_bin", "code_plugin_bin", "llm_config"):
+    for label in ("source_repo", "server_bin", "worker_bin", "code_plugin_bin"):
         require_absolute(f"--{label.replace('_', '-')}", str(getattr(args, label)))
+    if config["gate4"].get("llm_kind") == "real":
+        require_absolute("--llm-config", str(args.llm_config))
     for label, port in {
         "server": args.server_port,
         "worker": args.worker_port,
@@ -107,14 +121,17 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
     gate3 = config["gate3"]
     workers = int(gate3["workers"])
     worker_scale = config["worker_scale"]
-    max_scale_workers = max(int(value) for value in worker_scale["tiers"])
-    scale_model_port = int(worker_scale["model_port"])
-    if scale_model_port not in ALLOWED_EXPOSED_PORTS:
-        raise ValueError(
-            f"worker-scale model port {scale_model_port} is not in the explicitly allowed exposed-port set"
-        )
-    if scale_model_port in protected:
-        raise ValueError(f"worker-scale model port {scale_model_port} overlaps a protected port")
+    max_scale_workers = max(
+        [workers] + [int(value) for value in worker_scale.get("tiers", [])]
+    )
+    scale_model_port = int(worker_scale.get("model_port", args.model_port))
+    if worker_scale.get("enabled", False):
+        if scale_model_port not in ALLOWED_EXPOSED_PORTS:
+            raise ValueError(
+                f"worker-scale model port {scale_model_port} is not in the explicitly allowed exposed-port set"
+            )
+        if scale_model_port in protected:
+            raise ValueError(f"worker-scale model port {scale_model_port} overlaps a protected port")
     if (workers > 1 or config["worker_scale"].get("enabled", True)) and not args.private_worker_port_range:
         raise ValueError("multi-Worker execution requires --private-worker-port-range")
     if args.private_worker_port_range:
@@ -126,6 +143,10 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
         if start != args.worker_port or end - start + 1 < max_scale_workers or end > 65535:
             raise ValueError(
                 f"private Worker range must start at {args.worker_port} and contain at least {max_scale_workers} ports"
+            )
+        if start <= args.model_port <= end:
+            raise ValueError(
+                f"model port {args.model_port} overlaps the private Worker port range {start}-{end}"
             )
         if start <= scale_model_port < start + max_scale_workers:
             raise ValueError(
@@ -164,15 +185,35 @@ def gate3_command(args: argparse.Namespace, config: dict[str, Any], artifacts: P
         "--capacity", str(gate["capacity_per_worker"]),
         "--min-steps", str(gate["min_steps"]),
         "--max-steps", str(gate["max_steps"]),
-        "--model-mode", "real",
-        "--llm-config", args.llm_config,
+        "--model-mode", str(gate["model_mode"]),
         "--dataset-jsonl", str(gate["dataset_jsonl"]),
         "--dataset-limit", str(gate["dataset_limit"]),
         "--dataset-offset", str(gate["dataset_offset"]),
         "--exact-batches", str(gate["exact_batches_per_mode"]),
-        "--acceptance-purpose", "gate3-real-llm",
+        "--episode-batch-size", str(gate["episode_batch_size"]),
+        "--concurrent-batches", str(gate["concurrent_batches"]),
+        "--registration-timeout", str(gate["registration_timeout_seconds"]),
+        "--batch-timeout", str(gate["batch_timeout_seconds"]),
+        "--plugin-ready-timeout-seconds", str(gate["plugin_ready_timeout_seconds"]),
+        "--worker-register-max-attempts", str(gate["worker_register_max_attempts"]),
+        "--worker-register-retry-backoff-ms", str(gate["worker_register_retry_backoff_ms"]),
+        "--simulator-latency-mean-ms", str(gate["simulator_latency_ms"]["mean"]),
+        "--simulator-latency-std-ms", str(gate["simulator_latency_ms"]["std"]),
+        "--simulator-latency-min-ms", str(gate["simulator_latency_ms"]["min"]),
+        "--simulator-latency-max-ms", str(gate["simulator_latency_ms"]["max"]),
+        "--simulator-wrong-steps-mean", str(gate["simulator_wrong_steps"]["mean"]),
+        "--simulator-wrong-steps-std", str(gate["simulator_wrong_steps"]["std"]),
+        "--simulator-wrong-steps-min", str(gate["simulator_wrong_steps"]["min"]),
+        "--simulator-wrong-steps-max", str(gate["simulator_wrong_steps"]["max"]),
+        "--simulator-seed", str(gate["simulator_seed"]),
+        "--min-scale-episode-waves", str(gate["min_episode_waves"]),
+        "--acceptance-purpose", "worker-scale",
         "--artifacts", str(artifacts),
     ]
+    if gate.get("code_python"):
+        command.extend(["--code-python", str(gate["code_python"])])
+    if gate["model_mode"] == "real":
+        command.extend(["--llm-config", args.llm_config])
     for mode in gate["modes"]:
         command.extend(["--mode", mode])
     if int(gate["workers"]) > 1 and args.private_worker_port_range:
@@ -196,11 +237,9 @@ def worker_scale_command(
         "--duration", "1",
         "--workers", str(workers),
         "--capacity", str(gate["capacity_per_worker"]),
-        "--mode", "sync",
-        "--min-steps", "1",
+        "--min-steps", str(gate["min_steps"]),
         "--max-steps", str(gate["max_steps"]),
         "--model-mode", "simulator",
-        "--code-wrong-steps", "0",
         "--dataset-jsonl", str(gate["dataset_jsonl"]),
         "--dataset-limit", str(gate["dataset_limit"]),
         "--dataset-offset", str(gate["dataset_offset"]),
@@ -209,7 +248,16 @@ def worker_scale_command(
         "--concurrent-batches", str(concurrent_batches),
         "--registration-timeout", str(gate["registration_timeout_seconds"]),
         "--batch-timeout", str(gate["batch_timeout_seconds"]),
-        "--simulator-latency-ms", str(gate["simulator_latency_ms"]),
+        "--simulator-latency-mean-ms", str(gate["simulator_latency_ms"]["mean"]),
+        "--simulator-latency-std-ms", str(gate["simulator_latency_ms"]["std"]),
+        "--simulator-latency-min-ms", str(gate["simulator_latency_ms"]["min"]),
+        "--simulator-latency-max-ms", str(gate["simulator_latency_ms"]["max"]),
+        "--simulator-wrong-steps-mean", str(gate["simulator_wrong_steps"]["mean"]),
+        "--simulator-wrong-steps-std", str(gate["simulator_wrong_steps"]["std"]),
+        "--simulator-wrong-steps-min", str(gate["simulator_wrong_steps"]["min"]),
+        "--simulator-wrong-steps-max", str(gate["simulator_wrong_steps"]["max"]),
+        "--simulator-seed", str(gate["simulator_seed"]),
+        "--min-scale-episode-waves", str(gate.get("min_episode_waves", 10)),
         "--plugin-ready-timeout-seconds", str(gate["plugin_ready_timeout_seconds"]),
         "--worker-register-max-attempts", str(gate["worker_register_max_attempts"]),
         "--worker-register-retry-backoff-ms", str(gate["worker_register_retry_backoff_ms"]),
@@ -217,23 +265,35 @@ def worker_scale_command(
         "--private-worker-port-range", args.private_worker_port_range,
         "--artifacts", str(artifacts),
     ]
+    if gate.get("code_python"):
+        command.extend(["--code-python", str(gate["code_python"])])
+    for mode in gate.get("modes", ["sync", "one_step_off_policy", "fully_async"]):
+        command.extend(["--mode", mode])
     return command + common_child_args(args, model_port=int(gate["model_port"]))
 
 
 def gate4_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
     gate = config["gate4"]
-    return [
+    command = [
         sys.executable,
         str(HERE / "run_distributed_gate4_swe.py"),
         "--mode", "llm",
+        "--llm-kind", str(gate["llm_kind"]),
         "--max-steps", str(gate["max_steps"]),
         "--openhands-max-iterations", str(gate["openhands_max_iterations"]),
-        "--llm-config", args.llm_config,
+        "--instance-count", str(gate["instance_count"]),
+        "--instance-seed", str(gate["instance_seed"]),
+        "--simulator-latency-ms", str(gate["simulator_latency_ms"]),
         "--gateway-port", str(args.gateway_port),
         "--agent-api-port", str(args.agent_api_port),
         "--agent-health-port", str(args.agent_health_port),
         "--artifacts", str(artifacts),
-    ] + common_child_args(args)
+    ]
+    if gate["llm_kind"] == "real":
+        command.extend(["--llm-config", args.llm_config])
+    for concurrency in gate["concurrencies"]:
+        command.extend(["--concurrency", str(concurrency)])
+    return command + common_child_args(args)
 
 
 def newest_summary(root: Path, pattern: str) -> Path | None:
@@ -376,26 +436,31 @@ def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
         protected = base.protected_snapshot(server)
         base.assert_protected_unchanged(server, protected)
         source_and_binaries = base.source_and_binary_manifest(server, include_code_plugin=True)
-        dataset_paths = sorted({
-            str(config["gate3"]["dataset_jsonl"]),
-            str(config["worker_scale"]["dataset_jsonl"]),
-        })
+        dataset_paths = {str(config["gate3"]["dataset_jsonl"])}
+        if config["worker_scale"].get("enabled", False):
+            dataset_paths.add(str(config["worker_scale"]["dataset_jsonl"]))
+        dataset_paths = sorted(dataset_paths)
         datasets = {}
         for path in dataset_paths:
             base.run(server, f"test -f {base.q(path)}")
             _, dataset_hash, _ = base.run(server, f"sha256sum {base.q(path)}")
             datasets[path] = dataset_hash.split()[0]
-        _, mode_text, _ = base.run(worker, f"stat -c %a {base.q(args.llm_config)}")
-        if mode_text.strip() != "600":
-            raise RuntimeError("real OpenHands LLM config must have mode 0600")
-        _, hash_text, _ = base.run(worker, f"sha256sum {base.q(args.llm_config)}")
-        llm_config_sha256 = hash_text.split()[0]
+        llm_config_sha256 = ""
+        llm_config_mode = ""
+        if config["gate4"].get("llm_kind") == "real":
+            _, mode_text, _ = base.run(worker, f"stat -c %a {base.q(args.llm_config)}")
+            if mode_text.strip() != "600":
+                raise RuntimeError("real OpenHands LLM config must have mode 0600")
+            _, hash_text, _ = base.run(worker, f"sha256sum {base.q(args.llm_config)}")
+            llm_config_sha256 = hash_text.split()[0]
+            llm_config_mode = "0600"
         return {
             "protected_server": protected,
             "source_and_binaries": source_and_binaries,
             "llm_config_path": args.llm_config,
             "llm_config_sha256": llm_config_sha256,
-            "llm_config_mode": "0600",
+            "llm_config_mode": llm_config_mode,
+            "llm_kind": config["gate4"].get("llm_kind"),
             "datasets": datasets,
         }
     finally:
@@ -421,7 +486,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-suite-artifacts")
     parser.add_argument("--execute", action="store_true", help="Actually run Gate3 then Gate4; omit for protected preflight only.")
     parser.add_argument("--private-worker-port-range", default="")
-    parser.add_argument("--llm-config", required=True)
+    parser.add_argument("--llm-config", default="")
     parser.add_argument("--source-repo", required=True)
     parser.add_argument("--server-bin", required=True)
     parser.add_argument("--worker-bin", required=True)
@@ -453,7 +518,7 @@ def main() -> int:
     config = load_suite_config(args.config)
     validate_arguments(args, config)
     args.artifacts.mkdir(parents=True, exist_ok=True)
-    suite_id = f"real-training-suite-{time.strftime('%Y%m%d-%H%M%S')}"
+    suite_id = f"scale-stress-suite-{time.strftime('%Y%m%d-%H%M%S')}"
     suite_root = args.artifacts / suite_id
     suite_root.mkdir(parents=True, exist_ok=False)
     before = preflight(args, config)
@@ -470,14 +535,17 @@ def main() -> int:
     }
     summary_path = suite_root / "summary.json"
     if not args.execute:
-        document["planned_commands"] = {
-            "gate3": gate3_command(args, config, suite_root / "gate3"),
-            "gate4": gate4_command(args, config, suite_root / "gate4"),
-            "worker_scale": [
+        planned_commands: dict[str, Any] = {}
+        if config["gate3"].get("enabled", True):
+            planned_commands["gate3"] = gate3_command(args, config, suite_root / "gate3")
+        if config["gate4"].get("enabled", True):
+            planned_commands["gate4"] = gate4_command(args, config, suite_root / "gate4")
+        if config["worker_scale"].get("enabled", False):
+            planned_commands["worker_scale"] = [
                 worker_scale_command(args, config, workers, suite_root / f"worker-scale-{workers:04d}")
                 for workers in config["worker_scale"]["tiers"]
-            ],
-        }
+            ]
+        document["planned_commands"] = planned_commands
         summary_path.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
         print(f"[suite] preflight PASS summary={summary_path}")
         return 0
@@ -485,14 +553,14 @@ def main() -> int:
     try:
         if config["gate3"].get("enabled", True):
             document["scenarios"].append(run_child(
-                "gate3-real-llm",
+                "gate3-1024-simulator",
                 gate3_command(args, config, suite_root / "gate3"),
                 suite_root / "gate3",
                 "gate3-summary-*.json",
             ))
         if config["gate4"].get("enabled", True):
             document["scenarios"].append(run_child(
-                "gate4-real-llm",
+                "gate4-openhands-simulator-llm",
                 gate4_command(args, config, suite_root / "gate4"),
                 suite_root / "gate4",
                 "gate4-summary-*.json",

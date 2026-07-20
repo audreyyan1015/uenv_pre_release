@@ -3,48 +3,96 @@
   "gate3": {
     "enabled": true,
     "duration_seconds_per_mode": 1,
-    "workers": 1,
+    "workers": 1024,
     "capacity_per_worker": 1,
     "dataset_jsonl": "/home/uenv-scale-bench-merge/uenv-bridge/data/benchmarks/dscodebench/DSCodeBench.json",
-    "dataset_limit": 6,
+    "dataset_limit": 1000,
     "dataset_offset": 0,
-    "exact_batches_per_mode": 1,
-    "min_steps": 3,
-    "max_steps": 6,
+    "episode_batch_size": 256,
+    "concurrent_batches": 4,
+    "exact_batches_per_mode": 40,
+    "min_episode_waves": 10,
+    "min_steps": 2,
+    "max_steps": 8,
     "modes": [
       "sync",
       "one_step_off_policy",
       "fully_async"
     ],
-    "model_mode": "real"
+    "model_mode": "simulator",
+    "simulator_wrong_steps": {
+      "mean": 2.0,
+      "std": 1.0,
+      "min": 0,
+      "max": 5
+    },
+    "simulator_latency_ms": {
+      "mean": 500.0,
+      "std": 150.0,
+      "min": 50.0,
+      "max": 2000.0
+    },
+    "simulator_seed": 20260720,
+    "code_python": "/opt/uenv-stress/venvs/dscodebench/bin/python",
+    "registration_timeout_seconds": 900,
+    "batch_timeout_seconds": 1800,
+    "plugin_ready_timeout_seconds": 30,
+    "worker_register_max_attempts": 20,
+    "worker_register_retry_backoff_ms": 100,
+    "evidence_boundary": "1024 real UEnv Worker processes, real Code plugin, real DSCodeBench inputs, simulator LLM with per-episode normally distributed wrong_steps and latency; this is UEnv protocol/scheduler pressure evidence, not real LLM quality evidence"
   },
   "gate4": {
     "enabled": true,
     "mode": "llm",
+    "llm_kind": "simulator",
     "concurrencies": [1, 2],
+    "instance_count": 4,
+    "instance_seed": 20260720,
+    "simulator_latency_ms": 250,
     "max_steps": 10,
-    "openhands_max_iterations": 10
+    "openhands_max_iterations": 10,
+    "evidence_boundary": "real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local simulator"
   },
   "worker_scale": {
-    "enabled": true,
-    "tiers": [32, 512, 1024],
+    "enabled": false,
+    "tiers": [1024],
     "capacity_per_worker": 1,
     "dataset_jsonl": "/home/uenv-scale-bench-merge/uenv-bridge/data/benchmarks/dscodebench/DSCodeBench.json",
     "dataset_limit": 1000,
     "dataset_offset": 0,
-    "episode_batch_size": 32,
-    "episodes_per_worker": 4,
-    "max_steps": 1,
-    "registration_timeout_seconds": 600,
-    "batch_timeout_seconds": 900,
-    "simulator_latency_ms": 5000,
+    "episode_batch_size": 256,
+    "episodes_per_worker": 10,
+    "min_episode_waves": 10,
+    "min_steps": 2,
+    "max_steps": 8,
+    "modes": [
+      "sync",
+      "one_step_off_policy",
+      "fully_async"
+    ],
+    "simulator_wrong_steps": {
+      "mean": 2.0,
+      "std": 1.0,
+      "min": 0,
+      "max": 5
+    },
+    "simulator_latency_ms": {
+      "mean": 500.0,
+      "std": 150.0,
+      "min": 50.0,
+      "max": 2000.0
+    },
+    "simulator_seed": 20260720,
+    "code_python": "/opt/uenv-stress/venvs/dscodebench/bin/python",
+    "registration_timeout_seconds": 900,
+    "batch_timeout_seconds": 1800,
     "model_port": 6379,
     "plugin_ready_timeout_seconds": 30,
     "worker_register_max_attempts": 20,
     "worker_register_retry_backoff_ms": 100,
     "minimum_mem_available_bytes": 2147483648,
     "maximum_projected_host_memory_fraction": 0.85,
-    "model_mode": "deterministic_dataset_oracle",
-    "evidence_boundary": "real Worker processes, real Code plugins, real DSCodeBench inputs and four 5-second training-style waves; deterministic oracle model isolates control-plane scale and is not real-LLM quality evidence"
+    "model_mode": "normal_wrong_steps_simulator",
+    "evidence_boundary": "optional additional scale tier; disabled by default because Gate3 already carries the 1024-worker pressure run"
   }
 }

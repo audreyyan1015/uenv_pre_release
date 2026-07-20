@@ -14,10 +14,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
 import re
+import tarfile
 import tempfile
 import time
 import uuid
@@ -36,13 +38,42 @@ REAL_LLM_PREFLIGHT_SOURCE = Path(__file__).with_name("ark_real_llm_preflight.py"
 FLEET_SUPERVISOR_SOURCE = Path(__file__).with_name("worker_fleet_supervisor.py").read_text(encoding="utf-8")
 
 
+def put_worker_config_archive(worker, worker_run: str, documents: dict[str, tuple[str, int]], run_id: str) -> None:
+    """Upload many Worker YAMLs as one tarball.
+
+    At 1024+ workers, one SFTP open/write/chmod per YAML can dominate startup
+    before any pressure is applied to UEnv itself.  The archive keeps the exact
+    per-file content and mode while turning those small writes into one upload.
+    """
+    with tempfile.NamedTemporaryFile(prefix=f"{run_id}-worker-configs-", suffix=".tgz", delete=False) as tmp:
+        local_archive = Path(tmp.name)
+    try:
+        with tarfile.open(local_archive, "w:gz") as tar:
+            for path, (content, mode) in documents.items():
+                data = content.encode("utf-8")
+                info = tarfile.TarInfo(name=Path(path).name)
+                info.size = len(data)
+                info.mode = mode
+                info.mtime = int(time.time())
+                tar.addfile(info, io.BytesIO(data))
+        remote_archive = f"{worker_run}/worker-configs.tgz"
+        with worker.open_sftp() as sftp:
+            sftp.put(str(local_archive), remote_archive)
+        base.run(worker, f"tar -C {base.q(worker_run)} -xzf {base.q(remote_archive)}", timeout=120)
+    finally:
+        local_archive.unlink(missing_ok=True)
+
+
 MODEL_SIMULATOR = r'''#!/usr/bin/env python3
 # 这个脚本会临时写到 worker 机器上运行。
 # 它提供一个最小 OpenAI-compatible HTTP 接口，默认前几轮返回错误代码，
 # 后续返回正确代码。这样 Gate3 可以真实经过多 step，而不是第一步就结束。
 import argparse
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
+import random
 import re
 import threading
 import time
@@ -50,11 +81,19 @@ from urllib.parse import parse_qs, urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
-parser.add_argument("--latency-ms", type=int, default=1000)
-parser.add_argument("--wrong-steps", type=int, default=2)
+parser.add_argument("--latency-mean-ms", type=float, default=1000)
+parser.add_argument("--latency-std-ms", type=float, default=250)
+parser.add_argument("--latency-min-ms", type=float, default=100)
+parser.add_argument("--latency-max-ms", type=float, default=5000)
+parser.add_argument("--wrong-steps-mean", type=float, default=2)
+parser.add_argument("--wrong-steps-std", type=float, default=1)
+parser.add_argument("--wrong-steps-min", type=int, default=0)
+parser.add_argument("--wrong-steps-max", type=int, default=5)
+parser.add_argument("--seed", type=int, default=20260720)
 parser.add_argument("--dataset-jsonl", default="")
 args = parser.parse_args()
 attempts_by_task = {}
+profiles_by_task = {}
 attempts_lock = threading.Lock()
 dataset_oracle = {}
 if args.dataset_jsonl:
@@ -63,6 +102,39 @@ if args.dataset_jsonl:
             if line.strip():
                 row = json.loads(line)
                 dataset_oracle[str(row["problem_id"])] = str(row["ground_truth_code"])
+
+def clamp(value, lower, upper):
+    return max(lower, min(upper, value))
+
+def deterministic_rng(task_id):
+    digest = hashlib.sha256(f"{args.seed}:{task_id}".encode("utf-8")).hexdigest()
+    return random.Random(int(digest[:16], 16))
+
+def sample_profile(task_id):
+    rng = deterministic_rng(task_id)
+    wrong = int(round(rng.normalvariate(args.wrong_steps_mean, args.wrong_steps_std)))
+    wrong = clamp(wrong, args.wrong_steps_min, args.wrong_steps_max)
+    latency = rng.normalvariate(args.latency_mean_ms, args.latency_std_ms)
+    latency = clamp(latency, args.latency_min_ms, args.latency_max_ms)
+    return {"wrong_steps": wrong, "latency_ms": latency}
+
+def numeric_stats(values):
+    values = list(values)
+    if not values:
+        return {"count": 0, "min": 0, "max": 0, "mean": 0}
+    return {
+        "count": len(values),
+        "min": min(values),
+        "max": max(values),
+        "mean": sum(values) / len(values),
+    }
+
+def histogram(values):
+    out = {}
+    for value in values:
+        key = str(value)
+        out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items(), key=lambda item: int(item[0])))
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -77,18 +149,43 @@ class Handler(BaseHTTPRequestHandler):
                 for task_id, count in attempts_by_task.items()
                 if not prefix or task_id.startswith(prefix)
             }
-        histogram = {}
-        for count in counts.values():
-            histogram[str(count)] = histogram.get(str(count), 0) + 1
+            profiles = {
+                task_id: profile
+                for task_id, profile in profiles_by_task.items()
+                if not prefix or task_id.startswith(prefix)
+            }
         ordered = sorted(counts.values())
+        wrong_steps = [int(profile["wrong_steps"]) for profile in profiles.values()]
+        latencies = [float(profile["latency_ms"]) for profile in profiles.values()]
         body = json.dumps({
             "prefix": prefix,
             "task_count": len(ordered),
             "total_model_calls": sum(ordered),
             "min_steps": min(ordered) if ordered else 0,
             "max_steps": max(ordered) if ordered else 0,
-            "step_histogram": histogram,
+            "step_histogram": histogram(ordered),
+            "simulator": {
+                "kind": "normal-distribution-dscodebench-oracle-after-wrong-steps",
+                "seed": args.seed,
+                "wrong_steps": {
+                    "mean": args.wrong_steps_mean,
+                    "std": args.wrong_steps_std,
+                    "min": args.wrong_steps_min,
+                    "max": args.wrong_steps_max,
+                    "sampled": numeric_stats(wrong_steps),
+                    "histogram": histogram(wrong_steps),
+                },
+                "latency_ms": {
+                    "mean": args.latency_mean_ms,
+                    "std": args.latency_std_ms,
+                    "min": args.latency_min_ms,
+                    "max": args.latency_max_ms,
+                    "sampled": numeric_stats(latencies),
+                },
+                "oracle_rows": len(dataset_oracle),
+            },
             "examples": dict(list(sorted(counts.items()))[:20]),
+            "profile_examples": dict(list(sorted(profiles.items()))[:20]),
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -101,7 +198,6 @@ class Handler(BaseHTTPRequestHandler):
         raw = b""
         if size:
             raw = self.rfile.read(size)
-        time.sleep(args.latency_ms / 1000)
         task_id = "unknown"
         dataset_problem_id = ""
         try:
@@ -118,12 +214,14 @@ class Handler(BaseHTTPRequestHandler):
         with attempts_lock:
             attempt = attempts_by_task.get(task_id, 0) + 1
             attempts_by_task[task_id] = attempt
-        if attempt <= args.wrong_steps:
-            content = "```python\nraise NotImplementedError('deterministic scale warmup')\n```"
+            profile = profiles_by_task.setdefault(task_id, sample_profile(task_id))
+        time.sleep(float(profile["latency_ms"]) / 1000)
+        if attempt <= int(profile["wrong_steps"]):
+            content = "raise NotImplementedError('deterministic scale warmup')"
         elif dataset_problem_id in dataset_oracle:
-            content = "```python\n" + dataset_oracle[dataset_problem_id] + "\n```"
+            content = dataset_oracle[dataset_problem_id]
         else:
-            content = "```python\ndef add(a, b):\n    return a + b\n```"
+            content = "def add(a, b):\n    return a + b"
         body = json.dumps({
             "choices": [{
                 "message": {"role": "assistant", "content": content},
@@ -175,6 +273,10 @@ parser.add_argument("--output", required=True)
 parser.add_argument("--max-steps", type=int, required=True)
 parser.add_argument("--code-wrong-steps", type=int, required=True)
 parser.add_argument("--min-steps", type=int, required=True)
+parser.add_argument("--simulator-wrong-steps-mean", type=float, default=2)
+parser.add_argument("--simulator-wrong-steps-std", type=float, default=1)
+parser.add_argument("--simulator-wrong-steps-min", type=int, default=0)
+parser.add_argument("--simulator-wrong-steps-max", type=int, default=5)
 parser.add_argument("--model-name", required=True)
 parser.add_argument("--model-mode", choices=("real", "simulator"), required=True)
 parser.add_argument("--dataset-jsonl", required=True)
@@ -241,6 +343,7 @@ async def main():
     latencies = []
     actual_step_counts = []
     training_trace_token_counts = []
+    dataset_problem_usage = {}
     lock = asyncio.Lock()
     semaphore = asyncio.Semaphore(concurrent_batches)
     tasks = set()
@@ -255,6 +358,8 @@ async def main():
             "fully_async": args.workers * 2,
         }.get(args.mode, 0)
         row = dataset_rows[(mode_offset + sample_ordinal) % len(dataset_rows)]
+        problem_id = str(row["problem_id"])
+        dataset_problem_usage[problem_id] = dataset_problem_usage.get(problem_id, 0) + 1
         env_config = stress_common.dscodebench_env_payload(
             row,
             task_id=task_id,
@@ -273,7 +378,7 @@ async def main():
                 "gate": 3,
                 "max_steps": args.max_steps,
                 "dataset": "DSCodeBench",
-                "dataset_problem_id": row["problem_id"],
+                "dataset_problem_id": problem_id,
             },
             timeout_seconds=args.batch_timeout,
             max_steps=args.max_steps,
@@ -369,6 +474,14 @@ async def main():
     )
     document["max_steps"] = args.max_steps
     document["code_wrong_steps"] = args.code_wrong_steps
+    document["simulator_wrong_steps_distribution"] = {
+        "mean": args.simulator_wrong_steps_mean,
+        "std": args.simulator_wrong_steps_std,
+        "min": args.simulator_wrong_steps_min,
+        "max": args.simulator_wrong_steps_max,
+        "sampling_unit": "episode/task_id",
+        "note": "The model simulator samples wrong_steps once per task_id from a deterministic truncated normal distribution.",
+    }
     document["min_steps"] = args.min_steps
     document["model_mode"] = args.model_mode
     document["batch_size"] = episode_batch_size
@@ -381,6 +494,12 @@ async def main():
         "loaded_rows": len(dataset_rows),
         "offset": args.dataset_offset,
         "problem_ids": [str(row["problem_id"]) for row in dataset_rows],
+        "submitted_episodes": submitted,
+        "unique_problem_count": len(dataset_problem_usage),
+        "reuse_factor": submitted / len(dataset_problem_usage) if dataset_problem_usage else 0.0,
+        "problem_usage_top20": dict(
+            sorted(dataset_problem_usage.items(), key=lambda item: (-item[1], item[0]))[:20]
+        ),
         "real_input": True,
     }
     document["actual_step_stats"] = {
@@ -559,13 +678,22 @@ def run_scale(
     registration_timeout: int,
     batch_timeout: int,
     fleet_supervisor_threshold: int,
-    simulator_latency_ms: int,
+    simulator_latency_mean_ms: float,
+    simulator_latency_std_ms: float,
+    simulator_latency_min_ms: float,
+    simulator_latency_max_ms: float,
+    simulator_wrong_steps_mean: float,
+    simulator_wrong_steps_std: float,
+    simulator_wrong_steps_min: int,
+    simulator_wrong_steps_max: int,
+    simulator_seed: int,
     plugin_ready_timeout_seconds: int,
     worker_register_max_attempts: int,
     worker_register_retry_backoff_ms: int,
     episode_batch_size: int,
     concurrent_batches: int,
     acceptance_purpose: str,
+    code_python: str,
 ) -> dict:
     """执行一组 Gate3 规模。
 
@@ -607,9 +735,11 @@ def run_scale(
         base.assert_ports_free(worker, ports + obs_ports + [base.MODEL_PORT], base.WORKER_HOST)
         print(f"[gate3:{workers_count}x{capacity}] preflight ports={ports[0]}-{ports[-1]}", flush=True)
         build = base.source_and_binary_manifest(server, include_code_plugin=True)
+        print(f"[gate3:{workers_count}x{capacity}] source/binary manifest ready git={build['git_sha'][:12]}", flush=True)
         base.run(server, f"test -f {base.q(dataset_jsonl)}", timeout=20)
         _, dataset_hash_out, _ = base.run(server, f"sha256sum {base.q(dataset_jsonl)}", timeout=30)
         dataset_sha256 = dataset_hash_out.split()[0]
+        print(f"[gate3:{workers_count}x{capacity}] dataset manifest ready sha256={dataset_sha256[:12]}", flush=True)
 
         # bundle 先在 server 机器上制作，再通过本地临时文件转传到 worker 机器。
         # 这样 worker 机器不需要直接访问 /home/uenv 源码目录。
@@ -622,14 +752,17 @@ def run_scale(
             f"cp -a {base.q(base.SOURCE_REPO)}/plugins/code/. {base.q(server_run)}/bundle/plugins/code/",
             f"tar -C {base.q(server_run)}/bundle -czf {base.q(server_run)}/bundle.tgz .",
         ]), timeout=180)
+        print(f"[gate3:{workers_count}x{capacity}] worker/plugin bundle built", flush=True)
         with tempfile.NamedTemporaryFile(prefix=run_id, suffix=".tgz", delete=False) as tmp:
             local_bundle = Path(tmp.name)
         try:
+            print(f"[gate3:{workers_count}x{capacity}] copying worker/plugin bundle to worker", flush=True)
             with server.open_sftp() as sftp: sftp.get(f"{server_run}/bundle.tgz", str(local_bundle))
             with worker.open_sftp() as sftp: sftp.put(str(local_bundle), f"{worker_run}/bundle.tgz")
         finally:
             local_bundle.unlink(missing_ok=True)
         base.run(worker, f"install -d -m 0755 {base.q(worker_run)}/bundle && tar -C {base.q(worker_run)}/bundle -xzf {base.q(worker_run)}/bundle.tgz")
+        print(f"[gate3:{workers_count}x{capacity}] worker/plugin bundle installed", flush=True)
         base.put_text(server, f"{server_run}/server.yaml", server_config(workers_count, capacity))
         base.put_text(server, f"{server_run}/load_client.py", LOAD_CLIENT, 0o755)
         base.put_text(server, f"{server_run}/stress_test_common.py", COMMON_SOURCE)
@@ -638,8 +771,10 @@ def run_scale(
         base.put_text(worker, f"{worker_run}/ark_real_llm_proxy.py", REAL_LLM_PROXY_SOURCE, 0o700)
         base.put_text(worker, f"{worker_run}/ark_real_llm_preflight.py", REAL_LLM_PREFLIGHT_SOURCE, 0o700)
         base.put_text(worker, f"{worker_run}/worker_fleet_supervisor.py", FLEET_SUPERVISOR_SOURCE, 0o700)
+        print(f"[gate3:{workers_count}x{capacity}] runtime scripts uploaded", flush=True)
         worker_dataset = f"{worker_run}/DSCodeBench.json"
         if model_mode == "simulator":
+            print(f"[gate3:{workers_count}x{capacity}] copying DSCodeBench dataset to worker", flush=True)
             with tempfile.NamedTemporaryFile(prefix=run_id, suffix="-dscodebench.json", delete=False) as tmp:
                 local_dataset = Path(tmp.name)
             try:
@@ -649,6 +784,7 @@ def run_scale(
                     sftp.put(str(local_dataset), worker_dataset)
             finally:
                 local_dataset.unlink(missing_ok=True)
+            print(f"[gate3:{workers_count}x{capacity}] DSCodeBench dataset copied", flush=True)
         worker_documents = {}
         for i, (port, obs_port) in enumerate(zip(ports, obs_ports)):
             worker_id = f"stress-{run_id}-worker-{i:04d}"
@@ -656,7 +792,8 @@ def run_scale(
                 worker_config(worker_run, worker_id, port, obs_port, capacity),
                 0o600,
             )
-        base.put_texts(worker, worker_documents)
+        put_worker_config_archive(worker, worker_run, worker_documents, run_id)
+        print(f"[gate3:{workers_count}x{capacity}] worker configs archive uploaded count={len(worker_documents)}", flush=True)
         # load_client.py 需要 Python 版 protobuf message，所以每次用当前 proto 生成。
         proto_root = f"{base.SOURCE_REPO}/proto"
         proto = " ".join([
@@ -666,6 +803,7 @@ def run_scale(
         ])
         base.run(server, proto)
         base.run(server, f"touch {base.q(server_run)}/generated/uenv/__init__.py {base.q(server_run)}/generated/uenv/v1/__init__.py")
+        print(f"[gate3:{workers_count}x{capacity}] generated Python protobuf stubs", flush=True)
         # 关闭 trajectory/obs，减少压测以外的写入和背景工作。
         # Scale acceptance needs the assignment.worker_id on every completion
         # to prove that all real Workers, rather than only N registry entries,
@@ -692,7 +830,15 @@ def run_scale(
             model_script = "model_simulator.py"
             model_command = (
                 f"python3 -B {worker_run}/model_simulator.py --port {base.MODEL_PORT} "
-                f"--latency-ms {simulator_latency_ms} --wrong-steps {code_wrong_steps} "
+                f"--latency-mean-ms {simulator_latency_mean_ms} "
+                f"--latency-std-ms {simulator_latency_std_ms} "
+                f"--latency-min-ms {simulator_latency_min_ms} "
+                f"--latency-max-ms {simulator_latency_max_ms} "
+                f"--wrong-steps-mean {simulator_wrong_steps_mean} "
+                f"--wrong-steps-std {simulator_wrong_steps_std} "
+                f"--wrong-steps-min {simulator_wrong_steps_min} "
+                f"--wrong-steps-max {simulator_wrong_steps_max} "
+                f"--seed {simulator_seed} "
                 f"--dataset-jsonl {base.q(worker_dataset)}"
             )
         model_pid = base.start_owned(
@@ -723,8 +869,17 @@ def run_scale(
             "UENV_PLUGIN_READY_TIMEOUT_SECS": str(plugin_ready_timeout_seconds),
             "UENV_WORKER_REGISTER_MAX_ATTEMPTS": str(worker_register_max_attempts),
             "UENV_WORKER_REGISTER_RETRY_BACKOFF_MS": str(worker_register_retry_backoff_ms),
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+            "TF_NUM_INTRAOP_THREADS": "1",
+            "TF_NUM_INTEROP_THREADS": "1",
+            "CUDA_VISIBLE_DEVICES": "",
             "RUST_LOG": "error",
         }
+        if code_python:
+            worker_env["UENV_CODE_PYTHON"] = code_python
         if workers_count >= fleet_supervisor_threshold:
             fleet_spec = {
                 "workers": [
@@ -815,6 +970,23 @@ def run_scale(
             "concurrent_batches": concurrent_batches,
             "duration_per_mode_seconds": duration, "max_steps": max_steps,
             "code_wrong_steps": code_wrong_steps, "min_steps": min_steps, "worker_ports": ports,
+            "code_python": code_python or "python3",
+            "simulator_distribution": {
+                "wrong_steps": {
+                    "mean": simulator_wrong_steps_mean,
+                    "std": simulator_wrong_steps_std,
+                    "min": simulator_wrong_steps_min,
+                    "max": simulator_wrong_steps_max,
+                    "sampling_unit": "episode/task_id",
+                },
+                "latency_ms": {
+                    "mean": simulator_latency_mean_ms,
+                    "std": simulator_latency_std_ms,
+                    "min": simulator_latency_min_ms,
+                    "max": simulator_latency_max_ms,
+                },
+                "seed": simulator_seed,
+            },
             "plugin_ready_timeout_seconds": plugin_ready_timeout_seconds,
             "worker_registration_retry": {
                 "max_attempts": worker_register_max_attempts,
@@ -859,6 +1031,10 @@ def run_scale(
                 "--model-url", f"http://127.0.0.1:{base.MODEL_PORT}/v1", "--run-id", run_id, "--output", remote_result,
                 "--max-steps", str(max_steps), "--code-wrong-steps", str(code_wrong_steps),
                 "--min-steps", str(min_steps), "--model-mode", model_mode,
+                "--simulator-wrong-steps-mean", str(simulator_wrong_steps_mean),
+                "--simulator-wrong-steps-std", str(simulator_wrong_steps_std),
+                "--simulator-wrong-steps-min", str(simulator_wrong_steps_min),
+                "--simulator-wrong-steps-max", str(simulator_wrong_steps_max),
                 "--dataset-jsonl", dataset_jsonl,
                 "--dataset-limit", str(dataset_limit),
                 "--dataset-offset", str(dataset_offset),
@@ -875,7 +1051,7 @@ def run_scale(
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
             step_stats = _model_step_stats(worker, f"gate3-{run_id}-{mode}-")
-            expected_min_steps = min_steps if model_mode == "real" else code_wrong_steps + 1
+            expected_min_steps = min_steps
             step_validation = {
                 "expected_min_steps": expected_min_steps,
                 "max_allowed_steps": max_steps,
@@ -885,6 +1061,13 @@ def run_scale(
                     step_stats["task_count"] == result["completed"]
                     and step_stats["min_steps"] >= expected_min_steps
                     and step_stats["max_steps"] <= max_steps
+                    and (
+                        model_mode == "real"
+                        or step_stats.get("simulator", {})
+                        .get("wrong_steps", {})
+                        .get("sampled", {})
+                        .get("max", 0) <= simulator_wrong_steps_max
+                    )
                     and result["actual_step_stats"]["task_count"] == result["completed"]
                     and result["actual_step_stats"]["min_steps"] >= expected_min_steps
                     and result["actual_step_stats"]["max_steps"] <= max_steps
@@ -990,7 +1173,7 @@ def run_scale(
 
 
 def main() -> int:
-    """Gate3 command entry. Defaults to an isolated one-Worker smoke."""
+    """Gate3 command entry for real-Worker Gate3 and scale pressure runs."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration", type=int, default=30)
     parser.add_argument("--workers", type=int, default=1)
@@ -1043,10 +1226,25 @@ def main() -> int:
     parser.add_argument("--registration-timeout", type=int, default=180)
     parser.add_argument("--batch-timeout", type=int, default=180)
     parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
-    parser.add_argument("--simulator-latency-ms", type=int, default=10)
+    parser.add_argument("--simulator-latency-ms", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--simulator-latency-mean-ms", type=float, default=500)
+    parser.add_argument("--simulator-latency-std-ms", type=float, default=150)
+    parser.add_argument("--simulator-latency-min-ms", type=float, default=50)
+    parser.add_argument("--simulator-latency-max-ms", type=float, default=2000)
+    parser.add_argument("--simulator-wrong-steps-mean", type=float, default=2)
+    parser.add_argument("--simulator-wrong-steps-std", type=float, default=1)
+    parser.add_argument("--simulator-wrong-steps-min", type=int, default=0)
+    parser.add_argument("--simulator-wrong-steps-max", type=int, default=5)
+    parser.add_argument("--simulator-seed", type=int, default=20260720)
+    parser.add_argument("--min-scale-episode-waves", type=int, default=10)
     parser.add_argument("--plugin-ready-timeout-seconds", type=int, default=2)
     parser.add_argument("--worker-register-max-attempts", type=int, default=5)
     parser.add_argument("--worker-register-retry-backoff-ms", type=int, default=200)
+    parser.add_argument(
+        "--code-python",
+        default="",
+        help="Explicit Python interpreter for the Code plugin evaluator on the Worker host.",
+    )
     parser.add_argument(
         "--acceptance-purpose",
         choices=("gate3-real-llm", "worker-scale"),
@@ -1086,19 +1284,35 @@ def main() -> int:
         raise SystemExit("--dataset-limit must be positive and --dataset-offset non-negative")
     if args.exact_batches < 0 or args.registration_timeout <= 0 or args.batch_timeout <= 0:
         raise SystemExit("batch and timeout arguments must be non-negative/positive")
-    if args.fleet_supervisor_threshold < 2 or args.simulator_latency_ms < 0:
-        raise SystemExit("invalid fleet supervisor threshold or simulator latency")
+    if args.fleet_supervisor_threshold < 2:
+        raise SystemExit("invalid fleet supervisor threshold")
+    if not (0 <= args.simulator_latency_min_ms <= args.simulator_latency_mean_ms <= args.simulator_latency_max_ms):
+        raise SystemExit("simulator latency must satisfy min <= mean <= max")
+    if args.simulator_latency_std_ms < 0:
+        raise SystemExit("simulator latency std must be non-negative")
+    if not (0 <= args.simulator_wrong_steps_min <= args.simulator_wrong_steps_mean <= args.simulator_wrong_steps_max):
+        raise SystemExit("simulator wrong_steps must satisfy min <= mean <= max")
+    if args.simulator_wrong_steps_std < 0:
+        raise SystemExit("simulator wrong_steps std must be non-negative")
+    if args.simulator_wrong_steps_max >= args.max_steps:
+        raise SystemExit("--simulator-wrong-steps-max must be smaller than --max-steps")
     if not 1 <= args.plugin_ready_timeout_seconds <= 300:
         raise SystemExit("--plugin-ready-timeout-seconds must be between 1 and 300")
     modes = tuple(args.mode or MODES)
     if args.acceptance_purpose == "gate3-real-llm" and args.model_mode != "real":
         raise SystemExit("Gate3 acceptance requires --model-mode real")
     if args.acceptance_purpose == "worker-scale":
-        if args.model_mode != "simulator" or modes != ("sync",) or args.exact_batches <= 0:
-            raise SystemExit("worker-scale requires simulator, exactly --mode sync, and --exact-batches > 0")
+        if args.model_mode != "simulator" or args.exact_batches <= 0:
+            raise SystemExit("worker-scale requires simulator and --exact-batches > 0")
+        if args.workers < 1024:
+            raise SystemExit("worker-scale requires at least 1024 Workers")
         resolved_batch_size = args.episode_batch_size or args.workers
-        if resolved_batch_size * args.exact_batches < args.workers:
-            raise SystemExit("worker-scale must submit at least one episode per Worker")
+        required_episodes = args.workers * args.capacity * args.min_scale_episode_waves
+        if resolved_batch_size * args.exact_batches < required_episodes:
+            raise SystemExit(
+                "worker-scale total episodes must be at least "
+                f"workers * capacity * {args.min_scale_episode_waves} = {required_episodes}"
+            )
         resolved_concurrent_batches = args.concurrent_batches or args.capacity
         if resolved_batch_size * resolved_concurrent_batches > args.workers * args.capacity:
             raise SystemExit("worker-scale requested concurrency exceeds total Worker slots")
@@ -1128,13 +1342,22 @@ def main() -> int:
         args.registration_timeout,
         args.batch_timeout,
         args.fleet_supervisor_threshold,
-        args.simulator_latency_ms,
+        args.simulator_latency_mean_ms,
+        args.simulator_latency_std_ms,
+        args.simulator_latency_min_ms,
+        args.simulator_latency_max_ms,
+        args.simulator_wrong_steps_mean,
+        args.simulator_wrong_steps_std,
+        args.simulator_wrong_steps_min,
+        args.simulator_wrong_steps_max,
+        args.simulator_seed,
         args.plugin_ready_timeout_seconds,
         args.worker_register_max_attempts,
         args.worker_register_retry_backoff_ms,
         args.episode_batch_size or args.workers,
         args.concurrent_batches or args.capacity,
         args.acceptance_purpose,
+        args.code_python,
     )
     summaries = [summary]
     summary_path = args.artifacts / f"gate3-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"
