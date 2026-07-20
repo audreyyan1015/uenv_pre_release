@@ -75,6 +75,7 @@ def build_request(
     temperature: float,
     top_p: float,
     max_tokens: int,
+    thinking_token_budget: int | None,
     timeout_seconds: int,
     seed: int,
     benchmark_variant: str,
@@ -117,6 +118,15 @@ def build_request(
     if pool_selector:
         env_config["pool_selector"] = pool_selector
 
+    generation_config: dict[str, Any] = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "max_new_tokens": max_tokens,
+    }
+    if thinking_token_budget is not None:
+        generation_config["thinking_token_budget"] = thinking_token_budget
+
     payload = {
         "protocol_version": "1.0",
         "framework": "uenv-benchmark",
@@ -127,12 +137,7 @@ def build_request(
             "endpoint_type": "http",
             "url": model_endpoint,
             "model_name": model_name,
-            "generation_config": {
-                "temperature": temperature,
-                "top_p": top_p,
-                "max_tokens": max_tokens,
-                "max_new_tokens": max_tokens,
-            },
+            "generation_config": generation_config,
             "max_retries": 3,
         },
         "episode_config": {
@@ -305,8 +310,9 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--instance-id", action="append", default=[])
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--max-tokens", type=int, default=32768)
-    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--max-tokens", type=int, default=8192)
+    parser.add_argument("--thinking-token-budget", type=int, default=4096)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--timeout-seconds", type=int, default=7200)
     parser.add_argument("--client-timeout-seconds", type=float, default=7600.0)
@@ -315,13 +321,13 @@ def main() -> int:
     parser.add_argument("--benchmark-variant", default="pro")
     parser.add_argument("--command-mode", default="full_shell")
     parser.add_argument("--env-package-id", default="swe-bench-pro")
-    parser.add_argument("--env-package-version", default="0.2.0")
+    parser.add_argument("--env-package-version", default="0.3.4")
     parser.add_argument("--agent-bridge-id", default="uenv-agent-openhands")
     parser.add_argument("--agent-bridge-version", default="1.0.0")
     parser.add_argument("--agent-pool-id", default="openhands-default")
     parser.add_argument("--driver-entrypoint", default="run_swebenchpro_official.py")
-    parser.add_argument("--workspace-dir", default="/workspace")
-    parser.add_argument("--llm-config-path", default="/root/UEnv/config/openhands-llm-qwen3-thinking-32768.json")
+    parser.add_argument("--workspace-dir", default="/app")
+    parser.add_argument("--llm-config-path", default="/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json")
     parser.add_argument("--max-iterations", type=int, default=50)
     parser.add_argument("--pool-selector-json", default="")
     parser.add_argument("--requests-log", type=Path, default=None)
@@ -364,6 +370,7 @@ def main() -> int:
             temperature=args.temperature,
             top_p=args.top_p,
             max_tokens=args.max_tokens,
+            thinking_token_budget=args.thinking_token_budget,
             timeout_seconds=args.timeout_seconds,
             seed=args.seed + idx,
             benchmark_variant=args.benchmark_variant,
@@ -439,6 +446,7 @@ def main() -> int:
             "llm_config_path": args.llm_config_path,
             "max_iterations": args.max_iterations,
             "max_tokens": args.max_tokens,
+            "thinking_token_budget": args.thinking_token_budget,
             "inference_mode": "uenv_swe_agent",
             "thinking": "enabled_by_llm_config",
             "resumed_skipped_count": len(skip_ids),

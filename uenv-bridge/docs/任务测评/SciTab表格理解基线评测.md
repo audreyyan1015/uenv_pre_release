@@ -87,10 +87,23 @@ SciTab 样本
 
 ## 5. 运行命令
 
-本轮复用 OlymMATH / PubMedQA 测评阶段已经启动的 8GPU vLLM，监听本机 `18081`。vLLM 启动参数包含：
+从零开始运行时，先启动 8GPU vLLM，监听本机 `18081`：
 
 ```bash
-python3 -m vllm.entrypoints.openai.api_server \
+cd /data/ronghao/uenv/uenv-bridge
+
+podman rm -f uenv-scitab-vllm-18081 2>/dev/null || true
+
+podman run -d --name uenv-scitab-vllm-18081 \
+  --entrypoint python3 \
+  --network host \
+  --pids-limit=-1 \
+  --shm-size=64g \
+  --device nvidia.com/gpu=all \
+  -v /data/ronghao:/data/ronghao \
+  -w /data/ronghao/uenv/uenv-bridge \
+  localhost/vllm-openai:v0.19.0-cu130 \
+  -m vllm.entrypoints.openai.api_server \
   --model /data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B \
   --served-model-name Qwen/Qwen3.6-35B-A3B \
   --host 0.0.0.0 \
@@ -103,7 +116,13 @@ python3 -m vllm.entrypoints.openai.api_server \
   --trust-remote-code
 ```
 
-启动 Worker 可访问的 adapter model gateway：
+确认 vLLM 已就绪：
+
+```bash
+curl --noproxy '*' http://127.0.0.1:18081/v1/models
+```
+
+在独立终端启动 Worker 可访问的 adapter model gateway：
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
@@ -121,6 +140,12 @@ PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --preserve-thinking \
   --thinking-token-budget 16384 \
   --log-path "$BASE/model-gateway-official-reasoning-fields-18096-budget16384.jsonl"
+```
+
+确认 gateway 已就绪：
+
+```bash
+curl --noproxy '*' http://127.0.0.1:18096/v1/models
 ```
 
 运行 UEnv 全量评测：
