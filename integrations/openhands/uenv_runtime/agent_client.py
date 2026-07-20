@@ -152,6 +152,7 @@ class AgentControlClient:
         model_latency_ms: int | None = None,
         response_ids: list[int] | None = None,
         response_mask: list[int] | None = None,
+        metadata: dict[str, str] | None = None,
         *,
         agent_id: str,
     ) -> bool:
@@ -190,6 +191,8 @@ class AgentControlClient:
             req_kwargs["worker_latency_ms"] = int(worker_latency_ms)
         if model_latency_ms is not None:
             req_kwargs["model_latency_ms"] = int(model_latency_ms)
+        if metadata:
+            req_kwargs["metadata"] = {str(k): str(v) for k, v in metadata.items()}
         req = self._pb2.AgentJobCompleteRequest(**req_kwargs)
         if ids or mask:
             if ids and not mask:

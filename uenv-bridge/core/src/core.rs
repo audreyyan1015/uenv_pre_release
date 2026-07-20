@@ -449,12 +449,12 @@ fn episode_result_to_sample_result(
 
     let status_str = result.status.as_str();
     let done = matches!(status_str, "completed" | "failed" | "timeout");
-    let trajectory_json = result
-        .trajectory
+    let total_reward = result
+        .summary
         .as_ref()
-        .map(proto_trajectory_to_json_bytes)
-        .transpose()?
-        .unwrap_or_default();
+        .map(|s| s.total_reward)
+        .unwrap_or(0.0);
+    let trajectory_json = build_trajectory_json(&result, total_reward)?;
     let summary = result.summary.unwrap_or_default();
 
     Ok(SampleResult {
@@ -474,8 +474,64 @@ fn episode_result_to_sample_result(
     })
 }
 
+fn build_trajectory_json(
+    result: &uenv_server::proto::v1::EpisodeResult,
+    total_reward: f64,
+) -> Result<Vec<u8>, CoreError> {
+    let summary = result.summary.as_ref();
+    let total_steps = summary.map(|s| s.total_steps).unwrap_or(0);
+    let trajectory_id = result.trajectory_id.trim();
+    let has_metadata = !result.metadata.is_empty();
+    let has_trajectory_id = !trajectory_id.is_empty();
+
+    if let Some(trajectory) = result.trajectory.as_ref() {
+        return proto_trajectory_to_json_bytes(
+            trajectory,
+            if has_trajectory_id {
+                Some(trajectory_id)
+            } else {
+                None
+            },
+            if has_metadata {
+                Some(&result.metadata)
+            } else {
+                None
+            },
+        );
+    }
+
+    if has_trajectory_id || has_metadata {
+        let mut envelope = serde_json::Map::new();
+        envelope.insert("steps".to_string(), serde_json::Value::Array(vec![]));
+        envelope.insert(
+            "total_reward".to_string(),
+            serde_json::json!(total_reward),
+        );
+        envelope.insert("total_steps".to_string(), serde_json::json!(total_steps));
+        if has_trajectory_id {
+            envelope.insert(
+                "trajectory_id".to_string(),
+                serde_json::Value::String(trajectory_id.to_string()),
+            );
+        }
+        if has_metadata {
+            envelope.insert(
+                "metadata".to_string(),
+                serde_json::json!(result.metadata),
+            );
+        }
+        return serde_json::to_vec(&serde_json::Value::Object(envelope)).map_err(|err| {
+            CoreError::InvalidEpisodeResult(format!("failed to encode trajectory_json: {err}"))
+        });
+    }
+
+    Ok(Vec::new())
+}
+
 fn proto_trajectory_to_json_bytes(
     trajectory: &uenv_server::proto::v1::Trajectory,
+    trajectory_id: Option<&str>,
+    metadata: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<Vec<u8>, CoreError> {
     let steps = trajectory
         .steps
@@ -497,12 +553,26 @@ fn proto_trajectory_to_json_bytes(
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_vec(&json!({
-        "steps": steps,
-        "total_reward": trajectory.total_reward,
-        "total_steps": trajectory.total_steps,
-    }))
-    .map_err(|err| {
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("steps".to_string(), serde_json::Value::Array(steps));
+    envelope.insert(
+        "total_reward".to_string(),
+        serde_json::json!(trajectory.total_reward),
+    );
+    envelope.insert(
+        "total_steps".to_string(),
+        serde_json::json!(trajectory.total_steps),
+    );
+    if let Some(id) = trajectory_id.filter(|s| !s.is_empty()) {
+        envelope.insert(
+            "trajectory_id".to_string(),
+            serde_json::Value::String(id.to_string()),
+        );
+    }
+    if let Some(meta) = metadata.filter(|m| !m.is_empty()) {
+        envelope.insert("metadata".to_string(), serde_json::json!(meta));
+    }
+    serde_json::to_vec(&serde_json::Value::Object(envelope)).map_err(|err| {
         CoreError::InvalidEpisodeResult(format!("failed to encode trajectory_json: {err}"))
     })
 }

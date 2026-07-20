@@ -55,9 +55,40 @@ def _pro_workspace_dir(variant: str) -> str:
     return "/app" if variant.lower() == "pro" else "/testbed"
 
 
+def _infer_repo_language(instance: dict[str, Any]) -> str:
+    lang = str(instance.get("repo_language") or "").strip().lower()
+    if lang:
+        return lang
+    repo = str(instance.get("repo") or "").lower()
+    if repo.endswith("/go") or ".go" in repo:
+        return "go"
+    # Common Pro repos when catalog omits repo_language.
+    go_repos = (
+        "flipt-io/flipt",
+        "gravitational/teleport",
+        "navidrome/navidrome",
+        "future-architect/vuls",
+    )
+    js_repos = (
+        "element-hq/element-web",
+        "nodebb/nodebb",
+        "protonmail/webclients",
+        "internetarchive/openlibrary",
+    )
+    if any(repo == r or repo.endswith(r) for r in go_repos):
+        return "go"
+    if any(repo == r or repo.endswith(r) for r in js_repos):
+        return "javascript"
+    if "tutao" in repo:
+        return "typescript"
+    if "ansible" in repo or "qutebrowser" in repo:
+        return "python"
+    return ""
+
+
 def _build_instruction(instance: dict[str, Any], repo_path: str) -> str:
     ps = instance.get("problem_statement") or instance.get("issue_text") or ""
-    repo_language = str(instance.get("repo_language") or "").strip().lower()
+    repo_language = _infer_repo_language(instance)
     if repo_language in {"python", "py"}:
         language_hint = "Python files such as `*.py`"
     elif repo_language in {"go", "golang"}:

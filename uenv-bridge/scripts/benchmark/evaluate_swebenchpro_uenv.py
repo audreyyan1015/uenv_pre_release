@@ -205,6 +205,12 @@ def result_to_row(row: dict[str, Any], result: EpisodeResult, elapsed_ms: int) -
     step = last_step(result)
     info = step.info if step is not None else {}
     reward = float(result.summary.total_reward or 0.0)
+    meta = result.metadata or {}
+    trajectory_id = str(result.trajectory_id or info.get("trajectory_id", "") or meta.get("trajectory_id", ""))
+    tests_passed = meta.get("tests_passed", "")
+    tests_total = meta.get("tests_total", "")
+    git_diff_nonempty = meta.get("git_diff_nonempty", "")
+    git_diff_bytes = meta.get("git_diff_bytes", "")
     return {
         "instance_id": row["instance_id"],
         "repo": row.get("repo", ""),
@@ -217,7 +223,11 @@ def result_to_row(row: dict[str, Any], result: EpisodeResult, elapsed_ms: int) -
         "uenv_request_id": result.request_id,
         "uenv_error_code": result.error_code,
         "uenv_error_message": result.error_message,
-        "trajectory_id": info.get("trajectory_id", ""),
+        "trajectory_id": trajectory_id,
+        "tests_passed": tests_passed,
+        "tests_total": tests_total,
+        "git_diff_nonempty": git_diff_nonempty,
+        "git_diff_bytes": git_diff_bytes,
         "elapsed_ms": elapsed_ms,
         "terminate_reason": result.summary.terminate_reason,
     }
@@ -264,6 +274,10 @@ def write_outputs(output_dir: Path, rows: list[dict[str, Any]], metadata: dict[s
             "uenv_error_code",
             "uenv_error_message",
             "trajectory_id",
+            "tests_passed",
+            "tests_total",
+            "git_diff_nonempty",
+            "git_diff_bytes",
             "elapsed_ms",
             "terminate_reason",
         ]
