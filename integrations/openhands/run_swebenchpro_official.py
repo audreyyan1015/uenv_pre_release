@@ -57,12 +57,30 @@ def _pro_workspace_dir(variant: str) -> str:
 
 def _build_instruction(instance: dict[str, Any], repo_path: str) -> str:
     ps = instance.get("problem_statement") or instance.get("issue_text") or ""
+    repo_language = str(instance.get("repo_language") or "").strip().lower()
+    if repo_language in {"python", "py"}:
+        language_hint = "Python files such as `*.py`"
+    elif repo_language in {"go", "golang"}:
+        language_hint = "Go files such as `*.go`"
+    elif repo_language in {"javascript", "js", "typescript", "ts"}:
+        language_hint = "JavaScript/TypeScript files such as `*.js`, `*.ts`, and `*.tsx`"
+    else:
+        language_hint = "files matching the repository language and nearby config/template files"
     return (
         f"The git repository is already checked out at `{repo_path}`.\n"
-        f"Start by running `ls -la {repo_path}` and `find {repo_path} -maxdepth 2 -type f -name '*.py' | head`.\n"
-        f"All edits must be under `{repo_path}`.\n\n"
+        f"All investigation and edits must stay under `{repo_path}`.\n"
+        "Start by confirming the workspace:\n"
+        f"1. `pwd`\n"
+        f"2. `git -C {repo_path} rev-parse --show-toplevel`\n"
+        f"3. `ls -la {repo_path}`\n\n"
+        "Inspect the repository structure and identify the relevant language/framework before searching.\n"
+        f"This instance is labeled as `{repo_language or 'unknown'}`; prioritize {language_hint}.\n"
+        "Use targeted searches with `rg` for symbols, error messages, routes, tests, or issue keywords.\n"
+        "When relevant, also inspect non-test project files such as JSON, YAML, templates, and generated schemas.\n"
+        f"Do not search or edit outside `{repo_path}`. Do not inspect `/opt/openhands`, benchmark harness directories, `/tmp`, or `/root` unless explicitly required by a tool.\n\n"
         f"<issue_description>\n{ps}\n</issue_description>\n\n"
-        "Implement the minimal fix to non-test source files. Tests are already updated.\n"
+        "Implement the minimal fix in non-test project files required by the issue. Tests are already provided by the benchmark; do not modify tests unless the issue explicitly requires it.\n"
+        "Before finishing, inspect `git diff` and make sure the patch is focused.\n"
         "Use terminal and file_editor tools. When done, call the finish tool.\n"
     )
 
