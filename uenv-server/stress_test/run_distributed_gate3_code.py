@@ -73,6 +73,8 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import os
+from pathlib import Path
 import random
 import re
 import threading
@@ -85,23 +87,136 @@ parser.add_argument("--latency-mean-ms", type=float, default=1000)
 parser.add_argument("--latency-std-ms", type=float, default=250)
 parser.add_argument("--latency-min-ms", type=float, default=100)
 parser.add_argument("--latency-max-ms", type=float, default=5000)
+parser.add_argument("--zero-latency", action="store_true")
 parser.add_argument("--wrong-steps-mean", type=float, default=2)
 parser.add_argument("--wrong-steps-std", type=float, default=1)
 parser.add_argument("--wrong-steps-min", type=int, default=0)
 parser.add_argument("--wrong-steps-max", type=int, default=5)
 parser.add_argument("--seed", type=int, default=20260720)
 parser.add_argument("--dataset-jsonl", default="")
+parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
+parser.add_argument("--trace-corpus-path", default="")
+parser.add_argument(
+    "--trace-sampling-strategy",
+    choices=("problem_then_turn", "turn_only"),
+    default="problem_then_turn",
+)
 args = parser.parse_args()
 attempts_by_task = {}
 profiles_by_task = {}
 attempts_lock = threading.Lock()
 dataset_oracle = {}
+trace_records = []
+trace_by_problem_turn = {}
+trace_by_turn = {}
+trace_by_problem = {}
+trace_hits = 0
+trace_misses = 0
+trace_hits_by_task = {}
+trace_misses_by_task = {}
+observed_latencies_ms = []
 if args.dataset_jsonl:
     with open(args.dataset_jsonl, "r", encoding="utf-8") as source:
         for line in source:
             if line.strip():
                 row = json.loads(line)
                 dataset_oracle[str(row["problem_id"])] = str(row["ground_truth_code"])
+
+def iter_json_records(path):
+    if not path:
+        return
+    source_path = Path(path)
+    candidates = []
+    if source_path.is_dir():
+        candidates.extend(sorted(source_path.rglob("dscodebench_trace_corpus.jsonl")))
+        candidates.extend(sorted(source_path.rglob("*.jsonl")))
+        candidates.extend(sorted(source_path.rglob("*.json")))
+    else:
+        candidates.append(source_path)
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen or not candidate.exists():
+            continue
+        seen.add(key)
+        if candidate.suffix.lower() == ".jsonl":
+            with candidate.open("r", encoding="utf-8") as source:
+                for line in source:
+                    if line.strip():
+                        yield json.loads(line)
+        elif candidate.suffix.lower() == ".json":
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(document, list):
+                for item in document:
+                    if isinstance(item, dict):
+                        yield item
+            elif isinstance(document, dict):
+                records = document.get("records") or document.get("turns") or document.get("trace")
+                if isinstance(records, list):
+                    for item in records:
+                        if isinstance(item, dict):
+                            yield item
+                else:
+                    yield document
+
+def normalize_response_ids(values):
+    out = []
+    for value in values or []:
+        if isinstance(value, int):
+            out.append(value)
+        elif isinstance(value, str) and value.lstrip("-").isdigit():
+            out.append(int(value))
+    return out
+
+def normalize_trace_record(raw):
+    if not isinstance(raw, dict):
+        return None
+    output = raw.get("assistant_output")
+    if output is None:
+        output = raw.get("response_text") or raw.get("content")
+    if output is None and isinstance(raw.get("response"), dict):
+        choices = raw["response"].get("choices") or []
+        output = ((choices[0].get("message") or {}).get("content") if choices else "")
+    output = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+    if not output:
+        return None
+    response_ids = normalize_response_ids(raw.get("response_ids") or raw.get("uenv_response_ids"))
+    logprobs = raw.get("logprobs") if isinstance(raw.get("logprobs"), list) else []
+    if not response_ids and logprobs:
+        response_ids = normalize_response_ids([item.get("token_id") for item in logprobs if isinstance(item, dict)])
+    try:
+        turn_index = int(raw.get("turn_index", raw.get("attempt", 1)))
+    except Exception:
+        turn_index = 1
+    return {
+        "schema_version": int(raw.get("schema_version", 1) or 1),
+        "benchmark": str(raw.get("benchmark") or raw.get("dataset") or "DSCodeBench"),
+        "task_id": str(raw.get("task_id", "")),
+        "dataset_problem_id": str(raw.get("dataset_problem_id") or raw.get("problem_id") or ""),
+        "turn_index": max(1, turn_index),
+        "assistant_output": output,
+        "response_ids": response_ids,
+        "logprobs": logprobs,
+        "latency_ms": float(raw.get("latency_ms", 0) or 0),
+        "provider_response_id": str(raw.get("provider_response_id", "")),
+        "source": str(raw.get("source", "")),
+    }
+
+if args.trace_corpus_path:
+    for raw_record in iter_json_records(args.trace_corpus_path):
+        record = normalize_trace_record(raw_record)
+        if not record:
+            continue
+        trace_records.append(record)
+        problem_id = record["dataset_problem_id"]
+        turn = record["turn_index"]
+        if problem_id:
+            trace_by_problem_turn.setdefault((problem_id, turn), []).append(record)
+            trace_by_problem.setdefault(problem_id, []).append(record)
+        trace_by_turn.setdefault(turn, []).append(record)
+
+if args.simulator_mode == "trace_replay" and not trace_records:
+    raise SystemExit("--simulator-mode trace_replay requires a non-empty DSCodeBench trace corpus")
 
 def clamp(value, lower, upper):
     return max(lower, min(upper, value))
@@ -114,9 +229,28 @@ def sample_profile(task_id):
     rng = deterministic_rng(task_id)
     wrong = int(round(rng.normalvariate(args.wrong_steps_mean, args.wrong_steps_std)))
     wrong = clamp(wrong, args.wrong_steps_min, args.wrong_steps_max)
-    latency = rng.normalvariate(args.latency_mean_ms, args.latency_std_ms)
-    latency = clamp(latency, args.latency_min_ms, args.latency_max_ms)
+    latency = 0.0 if args.zero_latency else rng.normalvariate(args.latency_mean_ms, args.latency_std_ms)
+    latency = 0.0 if args.zero_latency else clamp(latency, args.latency_min_ms, args.latency_max_ms)
     return {"wrong_steps": wrong, "latency_ms": latency}
+
+def choose_record(candidates, task_id, attempt):
+    if not candidates:
+        return None
+    rng = deterministic_rng(f"{task_id}:{attempt}:trace")
+    return candidates[rng.randrange(len(candidates))]
+
+def replay_record(task_id, dataset_problem_id, attempt):
+    if args.trace_sampling_strategy == "problem_then_turn":
+        record = choose_record(trace_by_problem_turn.get((dataset_problem_id, attempt), []), task_id, attempt)
+        if record:
+            return record
+        record = choose_record(trace_by_problem.get(dataset_problem_id, []), task_id, attempt)
+        if record:
+            return record
+    record = choose_record(trace_by_turn.get(attempt, []), task_id, attempt)
+    if record:
+        return record
+    return choose_record(trace_records, task_id, attempt)
 
 def numeric_stats(values):
     values = list(values)
@@ -154,6 +288,15 @@ class Handler(BaseHTTPRequestHandler):
                 for task_id, profile in profiles_by_task.items()
                 if not prefix or task_id.startswith(prefix)
             }
+            replay_hits = sum(
+                count for task_id, count in trace_hits_by_task.items()
+                if not prefix or task_id.startswith(prefix)
+            )
+            replay_misses = sum(
+                count for task_id, count in trace_misses_by_task.items()
+                if not prefix or task_id.startswith(prefix)
+            )
+            observed_latencies = list(observed_latencies_ms)
         ordered = sorted(counts.values())
         wrong_steps = [int(profile["wrong_steps"]) for profile in profiles.values()]
         latencies = [float(profile["latency_ms"]) for profile in profiles.values()]
@@ -165,7 +308,12 @@ class Handler(BaseHTTPRequestHandler):
             "max_steps": max(ordered) if ordered else 0,
             "step_histogram": histogram(ordered),
             "simulator": {
-                "kind": "normal-distribution-dscodebench-oracle-after-wrong-steps",
+                "kind": (
+                    "trace-replay-dscodebench-real-llm-corpus"
+                    if args.simulator_mode == "trace_replay"
+                    else "template-dscodebench-oracle-after-wrong-steps"
+                ),
+                "mode": args.simulator_mode,
                 "seed": args.seed,
                 "wrong_steps": {
                     "mean": args.wrong_steps_mean,
@@ -181,8 +329,21 @@ class Handler(BaseHTTPRequestHandler):
                     "min": args.latency_min_ms,
                     "max": args.latency_max_ms,
                     "sampled": numeric_stats(latencies),
+                    "observed": numeric_stats(observed_latencies),
+                    "zero_latency": args.zero_latency,
                 },
                 "oracle_rows": len(dataset_oracle),
+                "trace_replay": {
+                    "corpus_path": args.trace_corpus_path,
+                    "records": len(trace_records),
+                    "sampling_strategy": args.trace_sampling_strategy,
+                    "hits": replay_hits,
+                    "misses": replay_misses,
+                    "contract": {
+                        "selection_keys": ["dataset_problem_id", "turn_index"],
+                        "output_fields": ["assistant_output", "response_ids", "logprobs", "latency_ms"],
+                    },
+                },
             },
             "examples": dict(list(sorted(counts.items()))[:20]),
             "profile_examples": dict(list(sorted(profiles.items()))[:20]),
@@ -194,6 +355,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        global trace_hits, trace_misses
         size = int(self.headers.get("content-length", "0"))
         raw = b""
         if size:
@@ -215,25 +377,75 @@ class Handler(BaseHTTPRequestHandler):
             attempt = attempts_by_task.get(task_id, 0) + 1
             attempts_by_task[task_id] = attempt
             profile = profiles_by_task.setdefault(task_id, sample_profile(task_id))
-        time.sleep(float(profile["latency_ms"]) / 1000)
-        if attempt <= int(profile["wrong_steps"]):
+        trace_record = replay_record(task_id, dataset_problem_id, attempt) if args.simulator_mode == "trace_replay" else None
+        sleep_ms = 0.0
+        if trace_record and trace_record.get("latency_ms", 0) > 0:
+            sleep_ms = (
+                0.0
+                if args.zero_latency
+                else float(clamp(trace_record["latency_ms"], args.latency_min_ms, args.latency_max_ms))
+            )
+        else:
+            sleep_ms = float(profile["latency_ms"])
+        with attempts_lock:
+            observed_latencies_ms.append(sleep_ms)
+        time.sleep(sleep_ms / 1000)
+        if trace_record:
+            with attempts_lock:
+                trace_hits += 1
+                trace_hits_by_task[task_id] = trace_hits_by_task.get(task_id, 0) + 1
+            content = str(trace_record["assistant_output"])
+            response_ids = normalize_response_ids(trace_record.get("response_ids"))
+            if not response_ids:
+                response_ids = [42]
+            logprobs = trace_record.get("logprobs") if isinstance(trace_record.get("logprobs"), list) else []
+            if not logprobs:
+                logprobs = [{"token": content, "token_id": response_ids[0], "logprob": -0.1}]
+            trace_source = {
+                "provider_response_id": trace_record.get("provider_response_id", ""),
+                "dataset_problem_id": trace_record.get("dataset_problem_id", ""),
+                "turn_index": trace_record.get("turn_index", attempt),
+            }
+        elif args.simulator_mode == "trace_replay":
+            with attempts_lock:
+                trace_misses += 1
+                trace_misses_by_task[task_id] = trace_misses_by_task.get(task_id, 0) + 1
+            content = "raise RuntimeError('DSCodeBench trace replay miss: no real LLM output available')"
+            response_ids = [0]
+            logprobs = [{"token": content, "token_id": 0, "logprob": -9.0}]
+            trace_source = {"miss": True, "dataset_problem_id": dataset_problem_id, "turn_index": attempt}
+        elif attempt <= int(profile["wrong_steps"]):
             content = "raise NotImplementedError('deterministic scale warmup')"
+            response_ids = [42]
+            logprobs = [{"token": content, "token_id": 42, "logprob": -0.1}]
+            trace_source = {}
         elif dataset_problem_id in dataset_oracle:
             content = dataset_oracle[dataset_problem_id]
+            response_ids = [42]
+            logprobs = [{"token": content, "token_id": 42, "logprob": -0.1}]
+            trace_source = {"oracle": True, "dataset_problem_id": dataset_problem_id}
         else:
             content = "def add(a, b):\n    return a + b"
+            response_ids = [42]
+            logprobs = [{"token": content, "token_id": 42, "logprob": -0.1}]
+            trace_source = {"template_fallback": True}
         body = json.dumps({
             "choices": [{
                 "message": {"role": "assistant", "content": content},
                 "finish_reason": "stop",
-                "logprobs": {"content": [{"token": content, "token_id": 42, "logprob": -0.1}]}
+                "logprobs": {"content": logprobs}
             }],
             "usage": {"prompt_tokens": 8, "completion_tokens": 8},
             "uenv_model_version": {
                 "rollout_param_version": 1,
-                "rollout_policy_version": "gate3-policy-1"
+                "rollout_policy_version": (
+                    "gate3-trace-replay-policy-1"
+                    if args.simulator_mode == "trace_replay"
+                    else "gate3-policy-1"
+                )
             },
-            "uenv_response_ids": [42]
+            "uenv_response_ids": response_ids,
+            "uenv_trace_replay": trace_source,
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -279,6 +491,9 @@ parser.add_argument("--simulator-wrong-steps-min", type=int, default=0)
 parser.add_argument("--simulator-wrong-steps-max", type=int, default=5)
 parser.add_argument("--model-name", required=True)
 parser.add_argument("--model-mode", choices=("real", "simulator"), required=True)
+parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
+parser.add_argument("--trace-corpus-path", default="")
+parser.add_argument("--trace-sampling-strategy", choices=("problem_then_turn", "turn_only"), default="problem_then_turn")
 parser.add_argument("--dataset-jsonl", required=True)
 parser.add_argument("--dataset-limit", type=int, default=8)
 parser.add_argument("--dataset-offset", type=int, default=0)
@@ -434,8 +649,10 @@ async def main():
         finally:
             semaphore.release()
 
-    # 在 duration 时间窗口内持续补充 batch。时间到后等待已经发出的 batch 收尾。
+    # worker-scale 下要求一次性形成 backlog：exact_batches 个 batch 要尽快全部
+    # 提交给 UEnv，再异步等待结果。duration 模式仍保留滚动补充语义。
     started = time.monotonic()
+    submit_started = started
     while (
         batch_sequence < args.exact_batches
         if args.exact_batches > 0
@@ -454,6 +671,7 @@ async def main():
         task = asyncio.create_task(send_batch())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+    client_submit_seconds = time.monotonic() - submit_started
     if tasks:
         await asyncio.gather(*tasks)
     elapsed = time.monotonic() - started
@@ -484,9 +702,35 @@ async def main():
     }
     document["min_steps"] = args.min_steps
     document["model_mode"] = args.model_mode
+    document["simulator_mode"] = args.simulator_mode
+    document["trace_corpus"] = {
+        "path": args.trace_corpus_path,
+        "sampling_strategy": args.trace_sampling_strategy,
+        "schema": {
+            "schema_version": 1,
+            "benchmark": "DSCodeBench",
+            "required_replay_fields": [
+                "dataset_problem_id",
+                "turn_index",
+                "assistant_output",
+                "response_ids",
+                "logprobs",
+                "latency_ms",
+            ],
+        },
+    }
     document["batch_size"] = episode_batch_size
     document["concurrent_batches"] = concurrent_batches
     document["requested_episode_concurrency"] = episode_batch_size * concurrent_batches
+    document["backlog_submission"] = {
+        "strategy": "submit_exact_batches_then_collect" if args.exact_batches > 0 else "duration_window_refill",
+        "planned_batches": args.exact_batches if args.exact_batches > 0 else batch_sequence,
+        "submitted_batches": batch_sequence,
+        "submitted_to_uenv": submitted,
+        "client_submit_seconds": client_submit_seconds,
+        "worker_slots": args.workers * args.slots,
+        "target_backlog_ratio": submitted / max(1, args.workers * args.slots),
+    }
     document["rpc_error_details"] = rpc_error_details
     document["dataset"] = {
         "name": "DSCodeBench",
@@ -643,19 +887,124 @@ def _model_step_stats(worker, prefix: str) -> dict:
     return json.loads(output)
 
 
+def _log_timestamp(line: str) -> str:
+    match = re.search(
+        r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?",
+        line,
+    )
+    return match.group(0) if match else ""
+
+
+def _line_worker_id(line: str) -> str:
+    match = re.search(r"worker_id=([^\s,]+)", line)
+    return match.group(1).strip('",') if match else ""
+
+
 def _completed_worker_coverage(server, log_path: str, worker_prefix: str) -> dict:
-    worker_ids = set()
-    for line in base.get_text(server, log_path).splitlines():
-        if "episode_completed" not in line:
+    """Summarize per-Worker episode load from server logs.
+
+    The server's `episode_completed` marker is the authoritative observed
+    completion signal.  Start/assignment markers are recorded when present; on
+    older logs without such markers, first/last completion time is still a
+    lower-bound load window for that Worker.
+    """
+    rows: dict[str, dict] = {}
+    start_markers = (
+        "episode_started",
+        "episode_start",
+        "episode_dispatched",
+        "episode_assigned",
+        "dispatch_episode",
+        "lease_granted",
+    )
+    for line_no, line in enumerate(base.get_text(server, log_path).splitlines(), start=1):
+        worker_id = _line_worker_id(line)
+        if not worker_id.startswith(worker_prefix):
             continue
-        match = re.search(r"worker_id=([^\s]+)", line)
-        worker_id = match.group(1).strip('"') if match else ""
-        if worker_id.startswith(worker_prefix):
-            worker_ids.add(worker_id)
+        row = rows.setdefault(worker_id, {
+            "worker_id": worker_id,
+            "started_episodes_observed": 0,
+            "completed_episodes": 0,
+            "first_start_timestamp": "",
+            "last_start_timestamp": "",
+            "first_completion_timestamp": "",
+            "last_completion_timestamp": "",
+            "first_observed_timestamp": "",
+            "last_observed_timestamp": "",
+            "first_observed_line": line_no,
+            "last_observed_line": line_no,
+        })
+        ts = _log_timestamp(line)
+        if ts and not row["first_observed_timestamp"]:
+            row["first_observed_timestamp"] = ts
+        if ts:
+            row["last_observed_timestamp"] = ts
+        row["last_observed_line"] = line_no
+        if any(marker in line for marker in start_markers):
+            row["started_episodes_observed"] += 1
+            if ts and not row["first_start_timestamp"]:
+                row["first_start_timestamp"] = ts
+            if ts:
+                row["last_start_timestamp"] = ts
+        if "episode_completed" in line:
+            row["completed_episodes"] += 1
+            if ts and not row["first_completion_timestamp"]:
+                row["first_completion_timestamp"] = ts
+            if ts:
+                row["last_completion_timestamp"] = ts
+    per_worker = sorted(rows.values(), key=lambda item: item["worker_id"])
+    worker_ids = [row["worker_id"] for row in per_worker if row["completed_episodes"] > 0]
     return {
         "unique_completed_workers": len(worker_ids),
-        "worker_ids": sorted(worker_ids),
+        "worker_ids": worker_ids,
+        "load_timeline": {
+            "unique_workers_observed": len(per_worker),
+            "total_started_episodes_observed": sum(row["started_episodes_observed"] for row in per_worker),
+            "total_completed_episodes_observed": sum(row["completed_episodes"] for row in per_worker),
+            "workers_without_completion": [
+                row["worker_id"] for row in per_worker if row["completed_episodes"] == 0
+            ],
+            "per_worker": per_worker,
+            "observability_note": (
+                "Counts are parsed from server.log. episode_completed is counted as completed load; "
+                "start timestamps are populated only when the server emits start/assignment markers."
+            ),
+        },
     }
+
+
+def _prepare_worker_trace_corpus(worker, worker_run: str, trace_corpus_path: str, run_id: str) -> str:
+    """Return a Worker-local trace corpus path, uploading local corpus if needed."""
+    if not trace_corpus_path:
+        return ""
+    candidate = Path(trace_corpus_path)
+    if candidate.exists():
+        if candidate.is_file():
+            remote_path = f"{worker_run}/dscodebench-trace-corpus.jsonl"
+            with worker.open_sftp() as sftp:
+                sftp.put(str(candidate), remote_path)
+            return remote_path
+        remote_dir = f"{worker_run}/trace-corpus"
+        with tempfile.NamedTemporaryFile(prefix=f"{run_id}-dscodebench-trace-", suffix=".tgz", delete=False) as tmp:
+            local_archive = Path(tmp.name)
+        try:
+            with tarfile.open(local_archive, "w:gz") as tar:
+                for path in sorted(candidate.rglob("*")):
+                    if path.is_file():
+                        tar.add(path, arcname=str(path.relative_to(candidate)))
+            base.run(worker, f"install -d -m 0755 {base.q(remote_dir)}")
+            remote_archive = f"{worker_run}/trace-corpus.tgz"
+            with worker.open_sftp() as sftp:
+                sftp.put(str(local_archive), remote_archive)
+            base.run(worker, f"tar -C {base.q(remote_dir)} -xzf {base.q(remote_archive)}", timeout=120)
+            return remote_dir
+        finally:
+            local_archive.unlink(missing_ok=True)
+    if trace_corpus_path.startswith("/"):
+        return trace_corpus_path
+    raise ValueError(
+        "--trace-corpus-path must be a Worker absolute path or an existing local file/directory"
+    )
 
 
 def run_scale(
@@ -682,11 +1031,15 @@ def run_scale(
     simulator_latency_std_ms: float,
     simulator_latency_min_ms: float,
     simulator_latency_max_ms: float,
+    simulator_zero_latency: bool,
     simulator_wrong_steps_mean: float,
     simulator_wrong_steps_std: float,
     simulator_wrong_steps_min: int,
     simulator_wrong_steps_max: int,
     simulator_seed: int,
+    simulator_mode: str,
+    trace_corpus_path: str,
+    trace_sampling_strategy: str,
     plugin_ready_timeout_seconds: int,
     worker_register_max_attempts: int,
     worker_register_retry_backoff_ms: int,
@@ -726,6 +1079,8 @@ def run_scale(
     obs_ports = [base.OBS_PORT + i for i in range(workers_count)]
     model_script = "model_simulator.py"
     llm_config_sha256 = ""
+    effective_trace_corpus_path = ""
+    real_llm_trace_output_dir = ""
     try:
         # 连接两台机器后，第一件事是记录正式 server 快照。
         server = base.connect(base.SERVER_HOST, password)
@@ -785,6 +1140,15 @@ def run_scale(
             finally:
                 local_dataset.unlink(missing_ok=True)
             print(f"[gate3:{workers_count}x{capacity}] DSCodeBench dataset copied", flush=True)
+            if simulator_mode == "trace_replay":
+                effective_trace_corpus_path = _prepare_worker_trace_corpus(
+                    worker, worker_run, trace_corpus_path, run_id
+                )
+                print(
+                    f"[gate3:{workers_count}x{capacity}] DSCodeBench trace corpus ready "
+                    f"path={effective_trace_corpus_path}",
+                    flush=True,
+                )
         worker_documents = {}
         for i, (port, obs_port) in enumerate(zip(ports, obs_ports)):
             worker_id = f"stress-{run_id}-worker-{i:04d}"
@@ -808,7 +1172,7 @@ def run_scale(
         # Scale acceptance needs the assignment.worker_id on every completion
         # to prove that all real Workers, rather than only N registry entries,
         # actually executed an episode.
-        server_log_filter = "info" if acceptance_purpose == "worker-scale" else "warn"
+        server_log_filter = "info" if acceptance_purpose in {"worker-scale", "single-worker-diagnostic"} else "warn"
         server_cmd = " ".join([
             "env", "UENV_SERVER_CONFIG_STRICT=1", "UENV_TRAJECTORY_ENABLED=0", "UENV_OBS_ENABLED=0", "UENV_LOG_ANSI=0",
             f"UENV_ADDR={base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}", f"UENV_CONFIG_PATH={server_run}/server.yaml",
@@ -822,9 +1186,12 @@ def run_scale(
             _, hash_out, _ = base.run(worker, f"sha256sum {base.q(llm_config)}")
             llm_config_sha256 = hash_out.split()[0]
             model_script = "ark_real_llm_proxy.py"
+            real_llm_trace_output_dir = f"{worker_run}/trace-corpus"
+            base.run(worker, f"install -d -m 0700 {base.q(real_llm_trace_output_dir)}")
             model_command = (
                 f"python3 -B {worker_run}/{model_script} --port {base.MODEL_PORT} "
-                f"--config {base.q(llm_config)}"
+                f"--config {base.q(llm_config)} "
+                f"--trace-output-dir {base.q(real_llm_trace_output_dir)}"
             )
         else:
             model_script = "model_simulator.py"
@@ -834,12 +1201,16 @@ def run_scale(
                 f"--latency-std-ms {simulator_latency_std_ms} "
                 f"--latency-min-ms {simulator_latency_min_ms} "
                 f"--latency-max-ms {simulator_latency_max_ms} "
+                f"{'--zero-latency ' if simulator_zero_latency else ''}"
                 f"--wrong-steps-mean {simulator_wrong_steps_mean} "
                 f"--wrong-steps-std {simulator_wrong_steps_std} "
                 f"--wrong-steps-min {simulator_wrong_steps_min} "
                 f"--wrong-steps-max {simulator_wrong_steps_max} "
                 f"--seed {simulator_seed} "
-                f"--dataset-jsonl {base.q(worker_dataset)}"
+                f"--dataset-jsonl {base.q(worker_dataset)} "
+                f"--simulator-mode {base.q(simulator_mode)} "
+                f"--trace-corpus-path {base.q(effective_trace_corpus_path)} "
+                f"--trace-sampling-strategy {base.q(trace_sampling_strategy)}"
             )
         model_pid = base.start_owned(
             worker,
@@ -984,6 +1355,7 @@ def run_scale(
                     "std": simulator_latency_std_ms,
                     "min": simulator_latency_min_ms,
                     "max": simulator_latency_max_ms,
+                    "zero_latency": simulator_zero_latency,
                 },
                 "seed": simulator_seed,
             },
@@ -993,11 +1365,36 @@ def run_scale(
                 "backoff_ms": worker_register_retry_backoff_ms,
             },
             "model_mode": model_mode,
+            "simulator_mode": simulator_mode,
             "model_kind": (
                 "real-ark-chat-completions+ark-tokenization"
                 if model_mode == "real"
-                else "deterministic-dataset-oracle-for-control-plane-scale"
+                else (
+                    "trace-replay-real-dscodebench-llm-corpus"
+                    if simulator_mode == "trace_replay"
+                    else "template-dataset-oracle-compatibility-mode"
+                )
             ),
+            "trace_corpus": {
+                "schema_version": 1,
+                "benchmark": "DSCodeBench",
+                "capture_output_dir": real_llm_trace_output_dir,
+                "requested_path": trace_corpus_path,
+                "effective_worker_path": effective_trace_corpus_path,
+                "sampling_strategy": trace_sampling_strategy,
+                "required_fields": [
+                    "dataset_problem_id",
+                    "turn_index",
+                    "assistant_output",
+                    "response_ids",
+                    "logprobs",
+                    "latency_ms",
+                ],
+                "note": (
+                    "Real LLM capture writes DSCodeBench turns; trace_replay scale tests replay "
+                    "those real assistant outputs and do not use ground_truth_code as model output."
+                ),
+            },
             "dataset": {
                 "name": "DSCodeBench",
                 "path": dataset_jsonl,
@@ -1024,13 +1421,15 @@ def run_scale(
         # 同一组 worker 不重启，连续跑三种模式，减少启动成本。
         for mode in modes:
             remote_result = f"{server_run}/result-{mode}.json"
-            command = " ".join([
+            load_client_args = [
                 f"PYTHONPATH={server_run}:{server_run}/generated", "python3", "-B", f"{server_run}/load_client.py",
                 "--server", f"{base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}", "--workers", str(workers_count),
                 "--slots", str(capacity), "--mode", mode, "--duration", str(duration),
                 "--model-url", f"http://127.0.0.1:{base.MODEL_PORT}/v1", "--run-id", run_id, "--output", remote_result,
                 "--max-steps", str(max_steps), "--code-wrong-steps", str(code_wrong_steps),
                 "--min-steps", str(min_steps), "--model-mode", model_mode,
+                "--simulator-mode", simulator_mode,
+                "--trace-sampling-strategy", trace_sampling_strategy,
                 "--simulator-wrong-steps-mean", str(simulator_wrong_steps_mean),
                 "--simulator-wrong-steps-std", str(simulator_wrong_steps_std),
                 "--simulator-wrong-steps-min", str(simulator_wrong_steps_min),
@@ -1044,13 +1443,39 @@ def run_scale(
                 "--episode-batch-size", str(episode_batch_size),
                 "--concurrent-batches", str(concurrent_batches),
                 "--model-name", ("proxy-selected-versioned-model" if model_mode == "real" else "gate3-code-model"),
-            ])
+            ]
+            if effective_trace_corpus_path:
+                load_client_args.extend(["--trace-corpus-path", effective_trace_corpus_path])
+            command = " ".join(load_client_args)
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} start", flush=True)
             command_timeout = registration_timeout + max(batch_timeout, duration + 240)
             _, out, err = base.run(server, command, timeout=command_timeout)
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
             step_stats = _model_step_stats(worker, f"gate3-{run_id}-{mode}-")
+            result["model_step_stats"] = step_stats
+            trace_replay_stats = (
+                step_stats.get("simulator", {}).get("trace_replay", {})
+                if isinstance(step_stats.get("simulator"), dict)
+                else {}
+            )
+            result["trace_replay"] = {
+                "required": model_mode == "simulator" and simulator_mode == "trace_replay",
+                "corpus_path": trace_replay_stats.get("corpus_path", effective_trace_corpus_path),
+                "records": trace_replay_stats.get("records", 0),
+                "sampling_strategy": trace_replay_stats.get("sampling_strategy", trace_sampling_strategy),
+                "hits": trace_replay_stats.get("hits", 0),
+                "misses": trace_replay_stats.get("misses", 0),
+                "passed": (
+                    model_mode != "simulator"
+                    or simulator_mode != "trace_replay"
+                    or (
+                        trace_replay_stats.get("records", 0) > 0
+                        and trace_replay_stats.get("hits", 0) == step_stats.get("total_model_calls", 0)
+                        and trace_replay_stats.get("misses", 0) == 0
+                    )
+                ),
+            }
             expected_min_steps = min_steps
             step_validation = {
                 "expected_min_steps": expected_min_steps,
@@ -1068,6 +1493,7 @@ def run_scale(
                         .get("sampled", {})
                         .get("max", 0) <= simulator_wrong_steps_max
                     )
+                    and result["trace_replay"]["passed"]
                     and result["actual_step_stats"]["task_count"] == result["completed"]
                     and result["actual_step_stats"]["min_steps"] >= expected_min_steps
                     and result["actual_step_stats"]["max_steps"] <= max_steps
@@ -1080,7 +1506,7 @@ def run_scale(
             result["step_validation"] = step_validation
             if not step_validation["passed"]:
                 raise RuntimeError(f"actual multi-step validation failed: {step_validation}")
-            if acceptance_purpose == "worker-scale":
+            if acceptance_purpose in {"worker-scale", "single-worker-diagnostic"}:
                 coverage = _completed_worker_coverage(
                     server,
                     f"{server_run}/server.log",
@@ -1098,6 +1524,24 @@ def run_scale(
             (local_run / f"result-{mode}.json").write_text(json.dumps(result, indent=2, sort_keys=True))
             print(f"[gate3:{workers_count}x{capacity}] mode={mode} PASS throughput={result['throughput_eps']:.2f} ep/s", flush=True)
         (local_run / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+        if model_mode == "real" and real_llm_trace_output_dir:
+            remote_trace_archive = f"{worker_run}/dscodebench-trace-corpus.tgz"
+            base.run(
+                worker,
+                f"tar -C {base.q(real_llm_trace_output_dir)} -czf {base.q(remote_trace_archive)} .",
+                timeout=120,
+            )
+            local_trace_archive = local_run / "dscodebench-trace-corpus.tgz"
+            with worker.open_sftp() as sftp:
+                sftp.get(remote_trace_archive, str(local_trace_archive))
+            local_trace_dir = local_run / "trace-corpus"
+            local_trace_dir.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(local_trace_archive, "r:gz") as tar:
+                tar.extractall(local_trace_dir)
+            trace_jsonl = local_trace_dir / "dscodebench_trace_corpus.jsonl"
+            if trace_jsonl.exists():
+                manifest["trace_corpus"]["local_jsonl"] = str(trace_jsonl)
+                (local_run / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
         if fleet_metrics_path:
             fleet_resource_metrics = json.loads(base.get_text(worker, fleet_metrics_path))
             (local_run / "fleet-metrics.json").write_text(
@@ -1231,11 +1675,15 @@ def main() -> int:
     parser.add_argument("--simulator-latency-std-ms", type=float, default=150)
     parser.add_argument("--simulator-latency-min-ms", type=float, default=50)
     parser.add_argument("--simulator-latency-max-ms", type=float, default=2000)
+    parser.add_argument("--simulator-zero-latency", action="store_true")
     parser.add_argument("--simulator-wrong-steps-mean", type=float, default=2)
     parser.add_argument("--simulator-wrong-steps-std", type=float, default=1)
     parser.add_argument("--simulator-wrong-steps-min", type=int, default=0)
     parser.add_argument("--simulator-wrong-steps-max", type=int, default=5)
     parser.add_argument("--simulator-seed", type=int, default=20260720)
+    parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
+    parser.add_argument("--trace-corpus-path", default="")
+    parser.add_argument("--trace-sampling-strategy", choices=("problem_then_turn", "turn_only"), default="problem_then_turn")
     parser.add_argument("--min-scale-episode-waves", type=int, default=10)
     parser.add_argument("--plugin-ready-timeout-seconds", type=int, default=2)
     parser.add_argument("--worker-register-max-attempts", type=int, default=5)
@@ -1247,7 +1695,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--acceptance-purpose",
-        choices=("gate3-real-llm", "worker-scale"),
+        choices=("gate3-real-llm", "worker-scale", "single-worker-diagnostic"),
         default="gate3-real-llm",
     )
     parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-gate-artifacts")
@@ -1261,11 +1709,13 @@ def main() -> int:
     if args.episode_batch_size < 0 or args.concurrent_batches < 0:
         parser.error("batch size/concurrency must be zero (auto) or positive")
     allowed_exposed_ports = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
-    for label, port in {
+    exposed_ports = {
         "isolated server": base.SERVER_PORT,
-        "single Worker": base.WORKER_PORT,
         "model endpoint": base.MODEL_PORT,
-    }.items():
+    }
+    if args.workers == 1:
+        exposed_ports["single Worker"] = base.WORKER_PORT
+    for label, port in exposed_ports.items():
         if port not in allowed_exposed_ports:
             raise SystemExit(f"{label} port {port} is outside the explicitly allowed cloud ports")
     if base.SERVER_PORT in base.PROTECTED_PORTS:
@@ -1290,12 +1740,21 @@ def main() -> int:
         raise SystemExit("simulator latency must satisfy min <= mean <= max")
     if args.simulator_latency_std_ms < 0:
         raise SystemExit("simulator latency std must be non-negative")
+    if args.simulator_zero_latency:
+        args.simulator_latency_mean_ms = 0.0
+        args.simulator_latency_std_ms = 0.0
+        args.simulator_latency_min_ms = 0.0
+        args.simulator_latency_max_ms = 0.0
     if not (0 <= args.simulator_wrong_steps_min <= args.simulator_wrong_steps_mean <= args.simulator_wrong_steps_max):
         raise SystemExit("simulator wrong_steps must satisfy min <= mean <= max")
     if args.simulator_wrong_steps_std < 0:
         raise SystemExit("simulator wrong_steps std must be non-negative")
     if args.simulator_wrong_steps_max >= args.max_steps:
         raise SystemExit("--simulator-wrong-steps-max must be smaller than --max-steps")
+    if args.model_mode == "simulator" and args.simulator_mode == "trace_replay" and not args.trace_corpus_path.strip():
+        raise SystemExit("--simulator-mode trace_replay requires --trace-corpus-path")
+    if args.model_mode == "real" and args.trace_corpus_path.strip():
+        raise SystemExit("--trace-corpus-path is only used by simulator trace_replay runs")
     if not 1 <= args.plugin_ready_timeout_seconds <= 300:
         raise SystemExit("--plugin-ready-timeout-seconds must be between 1 and 300")
     modes = tuple(args.mode or MODES)
@@ -1304,6 +1763,8 @@ def main() -> int:
     if args.acceptance_purpose == "worker-scale":
         if args.model_mode != "simulator" or args.exact_batches <= 0:
             raise SystemExit("worker-scale requires simulator and --exact-batches > 0")
+        if args.simulator_mode != "trace_replay":
+            raise SystemExit("worker-scale requires DSCodeBench --simulator-mode trace_replay")
         if args.workers < 1024:
             raise SystemExit("worker-scale requires at least 1024 Workers")
         resolved_batch_size = args.episode_batch_size or args.workers
@@ -1313,9 +1774,27 @@ def main() -> int:
                 "worker-scale total episodes must be at least "
                 f"workers * capacity * {args.min_scale_episode_waves} = {required_episodes}"
             )
-        resolved_concurrent_batches = args.concurrent_batches or args.capacity
-        if resolved_batch_size * resolved_concurrent_batches > args.workers * args.capacity:
-            raise SystemExit("worker-scale requested concurrency exceeds total Worker slots")
+        resolved_concurrent_batches = args.concurrent_batches or args.exact_batches
+        if resolved_concurrent_batches < args.exact_batches:
+            raise SystemExit(
+                "worker-scale requires --concurrent-batches >= --exact-batches "
+                "so all planned batches are submitted before collecting results"
+            )
+    if args.acceptance_purpose == "single-worker-diagnostic":
+        if args.workers != 1 or args.capacity <= 1:
+            raise SystemExit("single-worker-diagnostic requires --workers 1 and --capacity > 1")
+        if args.model_mode != "simulator" or args.exact_batches <= 0:
+            raise SystemExit("single-worker-diagnostic requires simulator and --exact-batches > 0")
+        resolved_batch_size = args.episode_batch_size or args.workers
+        required_episodes = args.capacity * args.min_scale_episode_waves
+        if resolved_batch_size * args.exact_batches < required_episodes:
+            raise SystemExit(
+                "single-worker-diagnostic total episodes must be at least "
+                f"capacity * {args.min_scale_episode_waves} = {required_episodes}"
+            )
+        resolved_concurrent_batches = args.concurrent_batches or args.exact_batches
+        if resolved_concurrent_batches < args.exact_batches:
+            raise SystemExit("single-worker-diagnostic requires --concurrent-batches >= --exact-batches")
     if args.code_wrong_steps < 0 or args.code_wrong_steps >= args.max_steps:
         raise SystemExit("--code-wrong-steps must be >=0 and smaller than --max-steps")
     password = os.environ.get("UENV_PASS")
@@ -1346,16 +1825,24 @@ def main() -> int:
         args.simulator_latency_std_ms,
         args.simulator_latency_min_ms,
         args.simulator_latency_max_ms,
+        args.simulator_zero_latency,
         args.simulator_wrong_steps_mean,
         args.simulator_wrong_steps_std,
         args.simulator_wrong_steps_min,
         args.simulator_wrong_steps_max,
         args.simulator_seed,
+        args.simulator_mode,
+        args.trace_corpus_path,
+        args.trace_sampling_strategy,
         args.plugin_ready_timeout_seconds,
         args.worker_register_max_attempts,
         args.worker_register_retry_backoff_ms,
         args.episode_batch_size or args.workers,
-        args.concurrent_batches or args.capacity,
+        args.concurrent_batches or (
+            args.exact_batches
+            if args.acceptance_purpose in {"worker-scale", "single-worker-diagnostic"} and args.exact_batches > 0
+            else args.capacity
+        ),
         args.acceptance_purpose,
         args.code_python,
     )

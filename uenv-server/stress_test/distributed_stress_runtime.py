@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import re
 import shlex
@@ -189,7 +191,10 @@ def connect(host: str, password: str) -> paramiko.SSHClient:
         raise RuntimeError(f"SSH transport unavailable for {host}")
     transport.set_keepalive(30)
     key = transport.get_remote_server_key()
-    fingerprint = key.fingerprint
+    fingerprint = getattr(key, "fingerprint", "")
+    if not fingerprint:
+        digest = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode("ascii").rstrip("=")
+        fingerprint = f"SHA256:{digest}"
     expected = EXPECTED_HOST_FINGERPRINTS[host]
     if fingerprint != expected:
         client.close()

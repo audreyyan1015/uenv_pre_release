@@ -1,15 +1,33 @@
 {
   "schema_version": 1,
+  "trace_collection": {
+    "purpose": "offline real-LLM trace corpus collection; this is not a 1024-Worker stress test",
+    "dscodebench": {
+      "dataset_count": 100,
+      "collection_concurrency": 100,
+      "uses_1024_workers": false,
+      "trace_corpus_path": "/opt/uenv-stress/trace-corpora/dscodebench/dscodebench_trace_corpus.jsonl",
+      "note": "Collect 100 DSCodeBench real-LLM replies in parallel for later local simulator replay/resampling."
+    },
+    "swebench_verified": {
+      "instance_count": 50,
+      "target_valid_traces": 50,
+      "collection_concurrency": 4,
+      "uses_1024_workers": false,
+      "trace_corpus_path": "/opt/uenv-stress/trace-corpora/swebench_verified/trace-corpus.jsonl",
+      "note": "Collect 50 SWE-bench Verified real-LLM/OpenHands traces for later local simulator replay/resampling. Low-concurrency batches are allowed to avoid provider TPM rate limits; this is trace collection, not the 1024-Worker stress test."
+    }
+  },
   "gate3": {
     "enabled": true,
     "duration_seconds_per_mode": 1,
     "workers": 1024,
     "capacity_per_worker": 1,
     "dataset_jsonl": "/home/uenv-scale-bench-merge/uenv-bridge/data/benchmarks/dscodebench/DSCodeBench.json",
-    "dataset_limit": 1000,
+    "dataset_limit": 100,
     "dataset_offset": 0,
     "episode_batch_size": 256,
-    "concurrent_batches": 4,
+    "concurrent_batches": 40,
     "exact_batches_per_mode": 40,
     "min_episode_waves": 10,
     "min_steps": 2,
@@ -32,33 +50,72 @@
       "min": 50.0,
       "max": 2000.0
     },
+    "simulator_zero_latency": false,
     "simulator_seed": 20260720,
+    "simulator_mode": "trace_replay",
+    "trace_corpus_path": "/opt/uenv-stress/trace-corpora/dscodebench/dscodebench_trace_corpus.jsonl",
+    "trace_sampling_strategy": "problem_then_turn",
     "code_python": "/opt/uenv-stress/venvs/dscodebench/bin/python",
     "registration_timeout_seconds": 900,
     "batch_timeout_seconds": 1800,
     "plugin_ready_timeout_seconds": 30,
     "worker_register_max_attempts": 20,
     "worker_register_retry_backoff_ms": 100,
-    "evidence_boundary": "1024 real UEnv Worker processes, real Code plugin, real DSCodeBench inputs, simulator LLM with per-episode normally distributed wrong_steps and latency; this is UEnv protocol/scheduler pressure evidence, not real LLM quality evidence"
+    "evidence_boundary": "1024 real UEnv Worker processes, real Code plugin, real DSCodeBench inputs, simulator LLM in trace_replay mode using 100 real LLM DSCodeBench outputs captured beforehand and replayed/re-sampled across scale episodes; this is UEnv protocol/scheduler pressure evidence, not new real-LLM quality evidence"
   },
   "gate4": {
     "enabled": true,
     "mode": "llm",
     "llm_kind": "simulator",
-    "concurrencies": [1, 2],
-    "instance_count": 4,
+    "parallel_modes": [
+      "sync",
+      "one_step_off_policy",
+      "fully_async"
+    ],
+    "concurrencies": [32],
+    "registered_workers": 1024,
+    "worker_capacity": 1,
+    "total_episodes": 10240,
+    "episode_batch_size": 32,
+    "min_episode_waves": 10,
+    "fleet_supervisor_threshold": 16,
+    "gateway_port": 22000,
+    "agent_api_port": 8077,
+    "agent_health_port": 8088,
+    "model_port": 8888,
+    "registration_timeout_seconds": 900,
+    "batch_timeout_seconds": 1800,
+    "instance_count": 50,
     "instance_seed": 20260720,
-    "simulator_latency_ms": 250,
+    "simulator_latency_ms": {
+      "mean": 250.0,
+      "std": 75.0,
+      "min": 0.0,
+      "max": 2000.0
+    },
+    "simulator_zero_latency": false,
+    "simulator_wrong_steps": {
+      "mean": 2.0,
+      "std": 1.0,
+      "min": 0,
+      "max": 5
+    },
+    "simulator_repair_success_rate": 0.35,
+    "simulator_repair_style": "plausible_patch",
+    "simulator_seed": 20260720,
+    "simulator_mode": "trace_replay",
+    "trace_corpus_path": "/opt/uenv-stress/trace-corpora/swebench_verified/trace-corpus.jsonl",
+    "trace_sampling_strategy": "instance_then_turn",
     "max_steps": 10,
     "openhands_max_iterations": 10,
-    "evidence_boundary": "real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local simulator"
+    "evidence_boundary": "1024 real UEnv SWE Worker processes, real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local trace_replay simulator using 50 real SWE-bench Verified LLM traces. container_concurrency is intentionally separate from registered_workers."
   },
   "worker_scale": {
     "enabled": false,
     "tiers": [1024],
     "capacity_per_worker": 1,
     "dataset_jsonl": "/home/uenv-scale-bench-merge/uenv-bridge/data/benchmarks/dscodebench/DSCodeBench.json",
-    "dataset_limit": 1000,
+    "dataset_limit": 100,
     "dataset_offset": 0,
     "episode_batch_size": 256,
     "episodes_per_worker": 10,
@@ -82,17 +139,21 @@
       "min": 50.0,
       "max": 2000.0
     },
+    "simulator_zero_latency": false,
     "simulator_seed": 20260720,
     "code_python": "/opt/uenv-stress/venvs/dscodebench/bin/python",
     "registration_timeout_seconds": 900,
     "batch_timeout_seconds": 1800,
-    "model_port": 6379,
+    "model_port": 8000,
     "plugin_ready_timeout_seconds": 30,
     "worker_register_max_attempts": 20,
     "worker_register_retry_backoff_ms": 100,
     "minimum_mem_available_bytes": 2147483648,
     "maximum_projected_host_memory_fraction": 0.85,
-    "model_mode": "normal_wrong_steps_simulator",
-    "evidence_boundary": "optional additional scale tier; disabled by default because Gate3 already carries the 1024-worker pressure run"
+    "model_mode": "trace_replay_simulator",
+    "simulator_mode": "trace_replay",
+    "trace_corpus_path": "/opt/uenv-stress/trace-corpora/dscodebench/dscodebench_trace_corpus.jsonl",
+    "trace_sampling_strategy": "problem_then_turn",
+    "evidence_boundary": "optional additional scale tier; DSCodeBench real Worker/plugin path with simulator LLM replaying/re-sampling a 100-instance real-LLM trace corpus"
   }
 }
