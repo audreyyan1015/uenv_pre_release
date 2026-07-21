@@ -50,10 +50,10 @@
 | 指标 | 含义 |
 |---|---|
 | `completion_rate` | UEnv 调度链路成功返回 `EpisodeResult` 的比例。 |
-| `execution_rate` | 当前 Worker 返回口径下成功执行且通过全部测试的比例。 |
+| `execution_rate` | Worker 实际运行测试的比例，即 `tests_run > 0` 的样本占比。 |
 | `pass@1` | 已生成答案一次通过全部测试用例的比例。 |
 | `reward_accuracy` | Worker 返回 reward 的均值；本轮与 `pass@1` 一致。 |
-| `error_count` | 执行阶段出现异常或超时的样本数。 |
+| `error_count` | 执行阶段出现运行时错误、harness 错误、依赖错误或超时的样本数，不包含已执行但答案错误的样本。 |
 
 官方评测脚本默认每题生成 200 个测试用例。本轮 UEnv 正式结果使用全量 1000 条样本、每题 200 个测试用例，并加入单题 300 秒超时保护，防止模型生成的长循环或训练代码卡住整轮评测。
 
@@ -149,7 +149,7 @@ curl --noproxy '*' http://127.0.0.1:18081/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260717_211508
+BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535
 mkdir -p "$BASE"
 
 PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
@@ -175,7 +175,7 @@ curl --noproxy '*' http://127.0.0.1:18094/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260717_211508 \
+OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535 \
 UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18094/v1 \
 UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
 LIMIT= \
@@ -201,67 +201,63 @@ RESUME=0 \
 本次全量产物路径如下：
 
 ```text
-/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260717_211508/uenv_requests.jsonl
-/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260717_211508/uenv_results.jsonl
-/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260717_211508/predictions.jsonl
-/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260717_211508/predictions.csv
-/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260717_211508/metrics.json
+/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535/uenv_requests.jsonl
+/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535/uenv_results.jsonl
+/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535/predictions.jsonl
+/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535/predictions.csv
+/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535/metrics.json
 ```
 
 ## 6. UEnv 全量结果
 
 总体指标：
 
-| problem_count | completed_count | failed_count | executed_count | passed_count | error_count | completion_rate | execution_rate | pass@1 | reward_accuracy |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1000 | 1000 | 0 | 267 | 267 | 733 | 1.000 | 0.267 | 0.267 | 0.267 |
+| problem_count | completed_count | failed_count | executed_count | passed_count | error_count | wrong_answer_count | completion_rate | execution_rate | pass@1 | reward_accuracy |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1000 | 1000 | 0 | 892 | 281 | 329 | 390 | 1.000 | 0.892 | 0.281 | 0.281 |
 
 分库指标：
 
-| library | problem_count | completion_rate | execution_rate | pass@1 | error_count |
-|---|---:|---:|---:|---:|---:|
-| keras | 104 | 1.000 | 0.183 | 0.183 | 85 |
-| lightgbm | 54 | 1.000 | 0.074 | 0.074 | 50 |
-| matplotlib | 105 | 1.000 | 0.333 | 0.333 | 70 |
-| numpy | 131 | 1.000 | 0.412 | 0.412 | 77 |
-| pandas | 92 | 1.000 | 0.228 | 0.228 | 71 |
-| pytorch | 101 | 1.000 | 0.376 | 0.376 | 63 |
-| scipy | 112 | 1.000 | 0.321 | 0.321 | 76 |
-| seaborn | 83 | 1.000 | 0.157 | 0.157 | 70 |
-| sklearn | 108 | 1.000 | 0.306 | 0.306 | 75 |
-| tensorflow | 110 | 1.000 | 0.127 | 0.127 | 96 |
+| library | problem_count | completion_rate | execution_rate | pass@1 | error_count | wrong_answer_count |
+|---|---:|---:|---:|---:|---:|---:|
+| keras | 104 | 1.000 | 0.846 | 0.202 | 43 | 40 |
+| lightgbm | 54 | 1.000 | 0.370 | 0.074 | 44 | 6 |
+| matplotlib | 105 | 1.000 | 0.981 | 0.324 | 15 | 56 |
+| numpy | 131 | 1.000 | 0.977 | 0.397 | 35 | 44 |
+| pandas | 92 | 1.000 | 0.837 | 0.315 | 31 | 32 |
+| pytorch | 101 | 1.000 | 0.990 | 0.396 | 34 | 27 |
+| scipy | 112 | 1.000 | 0.875 | 0.304 | 38 | 40 |
+| seaborn | 83 | 1.000 | 0.940 | 0.169 | 18 | 51 |
+| sklearn | 108 | 1.000 | 0.833 | 0.361 | 32 | 37 |
+| tensorflow | 110 | 1.000 | 1.000 | 0.127 | 39 | 57 |
 
-失败与异常统计：
+未通过与异常统计：
 
 | 类型 | 数量 | 说明 |
 |---|---:|---|
-| test assertion failed / wrong answer | 390 | Worker harness 执行后结果未通过，Adapter 侧记录为 `AssertionError`。 |
-| candidate produced no outputs | 229 | 候选代码未产生可比较输出，通常属于语法、运行时错误或未按题目要求返回结果。 |
-| numpy array truth value ambiguous | 46 | 代码中直接对 NumPy array 做布尔判断。 |
-| evaluation timed out after 300s | 25 | Worker code env 单题执行超时。 |
-| LightGBM runtime / warning error | 20 | LightGBM 训练或指标配置相关运行问题。 |
-| pandas Series truth value ambiguous | 6 | 代码中直接对 pandas Series 做布尔判断。 |
-| ImportError | 4 | 生成代码中存在不兼容导入。 |
-| missing python dependency / import | 3 | 少量样本仍触发缺失或不兼容依赖。 |
-| other worker error | 10 | 其他 Worker 执行错误。 |
+| `wrong_answer` | 390 | Worker harness 正常运行 200 个测试，但生成代码未通过全部测试。 |
+| `candidate_runtime_error` | 223 | 候选代码运行失败或未产生可比较输出。 |
+| `harness_error` | 74 | 测试 harness 执行阶段出现错误。 |
+| `dependency_error` | 9 | 依赖缺失或依赖版本不兼容。 |
+| `timeout` | 23 | Worker code env 单题执行超过 300 秒。 |
 
 运行耗时统计：
 
 | 指标 | 值 |
 |---|---:|
-| 单条 Episode `elapsed_ms` 最小值 | 6626 |
-| 单条 Episode `elapsed_ms` 最大值 | 349677 |
-| 单条 Episode `elapsed_ms` 平均值 | 65050.55 |
-| Worker 执行阶段 `execution_time_ms` 最小值 | 52 |
+| 单条 Episode `elapsed_ms` 最小值 | 8745 |
+| 单条 Episode `elapsed_ms` 最大值 | 346656 |
+| 单条 Episode `elapsed_ms` 平均值 | 65272.44 |
+| Worker 执行阶段 `execution_time_ms` 最小值 | 1 |
 | Worker 执行阶段 `execution_time_ms` 最大值 | 300013 |
-| Worker 执行阶段 `execution_time_ms` 平均值 | 32157.13 |
+| Worker 执行阶段 `execution_time_ms` 平均值 | 32432.18 |
 
-说明：当前 UEnv Worker 的 `inline_harness` wrapper 在 `_result.passed=false` 时会主动抛出 `AssertionError`，因此失败样本顶层 `tests_run` 被记录为 `0`；只有全通过样本顶层 `tests_run=200`。所以本节中的 `execution_rate=0.267` 是当前 UEnv/Worker 返回口径下的“成功执行且通过比例”，后续需要 Worker 返回更细粒度的结构化测试信息，才能进一步拆分执行失败、运行时异常和答案错误。
+说明：本轮使用 Worker 修复后的返回口径，未通过样本也会尽量返回结构化的 `tests_run`、`tests_passed` 和 `error_category`。1000 条样本中，`tests_run=200` 的样本为 892 条，`tests_run=0` 的样本为 108 条。因此本节中的 `execution_rate=0.892` 表示“实际运行了测试的比例”，不再等同于通过率。
 
 ## 7. UEnv 结果结论
 
 本次 UEnv 全量评测完成 1000/1000 条 DSCodeBench 样本，没有 Adapter Core / Server / Worker 调度层面的失败，说明代码生成任务已经能够通过 UEnv 全链路完成请求、模型生成、Worker code env 评测和结果回收。
 
-在当前 `official_fenced + thinking` 配置下，`Qwen/Qwen3.6-35B-A3B` 的 UEnv 链路 `pass@1=0.267`。当前更重要的结论是：UEnv 链路完成了 1000/1000 条样本的调度与结果回收，代码生成任务已经能够在 UEnv 中全量运行。
+在当前 `official_fenced + thinking` 配置下，`Qwen/Qwen3.6-35B-A3B` 的 UEnv 链路 `pass@1=0.281`。当前更重要的结论是：UEnv 链路完成了 1000/1000 条样本的调度与结果回收，代码生成任务已经能够在 UEnv 中全量运行。
 
-另外，Worker 当前把未通过 harness 的样本包装为错误返回，使失败样本的执行细节粒度低于直接官方评测。后续若希望严格对齐官方 `execution_rate`，需要 Worker 在 `_result.passed=false` 时仍返回结构化的 `tests_run`、`tests_passed` 和具体失败原因，而不是只通过 `AssertionError` 结束。
+另外，Worker 侧新增的结构化返回已经能让 Adapter 区分答案错误、候选代码运行时错误、harness 错误、依赖错误和超时。与旧记录相比，本轮不再把大多数未通过样本粗略归为 `tests_run=0`，因此 `execution_rate` 更接近官方评测语义，后续分析可以直接基于 `error_category` 做失败归因。
