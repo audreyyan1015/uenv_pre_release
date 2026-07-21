@@ -1,0 +1,203 @@
+{
+  "sample_count": 400,
+  "problem_count": 400,
+  "samples_per_problem": 1.0,
+  "parsed_count": 380,
+  "unparsed_count": 20,
+  "parse_rate": 0.95,
+  "accuracy": 0.6575,
+  "parsed_accuracy": 0.6921052631578948,
+  "problem_parsed_count": 380,
+  "problem_parse_rate": 0.95,
+  "pass_at_sample": 0.6575,
+  "consensus_accuracy": 0.5975,
+  "avg_unique_extracted_answers_per_problem": 0.95,
+  "avg_output_tokens": 0.0,
+  "max_output_tokens": 0,
+  "difficulty_distribution": {
+    "EASY": 200,
+    "HARD": 200
+  },
+  "subject_distribution": {
+    "Combinatorics": 54,
+    "Geometry": 58,
+    "Algebra": 50,
+    "Number Theory": 38,
+    "组合": 54,
+    "几何": 58,
+    "代数": 50,
+    "数论": 38
+  },
+  "extraction_method_distribution": {
+    "boxed": 376,
+    "missing": 20,
+    "answer_phrase": 4
+  },
+  "judge_method_distribution": {
+    "uenv_reward": 263,
+    "uenv_no_match": 137
+  },
+  "by_difficulty": {
+    "EASY": {
+      "sample_count": 200,
+      "parsed_count": 193,
+      "parse_rate": 0.965,
+      "accuracy": 0.795
+    },
+    "HARD": {
+      "sample_count": 200,
+      "parsed_count": 187,
+      "parse_rate": 0.935,
+      "accuracy": 0.52
+    }
+  },
+  "problem_by_difficulty": {
+    "EASY": {
+      "problem_count": 200,
+      "problem_parse_rate": 0.965,
+      "pass_at_sample": 0.795
+    },
+    "HARD": {
+      "problem_count": 200,
+      "problem_parse_rate": 0.935,
+      "pass_at_sample": 0.52
+    }
+  },
+  "by_language": {
+    "EN": {
+      "sample_count": 200,
+      "parsed_count": 194,
+      "parse_rate": 0.97,
+      "accuracy": 0.645
+    },
+    "ZH": {
+      "sample_count": 200,
+      "parsed_count": 186,
+      "parse_rate": 0.93,
+      "accuracy": 0.67
+    }
+  },
+  "problem_by_language": {
+    "EN": {
+      "problem_count": 200,
+      "problem_parse_rate": 0.97,
+      "pass_at_sample": 0.645
+    },
+    "ZH": {
+      "problem_count": 200,
+      "problem_parse_rate": 0.93,
+      "pass_at_sample": 0.67
+    }
+  },
+  "by_subject": {
+    "Algebra": {
+      "sample_count": 50,
+      "parsed_count": 49,
+      "parse_rate": 0.98,
+      "accuracy": 0.72
+    },
+    "Combinatorics": {
+      "sample_count": 54,
+      "parsed_count": 53,
+      "parse_rate": 0.9814814814814815,
+      "accuracy": 0.5
+    },
+    "Geometry": {
+      "sample_count": 58,
+      "parsed_count": 57,
+      "parse_rate": 0.9827586206896551,
+      "accuracy": 0.7241379310344828
+    },
+    "Number Theory": {
+      "sample_count": 38,
+      "parsed_count": 35,
+      "parse_rate": 0.9210526315789473,
+      "accuracy": 0.631578947368421
+    },
+    "代数": {
+      "sample_count": 50,
+      "parsed_count": 48,
+      "parse_rate": 0.96,
+      "accuracy": 0.74
+    },
+    "几何": {
+      "sample_count": 58,
+      "parsed_count": 54,
+      "parse_rate": 0.9310344827586207,
+      "accuracy": 0.7586206896551724
+    },
+    "数论": {
+      "sample_count": 38,
+      "parsed_count": 33,
+      "parse_rate": 0.868421052631579,
+      "accuracy": 0.631578947368421
+    },
+    "组合": {
+      "sample_count": 54,
+      "parsed_count": 51,
+      "parse_rate": 0.9444444444444444,
+      "accuracy": 0.5370370370370371
+    }
+  },
+  "problem_by_subject": {
+    "Algebra": {
+      "problem_count": 50,
+      "problem_parse_rate": 0.98,
+      "pass_at_sample": 0.72
+    },
+    "Combinatorics": {
+      "problem_count": 54,
+      "problem_parse_rate": 0.9814814814814815,
+      "pass_at_sample": 0.5
+    },
+    "Geometry": {
+      "problem_count": 58,
+      "problem_parse_rate": 0.9827586206896551,
+      "pass_at_sample": 0.7241379310344828
+    },
+    "Number Theory": {
+      "problem_count": 38,
+      "problem_parse_rate": 0.9210526315789473,
+      "pass_at_sample": 0.631578947368421
+    },
+    "代数": {
+      "problem_count": 50,
+      "problem_parse_rate": 0.96,
+      "pass_at_sample": 0.74
+    },
+    "几何": {
+      "problem_count": 58,
+      "problem_parse_rate": 0.9310344827586207,
+      "pass_at_sample": 0.7586206896551724
+    },
+    "数论": {
+      "problem_count": 38,
+      "problem_parse_rate": 0.868421052631579,
+      "pass_at_sample": 0.631578947368421
+    },
+    "组合": {
+      "problem_count": 54,
+      "problem_parse_rate": 0.9444444444444444,
+      "pass_at_sample": 0.5370370370370371
+    }
+  },
+  "uenv": {
+    "completed_count": 400,
+    "failed_count": 0,
+    "reward_accuracy": 0.6575,
+    "adapter_core_endpoint": "8.130.75.157:8088",
+    "model_endpoint": "http://10.10.20.142:18094/v1",
+    "model_name": "Qwen/Qwen3.6-35B-A3B",
+    "batch_id": "olymmath-uenv-20260719_182528",
+    "batch_size": 1,
+    "datasets": "EN-EASY,EN-HARD,ZH-EASY,ZH-HARD",
+    "prompt_style": "official",
+    "inference_mode": "uenv_generate",
+    "enable_thinking": true,
+    "preserve_thinking": false,
+    "thinking_token_budget": 16384,
+    "max_tokens": 32768,
+    "resume": true,
+    "remaining_requests_at_start": 22
+  }
+}
