@@ -164,7 +164,7 @@ class UEnvWorkspace(LocalWorkspace):
 
     def git_diff(self, path: str | Path) -> GitDiff:
         repo = str(path)
-        r = self._shell(f"git diff -- {shlex.quote(str(path))}", cwd=repo)
+        r = self._shell("git diff", cwd=repo)
         if r.exit_code != 0:
             raise RuntimeError(r.stderr or "git diff failed")
         return GitDiff(modified=r.stdout or None, original=None)

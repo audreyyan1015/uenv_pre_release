@@ -286,7 +286,9 @@ class RustCoreEpisodeClient:
         termination_reason = str(self._field(result, "termination_reason", status))
         error_code = self._field(result, "error_code", None)
         error_message = str(self._field(result, "error_message", ""))
-        trajectory = self._decode_core_trajectory(result, reward=reward, done=done, termination_reason=termination_reason)
+        trajectory, trajectory_id, metadata = self._decode_core_trajectory(
+            result, reward=reward, done=done, termination_reason=termination_reason
+        )
         return EpisodeResult(
             request_id=request_id,
             status=status,
@@ -298,6 +300,8 @@ class RustCoreEpisodeClient:
             ),
             error_code=int(error_code) if str(error_code or "").isdigit() else None,
             error_message=error_message,
+            trajectory_id=trajectory_id,
+            metadata=metadata,
             rollout_param_version=self._optional_int_field(result, "rollout_param_version"),
             rollout_policy_version=self._optional_string_field(result, "rollout_policy_version"),
             rollout_log_probs=[float(v) for v in list(self._field(result, "rollout_log_probs", []) or [])],
@@ -310,14 +314,21 @@ class RustCoreEpisodeClient:
         reward: float,
         done: bool,
         termination_reason: str,
-    ) -> Trajectory:
+    ) -> tuple[Trajectory, str, dict[str, str]]:
         raw = self._field(result, "trajectory_json", b"")
+        trajectory_id = ""
+        metadata: dict[str, str] = {}
         if raw:
             try:
                 data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+                if isinstance(data, dict):
+                    trajectory_id = str(data.get("trajectory_id") or "")
+                    meta = data.get("metadata") or {}
+                    if isinstance(meta, dict):
+                        metadata = {str(k): str(v) for k, v in meta.items()}
                 trajectory = self._trajectory_from_jsonable(data, reward=reward)
-                if trajectory.steps:
-                    return trajectory
+                if trajectory.steps or trajectory_id or metadata:
+                    return trajectory, trajectory_id, metadata
             except Exception:
                 pass
 
@@ -327,7 +338,7 @@ class RustCoreEpisodeClient:
             terminated=done,
             info={"source": "rust_core", "termination_reason": termination_reason},
         )
-        return Trajectory(steps=[step], total_reward=reward, total_steps=1)
+        return Trajectory(steps=[step], total_reward=reward, total_steps=1), trajectory_id, metadata
 
     def _trajectory_from_jsonable(self, data: Any, *, reward: float) -> Trajectory:
         if isinstance(data, list):

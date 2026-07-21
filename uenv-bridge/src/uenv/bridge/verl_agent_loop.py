@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from typing import Any
 from .agent_loop_clients import build_agent_loop_episode_client
 from .clients import EpisodeClient
 from .model_gateway import ModelGateway, ModelGatewayConfig, normalize_openai_endpoint
+from . import obs_client
 from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec, request_to_jsonable
 from .utils import prompt_text, to_jsonable
 
@@ -333,12 +335,32 @@ class UEnvAgentLoop(AgentLoopBase):
         *,
         batch_id: str,
     ) -> list[AgentLoopOutput]:
-        requests = await self._build_batch_requests(sampling_params_by_sample, sample_kwargs_by_sample, batch_id=batch_id)
-        outputs: list[AgentLoopOutput] = []
-        for chunk in self._request_chunks(requests):
-            chunk_results = await self._submit_episode_chunk_with_retry(chunk)
-            outputs.extend([self._output_from_result(request, result) for request, result in zip(chunk, chunk_results, strict=True)])
-        return outputs
+        training_run_id = str(
+            os.environ.get("UENV_TRAINING_RUN_ID")
+            or batch_id
+            or f"verl-{uuid.uuid4().hex[:8]}"
+        )
+        obs_client.run_started(training_run_id, correlation_id=f"batch:{batch_id}")
+        try:
+            requests = await self._build_batch_requests(
+                sampling_params_by_sample,
+                sample_kwargs_by_sample,
+                batch_id=batch_id,
+                training_run_id=training_run_id,
+            )
+            outputs: list[AgentLoopOutput] = []
+            for chunk in self._request_chunks(requests):
+                chunk_results = await self._submit_episode_chunk_with_retry(chunk)
+                outputs.extend(
+                    [
+                        self._output_from_result(request, result)
+                        for request, result in zip(chunk, chunk_results, strict=True)
+                    ]
+                )
+            return outputs
+        finally:
+            obs_client.run_stopped(training_run_id, correlation_id=f"batch:{batch_id}")
+            obs_client.run_closed(training_run_id, correlation_id=f"batch:{batch_id}")
 
     async def _build_batch_requests(
         self,
@@ -346,6 +368,7 @@ class UEnvAgentLoop(AgentLoopBase):
         sample_kwargs_by_sample: list[dict[str, Any]],
         *,
         batch_id: str,
+        training_run_id: str,
     ) -> list[EpisodeRequest]:
         runtime_model = await self._runtime_model_endpoint(
             sampling_params_by_sample[0] if sampling_params_by_sample else {},
@@ -355,7 +378,12 @@ class UEnvAgentLoop(AgentLoopBase):
         for sample_index, (sampling_params, sample_kwargs) in enumerate(
             zip(sampling_params_by_sample, sample_kwargs_by_sample, strict=True)
         ):
-            sample_kwargs = self._sample_kwargs_with_batch_index(sample_kwargs, batch_id=batch_id, sample_index=sample_index)
+            sample_kwargs = self._sample_kwargs_with_batch_index(
+                sample_kwargs,
+                batch_id=batch_id,
+                sample_index=sample_index,
+                training_run_id=training_run_id,
+            )
             messages = self._messages_from_raw_prompt(sample_kwargs.get("raw_prompt"))
             prompt_ids = await self._prompt_ids(messages)
             requests.append(
@@ -371,12 +399,21 @@ class UEnvAgentLoop(AgentLoopBase):
             )
         return requests
 
-    def _sample_kwargs_with_batch_index(self, sample_kwargs: dict[str, Any], *, batch_id: str, sample_index: int) -> dict[str, Any]:
+    def _sample_kwargs_with_batch_index(
+        self,
+        sample_kwargs: dict[str, Any],
+        *,
+        batch_id: str,
+        sample_index: int,
+        training_run_id: str,
+    ) -> dict[str, Any]:
         output = dict(sample_kwargs)
         extra_info = self._python_value(output.get("extra_info") or {})
         extra_info = dict(extra_info) if isinstance(extra_info, dict) else {}
         extra_info["batch_id"] = batch_id
         extra_info["sample_index"] = sample_index
+        # 与 run_batch 的 RUN_* 使用同一 training_run_id，避免 Obs 落到不同 run。
+        extra_info["training_run_id"] = training_run_id
         output["extra_info"] = extra_info
         return output
 
@@ -619,6 +656,13 @@ class UEnvAgentLoop(AgentLoopBase):
                 "metadata",
             ],
         }
+        # Obs / 可视化：把样本挂到同一 training_run（缺省用 batch_id）。
+        training_run_id = str(
+            self._value_from_extra_info(sample_kwargs, "training_run_id", None)
+            or os.environ.get("UENV_TRAINING_RUN_ID")
+            or batch_id
+        )
+        metadata["training_run_id"] = training_run_id
         parallel_mode, parallel_metadata = self._parallel_metadata(sample_kwargs)
         metadata.update(parallel_metadata)
         generation_config = {
