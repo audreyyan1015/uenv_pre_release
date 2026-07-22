@@ -34,8 +34,20 @@ _INTEGRATION = Path(__file__).resolve().parent
 sys.path.insert(0, str(_INTEGRATION))
 from uenv_runtime.client import UEnvGatewayClient, GatewayError  # noqa: E402
 from uenv_runtime.agent_job import load_agent_job  # noqa: E402
-from uenv_runtime.gateway_tools import patch_openhands_tools_for_uenv  # noqa: E402
+from uenv_runtime.gateway_tools import (  # noqa: E402
+    collect_tool_patch_status,
+    patch_openhands_tools_for_uenv,
+)
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
+from uenv_runtime.workspace_probe import (  # noqa: E402
+    merge_reset_observation,
+    probe_workspace,
+    validate_workspace_probe,
+)
+
+
+class WorkspaceProbeError(RuntimeError):
+    """Container workspace does not match instance catalog (infrastructure error)."""
 
 
 def _ensure_benchmarks_path() -> None:
@@ -88,6 +100,7 @@ def _infer_repo_language(instance: dict[str, Any]) -> str:
 
 def _build_instruction(instance: dict[str, Any], repo_path: str) -> str:
     ps = instance.get("problem_statement") or instance.get("issue_text") or ""
+    repo = str(instance.get("repo") or "")
     repo_language = _infer_repo_language(instance)
     if repo_language in {"python", "py"}:
         language_hint = "Python files such as `*.py`"
@@ -97,21 +110,41 @@ def _build_instruction(instance: dict[str, Any], repo_path: str) -> str:
         language_hint = "JavaScript/TypeScript files such as `*.js`, `*.ts`, and `*.tsx`"
     else:
         language_hint = "files matching the repository language and nearby config/template files"
+    repo_line = f"Verified repository: `{repo}`.\n" if repo else ""
+    forbid_ol = ""
+    if "openlibrary" not in (repo or "").lower() and "openlibrary" not in str(
+        instance.get("instance_id") or ""
+    ).lower():
+        forbid_ol = (
+            "CRITICAL: This is NOT the openlibrary repository. "
+            "Never create or edit paths containing `openlibrary`. "
+            "If a tool suggests openlibrary paths, ignore them and stay in this repo.\n"
+        )
     return (
         f"The git repository is already checked out at `{repo_path}`.\n"
+        f"{repo_line}"
         f"All investigation and edits must stay under `{repo_path}`.\n"
+        f"{forbid_ol}"
         "Start by confirming the workspace:\n"
         f"1. `pwd`\n"
-        f"2. `git -C {repo_path} rev-parse --show-toplevel`\n"
-        f"3. `ls -la {repo_path}`\n\n"
+        f"2. `git -C {repo_path} remote get-url origin`\n"
+        f"3. `git -C {repo_path} rev-parse --show-toplevel`\n"
+        f"4. `ls -la {repo_path}`\n\n"
         "Inspect the repository structure and identify the relevant language/framework before searching.\n"
         f"This instance is labeled as `{repo_language or 'unknown'}`; prioritize {language_hint}.\n"
         "Use targeted searches with `rg` for symbols, error messages, routes, tests, or issue keywords.\n"
         "When relevant, also inspect non-test project files such as JSON, YAML, templates, and generated schemas.\n"
-        f"Do not search or edit outside `{repo_path}`. Do not inspect `/opt/openhands`, benchmark harness directories, `/tmp`, or `/root` unless explicitly required by a tool.\n\n"
+        f"Do not search or edit outside `{repo_path}`. "
+        "Do NOT `git clone` or copy the repo under `/tmp` (or anywhere else); "
+        f"work only inside the existing checkout at `{repo_path}`. "
+        "Do not inspect `/opt/openhands`, benchmark harness directories, `/tmp`, or `/root` "
+        "unless a tool explicitly requires a temp file under `/tmp`.\n\n"
         f"<issue_description>\n{ps}\n</issue_description>\n\n"
-        "Implement the minimal fix in non-test project files required by the issue. Tests are already provided by the benchmark; do not modify tests unless the issue explicitly requires it.\n"
-        "Before finishing, inspect `git diff` and make sure the patch is focused.\n"
+        "Implement the minimal fix in **non-test project source files** required by the issue.\n"
+        "Do NOT modify files under `tests/`, `test/`, `*_test.*`, or `*.test.*` unless the issue text explicitly requires test changes.\n"
+        "Do NOT only update whitelists, scripts, or docs if the issue asks for library/runtime behavior changes.\n"
+        "Before finishing, run `git -C {repo_path} remote get-url origin` and `git -C {repo_path} diff --stat`, "
+        "and confirm the diff is in the correct repository and touches the intended source paths.\n"
         "Use terminal and file_editor tools. When done, call the finish tool.\n"
     )
 
@@ -320,7 +353,7 @@ def main() -> int:
     run_id = (args.run_id or "").strip() or f"run-oh-{time.strftime('%Y%m%d-%H%M%S')}-pro-{args.mode}"
 
     _ensure_benchmarks_path()
-    patch_openhands_tools_for_uenv()
+    patch_status = patch_openhands_tools_for_uenv()
 
     from benchmarks.utils.llm_config import load_llm_config
     from openhands.sdk import Agent, Conversation, Tool, get_logger
@@ -358,7 +391,8 @@ def main() -> int:
 
     session_id = agent_job.session_id if agent_job else None
     ws = UEnvWorkspace(
-        working_dir=workspace_dir,
+        working_dir="/tmp/uenv-oh-local-ws",
+        container_working_dir=workspace_dir,
         gateway_url=args.gateway or (agent_job.gateway_url if agent_job else ""),
         instance_id=args.instance,
         benchmark_variant=args.benchmark_variant,
@@ -379,13 +413,47 @@ def main() -> int:
             "max_iterations": args.max_iterations,
             "llm_model": str(llm.model) if llm else None,
             "benchmark_variant": args.benchmark_variant,
+            "repo": row.get("repo"),
+            "base_commit": row.get("base_commit"),
+            "patch_openhands_status": patch_status,
         },
     )
+
+    def _run_workspace_checks() -> None:
+        probe = probe_workspace(ws, workspace_dir)
+        probe_doc = {
+            "instance_id": args.instance,
+            "session_id": ws.session.session_id,
+            "repo": row.get("repo"),
+            "base_commit": row.get("base_commit"),
+            "workspace_dir": workspace_dir,
+            **probe,
+        }
+        _save_json(out / "workspace_probe.json", probe_doc)
+        ok, reason = validate_workspace_probe(
+            probe,
+            instance_id=args.instance,
+            repo=str(row.get("repo") or ""),
+            base_commit=str(row.get("base_commit") or ""),
+        )
+        reset_doc = merge_reset_observation(
+            ws.session.observation,
+            probe,
+            instance_id=args.instance,
+            session_id=ws.session.session_id,
+            repo=str(row.get("repo") or ""),
+            base_commit=str(row.get("base_commit") or ""),
+            ok=ok,
+            reason=reason,
+        )
+        _save_json(out / "reset_observation.json", reset_doc)
+        if not ok:
+            raise WorkspaceProbeError(reason)
 
     t0 = time.time()
     try:
         with ws:
-            _save_json(out / "reset_observation.json", ws.session.observation)
+            _run_workspace_checks()
 
             if args.mode == "gold":
                 patch = row.get("patch", "")
@@ -413,6 +481,15 @@ def main() -> int:
                     max_iteration_per_run=args.max_iterations,
                     delete_on_close=True,
                 )
+                tool_status = collect_tool_patch_status(conversation.state)
+                tool_status["patch_openhands_status"] = patch_status
+                _save_json(out / "tool_patch_status.json", tool_status)
+                if not tool_status.get("patch_ok"):
+                    raise WorkspaceProbeError(
+                        "OpenHands tools not routed to UEnv Gateway: "
+                        f"terminal={tool_status.get('terminal_executor')} "
+                        f"file_editor={tool_status.get('file_editor_executor')}"
+                    )
                 instruction = _build_instruction(row, workspace_dir)
                 _save_json(out / "instruction.txt", {"text": instruction})
                 conversation.send_message(instruction)
@@ -421,6 +498,33 @@ def main() -> int:
                     out / "conversation_events.json",
                     {"count": len(list(conversation.state.events))},
                 )
+                # Pre-submit: confirm agent stayed in the right repo.
+                pre = ws.execute_command(
+                    "git -C /app remote get-url origin; "
+                    "git -C /app status --short | head -40; "
+                    "git -C /app diff --stat | tail -20"
+                )
+                _save_json(
+                    out / "pre_submit_git.json",
+                    {
+                        "exit_code": pre.exit_code,
+                        "stdout": pre.stdout,
+                        "stderr": pre.stderr,
+                    },
+                )
+                remote = (pre.stdout or "").splitlines()[0] if pre.stdout else ""
+                expected_repo = str(row.get("repo") or "")
+                if expected_repo and expected_repo.split("/")[-1].lower() not in remote.lower():
+                    raise WorkspaceProbeError(
+                        f"pre-submit remote mismatch: got {remote!r}, expected repo {expected_repo!r}"
+                    )
+                if (
+                    "openlibrary" not in str(args.instance).lower()
+                    and "openlibrary" in (pre.stdout or "").lower()
+                ):
+                    raise WorkspaceProbeError(
+                        "pre-submit git status references openlibrary on a non-openlibrary instance"
+                    )
                 result = ws.submit()
 
         elapsed = time.time() - t0
@@ -473,6 +577,12 @@ def main() -> int:
         )
         return 0 if result.reward >= 1.0 else 0  # exit 0 if run completed; reward in JSON
 
+    except WorkspaceProbeError as e:
+        with run_log.open("a", encoding="utf-8") as f:
+            f.write(f"[workspace_probe_error] {e!s}\n")
+        _save_json(out / "infrastructure_error.json", {"error": str(e), "kind": "workspace_probe"})
+        print(json.dumps({"error": str(e), "kind": "workspace_probe", "output_dir": str(out)}))
+        return 2
     except Exception as e:
         with run_log.open("a", encoding="utf-8") as f:
             f.write(f"[error] {e!r}\n")

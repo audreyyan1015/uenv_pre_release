@@ -90,9 +90,12 @@ def build_request(
     llm_config_path: str,
     max_iterations: int,
     pool_selector: dict[str, str],
+    agent_mode: str = "llm",
 ) -> EpisodeRequest:
     instance_id = str(row["instance_id"])
     request_id = f"swebenchpro-{instance_id}-{uuid.uuid4().hex[:8]}"
+    if agent_mode not in ("llm", "gold"):
+        raise ValueError(f"unsupported agent_mode={agent_mode!r}")
     env_config: dict[str, Any] = {
         "task_name": "swe-bench-pro",
         "data_source": "swe-bench-pro",
@@ -103,7 +106,7 @@ def build_request(
         "env_package_id": env_package_id,
         "env_package_version": env_package_version,
         "execution_mode": "agent",
-        "mode": "llm",
+        "mode": agent_mode,
         "agent_bridge_id": agent_bridge_id,
         "agent_bridge_version": agent_bridge_version,
         "agent_pool_id": agent_pool_id,
@@ -343,6 +346,12 @@ def main() -> int:
     parser.add_argument("--workspace-dir", default="/app")
     parser.add_argument("--llm-config-path", default="/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json")
     parser.add_argument("--max-iterations", type=int, default=50)
+    parser.add_argument(
+        "--agent-mode",
+        choices=["llm", "gold"],
+        default=os.getenv("AGENT_MODE", "llm"),
+        help="Pass-through to AgentJob mode (llm or gold patch replay)",
+    )
     parser.add_argument("--pool-selector-json", default="")
     parser.add_argument("--requests-log", type=Path, default=None)
     parser.add_argument("--results-log", type=Path, default=None)
@@ -399,6 +408,7 @@ def main() -> int:
             llm_config_path=args.llm_config_path,
             max_iterations=args.max_iterations,
             pool_selector=pool_selector,
+            agent_mode=args.agent_mode,
         )
         for idx, row in enumerate(pending_examples)
     ]

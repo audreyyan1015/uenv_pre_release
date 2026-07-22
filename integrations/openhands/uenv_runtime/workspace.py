@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from .client import UEnvGatewayClient, UEnvSession
 
@@ -21,9 +21,14 @@ except ImportError as exc:  # pragma: no cover - optional dep on 7142 venv
 class UEnvWorkspace(LocalWorkspace):
     """Remote sandbox via UEnv Runtime Gateway (7143).
 
-    ``working_dir`` is the path **inside the provisioned container** (e.g. ``/app``).
-    Tooling on 7142 must use gateway-backed executors (see ``gateway_tools.py``).
+    ``container_working_dir`` is the path **inside the provisioned container**
+    (e.g. ``/app``). ``working_dir`` must be a **host-local empty placeholder**
+    so any accidental LocalWorkspace / unpatched tool never touches a real
+    checkout on the agent host (historically ``/app`` = openlibrary).
     """
+
+    # Marker for gateway_tools patch (avoids isinstance failures under uv / dual import).
+    uenv_gateway_workspace: ClassVar[bool] = True
 
     gateway_url: str
     instance_id: str
@@ -33,18 +38,30 @@ class UEnvWorkspace(LocalWorkspace):
     gateway_timeout: float = 600.0
     run_id: Optional[str] = None
     session_id: Optional[str] = None
+    # Path inside the Worker container (Gateway exec/read/write cwd).
+    container_working_dir: str = "/app"
 
     _client: Any = None
     _session: Any = None
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
+        # Never use host /app as LocalWorkspace cwd — isolate local leaks.
+        local = Path("/tmp/uenv-oh-local-ws")
+        local.mkdir(parents=True, exist_ok=True)
+        object.__setattr__(self, "working_dir", str(local))
+        if not (self.container_working_dir or "").strip():
+            object.__setattr__(self, "container_working_dir", "/app")
         self._client = UEnvGatewayClient(
             self.gateway_url,
             timeout=self.gateway_timeout,
             api_key=self.api_key,
             run_id=self.run_id,
         )
+
+    @property
+    def remote_working_dir(self) -> str:
+        return (self.container_working_dir or "/app").rstrip("/") or "/app"
 
     @property
     def session(self) -> UEnvSession:
@@ -64,7 +81,14 @@ class UEnvWorkspace(LocalWorkspace):
         return self.session.issue_text
 
     def _shell(self, command: str, cwd: str | Path | None = None, timeout: float = 30.0) -> CommandResult:
-        wd = str(cwd) if cwd is not None else self.working_dir
+        # Always execute in the container workspace, never the host placeholder.
+        if cwd is None:
+            wd = self.remote_working_dir
+        else:
+            wd = str(cwd)
+            # If caller accidentally passes the host placeholder, rewrite to container.
+            if wd.rstrip("/") == str(Path(self.working_dir)).rstrip("/"):
+                wd = self.remote_working_dir
         wrapped = f"cd {shlex.quote(wd)} && {command}"
         r = self.session.exec(wrapped)
         return CommandResult(
