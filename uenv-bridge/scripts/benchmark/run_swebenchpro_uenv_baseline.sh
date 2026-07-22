@@ -28,6 +28,7 @@ DRIVER_ENTRYPOINT=${DRIVER_ENTRYPOINT:-run_swebenchpro_official.py}
 WORKSPACE_DIR=${WORKSPACE_DIR:-/app}
 LLM_CONFIG_PATH=${LLM_CONFIG_PATH:-/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json}
 MAX_ITERATIONS=${MAX_ITERATIONS:-50}
+AGENT_MODE=${AGENT_MODE:-llm}
 POOL_SELECTOR_JSON=${POOL_SELECTOR_JSON:-}
 RESUME=${RESUME:-0}
 PODMAN_GPU_ARGS=${PODMAN_GPU_ARGS:-}
@@ -69,6 +70,7 @@ ARGS=(
   --workspace-dir "$WORKSPACE_DIR"
   --llm-config-path "$LLM_CONFIG_PATH"
   --max-iterations "$MAX_ITERATIONS"
+  --agent-mode "$AGENT_MODE"
 )
 if [ -n "$LIMIT" ]; then
   ARGS+=(--limit "$LIMIT")

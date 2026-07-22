@@ -57,6 +57,16 @@ cd /root/UEnv
 chmod +x scripts/run-openhands-pro-20877.sh scripts/openhands/*.py 2>/dev/null || true
 chmod +x scripts/verify-openhands-trajectory-e2e-20877.sh \
   scripts/verify-swe-agent-orchestration-e2e.sh scripts/swe_agent_orchestration_e2e.py 2>/dev/null || true
+
+# Quarantine stale Agent-host /app checkout (openlibrary) so LocalWorkspace fallback cannot pollute runs.
+if [[ -d /app/.git ]] && git -C /app remote get-url origin 2>/dev/null | grep -qi openlibrary; then
+  BAK="/app.openlibrary-host-backup-\$(date +%Y%m%d%H%M%S)"
+  echo "== moving stale Agent-host /app (openlibrary) to \$BAK =="
+  mv /app "\$BAK"
+  mkdir -p /app
+  echo "Agent-host /app quarantined; gateway workspace is remote-only." > /app/README.uenv-quarantine
+fi
+
 if [[ ! -f /root/.openhands-20877.env ]]; then
   cp config/openhands-20877.env.example /root/.openhands-20877.env
   chmod 600 /root/.openhands-20877.env
