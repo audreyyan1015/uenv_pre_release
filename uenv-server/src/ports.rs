@@ -27,6 +27,7 @@ pub(crate) trait WorkerDispatchPort: Send + Sync {
         &'a self,
         endpoint: &'a str,
         request: EpisodeRequest,
+        accepted: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
     /// 通知 worker 取消已经 dispatch 的 episode。
@@ -37,7 +38,14 @@ pub(crate) trait WorkerDispatchPort: Send + Sync {
         &'a self,
         endpoint: &'a str,
         request: CancelWorkerEpisodeRequest,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::proto::worker::v1::CancelWorkerEpisodeResponse>> + Send + 'a>>;
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = anyhow::Result<crate::proto::worker::v1::CancelWorkerEpisodeResponse>,
+                > + Send
+                + 'a,
+        >,
+    >;
 }
 
 /// 基于 tonic 的 worker gRPC 客户端实现。
@@ -48,6 +56,7 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
         &'a self,
         endpoint: &'a str,
         request: EpisodeRequest,
+        accepted: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             // endpoint 来自 worker 注册信息，不包含协议前缀；tonic 需要 http:// 前缀。
@@ -57,6 +66,9 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
                 episode: Some(request),
             };
             let mut stream = client.dispatch_episode(dispatch).await?.into_inner();
+            if let Some(accepted) = accepted {
+                let _ = accepted.send(());
+            }
             while let Some(report) = stream.message().await? {
                 info!(
                     episode_id = %report.episode_id,
@@ -74,16 +86,20 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
         &'a self,
         endpoint: &'a str,
         request: CancelWorkerEpisodeRequest,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<crate::proto::worker::v1::CancelWorkerEpisodeResponse>> + Send + 'a>> {
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = anyhow::Result<crate::proto::worker::v1::CancelWorkerEpisodeResponse>,
+                > + Send
+                + 'a,
+        >,
+    > {
         Box::pin(async move {
             let mut client: WorkerGrpcServiceClient<Channel> =
                 WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
             // 取消 RPC 设置短超时，避免 cancel API 被异常 worker 长时间阻塞。
-            let resp = tokio::time::timeout(
-                Duration::from_secs(5),
-                client.cancel_episode(request),
-            )
-            .await??;
+            let resp = tokio::time::timeout(Duration::from_secs(5), client.cancel_episode(request))
+                .await??;
             Ok(resp.into_inner())
         })
     }
@@ -201,8 +217,8 @@ impl GatewaySessionPort for ReqwestGatewaySessionClient {
             if !gateway_api_key.is_empty() {
                 req = req.header("X-API-Key", gateway_api_key);
             }
-            // destroy 是清理动作。无论 HTTP 状态、网络错误还是超时，都只记录日志并返回 Ok。
-            // 这样 cleanup 失败不会覆盖已经确定的 episode 结果。
+            // 清理失败向调用方返回错误；GatewaySessionGuard 会把错误持久化为
+            // cleanup_pending，但不会用它覆盖已经确定的 episode 结果。
             match tokio::time::timeout(Duration::from_secs(5), req.send()).await {
                 Ok(Ok(resp)) => {
                     if !resp.status().is_success() {
@@ -211,13 +227,16 @@ impl GatewaySessionPort for ReqwestGatewaySessionClient {
                             status = %resp.status(),
                             "destroy_session_non_success"
                         );
+                        anyhow::bail!("destroy session returned HTTP {}", resp.status());
                     }
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(session_id, error = %e, "destroy_session_failed");
+                    return Err(e.into());
                 }
                 Err(_) => {
                     tracing::warn!(session_id, "destroy_session_timeout");
+                    anyhow::bail!("destroy session timed out");
                 }
             }
             Ok(())
@@ -228,9 +247,10 @@ impl GatewaySessionPort for ReqwestGatewaySessionClient {
 pub(crate) async fn dispatch_to_worker(
     endpoint: &str,
     request: EpisodeRequest,
+    accepted: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> anyhow::Result<()> {
     TonicWorkerDispatchClient
-        .dispatch_episode(endpoint, request)
+        .dispatch_episode(endpoint, request, accepted)
         .await
 }
 
@@ -251,7 +271,13 @@ pub(crate) async fn create_session_for_episode(
     run_id: &str,
 ) -> anyhow::Result<ForEpisodeSession> {
     ReqwestGatewaySessionClient
-        .create_for_episode(gateway_public_url, gateway_api_key, spec, episode_id, run_id)
+        .create_for_episode(
+            gateway_public_url,
+            gateway_api_key,
+            spec,
+            episode_id,
+            run_id,
+        )
         .await
 }
 

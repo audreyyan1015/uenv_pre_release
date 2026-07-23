@@ -12,6 +12,107 @@ impl UEnvEpisodeService {
     }
 
     pub async fn submit_episode(&self, mut req: EpisodeRequest) -> anyhow::Result<EpisodeResult> {
+        normalize_episode_request(&mut req);
+        let _ = ensure_async_request_context(&mut req)?;
+        let Some(store) = self.state.persistence_store().cloned() else {
+            return self.execute_episode_inner(req).await;
+        };
+        if !self.state.is_accepting_episodes() {
+            anyhow::bail!("server is not ready to accept new episodes");
+        }
+
+        let request_checksum = crate::persistence::request_checksum(&req);
+        let timeout_secs = if req.timeout_seconds > 0 {
+            req.timeout_seconds as u64
+        } else {
+            self.state.default_episode_timeout_secs
+        };
+        let deadline_at_ms = crate::persistence::now_ms()
+            .saturating_add((timeout_secs as i64).saturating_mul(1_000));
+        match store
+            .find_or_create_episode(req.clone(), "sync", deadline_at_ms)
+            .await
+        {
+            Ok(crate::persistence::EpisodeLookup::Terminal {
+                request_checksum: existing,
+                result,
+            }) => {
+                if existing != request_checksum {
+                    anyhow::bail!("EPISODE_ID_CONFLICT: episode_id reused with different request");
+                }
+                return Ok(result);
+            }
+            Ok(crate::persistence::EpisodeLookup::Active {
+                request_checksum: existing,
+                ..
+            }) if existing != request_checksum => {
+                anyhow::bail!("EPISODE_ID_CONFLICT: episode_id reused with different request");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.state.mark_persistence_unhealthy(&error);
+                return Err(error);
+            }
+        }
+
+        let episode_id = req.episode_id.clone();
+        let (entry, owner) = self
+            .state
+            .episode_coordinator
+            .get_or_insert(&episode_id, &request_checksum)?;
+        if owner {
+            let state = Arc::clone(&self.state);
+            let entry_for_task = Arc::clone(&entry);
+            tokio::spawn(async move {
+                let service = UEnvEpisodeService::new(Arc::clone(&state));
+                let terminal = match service.execute_episode_inner(req.clone()).await {
+                    Ok(result) => result,
+                    Err(error) => failed_result_from_request(
+                        &req,
+                        "failed",
+                        error.to_string(),
+                        ErrorCode::ErrInternal,
+                        None,
+                    ),
+                };
+                let terminal_code = terminal
+                    .error_code
+                    .and_then(|code| ErrorCode::try_from(code).ok())
+                    .map(|code| code.as_str_name().to_string())
+                    .unwrap_or_default();
+                let outcome = if terminal.encoded_len() as u64 > state.persistence_max_result_bytes
+                {
+                    Err(anyhow::anyhow!(
+                        "EpisodeResult exceeds persistence.max_result_bytes"
+                    ))
+                } else {
+                    store
+                        .commit_terminal(
+                            terminal.clone(),
+                            terminal_code,
+                            terminal.error_message.clone(),
+                        )
+                        .await
+                };
+                match outcome {
+                    Ok(()) => entry_for_task.finish(Ok(terminal)),
+                    Err(error) => {
+                        state.mark_persistence_unhealthy(&error);
+                        entry_for_task.finish(Err(error.to_string()));
+                    }
+                }
+                state
+                    .episode_coordinator
+                    .remove_if_same(&episode_id, &entry_for_task);
+            });
+        }
+        entry.wait().await
+    }
+
+    async fn execute_episode_inner(
+        &self,
+        mut req: EpisodeRequest,
+    ) -> anyhow::Result<EpisodeResult> {
         // 所有执行后端共用这个入口：先补齐请求字段、登记 active 状态，再进入 admission 和后端选择。
         normalize_episode_request(&mut req);
         let async_context = ensure_async_request_context(&mut req)?;
@@ -215,6 +316,45 @@ impl UEnvEpisodeService {
                     enqueue_ts: async_context.enqueue_ts,
                 },
             );
+            let accepted_sender = if let Some(store) = self.state.persistence_store().cloned() {
+                let record = crate::persistence::DispatchRecord {
+                    episode_id: episode_id.clone(),
+                    attempt_id,
+                    dispatch_lease_id: req.dispatch_lease_id.clone(),
+                    worker_id: assignment.worker_id.clone(),
+                    worker_endpoint: assignment.endpoint.clone(),
+                    dispatch_token: req.dispatch_token.clone(),
+                    server_epoch: req.scheduler_epoch,
+                    phase: "dispatch_intent".to_string(),
+                    dispatch_at_ms: (dispatch_ts * 1000.0) as i64,
+                    accepted_at_ms: None,
+                    deadline_at_ms: req
+                        .lease_expire_at
+                        .as_ref()
+                        .map(|ts| ts.seconds.saturating_mul(1_000))
+                        .unwrap_or_else(crate::persistence::now_ms),
+                };
+                if let Err(error) = store.put_dispatch_intent(record).await {
+                    self.state.pending_results.remove(&pending_key);
+                    self.state.active_episodes.remove(&episode_id);
+                    worker_lease.release();
+                    self.state.mark_persistence_unhealthy(&error);
+                    return Err(error);
+                }
+                let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+                let state = Arc::clone(&self.state);
+                let lease_id = req.dispatch_lease_id.clone();
+                tokio::spawn(async move {
+                    if accepted_rx.await.is_ok() {
+                        if let Err(error) = store.mark_dispatch_accepted(&lease_id).await {
+                            state.mark_persistence_unhealthy(&error);
+                        }
+                    }
+                });
+                Some(accepted_tx)
+            } else {
+                None
+            };
 
             tracing::info!(
                 episode_id = %episode_id,
@@ -287,7 +427,11 @@ impl UEnvEpisodeService {
                     }
                 }
 
-                dispatch_result = dispatch_to_worker(&assignment.endpoint, req.clone()) => {
+                dispatch_result = dispatch_to_worker(
+                    &assignment.endpoint,
+                    req.clone(),
+                    accepted_sender,
+                ) => {
                     match dispatch_result {
                         Err(e) => {
                             // 连接/派发失败可以换 worker 重试；但 Worker 已执行后返回的确定性
@@ -417,6 +561,17 @@ impl UEnvEpisodeService {
                         "episode_attempt_failed_retrying"
                     );
                     req.attempt_id += 1;
+                    if req.attempt_id <= self.state.max_attempts {
+                        tokio::select! {
+                            _ = handle.cancel_token.cancelled() => {
+                                let result = broadcast_cancelled_for_request(&self.state, &req);
+                                return Ok(result);
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(
+                                self.state.schedule_retry_interval_ms,
+                            )) => {}
+                        }
+                    }
                 }
             }
         }
@@ -516,7 +671,9 @@ impl UEnvEpisodeService {
                         let result = broadcast_timeout_for_request(
                             &self.state,
                             &req,
-                            format!("swe agent episode {episode_id} timeout acquiring agent+worker slot"),
+                            format!(
+                                "swe agent episode {episode_id} timeout acquiring agent+worker slot"
+                            ),
                             Some(ResultTiming {
                                 enqueue_at: async_context.enqueue_at,
                                 dispatch_at: None,
@@ -660,12 +817,36 @@ impl UEnvEpisodeService {
             }
         };
 
-        let gateway_session_id = session.session_id.clone();
+        if let Some(store) = self.state.persistence_store() {
+            if let Err(error) = store
+                .upsert_gateway_session(
+                    &session.session_id,
+                    &episode_id,
+                    &assignment.worker_id,
+                    &assignment.gateway_public_url,
+                    gateway_api_key.as_bytes(),
+                )
+                .await
+            {
+                cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    destroy_session(
+                        &assignment.gateway_public_url,
+                        &gateway_api_key,
+                        &session.session_id,
+                    ),
+                )
+                .await;
+                anyhow::bail!("persist gateway session before dispatch failed: {error}");
+            }
+        }
         // session_guard 负责在后续取消、超时、错误或正常结束时关闭 session。
         let mut session_guard = GatewaySessionGuard::new(
             assignment.gateway_public_url.clone(),
             gateway_api_key.clone(),
             session.session_id.clone(),
+            self.state.persistence_store().cloned(),
         );
         let worker_id_for_row = assignment.worker_id.clone();
         let agent_bridge_version = spec.agent_bridge_version.clone();
@@ -695,6 +876,22 @@ impl UEnvEpisodeService {
             enqueue_ts: req.enqueue_ts,
             metadata: req.metadata.clone(),
         };
+        if let Some(store) = self.state.persistence_store() {
+            let deadline_at_ms = crate::persistence::now_ms().saturating_add(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64,
+            );
+            if let Err(error) = store
+                .enqueue_agent_job(&pool_id, job.clone(), deadline_at_ms)
+                .await
+            {
+                cleanup_episode(&self.state, &mut worker_lease, &episode_id);
+                session_guard.close_now().await;
+                anyhow::bail!("persist agent job before enqueue failed: {error}");
+            }
+        }
         let mut rx = self.state.agent_job_queue.enqueue(&pool_id, job);
         // cancel_episode 会通过 handle 找到正在排队或执行的 agent job，并从队列中 abandon。
         handle.set_agent_job(pool_id.clone(), job_id.clone());
@@ -726,6 +923,9 @@ impl UEnvEpisodeService {
                     // 总 deadline 到达后，job 即使随后完成也不能再改变 server 已返回的终态。
                     cleanup_episode(&self.state, &mut worker_lease, &episode_id);
                     self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                    if let Some(store) = self.state.persistence_store() {
+                        let _ = store.mark_agent_job_terminal(&job_id, "timed_out").await;
+                    }
                     session_guard.close_now().await;
                     let result = broadcast_timeout_for_request(
                         &self.state,
@@ -745,6 +945,9 @@ impl UEnvEpisodeService {
                     if self.state.agent_job_queue.is_pending(&pool_id, &job_id) {
                         cleanup_episode(&self.state, &mut worker_lease, &episode_id);
                         self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                        if let Some(store) = self.state.persistence_store() {
+                            let _ = store.mark_agent_job_terminal(&job_id, "timed_out").await;
+                        }
                         session_guard.close_now().await;
                         let result = broadcast_timeout_for_request(
                             &self.state,
@@ -763,6 +966,9 @@ impl UEnvEpisodeService {
                     // 取消时同时清理 active episode、worker reservation、job queue 和 gateway session。
                     cleanup_episode(&self.state, &mut worker_lease, &episode_id);
                     self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                    if let Some(store) = self.state.persistence_store() {
+                        let _ = store.mark_agent_job_terminal(&job_id, "cancelled").await;
+                    }
                     session_guard.close_now().await;
                     let result = broadcast_cancelled_for_request(&self.state, &req);
                     break result;
@@ -771,20 +977,15 @@ impl UEnvEpisodeService {
                     // agent job 完成后，把 AgentJobComplete 转成通用 EpisodeResult，再交给 finalizer 补齐公共字段。
                     cleanup_episode(&self.state, &mut worker_lease, &episode_id);
                     let result = match done {
-                        Ok(complete) => {
+                        Ok(completion) => {
+                            let complete = completion.complete;
                             // agent 可能不填 status，server 对空状态按 completed 处理。
                             let status = if complete.status.is_empty() {
                                 "completed".to_string()
                             } else {
                                 complete.status.clone()
                             };
-                            let result = agent_complete_to_episode_result(
-                                &complete,
-                                &episode_id,
-                                req.attempt_id,
-                                &gateway_session_id,
-                                &status,
-                            );
+                            let result = completion.result;
                             if status == "failed" || !complete.error_message.is_empty() {
                                 tracing::warn!(
                                     episode_id = %episode_id,
@@ -824,17 +1025,15 @@ impl UEnvEpisodeService {
         };
         session_guard.close_now().await;
 
-        let timing = ResultTiming {
-            enqueue_at: async_context.enqueue_at,
-            dispatch_at: None,
-            dispatch_ts: None,
-        };
+        // AgentControlService 已在 ACK CompleteAgentJob 前终态落盘；这里不再补充
+        // 非确定 timing 字段，保证协调器的重复 commit 与已确认终态字节一致。
+        let timing = None;
         // finalizer 会统一处理持久化、广播和 completed_async 缓存，SWE agent 路径也走同一套终态出口。
         let result = complete_episode_result(
             &self.state,
             &req,
             result,
-            Some(timing),
+            timing,
             Some(ResultPersistenceContext::swe_agent(
                 worker_id_for_row.clone(),
                 job_id.clone(),
@@ -932,7 +1131,7 @@ impl UEnvEpisodeService {
     }
 }
 
-fn agent_complete_to_episode_result(
+pub(crate) fn agent_complete_to_episode_result(
     complete: &AgentJobCompleteRequest,
     episode_id: &str,
     attempt_id: u32,

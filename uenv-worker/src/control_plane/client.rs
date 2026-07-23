@@ -11,7 +11,9 @@ use tonic::Request;
 
 use crate::metrics::MetricsExporter;
 use crate::proto::scheduler::v1::control_plane_service_client::ControlPlaneServiceClient;
-use crate::proto::scheduler::v1::{HeartbeatRequest, RegisterWorkerRequest, ReportResultRequest, SyncedEnvPackage};
+use crate::proto::scheduler::v1::{
+    HeartbeatRequest, RegisterWorkerRequest, ReportResultRequest, SyncedEnvPackage,
+};
 use crate::proto::v1::{EpisodeResult, ResourceSpec};
 use crate::wal::WalWriter;
 
@@ -128,7 +130,8 @@ impl SchedulerControlPlaneClient {
     }
 
     pub async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
+        let mut client =
+            ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await;
         let active_load = self.metrics.active_episode_count() as i32;
         let response = client
@@ -191,8 +194,11 @@ impl SchedulerControlPlaneClient {
     /// 如果回包的 server_epoch 与本地记录不同，说明 server 已重启，
     /// 立即触发 re-register（重新将自己注册到新 server 实例）。
     /// re-register 失败时向上传播错误，由 spawn_heartbeat_loop 捕获后重试。
-    async fn heartbeat_once(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
+    async fn heartbeat_once(
+        &self,
+    ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut client =
+            ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let (tx, rx) = mpsc::channel(4);
         let identity = self.identity.read().await.clone();
         let prev_epoch = identity.server_epoch;
@@ -254,7 +260,8 @@ impl SchedulerControlPlaneClient {
         dispatch_lease_id: String,
         dispatch_token: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
+        let mut client =
+            ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await.clone();
         let worker_id_for_log = identity.worker_id.clone();
         let response = client
@@ -294,6 +301,7 @@ impl SchedulerControlPlaneClient {
             loop {
                 let pending = wal.load_pending();
                 metrics.set_wal_pending_records(wal.pending_count());
+                metrics.set_wal_quarantined_records(wal.quarantined_count());
                 if pending.is_empty() {
                     backoff_ms = 500;
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -319,6 +327,12 @@ impl SchedulerControlPlaneClient {
                             this.connected.store(false, Ordering::Relaxed);
                             tracing::warn!(
                                 idempotency_key = %rec.idempotency_key,
+                                episode_id = %rec.episode_id,
+                                attempt_id = rec.attempt_id,
+                                worker_id = %rec.worker_id,
+                                persisted_server_epoch = rec.server_epoch,
+                                request_checksum = %rec.request_checksum,
+                                result_checksum = %rec.result_checksum,
                                 error = %err,
                                 msg = "wal_replay_report_failed"
                             );

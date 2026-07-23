@@ -8,21 +8,19 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tracing_subscriber::EnvFilter;
 use tonic::transport::Server;
+use tracing_subscriber::EnvFilter;
 
 use uenv_adapter_core::pb::adapter_core_service_server::AdapterCoreServiceServer;
 use uenv_adapter_core::{AdapterCore, AdapterCoreServiceImpl};
 
-use uenv_server::proto::v1::admin_service_server::AdminServiceServer;
-use uenv_server::proto::v1::episode_result::Summary;
-use uenv_server::proto::v1::{
-    EpisodeRequest, EpisodeResult, StepRecord, Trajectory,
-};
-use uenv_server::proto::scheduler::v1::control_plane_service_server::ControlPlaneServiceServer;
-use uenv_server::proto::v1::agent_control_service_server::AgentControlServiceServer;
-use uenv_server::control_plane::ControlPlaneServiceImpl;
 use uenv_server::agent_job::AgentControlServiceImpl;
+use uenv_server::control_plane::ControlPlaneServiceImpl;
+use uenv_server::proto::scheduler::v1::control_plane_service_server::ControlPlaneServiceServer;
+use uenv_server::proto::v1::admin_service_server::AdminServiceServer;
+use uenv_server::proto::v1::agent_control_service_server::AgentControlServiceServer;
+use uenv_server::proto::v1::episode_result::Summary;
+use uenv_server::proto::v1::{EpisodeRequest, EpisodeResult, StepRecord, Trajectory};
 use uenv_server::service::AdminServiceImpl;
 use uenv_server::{EpisodeService, EpisodeServiceError, UEnvEpisodeService};
 
@@ -42,8 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(%addr, "uenv_listening");
 
-    let backend = std::env::var("UENV_ADAPTER_CORE_BACKEND")
-        .unwrap_or_else(|_| "server".to_string());
+    let backend =
+        std::env::var("UENV_ADAPTER_CORE_BACKEND").unwrap_or_else(|_| "server".to_string());
     tracing::info!(
         addr = %addr,
         backend = %backend,
@@ -63,8 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let config_path = std::env::var("UENV_CONFIG_PATH")
-        .unwrap_or_else(|_| "config/server.yaml".to_string());
+    let config_path =
+        std::env::var("UENV_CONFIG_PATH").unwrap_or_else(|_| "config/server.yaml".to_string());
     let config = if std::env::var("UENV_SERVER_CONFIG_STRICT")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
@@ -82,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin_http_token_configured = !config.admin_http_token.is_empty(),
         "server_config_loaded"
     );
-    let state = uenv_server::create_state_with_config(&config);
+    let state = uenv_server::create_persistent_state_with_config(&config, &config_path).await?;
 
     // 轨迹聚合存储 HTTP（:8077，v2.2）：按环境变量启用。同一 store 同时供 HTTP 与 episode_results。
     {
@@ -131,7 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(AdminServiceServer::new(AdminServiceImpl {
             state: state.clone(),
         }))
-        .serve(addr)
+        .serve_with_shutdown(
+            addr,
+            graceful_shutdown(Arc::clone(&state), config.persistence.shutdown_grace_secs),
+        )
         .await?;
 
     Ok(())
@@ -224,6 +225,51 @@ fn parse_i64_list(value: &str) -> Option<Vec<i64>> {
         items.push(item.trim().parse::<i64>().ok()?);
     }
     Some(items)
+}
+
+async fn graceful_shutdown(state: Arc<uenv_server::state::ServerState>, shutdown_grace_secs: u64) {
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            signal.recv().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate => {}
+    }
+    state.begin_shutdown();
+    tracing::info!(
+        active_episodes = state.episode_coordinator.active_count(),
+        shutdown_grace_secs,
+        "uenv_adapter_core_draining"
+    );
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(shutdown_grace_secs.max(1));
+    while state.episode_coordinator.active_count() > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if let Some(store) = state.persistence_store() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, store.checkpoint()).await {
+            Ok(Ok(())) => tracing::info!("persistence_checkpoint_completed"),
+            Ok(Err(error)) => {
+                tracing::error!(error = %error, "persistence_checkpoint_failed")
+            }
+            Err(_) => tracing::error!("persistence_checkpoint_timed_out"),
+        }
+    }
+    tracing::info!(
+        active_episodes = state.episode_coordinator.active_count(),
+        "uenv_adapter_core_shutdown_ready"
+    );
 }
 
 fn init_tracing() {

@@ -131,12 +131,15 @@ impl AgentRegistry {
     }
 
     /// 心跳：刷新时间并用 Agent 自报的 active_jobs 校准负载。
-    pub fn heartbeat(&self, agent_id: &str, active_jobs: u32) {
+    pub fn heartbeat(&self, agent_id: &str, active_jobs: u32) -> bool {
         let mut agents = self.agents.write();
         if let Some(a) = agents.iter_mut().find(|a| a.agent_id == agent_id) {
             a.last_heartbeat_at = Instant::now();
             a.reported_load = active_jobs;
             a.current_load = Self::effective_load(a);
+            true
+        } else {
+            false
         }
     }
 
@@ -207,8 +210,7 @@ impl AgentRegistry {
             return true;
         }
         a.synced_agent_bridges.iter().any(|b| {
-            b.package_id == bridge_id
-                && (bridge_version.is_empty() || b.version == bridge_version)
+            b.package_id == bridge_id && (bridge_version.is_empty() || b.version == bridge_version)
         })
     }
 
@@ -274,7 +276,7 @@ impl AgentRegistry {
     ///   3. 标签亲和：若请求带 selector，保留「池内有 Agent 标签满足全部 selector」的池；
     ///      无匹配则软回退（不收窄、不失败）
     ///   4. 跨池负载均衡：在剩余候选池中选剩余容量最多的池（并列取 pool_id 最小）
-///
+    ///
     /// 第 2、3 步是软策略（无匹配则放宽），第 1、4 步会直接决定结果。无任何策略输入时使用负载均衡，
     /// 单池场景等价于原「取该池」行为。
     pub fn resolve_pool_id(
@@ -288,9 +290,8 @@ impl AgentRegistry {
         let agents = self.agents.read();
 
         // 基础候选：存活 + bridge 匹配的 Agent 所在池（去重）。
-        let servable = |a: &AgentInfo| {
-            !self.is_stale(a) && Self::bridge_matches(a, bridge_id, bridge_version)
-        };
+        let servable =
+            |a: &AgentInfo| !self.is_stale(a) && Self::bridge_matches(a, bridge_id, bridge_version);
 
         // 显式指定池时只在该池判定，并把它作为硬约束处理。
         if !spec_pool.is_empty() {
@@ -465,7 +466,6 @@ impl AgentRegistry {
             .map(|a| Self::capacity_of(a).saturating_sub(Self::effective_load(a)))
             .sum()
     }
-
 
     /// 池内当前存活（心跳未超时）Agent 的 `max_concurrent` 之和。
     /// 用于池级 admission 信号量的容量：submit 侧据此决定能放行多少并发 episode，

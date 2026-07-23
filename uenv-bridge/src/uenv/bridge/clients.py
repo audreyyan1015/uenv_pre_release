@@ -61,6 +61,8 @@ class RustCoreClientConfig:
     auto_start: bool = False
     binary: str | None = None
     streaming: bool = False
+    transport_retry_attempts: int = 3
+    transport_retry_delay_seconds: float = 1.0
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "RustCoreClientConfig":
@@ -72,6 +74,8 @@ class RustCoreClientConfig:
             auto_start=bool(core.get("auto_start", False)),
             binary=str(core["binary"]) if core.get("binary") else None,
             streaming=bool(core.get("streaming", False)),
+            transport_retry_attempts=max(1, int(core.get("transport_retry_attempts", 3))),
+            transport_retry_delay_seconds=max(0.0, float(core.get("transport_retry_delay_seconds", 1.0))),
         )
 
 
@@ -208,24 +212,68 @@ class RustCoreEpisodeClient:
             raise RuntimeError("RustCoreEpisodeClient stub does not provide ExecuteBatch")
 
         core_request = self._to_core_execute_batch_request(request_list)
-        try:
-            core_response = self.stub.ExecuteBatch(core_request, timeout=self.config.timeout_seconds)
-        except TypeError:
-            core_response = self.stub.ExecuteBatch(core_request)
+        core_response = self._execute_batch_with_retry(core_request)
         for result in self._core_response_results(core_response):
             yield self._from_core_result(result)
 
     def _submit_episode_streaming(self, requests: list[EpisodeRequest]) -> Iterable[EpisodeResult]:
         if not hasattr(self.stub, "ExecuteBatchStream"):
             raise RuntimeError("RustCoreEpisodeClient streaming mode requires ExecuteBatchStream")
-        core_request = self._to_core_execute_batch_request(requests)
-        samples = self._core_request_samples(core_request)
+        remaining = list(requests)
+        completed: set[str] = set()
+        for attempt in range(self.config.transport_retry_attempts):
+            core_request = self._to_core_execute_batch_request(remaining)
+            samples = list(self._core_request_samples(core_request))
+            try:
+                core_results = self._execute_batch_stream(samples)
+                for result in core_results:
+                    request_id = str(self._field(result, "request_id", ""))
+                    if request_id in completed:
+                        continue
+                    completed.add(request_id)
+                    yield self._from_core_result(result)
+                return
+            except Exception as exc:
+                remaining = [request for request in remaining if request.request_id not in completed]
+                if not remaining or not self._should_retry_transport(exc, attempt):
+                    raise
+                self._wait_before_retry()
+
+    def _execute_batch_with_retry(self, core_request: Any) -> Any:
+        for attempt in range(self.config.transport_retry_attempts):
+            try:
+                try:
+                    return self.stub.ExecuteBatch(core_request, timeout=self.config.timeout_seconds)
+                except TypeError:
+                    return self.stub.ExecuteBatch(core_request)
+            except Exception as exc:
+                if not self._should_retry_transport(exc, attempt):
+                    raise
+                self._wait_before_retry()
+        raise AssertionError("transport retry loop exited unexpectedly")
+
+    def _execute_batch_stream(self, samples: list[Any]) -> Iterable[Any]:
         try:
-            core_results = self.stub.ExecuteBatchStream(iter(samples), timeout=self.config.timeout_seconds)
+            return self.stub.ExecuteBatchStream(iter(samples), timeout=self.config.timeout_seconds)
         except TypeError:
-            core_results = self.stub.ExecuteBatchStream(iter(samples))
-        for result in core_results:
-            yield self._from_core_result(result)
+            return self.stub.ExecuteBatchStream(iter(samples))
+
+    def _should_retry_transport(self, exc: Exception, attempt: int) -> bool:
+        if attempt + 1 >= self.config.transport_retry_attempts:
+            return False
+        code_method = getattr(exc, "code", None)
+        if not callable(code_method):
+            return False
+        try:
+            code = code_method()
+        except Exception:
+            return False
+        name = str(getattr(code, "name", code)).upper().rsplit(".", 1)[-1]
+        return name in {"UNAVAILABLE", "CANCELLED", "UNKNOWN", "INTERNAL", "DEADLINE_EXCEEDED"}
+
+    def _wait_before_retry(self) -> None:
+        if self.config.transport_retry_delay_seconds > 0:
+            time.sleep(self.config.transport_retry_delay_seconds)
 
     def _to_core_execute_batch_request(self, requests: list[EpisodeRequest]) -> dict[str, Any]:
         batch_id = ""

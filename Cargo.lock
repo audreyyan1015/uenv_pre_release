@@ -2147,6 +2147,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures",
+ "libc",
  "parking_lot",
  "prost",
  "prost-types",

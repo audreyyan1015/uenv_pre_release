@@ -215,6 +215,8 @@ class AgentControlClient:
             timestamp_ms=int(timestamp_ms),
         )
         resp = self._stub.AgentHeartbeat(req, timeout=self.timeout_sec)
+        if not bool(resp.ok):
+            raise RuntimeError(f"AgentHeartbeat rejected unknown agent_id={agent_id}")
         return int(resp.next_heartbeat_interval_ms)
 
 
