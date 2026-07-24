@@ -3,7 +3,7 @@
 
 这个文件只放“跨机器编排”会反复用到的基础能力：
 
-1. 连接 8.130.75.157 和 8.130.86.71。
+1. 连接 8.130.75.157 和新 worker 主机。
 2. 检查 SSH 主机指纹，避免连错机器。
 3. 检查端口是否空闲，避免占用已有服务。
 4. 保护已经在运行的正式 adapter-core，不允许误停或误替换。
@@ -26,14 +26,14 @@ import time
 import paramiko
 
 
-# 75.157 作为隔离 server 机器；86.71 作为真实 worker / OpenHands 容器机器。
+# 75.157 作为隔离 server 机器；65.20/51.129 作为真实 worker / OpenHands 容器机器。
 SERVER_HOST = "8.130.75.157"
-WORKER_HOST = "8.130.86.71"
+WORKER_HOST = "8.130.65.20"
 
 # 两台机器在内网互通时使用的地址。worker 注册给 server 时要使用内网地址，
 # 不能使用 127.0.0.1，否则另一台机器访问不到。
 SERVER_PRIVATE_IP = "192.168.0.136"
-WORKER_PRIVATE_IP = "192.168.0.132"
+WORKER_PRIVATE_IP = "192.168.0.139"
 
 # 分布式压测使用的固定隔离端口。它们必须提前确认空闲。
 SERVER_PORT = 8099
@@ -50,7 +50,8 @@ PROTECTED_PORTS = (50052, 8088, 8077)
 # 这里会报错，需要人工重新确认后再更新。
 EXPECTED_HOST_FINGERPRINTS = {
     SERVER_HOST: "SHA256:rhrO15uNM5EoSY/4coio0s2iYkV7e+t2vaSE0G5Uqf8",
-    WORKER_HOST: "SHA256:jdrwqK/dSZkw5qhBxTyhj2CqfMpXAiSXrZfpujSUD3c",
+    "8.130.65.20": "SHA256:Ilv9s1diS4C4AZR0fSnxCjQs7fANg1Vyz1IqGAhTQKU",
+    "8.145.51.129": "SHA256:VaErDqKKvTkmyepP+cYoQGzqDO8Chz3g3dx8Euw93uw",
 }
 SOURCE_REPO = ""
 SERVER_BIN = ""
