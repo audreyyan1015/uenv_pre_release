@@ -9,26 +9,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
+use prost::Message;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
+use crate::admin_query::AdminQueryService;
+use crate::admission::AdmissionAcquireError;
+use crate::episode_context::EpisodeContext;
+use crate::execution_backend::select_execution_backend;
 use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
-use crate::proto::v1::{AgentJob, AgentJobCompleteRequest, StepRecord, Trajectory};
 use crate::proto::v1::admin_service_server::AdminService;
+use crate::proto::v1::{AgentJob, AgentJobCompleteRequest, StepRecord, Trajectory};
 use crate::proto::v1::{
     CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest, DrainWorkerResponse,
     EpisodeRequest, EpisodeResult, ErrorCode, GetServerStatusRequest, ServerStatus,
 };
 use crate::proto::worker::v1::CancelWorkerEpisodeRequest;
-use crate::admission::AdmissionAcquireError;
-use crate::admin_query::AdminQueryService;
-use crate::episode_context::EpisodeContext;
-use crate::execution_backend::select_execution_backend;
 use crate::result_finalizer::{
-    cancelled_result_from_request, complete_episode_result, failed_result_from_request,
-    publish_episode_result, timeout_result_from_request, ResultPersistenceContext, ResultTiming,
+    ResultPersistenceContext, ResultTiming, cancelled_result_from_request, complete_episode_result,
+    failed_result_from_request, publish_episode_result, timeout_result_from_request,
 };
 use crate::scheduler::traits::{ScheduleError, Scheduler, WorkerAssignment};
 use crate::state::{
@@ -96,15 +97,22 @@ struct GatewaySessionGuard {
     gateway_public_url: String,
     gateway_api_key: String,
     session_id: String,
+    persistence: Option<Arc<crate::persistence::PersistenceStore>>,
     disarmed: bool,
 }
 
 impl GatewaySessionGuard {
-    fn new(gateway_public_url: String, gateway_api_key: String, session_id: String) -> Self {
+    fn new(
+        gateway_public_url: String,
+        gateway_api_key: String,
+        session_id: String,
+        persistence: Option<Arc<crate::persistence::PersistenceStore>>,
+    ) -> Self {
         Self {
             gateway_public_url,
             gateway_api_key,
             session_id,
+            persistence,
             disarmed: false,
         }
     }
@@ -117,8 +125,16 @@ impl GatewaySessionGuard {
         let key = self.gateway_api_key.clone();
         let sid = self.session_id.clone();
         self.disarmed = true;
-        let _ =
+        let cleanup =
             tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid)).await;
+        if let Some(store) = &self.persistence {
+            let error = match cleanup {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(_) => Some("gateway destroy timed out".to_string()),
+            };
+            let _ = store.mark_gateway_destroyed(&sid, error).await;
+        }
     }
 }
 
@@ -130,9 +146,19 @@ impl Drop for GatewaySessionGuard {
         let gw = self.gateway_public_url.clone();
         let key = self.gateway_api_key.clone();
         let sid = self.session_id.clone();
+        let persistence = self.persistence.clone();
         tokio::spawn(async move {
-            let _ = tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid))
-                .await;
+            let cleanup =
+                tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid))
+                    .await;
+            if let Some(store) = persistence {
+                let error = match cleanup {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error.to_string()),
+                    Err(_) => Some("gateway destroy timed out".to_string()),
+                };
+                let _ = store.mark_gateway_destroyed(&sid, error).await;
+            }
         });
     }
 }

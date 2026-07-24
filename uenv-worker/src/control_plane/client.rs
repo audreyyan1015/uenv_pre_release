@@ -347,6 +347,7 @@ impl SchedulerControlPlaneClient {
             loop {
                 let pending = wal.load_pending();
                 metrics.set_wal_pending_records(wal.pending_count());
+                metrics.set_wal_quarantined_records(wal.quarantined_count());
                 if pending.is_empty() {
                     backoff_ms = 500;
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -372,6 +373,12 @@ impl SchedulerControlPlaneClient {
                             this.connected.store(false, Ordering::Relaxed);
                             tracing::warn!(
                                 idempotency_key = %rec.idempotency_key,
+                                episode_id = %rec.episode_id,
+                                attempt_id = rec.attempt_id,
+                                worker_id = %rec.worker_id,
+                                persisted_server_epoch = rec.server_epoch,
+                                request_checksum = %rec.request_checksum,
+                                result_checksum = %rec.result_checksum,
                                 error = %err,
                                 msg = "wal_replay_report_failed"
                             );

@@ -23,8 +23,12 @@ pub mod config;
 pub mod control_plane;
 /// 单个 episode attempt 的稳定上下文。
 pub mod episode_context;
+/// 持久化 Episode 的后台执行 owner 和重复提交 attach 通道。
+pub mod episode_coordinator;
 /// 根据请求选择 native worker 后端或 SWE agent 后端。
 pub mod execution_backend;
+/// Server 运行状态 SQLite 持久化、迁移和恢复记录。
+pub mod persistence;
 /// 外部 RPC/HTTP 调用封装，service 层通过它访问 worker 和 gateway。
 pub mod ports;
 /// prost 生成的 protobuf 类型。
@@ -46,7 +50,7 @@ use parking_lot::RwLock;
 use scheduler::RoundRobinScheduler;
 
 pub use agent_job::AgentControlServiceImpl;
-pub use config::ServerConfig;
+pub use config::{PersistenceConfig, ServerConfig};
 pub use service::{AdminServiceImpl, EpisodeService, EpisodeServiceError, UEnvEpisodeService};
 
 /// 使用所有默认值创建 ServerState，主要用于测试或不需要外部配置的场景。
@@ -68,4 +72,88 @@ pub fn create_state_with_config(config: &ServerConfig) -> Arc<state::ServerState
     // TTL sweeper 负责周期性清理取消、幂等和异步结果缓存，避免长期运行后状态表无限增长。
     state::spawn_ttl_sweeper(Arc::clone(&state));
     state
+}
+
+/// 生产入口：按配置打开持久化数据库并注入 ServerState。
+///
+/// 与 `create_state_with_config` 分开，保证既有单元测试不会在源码目录创建默认数据库。
+pub async fn create_persistent_state_with_config(
+    config: &ServerConfig,
+    config_path: impl AsRef<std::path::Path>,
+) -> anyhow::Result<Arc<state::ServerState>> {
+    config.validate().map_err(|error| anyhow::anyhow!(error))?;
+    let state = create_state_with_config(config);
+    if !config.persistence.enabled {
+        tracing::warn!("persistence_disabled_by_configuration");
+        return Ok(state);
+    }
+    let db_path = config.resolve_persistence_db_path(config_path);
+    let store = persistence::PersistenceStore::open(db_path.clone(), &config.persistence)?;
+    state
+        .persistence
+        .set(Arc::clone(&store))
+        .map_err(|_| anyhow::anyhow!("persistence store already initialized"))?;
+    state
+        .agent_job_queue
+        .attach_persistence(Arc::clone(&store))
+        .map_err(|_| anyhow::anyhow!("agent job persistence already initialized"))?;
+    tracing::info!(
+        db_path = %db_path.display(),
+        schema_version = store.health().schema_version,
+        "persistence_initialized"
+    );
+    let recovered = persistence::recovery::recover_state(Arc::clone(&state)).await?;
+    tracing::info!(
+        recovered_episodes = recovered,
+        "persistence_recovery_completed"
+    );
+    spawn_persistence_sweeper(Arc::clone(&state));
+    Ok(state)
+}
+
+fn spawn_persistence_sweeper(state: Arc<state::ServerState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let Some(store) = state.persistence_store().cloned() else {
+                return;
+            };
+            let now = persistence::now_ms();
+            let result = store
+                .sweep(
+                    now.saturating_sub(
+                        (state.persistence_terminal_ttl_secs as i64).saturating_mul(1_000),
+                    ),
+                    now.saturating_sub(
+                        (state.persistence_idempotency_ttl_secs as i64).saturating_mul(1_000),
+                    ),
+                    state.persistence_max_completed_entries,
+                )
+                .await;
+            if let Err(error) = result {
+                state.mark_persistence_unhealthy(&error);
+                return;
+            }
+            match persistence::recovery::cleanup_gateway_sessions(&state).await {
+                Ok(retried) if retried > 0 => {
+                    tracing::info!(retried, "gateway_cleanup_retry_completed")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "gateway_cleanup_retry_failed")
+                }
+            }
+            match persistence::recovery::replay_outbox(&state).await {
+                Ok(replayed) if replayed > 0 => {
+                    tracing::info!(replayed, "persistence_outbox_replayed")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    state.mark_persistence_unhealthy(&error);
+                    return;
+                }
+            }
+        }
+    });
 }

@@ -19,6 +19,7 @@ pub struct MetricsExporter {
     pool_size_evicting: Arc<AtomicU64>,
     pool_size_destroyed: Arc<AtomicU64>,
     wal_pending_records: Arc<AtomicU64>,
+    wal_quarantined_records: Arc<AtomicU64>,
     swe_pool_size: Arc<AtomicU64>,
 }
 
@@ -39,7 +40,12 @@ impl MetricsExporter {
         self.active_episode_count.load(Ordering::Relaxed)
     }
 
-    pub fn observe_episode(&self, duration_ms: u64, env_step_duration_ms: u64, model_duration_ms: u64) {
+    pub fn observe_episode(
+        &self,
+        duration_ms: u64,
+        env_step_duration_ms: u64,
+        model_duration_ms: u64,
+    ) {
         self.episode_total.fetch_add(1, Ordering::Relaxed);
         self.episode_duration_ms_sum
             .fetch_add(duration_ms, Ordering::Relaxed);
@@ -89,6 +95,7 @@ uenv_heartbeat_lag_ms {}\n\
 uenv_warmup_pool_hit_total {}\n\
 uenv_warmup_pool_miss_total {}\n\
 uenv_wal_pending_records {}\n\
+uenv_wal_quarantined_records {}\n\
 uenv_instance_pool_size{{status=\"creating\"}} {}\n\
 uenv_instance_pool_size{{status=\"warm\"}} {}\n\
 uenv_instance_pool_size{{status=\"active\"}} {}\n\
@@ -106,6 +113,7 @@ uenv_swe_instance_pool_size {}\n",
             self.warmup_pool_hit_total.load(Ordering::Relaxed),
             self.warmup_pool_miss_total.load(Ordering::Relaxed),
             self.wal_pending_records.load(Ordering::Relaxed),
+            self.wal_quarantined_records.load(Ordering::Relaxed),
             self.pool_size_creating.load(Ordering::Relaxed),
             self.pool_size_warm.load(Ordering::Relaxed),
             self.pool_size_active.load(Ordering::Relaxed),
@@ -119,6 +127,11 @@ uenv_swe_instance_pool_size {}\n",
 
     pub fn set_wal_pending_records(&self, pending: u64) {
         self.wal_pending_records.store(pending, Ordering::Relaxed);
+    }
+
+    pub fn set_wal_quarantined_records(&self, quarantined: u64) {
+        self.wal_quarantined_records
+            .store(quarantined, Ordering::Relaxed);
     }
 
     /// SWE L2 会话池当前活跃 session 数（M2-5）。

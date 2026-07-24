@@ -16,7 +16,7 @@
 //   - in-flight 表用 job_id 关联，complete 时取出 Sender 发送。
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
@@ -35,8 +35,14 @@ struct InFlightJob {
     /// 领取该 Job 的 agent_id。complete 时必须与这里记录的值一致。
     agent_id: String,
     run_id: String,
+    job: AgentJob,
     /// service.rs 正在等待的结果发送端，complete_agent_job 会通过它回传结果。
-    done: oneshot::Sender<AgentJobCompleteRequest>,
+    done: oneshot::Sender<AgentJobCompletion>,
+}
+
+pub struct AgentJobCompletion {
+    pub(crate) complete: AgentJobCompleteRequest,
+    pub(crate) result: crate::proto::v1::EpisodeResult,
 }
 
 /// AgentJob 队列：按 pool 分组的待领队列 + 全局 in-flight 表。
@@ -47,6 +53,7 @@ pub struct AgentJobQueue {
     in_flight: DashMap<String, InFlightJob>,
     /// Agent 注册表引用（poll/complete 时增减负载）。
     registry: Arc<AgentRegistry>,
+    persistence: OnceLock<Arc<crate::persistence::PersistenceStore>>,
 }
 
 impl AgentJobQueue {
@@ -55,16 +62,20 @@ impl AgentJobQueue {
             pending: DashMap::new(),
             in_flight: DashMap::new(),
             registry,
+            persistence: OnceLock::new(),
         }
+    }
+
+    pub fn attach_persistence(
+        &self,
+        store: Arc<crate::persistence::PersistenceStore>,
+    ) -> Result<(), Arc<crate::persistence::PersistenceStore>> {
+        self.persistence.set(store)
     }
 
     /// 入队一个 AgentJob，返回等待其完成的 receiver。
     /// 编排逻辑 await 该 receiver 拿 CompleteAgentJob（配合外层 deadline）。
-    pub fn enqueue(
-        &self,
-        pool_id: &str,
-        job: AgentJob,
-    ) -> oneshot::Receiver<AgentJobCompleteRequest> {
+    pub fn enqueue(&self, pool_id: &str, job: AgentJob) -> oneshot::Receiver<AgentJobCompletion> {
         let (tx, rx) = oneshot::channel();
         let job_id = job.job_id.clone();
         // 先登记 in-flight 的回调（agent_id 在 poll 时才确定，此处留空占位）。
@@ -74,6 +85,7 @@ impl AgentJobQueue {
             InFlightJob {
                 agent_id: String::new(),
                 run_id: job.run_id.clone(),
+                job: job.clone(),
                 done: tx,
             },
         );
@@ -82,6 +94,39 @@ impl AgentJobQueue {
             .or_default()
             .push_back(job);
         tracing::info!(job_id = %job_id, pool_id = %pool_id, "agent_job_enqueued");
+        rx
+    }
+
+    pub(crate) fn restore_persisted(
+        &self,
+        pool_id: &str,
+        job: AgentJob,
+        leased_agent_id: Option<String>,
+    ) -> oneshot::Receiver<AgentJobCompletion> {
+        let (tx, rx) = oneshot::channel();
+        let job_id = job.job_id.clone();
+        let agent_id = leased_agent_id.unwrap_or_default();
+        self.in_flight.insert(
+            job_id.clone(),
+            InFlightJob {
+                agent_id: agent_id.clone(),
+                run_id: job.run_id.clone(),
+                job: job.clone(),
+                done: tx,
+            },
+        );
+        if agent_id.is_empty() {
+            self.pending
+                .entry(pool_id.to_string())
+                .or_default()
+                .push_back(job);
+        }
+        tracing::info!(
+            job_id = %job_id,
+            pool_id,
+            leased_agent_id = %agent_id,
+            "agent_job_recovered"
+        );
         rx
     }
 
@@ -187,9 +232,9 @@ impl AgentControlService for AgentControlServiceImpl {
         request: Request<AgentHeartbeatRequest>,
     ) -> Result<Response<AgentHeartbeatResponse>, Status> {
         let req = request.into_inner();
-        self.registry.heartbeat(&req.agent_id, req.active_jobs);
+        let known = self.registry.heartbeat(&req.agent_id, req.active_jobs);
         Ok(Response::new(AgentHeartbeatResponse {
-            ok: true,
+            ok: known,
             next_heartbeat_interval_ms: self.heartbeat_interval_ms,
         }))
     }
@@ -243,6 +288,38 @@ impl AgentControlService for AgentControlServiceImpl {
         };
         let agent_id = polling_agent_id;
 
+        if let Some(store) = self.queue.persistence.get() {
+            match store
+                .lease_agent_job(&job.job_id, &agent_id, &job.run_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.registry.decrement_load(&agent_id);
+                    self.queue
+                        .pending
+                        .entry(req.agent_pool_id.clone())
+                        .or_default()
+                        .push_front(job);
+                    return Ok(Response::new(PollAgentJobResponse {
+                        has_job: false,
+                        job: None,
+                    }));
+                }
+                Err(error) => {
+                    self.registry.decrement_load(&agent_id);
+                    self.queue
+                        .pending
+                        .entry(req.agent_pool_id.clone())
+                        .or_default()
+                        .push_front(job);
+                    return Err(Status::unavailable(format!(
+                        "persist agent job lease failed: {error}"
+                    )));
+                }
+            }
+        }
+
         let in_flight_ok = self
             .queue
             .in_flight
@@ -282,6 +359,26 @@ impl AgentControlService for AgentControlServiceImpl {
         let req = request.into_inner();
         let job_id = req.job_id.clone();
         let Some(inflight_ref) = self.queue.in_flight.get(&job_id) else {
+            if let Some(store) = self.queue.persistence.get() {
+                let decision = store
+                    .commit_agent_completion(
+                        req.clone(),
+                        crate::proto::v1::EpisodeResult::default(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        Status::unavailable(format!(
+                            "check persisted agent completion failed: {error}"
+                        ))
+                    })?;
+                if matches!(decision, crate::persistence::IdempotencyDecision::Replay(_)) {
+                    return Ok(Response::new(AgentJobCompleteResponse {
+                        ack: true,
+                        code: "DUPLICATE_ACCEPTED".to_string(),
+                        message: String::new(),
+                    }));
+                }
+            }
             tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
             return Ok(Response::new(AgentJobCompleteResponse {
                 ack: false,
@@ -312,7 +409,62 @@ impl AgentControlService for AgentControlServiceImpl {
                 message: "agent_id or run_id mismatch".to_string(),
             }));
         }
+        let job = inflight_ref.job.clone();
         drop(inflight_ref);
+
+        let status = if req.status.is_empty() {
+            "completed"
+        } else {
+            req.status.as_str()
+        };
+        let result = if let Some(store) = self.queue.persistence.get() {
+            let episode_request = store
+                .get_episode_request(&job.episode_id)
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!("load persisted episode request failed: {error}"))
+                })?
+                .ok_or_else(|| Status::failed_precondition("persisted episode request missing"))?;
+            let raw = crate::service::agent_complete_to_episode_result(
+                &req,
+                &episode_request.episode_id,
+                episode_request.attempt_id,
+                &job.session_id,
+                status,
+            );
+            let result =
+                crate::result_finalizer::finalize_or_protocol_failed(&episode_request, raw, None);
+            match store
+                .commit_agent_completion(req.clone(), result.clone())
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!("persist agent completion failed: {error}"))
+                })? {
+                crate::persistence::IdempotencyDecision::Replay(_) => result,
+                crate::persistence::IdempotencyDecision::Conflict(_) => {
+                    return Ok(Response::new(AgentJobCompleteResponse {
+                        ack: false,
+                        code: "COMPLETION_CONFLICT".to_string(),
+                        message: "persisted completion identity or checksum conflict".to_string(),
+                    }));
+                }
+                crate::persistence::IdempotencyDecision::Missing => {
+                    return Ok(Response::new(AgentJobCompleteResponse {
+                        ack: false,
+                        code: "UNKNOWN_JOB".to_string(),
+                        message: "persisted job missing".to_string(),
+                    }));
+                }
+            }
+        } else {
+            crate::service::agent_complete_to_episode_result(
+                &req,
+                &job.episode_id,
+                0,
+                &job.session_id,
+                status,
+            )
+        };
 
         match self.queue.in_flight.remove(&job_id) {
             Some((_, inflight)) => {
@@ -324,7 +476,10 @@ impl AgentControlService for AgentControlServiceImpl {
                     reward = req.reward,
                     "agent_job_completed"
                 );
-                let _ = inflight.done.send(req);
+                let _ = inflight.done.send(AgentJobCompletion {
+                    complete: req,
+                    result,
+                });
                 Ok(Response::new(AgentJobCompleteResponse {
                     ack: true,
                     code: "ACCEPTED".to_string(),

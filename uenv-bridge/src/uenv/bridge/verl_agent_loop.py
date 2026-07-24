@@ -255,6 +255,8 @@ class UEnvAgentLoop(AgentLoopBase):
             startup_timeout_seconds=self.config_for_uenv.startup_timeout_seconds,
             auto_start=self.config_for_uenv.auto_start,
             binary=self.config_for_uenv.binary,
+            transport_retry_attempts=self.config_for_uenv.batch_retry_attempts,
+            transport_retry_delay_seconds=self.config_for_uenv.batch_retry_delay_seconds,
             fake_reward=self.config_for_uenv.fake_reward,
             fake_response_text=self.config_for_uenv.fake_response_text,
         )
