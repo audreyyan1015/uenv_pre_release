@@ -358,7 +358,8 @@ def main() -> int:
             return 1
         llm = load_llm_config(args.llm_config)
         rollout_collector = RolloutTraceCollector(args.llm_config)
-        rollout_collector.install(llm)
+        episode_id = str(agent_job.episode_id) if agent_job and agent_job.episode_id else run_id
+        rollout_collector.install(llm, episode_id=episode_id, dataset="swebench_pro")
         logger.info("LLM model=%s", llm.model)
 
     session_id = agent_job.session_id if agent_job else None

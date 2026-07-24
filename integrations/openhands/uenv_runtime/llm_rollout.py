@@ -25,9 +25,18 @@ class RolloutTraceCollector:
         self._provider_model = self.model.removeprefix("volcengine/")
         self._responses: list[dict[str, Any]] = []
 
-    def install(self, llm: Any) -> None:
+    def install(self, llm: Any, *, episode_id: str = "", dataset: str = "") -> None:
         """Request logprobs on real agent calls and capture the raw responses."""
         original_completion = llm.completion
+
+        def add_uenv_headers(kwargs: dict[str, Any]) -> None:
+            if not episode_id:
+                return
+            headers = dict(kwargs.get("extra_headers") or {})
+            headers["X-UEnv-Episode-Id"] = episode_id
+            if dataset:
+                headers["X-UEnv-Dataset"] = dataset
+            kwargs["extra_headers"] = headers
 
         def completion(*args: Any, **kwargs: Any) -> Any:
             # Seed 2.1 is a reasoning model by default. Ark only exposes
@@ -35,6 +44,7 @@ class RolloutTraceCollector:
             kwargs.setdefault("thinking", {"type": "disabled"})
             kwargs.setdefault("logprobs", True)
             kwargs.setdefault("top_logprobs", 1)
+            add_uenv_headers(kwargs)
             response = original_completion(*args, **kwargs)
             self.record(response)
             return response
@@ -47,6 +57,7 @@ class RolloutTraceCollector:
             kwargs.setdefault("thinking", {"type": "disabled"})
             kwargs.setdefault("logprobs", True)
             kwargs.setdefault("top_logprobs", 1)
+            add_uenv_headers(kwargs)
             response = await original_acompletion(*args, **kwargs)
             self.record(response)
             return response

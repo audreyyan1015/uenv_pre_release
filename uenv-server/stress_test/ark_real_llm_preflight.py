@@ -21,7 +21,7 @@ payload = {
             "role": "user",
             "content": (
                 "Return only this Python code: def add(a, b): return a + b\n"
-                "Task ID: gate3-real-llm-preflight"
+                "Task ID: dscodebench-pressure-real-llm-preflight"
             ),
         }
     ],

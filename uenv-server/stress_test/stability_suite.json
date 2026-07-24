@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "run": {
+    "seed": 20260722,
+    "reconciliation_grace_seconds": 120,
+    "stream_shards": 96,
+    "max_samples_per_stream": 512,
+    "resource_sample_seconds": 30,
+    "availability_sample_seconds": 1,
+    "availability_failure_threshold": 3,
+    "availability_recovery_threshold": 3,
+    "parallel_mode": "fully_async",
+    "estimated_persisted_bytes_per_episode": 768,
+    "estimated_fixed_artifact_bytes": 2147483648,
+    "disk_headroom_multiplier": 1.2
+  },
+  "load": {
+    "mode": "mixed",
+    "arrival_mode": "constant",
+    "batch_size": 1,
+    "formal_arrival_segments": [
+      {"mode": "constant", "fraction": 0.9, "batch_size": 1},
+      {"mode": "batch", "fraction": 0.1, "batch_size": 64}
+    ],
+    "allocation_share_sum": 1.0,
+    "scheduler_lag_abort_seconds": 5.0
+  },
+  "datasets": {
+    "root": "/opt/uenv-stress/datasets",
+    "manifest": "/opt/uenv-stress/datasets/dataset_manifest.json"
+  },
+  "traces": {
+    "root": "/opt/uenv-stress/trace-corpora",
+    "manifest": "/opt/uenv-stress/trace-corpora/trace_manifest.json",
+    "development_only": false,
+    "formal_source_model_prefixes": ["doubao"]
+  },
+  "server_env": {
+    "UENV_MAX_PENDING_BATCHES": 128,
+    "UENV_MAX_STREAM_SAMPLES": 512
+  },
+  "latency_profiles": {
+    "swe_8b": {"mean_seconds": 129.9, "std_seconds": 125.3, "base_tokens": 10406},
+    "gsm8k_8b": {"mean_seconds": 23.3, "std_seconds": 1.1, "base_tokens": 884}
+  },
+  "phases": {
+    "selfcheck_seconds": 600,
+    "reference_seconds": 14400,
+    "stability_seconds": 259200,
+    "capacity_seconds": 1800,
+    "burst_seconds": 60,
+    "capacity_multiplier": 1.2,
+    "burst_multiplier": 4.0,
+    "fault_repetitions": 5
+  },
+  "tasks": {
+    "dscodebench": {
+      "standalone_rate_eps": 12.0,
+      "allocation_share": 0.2,
+      "target_rate_eps": 2.4,
+      "env_type": "code",
+      "max_steps": 1,
+      "timeout_seconds": 300,
+      "episode_p95_seconds": 34.11,
+      "latency_profile": "swe_8b",
+      "dataset_path": "/opt/uenv-stress/datasets/dscodebench/DSCodeBench.json",
+      "trace_file": "/opt/uenv-stress/trace-corpora/dscodebench/dscodebench.jsonl",
+      "min_valid_traces": 100
+    },
+    "swebench_pro": {
+      "standalone_rate_eps": 1.2,
+      "allocation_share": 0.2,
+      "target_rate_eps": 0.24,
+      "env_type": "swe",
+      "max_steps": 250,
+      "timeout_seconds": 3600,
+      "episode_p95_seconds": 354.92,
+      "latency_profile": "swe_8b",
+      "dataset_path": "/opt/uenv-stress/datasets/swebench_pro/catalog.json",
+      "instance_list": "/opt/uenv-stress/datasets/swebench_pro/swebench_pro_instances.json",
+      "openhands_llm_config": "/opt/uenv-stress/config/openhands-trace-replay.json",
+      "trace_file": "/opt/uenv-stress/trace-corpora/swebench_pro/swebench_pro.jsonl",
+      "min_valid_traces": 50
+    },
+    "olymmath": {
+      "standalone_rate_eps": 20.0,
+      "allocation_share": 0.2,
+      "target_rate_eps": 4.0,
+      "env_type": "math",
+      "max_steps": 1,
+      "timeout_seconds": 900,
+      "episode_p95_seconds": 512.14,
+      "latency_profile": "gsm8k_8b",
+      "dataset_path": "/opt/uenv-stress/datasets/olymmath",
+      "trace_file": "/opt/uenv-stress/trace-corpora/math/olymmath.jsonl",
+      "min_valid_traces": 100
+    },
+    "scitab": {
+      "standalone_rate_eps": 740.0,
+      "allocation_share": 0.2,
+      "target_rate_eps": 148.0,
+      "env_type": "math",
+      "max_steps": 1,
+      "timeout_seconds": 120,
+      "episode_p95_seconds": 14.23,
+      "latency_profile": "gsm8k_8b",
+      "dataset_path": "/opt/uenv-stress/datasets/scitab/sci_tab.json",
+      "trace_file": "/opt/uenv-stress/trace-corpora/math/scitab.jsonl",
+      "min_valid_traces": 100
+    },
+    "pubmedqa": {
+      "standalone_rate_eps": 740.0,
+      "allocation_share": 0.2,
+      "target_rate_eps": 148.0,
+      "env_type": "math",
+      "max_steps": 1,
+      "timeout_seconds": 120,
+      "episode_p95_seconds": 14.23,
+      "latency_profile": "gsm8k_8b",
+      "dataset_path": "/opt/uenv-stress/datasets/pubmedqa/ori_pqal.json",
+      "trace_file": "/opt/uenv-stress/trace-corpora/math/pubmedqa.jsonl",
+      "min_valid_traces": 100
+    }
+  }
+}
