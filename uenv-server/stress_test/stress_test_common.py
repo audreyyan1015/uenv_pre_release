@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """压测样本和结果格式的公共工具。
 
 这个文件解决一个问题：不同压测脚本不要各自手写 episode payload。
@@ -229,6 +229,7 @@ def make_sample_envelope(
     max_steps: int = 1,
     model_url: str = "",
     model_name: str = "",
+    request_id: str = "",
 ):
     """构造 AdapterCore ExecuteBatch 接口需要的 SampleEnvelope。
 
@@ -244,7 +245,7 @@ def make_sample_envelope(
     if max_steps <= 0:
         raise ValueError(f"max_steps must be positive, got {max_steps}")
     fields = {
-        "request_id": str(uuid.uuid4()),
+        "request_id": request_id or str(uuid.uuid4()),
         "batch_id": batch_id,
         "sample_index": sample_index,
         "framework": "verl",
@@ -300,6 +301,7 @@ def sample_result_dict(result) -> dict:
         trace_errors.append("rollout_log_probs/response_ids length mismatch")
     return {
         "request_id": result.request_id,
+        "batch_id": result.batch_id,
         "sample_index": result.sample_index,
         "status": result.status,
         "reward": result.reward,
@@ -319,7 +321,7 @@ def sample_result_dict(result) -> dict:
     }
 
 
-def gate3_result_document(
+def dscodebench_pressure_result_document(
     *,
     run_id: str,
     mode: str,
@@ -334,9 +336,9 @@ def gate3_result_document(
     latencies_ms: Iterable[float],
     rewards: Iterable[float],
 ) -> dict:
-    """生成 Gate3 Code 扩容压测的结果 JSON。
+    """生成 DSCodeBench pressure Code 扩容压测的结果 JSON。
 
-    Gate3 关心的是真实 Code worker 在不同 worker/slot 规模下的吞吐、
+    DSCodeBench pressure 关心的是真实 Code worker 在不同 worker/slot 规模下的吞吐、
     延迟和协议错误数量，所以这里输出 completed、failed、throughput_eps、
     batch_latency_ms、protocol_errors 等字段。
     """
@@ -352,6 +354,7 @@ def gate3_result_document(
     average_reward = sum(rewards) / len(rewards) if rewards else 0.0
     return {
         "schema_version": 2,
+        "test_name": "DSCodeBench pressure",
         "run_id": run_id,
         "mode": mode,
         "configured_workers": configured_workers,
@@ -387,7 +390,7 @@ def gate3_result_document(
     }
 
 
-def gate4_swe_result_document(
+def swebench_pro_pressure_result_document(
     *,
     run_id: str,
     server: str,
@@ -402,7 +405,7 @@ def gate4_swe_result_document(
     elapsed_seconds: float,
     results: list[dict],
 ) -> dict:
-    """生成 Gate4 SWE/OpenHands 容器压测的结果 JSON。"""
+    """生成 SWE-bench Pro pressure SWE/OpenHands 容器压测的结果 JSON。"""
     average_reward = sum(item["reward"] for item in results) / len(results) if results else 0.0
     statuses_ok = bool(
         results and all(item["status"] in {"completed", "success"} for item in results)
@@ -411,6 +414,9 @@ def gate4_swe_result_document(
     infrastructure_passed = statuses_ok and traces_ok
     return {
         "schema_version": 2,
+        "test_name": "SWE-bench Pro pressure",
+        "dataset": "swe-bench-pro",
+        "benchmark_variant": "pro",
         "run_id": run_id,
         "server": server,
         "worker_id": worker_id,
@@ -463,7 +469,7 @@ def stress_result_document(
 ) -> dict:
     """生成 stress_test_real.py 单机 runner 的结果 JSON。
 
-    单机 runner 支持 math/code/swe_openhands，所以字段比 Gate3/Gate4 更通用。
+    单机 runner 支持 math/code/swe_openhands，所以字段比 DSCodeBench pressure/SWE-bench Pro pressure 更通用。
     openhands_agent_slots 只有 SWE/OpenHands 场景才有实际意义。
     """
     rewards = list(rewards)

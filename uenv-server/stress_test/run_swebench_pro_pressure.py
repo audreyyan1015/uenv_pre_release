@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""分布式 Gate4：真实 SWE/OpenHands 容器压测。
+﻿#!/usr/bin/env python3
+"""分布式 SWE-bench Pro pressure：真实 SWE/OpenHands 容器压测。
 
 运行位置说明：
 - 隔离 server 启动在 8.130.75.157:8099。
@@ -42,8 +42,8 @@ FLEET_SUPERVISOR_SOURCE = Path(__file__).with_name("worker_fleet_supervisor.py")
 
 
 def put_worker_config_archive(worker, worker_run: str, documents: dict[str, tuple[str, int]], run_id: str) -> None:
-    """Upload many Gate4 Worker YAMLs as one archive for 1024+ Worker scale runs."""
-    with tempfile.NamedTemporaryFile(prefix=f"{run_id}-gate4-worker-configs-", suffix=".tgz", delete=False) as tmp:
+    """Upload many SWE-bench Pro pressure Worker YAMLs as one archive for 1024+ Worker scale runs."""
+    with tempfile.NamedTemporaryFile(prefix=f"{run_id}-swebench_pro_pressure-worker-configs-", suffix=".tgz", delete=False) as tmp:
         local_archive = Path(tmp.name)
     try:
         with tarfile.open(local_archive, "w:gz") as tar:
@@ -65,7 +65,7 @@ def put_worker_config_archive(worker, worker_run: str, documents: dict[str, tupl
 RESOURCE_MONITOR = r'''#!/usr/bin/env python3
 # 这个脚本会临时写到 worker 机器上运行。
 # 它每 0.1 秒记录一次内存、load、Docker 正在运行的容器数量。
-# Gate4 用它确认真实容器并发确实达到了 requested concurrency。
+# SWE-bench Pro pressure 用它确认真实容器并发确实达到了 requested concurrency。
 import argparse
 import json
 from pathlib import Path
@@ -620,11 +620,11 @@ else:
 
 def env_config(instance_id):
     # 这里生成的 env_config_json 会交给 SWE worker。
-    # driver 是 official runner，catalog 是 verified.json。
+    # driver 是 official runner，catalog 是 pro.json。
     # mode=llm 表示真实 OpenHands agent 多轮执行；mode=gold 只用于必要的基线排查。
     return stress_common.swe_openhands_env_payload(
         instance_id=instance_id,
-        benchmark_variant="verified",
+        benchmark_variant="pro",
         command_mode="FullShell",
         mode=args.mode,
         agent_pool_id="openhands-distributed-smoke",
@@ -652,11 +652,12 @@ while planned < target_episodes:
     current_size = min(episode_batch_size, target_episodes - planned)
     batch_id = str(uuid.uuid4())
     samples = []
+    expected_ids = []
     for index in range(current_size):
         ordinal = args.episode_offset + planned + index
         instance_id = instance_ids[ordinal % len(instance_ids)]
         instance_usage[instance_id] = instance_usage.get(instance_id, 0) + 1
-        samples.append(stress_common.make_sample_envelope(
+        sample = stress_common.make_sample_envelope(
             adapter_core_pb2,
             batch_id=batch_id,
             sample_index=ordinal,
@@ -667,24 +668,26 @@ while planned < target_episodes:
             sample_context={
                 "stress_run_id": args.run_id,
                 "environment": "swe_openhands",
-                "gate4_concurrency": args.concurrency,
+                "swebench_pro_pressure_concurrency": args.concurrency,
                 "mode": args.mode,
                 "parallel_mode": args.parallel_mode,
                 "max_steps": args.max_steps,
                 "openhands_max_iterations": args.openhands_max_iterations,
-                "dataset": "SWE-bench Verified",
+                "dataset": "SWE-bench Pro",
                 "instance_id": instance_id,
                 "episode_ordinal": ordinal,
             },
             timeout_seconds=args.batch_timeout,
             max_steps=args.max_steps,
-        ))
-    batch_specs.append((len(batch_specs), batch_id, current_size, samples))
+        )
+        samples.append(sample)
+        expected_ids.append(sample.request_id)
+    batch_specs.append((len(batch_specs), batch_id, current_size, samples, expected_ids))
     planned += current_size
 
 
 def execute_batch(batch_spec):
-    batch_index, batch_id, current_size, samples = batch_spec
+    batch_index, batch_id, current_size, samples, expected_ids = batch_spec
     batch_started = time.monotonic()
     try:
         response = execute(
@@ -699,7 +702,7 @@ def execute_batch(batch_spec):
             "batch_id": batch_id,
             "submitted": current_size,
             "completed": 0,
-            "failed": current_size,
+            "failed": 0,
             "protocol_errors": 0,
             "rpc_error_episodes": current_size,
             "rpc_error": {
@@ -708,6 +711,8 @@ def execute_batch(batch_spec):
             },
             "latency_ms": (time.monotonic() - batch_started) * 1000,
             "results": [],
+            "missing_result_ids": expected_ids,
+            "duplicate_result_ids": [],
         }
     latency_ms = (time.monotonic() - batch_started) * 1000
     parsed_results = [stress_common.sample_result_dict(result) for result in response.results]
@@ -722,29 +727,48 @@ def execute_batch(batch_spec):
     for parsed in parsed_results:
         if not parsed.get("training_trace_valid", True):
             batch_protocol_errors += 1
-    missing_results = max(0, current_size - len(response.results))
+    result_counts = {}
+    for result in response.results:
+        result_counts[result.request_id] = result_counts.get(result.request_id, 0) + 1
+    received_ids = set(result_counts)
+    missing_result_ids = sorted(set(expected_ids) - received_ids)
+    duplicate_result_ids = sorted(
+        request_id for request_id, count in result_counts.items() if count > 1
+    )
+    unknown_result_ids = sorted(received_ids - set(expected_ids))
     return {
         "batch_index": batch_index,
         "batch_id": batch_id,
         "submitted": current_size,
         "completed": batch_completed,
-        "failed": batch_failed + missing_results,
-        "protocol_errors": batch_protocol_errors + missing_results,
+        "failed": batch_failed + len(missing_result_ids) + len(duplicate_result_ids),
+        "protocol_errors": (
+            batch_protocol_errors
+            + len(missing_result_ids)
+            + len(duplicate_result_ids)
+            + len(unknown_result_ids)
+        ),
         "rpc_error_episodes": 0,
         "latency_ms": latency_ms,
         "results": parsed_results,
         "result_count": len(response.results),
         "expected_result_count": current_size,
+        "missing_result_ids": missing_result_ids,
+        "duplicate_result_ids": duplicate_result_ids,
+        "unknown_result_ids": unknown_result_ids,
     }
 
 
 submit_started = time.monotonic()
 max_in_flight_batches = len(batch_specs)
+missing_result_ids = []
+duplicate_result_ids = []
+unknown_result_ids = []
 with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as executor:
     future_to_batch = {executor.submit(execute_batch, spec): spec for spec in batch_specs}
     client_submit_seconds = time.monotonic() - submit_started
     for future in concurrent.futures.as_completed(future_to_batch):
-        _, batch_id, current_size, _ = future_to_batch[future]
+        _, batch_id, current_size, _, expected_ids = future_to_batch[future]
         try:
             batch_result = future.result()
         except Exception as exc:
@@ -752,12 +776,15 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as
                 "batch_id": batch_id,
                 "submitted": current_size,
                 "completed": 0,
-                "failed": current_size,
+                "failed": 0,
                 "protocol_errors": 0,
                 "rpc_error_episodes": current_size,
                 "rpc_error": {"code": type(exc).__name__, "details": str(exc)},
                 "latency_ms": 0,
                 "results": [],
+                "missing_result_ids": expected_ids,
+                "duplicate_result_ids": [],
+                "unknown_result_ids": [],
             }
         submitted += int(batch_result.get("submitted", 0))
         completed += int(batch_result.get("completed", 0))
@@ -766,6 +793,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as
         rpc_error_episodes += int(batch_result.get("rpc_error_episodes", 0))
         latencies.append(float(batch_result.get("latency_ms", 0)))
         all_results.extend(batch_result.get("results", []))
+        missing_result_ids.extend(batch_result.get("missing_result_ids", []))
+        duplicate_result_ids.extend(batch_result.get("duplicate_result_ids", []))
+        unknown_result_ids.extend(batch_result.get("unknown_result_ids", []))
         if "rpc_error" in batch_result and len(rpc_error_details) < 10:
             detail = dict(batch_result["rpc_error"])
             detail["batch_id"] = batch_result.get("batch_id", batch_id)
@@ -773,7 +803,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as
             rpc_error_details.append(detail)
 elapsed = time.monotonic() - started
 resolved = completed + failed + rpc_error_episodes
-document = stress_common.gate4_swe_result_document(
+document = stress_common.swebench_pro_pressure_result_document(
     run_id=args.run_id,
     server=args.server,
     worker_id=args.worker_id,
@@ -815,6 +845,9 @@ document["scale"] = {
     "submitted_throughput_eps": submitted / elapsed if elapsed > 0 else 0.0,
     "client_submit_rate_eps": submitted / client_submit_seconds if client_submit_seconds > 0 else 0.0,
     "rpc_error_details": rpc_error_details,
+    "missing_result_ids": sorted(set(missing_result_ids)),
+    "duplicate_result_ids": sorted(set(duplicate_result_ids)),
+    "unknown_result_ids": sorted(set(unknown_result_ids)),
     "batch_latency_ms": {
         "count": len(latencies),
         "min": min(latencies) if latencies else 0,
@@ -823,7 +856,7 @@ document["scale"] = {
     },
 }
 document["dataset"] = {
-    "name": "SWE-bench Verified",
+    "name": "SWE-bench Pro",
     "selected_instance_ids": instance_ids,
     "unique_instance_count": len(set(instance_ids)),
     "submitted_episodes": submitted,
@@ -840,7 +873,7 @@ if not document["infrastructure"]["passed"] or completed != submitted or protoco
 
 
 def server_config(expected_workers: int = 1, worker_capacity: int = 1) -> str:
-    """生成 Gate4 隔离 server 配置。
+    """生成 SWE-bench Pro pressure 隔离 server 配置。
 
     SWE episode 比 Code episode 慢很多，所以 default_timeout_secs 和
     worker_degraded_threshold_secs 都设置得更长。
@@ -946,7 +979,7 @@ def parse_private_port_range(value: str, count: int, *, single_port: int, label:
 def container_ids(client) -> set[str]:
     """读取 worker 机器上所有 Docker 容器 ID。
 
-    Gate4 开始前要求容器集合为空；结束后要求恢复到开始前的集合。
+    SWE-bench Pro pressure 开始前要求容器集合为空；结束后要求恢复到开始前的集合。
     这样可以发现压测有没有遗留容器。
     """
     _, out, _ = base.run(client, "docker ps -aq --no-trunc", timeout=30)
@@ -1259,30 +1292,69 @@ def normalize_trace_corpus_document(document: object, *, source_path: str, fallb
     }
 
 
-def sample_swe_instances(catalog_path: str, catalog_text: str, count: int, seed: int) -> tuple[list[str], dict]:
-    """Sample multiple SWE-bench Verified instances from the configured catalog."""
+def fixed_swe_instances(
+    catalog_path: str,
+    catalog_text: str,
+    instance_list_path: str,
+    instance_list_text: str,
+) -> tuple[list[str], dict]:
+    """Load the frozen 50-instance SWE-bench Pro acceptance set."""
     data = json.loads(catalog_text)
     rows = list(data.values()) if isinstance(data, dict) else list(data)
-    ids = [str(row["instance_id"]) for row in rows]
-    if not ids:
+    catalog_ids = {str(row["instance_id"]) for row in rows}
+    selected = [str(value) for value in json.loads(instance_list_text)]
+    if not catalog_ids:
         raise ValueError(f"empty SWE catalog: {catalog_path}")
-    rng = random.Random(seed)
-    shuffled = ids[:]
-    rng.shuffle(shuffled)
-    selected = [shuffled[index % len(shuffled)] for index in range(count)]
+    if len(selected) != 50 or len(set(selected)) != 50:
+        raise ValueError("SWE-bench Pro frozen instance list must contain 50 unique IDs")
+    missing = sorted(set(selected) - catalog_ids)
+    if missing:
+        raise ValueError(f"SWE-bench Pro frozen IDs missing from catalog: {missing[:20]}")
     return selected, {
         "catalog_path": str(catalog_path),
-        "catalog_size": len(ids),
-        "seed": seed,
+        "instance_list_path": str(instance_list_path),
+        "catalog_size": len(catalog_ids),
         "selected_instance_ids": selected,
-        "unique_instance_count": len(set(selected)),
-        "requested_episodes": count,
-        "reused_instances": count > len(set(selected)),
+        "unique_instance_count": 50,
+        "requested_episodes": 50,
+        "reused_instances": False,
         "catalog_has_image_fields": any(
             bool(row.get("image") or row.get("docker_image")) for row in rows
             if isinstance(row, dict)
         ),
     }
+
+
+def validate_swebench_pro_trace_corpus(path: Path, selected_ids: list[str]) -> dict:
+    """Reject Verified/mismatched traces before any scale infrastructure starts."""
+    files = sorted(path.rglob("*.jsonl")) if path.is_dir() else [path]
+    if not files:
+        raise ValueError(f"no SWE-bench Pro trace JSONL files under {path}")
+    covered: set[str] = set()
+    count = 0
+    for source in files:
+        for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            dataset = str(item.get("dataset", "")).lower()
+            variant = str(item.get("benchmark_variant", "")).lower()
+            driver = str(item.get("driver", item.get("driver_entrypoint", "")))
+            instance_id = str(item.get("instance_id", ""))
+            if dataset != "swe-bench-pro" or variant != "pro":
+                raise ValueError(f"{source}:{line_number} is not SWE-bench Pro")
+            if not driver.endswith("run_swebenchpro_official.py"):
+                raise ValueError(f"{source}:{line_number} uses a non-Pro driver")
+            if instance_id not in selected_ids:
+                raise ValueError(f"{source}:{line_number} instance not in frozen 50-ID set")
+            if not item.get("turns"):
+                raise ValueError(f"{source}:{line_number} has no real trace turns")
+            covered.add(instance_id)
+            count += 1
+    missing = sorted(set(selected_ids) - covered)
+    if missing:
+        raise ValueError(f"SWE-bench Pro trace corpus misses frozen instances: {missing}")
+    return {"trace_count": count, "covered_instance_count": len(covered)}
 
 
 def docker_image_inventory(client) -> dict:
@@ -1309,16 +1381,17 @@ def docker_image_inventory(client) -> dict:
     }
 
 
-def swebench_image_for_instance(instance_id: str) -> str:
-    namespace, repo_issue = instance_id.split("__", 1)
-    return f"swebench/sweb.eval.x86_64.{namespace}_1776_{repo_issue}:latest"
-
-
-def docker_image_presence(client, instance_ids: list[str]) -> dict:
+def docker_image_presence(client, instance_ids: list[str], catalog_text: str) -> dict:
+    catalog_value = json.loads(catalog_text)
+    rows = list(catalog_value.values()) if isinstance(catalog_value, dict) else list(catalog_value)
+    by_id = {str(row["instance_id"]): row for row in rows}
     records = []
     missing = []
     for instance_id in instance_ids:
-        image = swebench_image_for_instance(instance_id)
+        row = by_id[instance_id]
+        image = str(row.get("image_cache_key") or row.get("docker_image") or row.get("dockerhub_tag") or "")
+        if not image:
+            raise ValueError(f"SWE-bench Pro catalog row has no Docker image: {instance_id}")
         status, image_id, _ = base.run(
             client,
             f"docker image inspect {base.q(image)} --format '{{{{.Id}}}}'",
@@ -1466,7 +1539,7 @@ def run_one(
     registration_timeout: int,
     batch_timeout: int,
 ) -> int:
-    """执行一轮 Gate4。
+    """执行一轮 SWE-bench Pro pressure。
 
     concurrency 表示 OpenHands/container 并发上限；registered_workers 表示
     真实 UEnv SWE Worker 注册数量。1024 Worker 规模压测通过多批 episode
@@ -1522,7 +1595,7 @@ def run_one(
     if not password:
         raise SystemExit("UENV_PASS is required")
 
-    run_id = f"gate4-swe-{args.parallel_mode}-c{args.concurrency}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    run_id = f"swebench-pro-pressure-{args.parallel_mode}-c{args.concurrency}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     server_run = f"/tmp/uenv-{run_id}"
     worker_run = f"/opt/uenv-stress/runs/{run_id}"
     worker_prefix = f"stress-{run_id}-worker-"
@@ -1558,7 +1631,7 @@ def run_one(
     if len(fixed_worker_ports) != len(set(fixed_worker_ports)):
         overlaps.append({"left": "agent/model", "right": "agent/model", "ports": sorted(fixed_worker_ports)})
     if overlaps:
-        raise ValueError(f"Gate4 Worker/gateway/observability/agent port groups overlap: {overlaps}")
+        raise ValueError(f"SWE-bench Pro pressure Worker/gateway/observability/agent port groups overlap: {overlaps}")
     target_episodes = args.total_episodes or (args.registered_workers * args.worker_capacity * args.min_episode_waves)
     resolved_episode_batch_size = args.episode_batch_size or args.concurrency
     if resolved_episode_batch_size <= 0:
@@ -1567,7 +1640,7 @@ def run_one(
     local_run = args.artifacts / run_id
     local_run.mkdir()
     print(
-        "[gate4][stage] run prepared "
+        "[swebench_pro_pressure][stage] run prepared "
         f"run_id={run_id} local_run={local_run} "
         f"server={base.SERVER_HOST}:{base.SERVER_PORT} "
         f"worker={base.WORKER_HOST} registered_workers={args.registered_workers} "
@@ -1591,34 +1664,35 @@ def run_one(
     try:
         # 先连接两台机器，并记录正式 server 和容器集合的基线。
         server = base.connect(base.SERVER_HOST, password)
-        print(f"[gate4][stage] connecting server {base.SERVER_HOST}", flush=True)
+        print(f"[swebench_pro_pressure][stage] connecting server {base.SERVER_HOST}", flush=True)
         server = base.connect(base.SERVER_HOST, password)
-        print(f"[gate4][stage] connected server {base.SERVER_HOST}", flush=True)
-        print(f"[gate4][stage] connecting worker {base.WORKER_HOST}", flush=True)
+        print(f"[swebench_pro_pressure][stage] connected server {base.SERVER_HOST}", flush=True)
+        print(f"[swebench_pro_pressure][stage] connecting worker {base.WORKER_HOST}", flush=True)
         worker = base.connect(base.WORKER_HOST, password)
-        print(f"[gate4][stage] connected worker {base.WORKER_HOST}", flush=True)
-        print("[gate4][stage] collecting protected/source/catalog preflight", flush=True)
+        print(f"[swebench_pro_pressure][stage] connected worker {base.WORKER_HOST}", flush=True)
+        print("[swebench_pro_pressure][stage] collecting protected/source/catalog preflight", flush=True)
         before_protected = base.protected_snapshot(server)
         build = base.source_and_binary_manifest(server, include_code_plugin=False)
-        catalog_path = f"{base.SOURCE_REPO}/config/swe/verified.json"
+        catalog_path = args.dataset_catalog
         catalog_text = base.get_text(server, catalog_path)
-        selected_instances, instance_sampling = sample_swe_instances(
+        instance_list_text = base.get_text(server, args.instance_list)
+        selected_instances, instance_sampling = fixed_swe_instances(
             catalog_path,
             catalog_text,
-            max(args.concurrency, args.instance_count),
-            args.instance_seed,
+            args.instance_list,
+            instance_list_text,
         )
         before_containers = container_ids(worker)
         if before_containers:
             raise RuntimeError(f"worker host is not container-empty: {sorted(before_containers)}")
-        # Gate4 涉及 server、worker、gateway、agent API、agent health 多个端口。
+        # SWE-bench Pro pressure 涉及 server、worker、gateway、agent API、agent health 多个端口。
         # 全部确认空闲后再启动。
         base.assert_port_free(server, base.SERVER_PORT, base.SERVER_HOST)
-        print("[gate4][stage] checking isolated ports and SWE images", flush=True)
+        print("[swebench_pro_pressure][stage] checking isolated ports and SWE images", flush=True)
         base.assert_port_free(server, base.SERVER_PORT, base.SERVER_HOST)
         base.assert_ports_free(worker, worker_ports + obs_ports + gateway_ports + fixed_worker_ports, base.WORKER_HOST)
         image_inventory = docker_image_inventory(worker)
-        selected_image_presence = docker_image_presence(worker, selected_instances)
+        selected_image_presence = docker_image_presence(worker, selected_instances, catalog_text)
         if not selected_image_presence["all_present"]:
             raise RuntimeError(
                 "selected SWE-bench images are not cached locally under local_only policy: "
@@ -1641,6 +1715,9 @@ def run_one(
         effective_trace_corpus_path = args.trace_corpus_path
         if args.llm_kind == "simulator" and args.simulator_mode == "trace_replay":
             local_corpus = Path(args.trace_corpus_path)
+            if not local_corpus.exists():
+                raise ValueError(f"formal SWE-bench Pro trace corpus must be locally readable: {local_corpus}")
+            trace_validation = validate_swebench_pro_trace_corpus(local_corpus, selected_instances)
             if local_corpus.exists():
                 with tempfile.NamedTemporaryFile(prefix=f"{run_id}-trace-corpus-", suffix=".tgz", delete=False) as tmp:
                     local_archive = Path(tmp.name)
@@ -1657,6 +1734,7 @@ def run_one(
                     effective_trace_corpus_path = f"{worker_run}/trace-corpus"
                 finally:
                     local_archive.unlink(missing_ok=True)
+            print(f"[preflight] SWE-bench Pro trace corpus verified: {trace_validation}")
         if args.mode == "llm" and args.llm_kind == "simulator":
             base.put_text(worker, f"{worker_run}/llm_simulator.py", LLM_SIMULATOR, 0o700)
             simulator_config = {
@@ -1695,7 +1773,7 @@ def run_one(
             )
         if args.mode == "llm":
             if not effective_llm_config:
-                raise ValueError("Gate4 llm mode requires --llm-config or OPENHANDS_LLM_CONFIG")
+                raise ValueError("SWE-bench Pro pressure llm mode requires --llm-config or OPENHANDS_LLM_CONFIG")
             base.run(worker, f"test -f {base.q(effective_llm_config)} && test $(stat -c %a {base.q(effective_llm_config)}) = 600")
             base.put_text(worker, f"{worker_run}/llm_preflight.py", LLM_PREFLIGHT, 0o700)
             _, llm_output, _ = base.run(
@@ -1726,7 +1804,7 @@ def run_one(
                 f"install -d -m 0755 {base.q(server_run)}/bundle/scripts/openhands {base.q(server_run)}/bundle/uenv-server/stress_test {base.q(server_run)}/bundle/config/swe",
                 f"install -m 0755 {base.q(base.SOURCE_REPO)}/scripts/openhands/openhands_runner.py {base.q(server_run)}/bundle/scripts/openhands/openhands_runner.py",
                 f"install -m 0755 {base.q(base.SOURCE_REPO)}/uenv-server/stress_test/run_openhands_stress.sh {base.q(server_run)}/bundle/uenv-server/stress_test/run_openhands_stress.sh",
-                f"install -m 0644 {base.q(base.SOURCE_REPO)}/config/swe/verified.json {base.q(server_run)}/bundle/config/swe/verified.json",
+                f"install -m 0644 {base.q(args.dataset_catalog)} {base.q(server_run)}/bundle/config/swe/pro.json",
                 f"tar -C {base.q(server_run)}/bundle -czf {base.q(server_run)}/bundle.tgz .",
                 f"sha256sum {base.q(server_run)}/bundle.tgz > {base.q(server_run)}/bundle.tgz.sha256",
             ]),
@@ -1844,7 +1922,7 @@ def run_one(
             "UENV_WORKER_EPISODE_TIMEOUT_SECS": str(args.batch_timeout),
             "UENV_LLM_HTTP_TIMEOUT_SECS": str(args.batch_timeout),
             "UENV_SWE_ARTIFACT_DIR": f"{worker_run}/trajectory",
-            "UENV_SWE_INSTANCES": f"{worker_run}/bundle/config/swe/verified.json",
+            "UENV_SWE_INSTANCES": f"{worker_run}/bundle/config/swe/pro.json",
             "UENV_SWE_RUNTIME": "docker",
             "UENV_SWE_GATEWAY_API_KEY": f"stress-gateway-{run_id}",
             "RUST_LOG": "info",
@@ -1893,9 +1971,9 @@ def run_one(
                     break
                 time.sleep(0.5)
             else:
-                raise RuntimeError("Gate4 Worker fleet supervisor did not publish its PID manifest")
+                raise RuntimeError("SWE-bench Pro pressure Worker fleet supervisor did not publish its PID manifest")
             if fleet_pid_document.get("worker_count") != args.registered_workers:
-                raise RuntimeError(f"Gate4 fleet PID manifest count mismatch: {fleet_pid_document}")
+                raise RuntimeError(f"SWE-bench Pro pressure fleet PID manifest count mismatch: {fleet_pid_document}")
             worker_pids = [
                 (int(item["pid"]), str(item["config"]))
                 for item in fleet_pid_document["workers"]
@@ -1966,7 +2044,7 @@ def run_one(
             "OPENHANDS_MAX_ITERATIONS": str(args.openhands_max_iterations),
             "OPENHANDS_RUN_TIMEOUT_SEC": "900",
             "UENV_REPO": f"{worker_run}/bundle",
-            "UENV_SWE_INSTANCES": f"{worker_run}/bundle/config/swe/verified.json",
+            "UENV_SWE_INSTANCES": f"{worker_run}/bundle/config/swe/pro.json",
             "UENV_SWE_RUNTIME": "docker",
             "UENV_GATEWAY_API_KEY": f"stress-gateway-{run_id}",
             "UENV_AGENT_BRIDGE_DIR": f"{worker_run}/bundle/integrations/openhands",
@@ -2026,7 +2104,7 @@ def run_one(
             "obs_ports": obs_ports,
             "agent_id": agent_id,
             "dataset": {
-                "name": "SWE-bench Verified",
+                "name": "SWE-bench Pro",
                 "sampling": instance_sampling,
             },
             "selected_instance_ids": selected_instances,
@@ -2089,7 +2167,7 @@ def run_one(
             "--batch-timeout", str(args.batch_timeout),
             "--run-id", run_id,
             "--driver", f"{worker_run}/bundle/integrations/openhands/run_swebenchpro_official.py",
-            "--catalog", f"{worker_run}/bundle/config/swe/verified.json",
+            "--catalog", f"{worker_run}/bundle/config/swe/pro.json",
             "--output", f"{server_run}/result.json",
             "--concurrency", str(args.concurrency),
             "--mode", args.mode,
@@ -2119,7 +2197,7 @@ def run_one(
             result_text = json.dumps(result_document, indent=2, sort_keys=True)
             if args.registered_workers > 1 and not coverage["passed"]:
                 raise RuntimeError(
-                    "not every Gate4 SWE Worker completed an episode: "
+                    "not every SWE-bench Pro pressure SWE Worker completed an episode: "
                     f"expected={args.registered_workers} actual={coverage['unique_completed_workers']}"
                 )
         if args.llm_kind == "simulator":
@@ -2133,9 +2211,9 @@ def run_one(
         llm_stats = json.loads(llm_stats_text or "{}")
         if args.llm_kind == "simulator" and args.simulator_mode == "trace_replay":
             if int(llm_stats.get("trace_replay_misses", 0)) != 0:
-                raise RuntimeError(f"Gate4 trace replay had misses: {llm_stats}")
+                raise RuntimeError(f"SWE-bench Pro pressure trace replay had misses: {llm_stats}")
             if int(llm_stats.get("trace_replay_hits", 0)) <= 0:
-                raise RuntimeError(f"Gate4 trace replay had no hits: {llm_stats}")
+                raise RuntimeError(f"SWE-bench Pro pressure trace replay had no hits: {llm_stats}")
         _, explicit_corpus_paths_text, _ = base.run(
             worker,
             f"find {base.q(worker_run)}/openhands -name llm_trace_corpus_episode.json -type f -print",
@@ -2190,7 +2268,7 @@ def run_one(
         monitor_pid = None
         resources_text = base.get_text(worker, f"{worker_run}/resources.jsonl")
         # Resource metrics are observational: they are reported for analysis,
-        # while Gate4 pass/fail remains based on protocol, trace and coverage.
+        # while SWE-bench Pro pressure pass/fail remains based on protocol, trace and coverage.
         resource_rows = [json.loads(line) for line in resources_text.splitlines() if line.strip()]
         resource_summary = summarize_resource_rows(resource_rows)
         peak_containers = int(resource_summary["peak_running_containers"])
@@ -2257,7 +2335,7 @@ def run_one(
                 pass
         if client_status != 0:
             raise RuntimeError(
-                "Gate4 infrastructure/trace validation failed: "
+                "SWE-bench Pro pressure infrastructure/trace validation failed: "
                 f"{result_document.get('infrastructure')}"
             )
         print(f"[smoke] PASS run_id={run_id} local_artifacts={local_run}")
@@ -2350,7 +2428,7 @@ def run_one(
 
 
 def main() -> int:
-    """Gate4 命令行入口。
+    """SWE-bench Pro pressure 命令行入口。
 
     默认跑 1 和 2 两轮；也可以传 --concurrency 1 或 --concurrency 2
     只跑某一轮。每轮都会生成独立 run_id 和 artifact 目录。
@@ -2379,6 +2457,8 @@ def main() -> int:
     parser.add_argument("--openhands-max-iterations", type=int, default=10)
     parser.add_argument("--instance-count", type=int, default=4)
     parser.add_argument("--instance-seed", type=int, default=20260720)
+    parser.add_argument("--dataset-catalog", required=True)
+    parser.add_argument("--instance-list", required=True)
     parser.add_argument("--simulator-latency-ms", type=float, default=250)
     parser.add_argument("--simulator-latency-mean-ms", type=float, default=250)
     parser.add_argument("--simulator-latency-std-ms", type=float, default=75)
@@ -2448,7 +2528,7 @@ def main() -> int:
     if args.instance_count <= 0:
         raise SystemExit("--instance-count must be positive")
     if args.instance_count < 50:
-        raise SystemExit("--instance-count must be at least 50 for SWE-bench Verified coverage")
+        raise SystemExit("--instance-count must be at least 50 for SWE-bench Pro coverage")
     if args.registered_workers <= 0:
         raise SystemExit("--registered-workers must be positive")
     if args.worker_capacity < 0:
@@ -2459,14 +2539,14 @@ def main() -> int:
         raise SystemExit("--worker-capacity must resolve to a positive value")
     if args.registered_workers > 1:
         if args.registered_workers < 1024:
-            raise SystemExit("Gate4 scale mode requires at least 1024 registered Workers")
+            raise SystemExit("SWE-bench Pro pressure scale mode requires at least 1024 registered Workers")
         if not args.private_worker_port_range or not args.private_gateway_port_range:
-            raise SystemExit("Gate4 multi-Worker scale requires --private-worker-port-range and --private-gateway-port-range")
+            raise SystemExit("SWE-bench Pro pressure multi-Worker scale requires --private-worker-port-range and --private-gateway-port-range")
         if args.llm_kind != "simulator" or args.simulator_mode != "trace_replay":
-            raise SystemExit("Gate4 1024 Worker scale requires simulator trace_replay LLM")
+            raise SystemExit("SWE-bench Pro pressure 1024 Worker scale requires simulator trace_replay LLM")
         required_episodes = args.registered_workers * args.worker_capacity * args.min_scale_episode_waves
         if args.total_episodes and args.total_episodes < required_episodes:
-            raise SystemExit("Gate4 scale total episodes must be at least registered_workers * worker_capacity * min_scale_episode_waves")
+            raise SystemExit("SWE-bench Pro pressure scale total episodes must be at least registered_workers * worker_capacity * min_scale_episode_waves")
     if args.total_episodes < 0 or args.episode_batch_size < 0 or args.episode_offset < 0:
         raise SystemExit("--total-episodes, --episode-batch-size and --episode-offset must be non-negative")
     if args.fleet_supervisor_threshold < 2:
@@ -2513,7 +2593,7 @@ def main() -> int:
     final_code = 0
     for parallel_mode in parallel_modes:
         for concurrency in concurrencies:
-            print(f"[gate4] parallel_mode={parallel_mode} concurrency={concurrency} start", flush=True)
+            print(f"[swebench_pro_pressure] parallel_mode={parallel_mode} concurrency={concurrency} start", flush=True)
             started = time.monotonic()
             returncode = run_one(
                 concurrency,
@@ -2579,16 +2659,16 @@ def main() -> int:
                     item["result_path"] = str(latest_result)
                     item["resource_observations_error"] = "failed to parse latest result.json"
             summary.append(item)
-            print(f"[gate4] parallel_mode={parallel_mode} concurrency={concurrency} done returncode={returncode}", flush=True)
+            print(f"[swebench_pro_pressure] parallel_mode={parallel_mode} concurrency={concurrency} done returncode={returncode}", flush=True)
             if returncode != 0:
                 final_code = returncode
                 break
         if final_code != 0:
             break
 
-    summary_path = args.artifacts / f"gate4-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    summary_path = args.artifacts / f"swebench-pro-pressure-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
-    print(f"[gate4] summary={summary_path}")
+    print(f"[swebench_pro_pressure] summary={summary_path}")
     return final_code
 
 

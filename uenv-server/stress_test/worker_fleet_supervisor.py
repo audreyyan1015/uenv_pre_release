@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--spec", required=True)
 parser.add_argument("--pid-file", required=True)
 parser.add_argument("--metrics-file", required=True)
+parser.add_argument("--resource-csv", default="")
+parser.add_argument("--resource-sample-seconds", type=float, default=30.0)
+parser.add_argument("--run-id", default="")
 args = parser.parse_args()
 
 spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
@@ -46,11 +50,12 @@ def memory_bytes() -> tuple[int, int]:
     return values["MemTotal"], values["MemAvailable"]
 
 
-def process_group_metrics() -> tuple[int, int, int]:
-    """Return process count, RSS bytes and open FD count for this owned process group."""
+def process_group_metrics() -> tuple[int, int, int, int]:
+    """Return process count, RSS bytes, open FD count and thread count."""
     process_count = 0
     rss_bytes = 0
     open_fds = 0
+    threads = 0
     group_id = os.getpgrp()
     for proc_dir in Path("/proc").iterdir():
         if not proc_dir.name.isdigit():
@@ -63,11 +68,22 @@ def process_group_metrics() -> tuple[int, int, int]:
             for line in (proc_dir / "status").read_text(encoding="utf-8").splitlines():
                 if line.startswith("VmRSS:"):
                     rss_bytes += int(line.split()[1]) * 1024
-                    break
+                elif line.startswith("Threads:"):
+                    threads += int(line.split()[1])
             open_fds += sum(1 for _ in (proc_dir / "fd").iterdir())
         except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError, IndexError):
             continue
-    return process_count, rss_bytes, open_fds
+    return process_count, rss_bytes, open_fds, threads
+
+
+def append_resource_row(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and path.stat().st_size > 0
+    with path.open("a", encoding="utf-8", newline="") as target:
+        writer = csv.DictWriter(target, fieldnames=list(row))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def write_json_atomic(path: Path, document: dict) -> None:
@@ -87,6 +103,8 @@ metrics = {
     "peak_processes": 0,
     "peak_rss_bytes": 0,
     "peak_open_fds": 0,
+    "peak_threads": 0,
+    "worker_exit_count": 0,
     "started_unix": time.time(),
 }
 try:
@@ -120,14 +138,16 @@ try:
     target = Path(args.pid_file)
     write_json_atomic(target, pid_document)
 
+    next_resource_sample = 0.0
     while not stopping:
-        process_count, rss_bytes, open_fds = process_group_metrics()
+        process_count, rss_bytes, open_fds, threads = process_group_metrics()
         _mem_total, mem_available = memory_bytes()
         metrics["sample_count"] += 1
         metrics["min_mem_available_bytes"] = min(metrics["min_mem_available_bytes"], mem_available)
         metrics["peak_processes"] = max(metrics["peak_processes"], process_count)
         metrics["peak_rss_bytes"] = max(metrics["peak_rss_bytes"], rss_bytes)
         metrics["peak_open_fds"] = max(metrics["peak_open_fds"], open_fds)
+        metrics["peak_threads"] = max(metrics["peak_threads"], threads)
         metrics["updated_unix"] = time.time()
         write_json_atomic(metrics_target, metrics)
         failed = [
@@ -136,9 +156,17 @@ try:
             if child.poll() is not None
         ]
         if failed:
+            metrics["worker_exit_count"] += len(failed)
             print(json.dumps({"event": "worker_exited", "failed": failed[:20]}), flush=True)
             exit_code = 1
             break
+        if args.resource_csv and time.monotonic() >= next_resource_sample:
+            append_resource_row(Path(args.resource_csv), {
+                "timestamp": time.time(), "run_id": args.run_id, "processes": process_count,
+                "rss_bytes": rss_bytes, "open_fds": open_fds, "threads": threads,
+                "worker_exits": metrics["worker_exit_count"], "oom_events": 0,
+            })
+            next_resource_sample = time.monotonic() + args.resource_sample_seconds
         time.sleep(0.5)
 finally:
     deadline = time.monotonic() + 20
@@ -157,6 +185,19 @@ finally:
         log.close()
     metrics["finished_unix"] = time.time()
     metrics["exit_code"] = exit_code
+    remaining_processes, remaining_rss, remaining_fds, remaining_threads = process_group_metrics()
+    metrics["cleanup"] = {
+        "remaining_processes": remaining_processes,
+        "remaining_rss_bytes": remaining_rss,
+        "remaining_open_fds": remaining_fds,
+        "remaining_threads": remaining_threads,
+    }
+    if args.resource_csv:
+        append_resource_row(Path(args.resource_csv), {
+            "timestamp": time.time(), "run_id": args.run_id, "processes": remaining_processes,
+            "rss_bytes": remaining_rss, "open_fds": remaining_fds, "threads": remaining_threads,
+            "worker_exits": metrics["worker_exit_count"], "oom_events": 0,
+        })
     write_json_atomic(metrics_target, metrics)
 
 raise SystemExit(exit_code)

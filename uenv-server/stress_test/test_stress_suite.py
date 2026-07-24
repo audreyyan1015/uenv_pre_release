@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -7,26 +7,32 @@ from types import SimpleNamespace
 import unittest
 
 import run_stress_suite
+import run_dscodebench_pressure
+import run_swebench_pro_pressure
 import stress_test_common
 
 
 class StressSuiteTests(unittest.TestCase):
+    def test_embedded_pressure_clients_compile(self):
+        compile(run_dscodebench_pressure.LOAD_CLIENT, "<dscodebench-client>", "exec")
+        compile(run_swebench_pro_pressure.SWE_CLIENT, "<swebench-pro-client>", "exec")
+
     def test_scale_config_requires_1024_simulator_and_10_waves(self):
         config = run_stress_suite.load_suite_config(
             Path(__file__).with_name("stress_suite.json")
         )
-        self.assertEqual(config["gate3"]["model_mode"], "simulator")
-        self.assertEqual(config["gate3"]["workers"], 1024)
+        self.assertEqual(config["dscodebench_pressure"]["model_mode"], "simulator")
+        self.assertEqual(config["dscodebench_pressure"]["workers"], 1024)
         self.assertEqual(
-            config["gate3"]["episode_batch_size"] * config["gate3"]["exact_batches_per_mode"],
-            config["gate3"]["workers"] * config["gate3"]["capacity_per_worker"] * config["gate3"]["min_episode_waves"],
+            config["dscodebench_pressure"]["episode_batch_size"] * config["dscodebench_pressure"]["exact_batches_per_mode"],
+            config["dscodebench_pressure"]["workers"] * config["dscodebench_pressure"]["capacity_per_worker"] * config["dscodebench_pressure"]["min_episode_waves"],
         )
-        self.assertEqual(config["gate3"]["simulator_wrong_steps"]["mean"], 2.0)
-        self.assertEqual(config["gate3"]["simulator_wrong_steps"]["std"], 1.0)
-        self.assertEqual(config["gate3"]["code_python"], "/opt/uenv-stress/venvs/dscodebench/bin/python")
-        self.assertEqual(config["gate4"]["mode"], "llm")
-        self.assertEqual(config["gate4"]["llm_kind"], "simulator")
-        self.assertGreaterEqual(config["gate4"]["instance_count"], 2)
+        self.assertEqual(config["dscodebench_pressure"]["simulator_wrong_steps"]["mean"], 2.0)
+        self.assertEqual(config["dscodebench_pressure"]["simulator_wrong_steps"]["std"], 1.0)
+        self.assertEqual(config["dscodebench_pressure"]["code_python"], "/opt/uenv-stress/venvs/dscodebench/bin/python")
+        self.assertEqual(config["swebench_pro_pressure"]["mode"], "llm")
+        self.assertEqual(config["swebench_pro_pressure"]["llm_kind"], "simulator")
+        self.assertGreaterEqual(config["swebench_pro_pressure"]["instance_count"], 2)
         self.assertFalse(config["worker_scale"]["enabled"])
         self.assertEqual(config["worker_scale"]["tiers"], [1024])
         self.assertEqual(config["worker_scale"]["model_port"], 6379)
@@ -52,7 +58,7 @@ class StressSuiteTests(unittest.TestCase):
             loaded = stress_test_common.load_dscodebench_jsonl(str(path), limit=1)
         payload = stress_test_common.dscodebench_env_payload(
             loaded[0],
-            task_id="gate3-real-1",
+            task_id="dscodebench_pressure-real-1",
             min_steps_before_terminate=3,
         )
         self.assertEqual(payload["dataset"], "dscodebench")
@@ -89,13 +95,13 @@ class StressSuiteTests(unittest.TestCase):
         self.assertEqual(decision["projected_next_fleet_memory_bytes"], 4 * 1024**3)
 
     def test_exact_batch_loop_rechecks_after_semaphore_wait(self):
-        source = Path(__file__).with_name("run_distributed_gate3_code.py").read_text(encoding="utf-8")
+        source = Path(__file__).with_name("run_dscodebench_pressure.py").read_text(encoding="utf-8")
         self.assertIn(
             "if args.exact_batches > 0 and batch_sequence >= args.exact_batches",
             source,
         )
 
-    def test_gate3_scale_command_receives_private_range_and_distribution(self):
+    def test_dscodebench_pressure_scale_command_receives_private_range_and_distribution(self):
         config = run_stress_suite.load_suite_config(
             Path(__file__).with_name("stress_suite.json")
         )
@@ -107,7 +113,7 @@ class StressSuiteTests(unittest.TestCase):
             model_port=8888, obs_port=18002, llm_config="/secret/config.json",
             private_worker_port_range="8000-9023",
         )
-        command = run_stress_suite.gate3_command(args, config, Path("/artifacts"))
+        command = run_stress_suite.dscodebench_pressure_command(args, config, Path("/artifacts"))
         self.assertIn("--private-worker-port-range", command)
         self.assertIn("--simulator-wrong-steps-mean", command)
         self.assertIn("--min-scale-episode-waves", command)
@@ -130,11 +136,11 @@ class StressSuiteTests(unittest.TestCase):
     def test_newest_summary_finds_child_output_under_absolute_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            target = root / "nested" / "gate3-summary-test.json"
+            target = root / "nested" / "dscodebench-pressure-summary-test.json"
             target.parent.mkdir()
             target.write_text("{}", encoding="utf-8")
             self.assertEqual(
-                run_stress_suite.newest_summary(root, "gate3-summary-*.json"),
+                run_stress_suite.newest_summary(root, "dscodebench-pressure-summary-*.json"),
                 target,
             )
 

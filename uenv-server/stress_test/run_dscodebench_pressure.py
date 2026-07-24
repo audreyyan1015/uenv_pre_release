@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""分布式 Gate3：真实 Code worker 多轮与扩容压测。
+﻿#!/usr/bin/env python3
+"""分布式 DSCodeBench pressure：真实 Code worker 多轮与扩容压测。
 
 运行位置说明：
 - 这个脚本从 8.130.75.157 的 stress_test 目录启动。
@@ -67,7 +67,7 @@ def put_worker_config_archive(worker, worker_run: str, documents: dict[str, tupl
 MODEL_SIMULATOR = r'''#!/usr/bin/env python3
 # 这个脚本会临时写到 worker 机器上运行。
 # 它提供一个最小 OpenAI-compatible HTTP 接口，默认前几轮返回错误代码，
-# 后续返回正确代码。这样 Gate3 可以真实经过多 step，而不是第一步就结束。
+# 后续返回正确代码。这样 DSCodeBench pressure 可以真实经过多 step，而不是第一步就结束。
 import argparse
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -439,9 +439,9 @@ class Handler(BaseHTTPRequestHandler):
             "uenv_model_version": {
                 "rollout_param_version": 1,
                 "rollout_policy_version": (
-                    "gate3-trace-replay-policy-1"
+                    "dscodebench_pressure-trace-replay-policy-1"
                     if args.simulator_mode == "trace_replay"
-                    else "gate3-policy-1"
+                    else "dscodebench_pressure-policy-1"
                 )
             },
             "uenv_response_ids": response_ids,
@@ -554,6 +554,9 @@ async def main():
         raise ValueError("episode batch size must be positive")
     submitted = completed = failed = rpc_errors = protocol_errors = 0
     rpc_error_details = []
+    missing_result_ids = []
+    duplicate_result_ids = []
+    unknown_result_ids = []
     rewards = []
     latencies = []
     actual_step_counts = []
@@ -566,7 +569,7 @@ async def main():
     batch_sequence = 0
 
     def make_sample(batch_id, index, sample_ordinal):
-        task_id = f"gate3-{args.run_id}-{args.mode}-{batch_id}-{index}"
+        task_id = f"dscodebench-pressure-{args.run_id}-{args.mode}-{batch_id}-{index}"
         mode_offset = {
             "sync": 0,
             "one_step_off_policy": args.workers,
@@ -612,6 +615,7 @@ async def main():
             make_sample(batch_id, index, current_batch * episode_batch_size + index)
             for index in range(episode_batch_size)
         ]
+        expected_ids = [sample.request_id for sample in samples]
         async with lock:
             submitted += len(samples)
         started = time.monotonic()
@@ -624,6 +628,20 @@ async def main():
             elapsed = (time.monotonic() - started) * 1000
             async with lock:
                 latencies.append(elapsed)
+                result_counts = {}
+                for result in response.results:
+                    result_counts[result.request_id] = result_counts.get(result.request_id, 0) + 1
+                received_ids = set(result_counts)
+                batch_missing = sorted(set(expected_ids) - received_ids)
+                batch_duplicates = sorted(
+                    request_id for request_id, count in result_counts.items() if count > 1
+                )
+                batch_unknown = sorted(received_ids - set(expected_ids))
+                missing_result_ids.extend(batch_missing)
+                duplicate_result_ids.extend(batch_duplicates)
+                unknown_result_ids.extend(batch_unknown)
+                failed += len(batch_missing) + len(batch_duplicates)
+                protocol_errors += len(batch_missing) + len(batch_duplicates) + len(batch_unknown)
                 for result in response.results:
                     rewards.append(result.reward)
                     if result.status in {"completed", "success"}:
@@ -639,6 +657,7 @@ async def main():
         except grpc.RpcError as exc:
             async with lock:
                 rpc_errors += len(samples)
+                missing_result_ids.extend(expected_ids)
                 if len(rpc_error_details) < 10:
                     rpc_error_details.append({
                         "code": exc.code().name if exc.code() else "UNKNOWN",
@@ -675,8 +694,8 @@ async def main():
     if tasks:
         await asyncio.gather(*tasks)
     elapsed = time.monotonic() - started
-    # 统一用公共模块生成结果，保证 Gate3 和其它脚本的统计字段含义一致。
-    document = stress_common.gate3_result_document(
+    # 统一用公共模块生成结果，保证 DSCodeBench pressure 和其它脚本的统计字段含义一致。
+    document = stress_common.dscodebench_pressure_result_document(
         run_id=args.run_id,
         mode=args.mode,
         configured_workers=args.workers,
@@ -732,6 +751,9 @@ async def main():
         "target_backlog_ratio": submitted / max(1, args.workers * args.slots),
     }
     document["rpc_error_details"] = rpc_error_details
+    document["missing_result_ids"] = sorted(set(missing_result_ids))
+    document["duplicate_result_ids"] = sorted(set(duplicate_result_ids))
+    document["unknown_result_ids"] = sorted(set(unknown_result_ids))
     document["dataset"] = {
         "name": "DSCodeBench",
         "path": args.dataset_jsonl,
@@ -790,7 +812,7 @@ while True:
 def server_config(workers: int, capacity: int) -> str:
     """生成隔离 server 的配置。
 
-    这里的 server 只服务本次 Gate3 压测，绑定 8099，不使用正式 server。
+    这里的 server 只服务本次 DSCodeBench pressure 压测，绑定 8099，不使用正式 server。
     completed_async_max_entries 等容量按 worker*slot 放大，避免压测时结果缓存太小。
     """
     total = workers * capacity
@@ -1048,7 +1070,7 @@ def run_scale(
     acceptance_purpose: str,
     code_python: str,
 ) -> dict:
-    """执行一组 Gate3 规模。
+    """执行一组 DSCodeBench pressure 规模。
 
     workers_count 是 worker 数，capacity 是每个 worker 的并发 slot 数。
     这个函数完成以下步骤：
@@ -1059,7 +1081,7 @@ def run_scale(
     5. 依次跑三种 parallel_mode；
     6. 清理本次启动的进程并复查端口。
     """
-    run_id = f"gate3-code-{workers_count}x{capacity}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    run_id = f"dscodebench-pressure-{workers_count}x{capacity}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     server_run = f"/tmp/uenv-{run_id}"
     worker_run = f"/opt/uenv-stress/runs/{run_id}"
     local_run = artifacts / run_id
@@ -1088,13 +1110,13 @@ def run_scale(
         before = base.protected_snapshot(server)
         base.assert_port_free(server, base.SERVER_PORT, base.SERVER_HOST)
         base.assert_ports_free(worker, ports + obs_ports + [base.MODEL_PORT], base.WORKER_HOST)
-        print(f"[gate3:{workers_count}x{capacity}] preflight ports={ports[0]}-{ports[-1]}", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] preflight ports={ports[0]}-{ports[-1]}", flush=True)
         build = base.source_and_binary_manifest(server, include_code_plugin=True)
-        print(f"[gate3:{workers_count}x{capacity}] source/binary manifest ready git={build['git_sha'][:12]}", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] source/binary manifest ready git={build['git_sha'][:12]}", flush=True)
         base.run(server, f"test -f {base.q(dataset_jsonl)}", timeout=20)
         _, dataset_hash_out, _ = base.run(server, f"sha256sum {base.q(dataset_jsonl)}", timeout=30)
         dataset_sha256 = dataset_hash_out.split()[0]
-        print(f"[gate3:{workers_count}x{capacity}] dataset manifest ready sha256={dataset_sha256[:12]}", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] dataset manifest ready sha256={dataset_sha256[:12]}", flush=True)
 
         # bundle 先在 server 机器上制作，再通过本地临时文件转传到 worker 机器。
         # 这样 worker 机器不需要直接访问 /home/uenv 源码目录。
@@ -1107,17 +1129,17 @@ def run_scale(
             f"cp -a {base.q(base.SOURCE_REPO)}/plugins/code/. {base.q(server_run)}/bundle/plugins/code/",
             f"tar -C {base.q(server_run)}/bundle -czf {base.q(server_run)}/bundle.tgz .",
         ]), timeout=180)
-        print(f"[gate3:{workers_count}x{capacity}] worker/plugin bundle built", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] worker/plugin bundle built", flush=True)
         with tempfile.NamedTemporaryFile(prefix=run_id, suffix=".tgz", delete=False) as tmp:
             local_bundle = Path(tmp.name)
         try:
-            print(f"[gate3:{workers_count}x{capacity}] copying worker/plugin bundle to worker", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] copying worker/plugin bundle to worker", flush=True)
             with server.open_sftp() as sftp: sftp.get(f"{server_run}/bundle.tgz", str(local_bundle))
             with worker.open_sftp() as sftp: sftp.put(str(local_bundle), f"{worker_run}/bundle.tgz")
         finally:
             local_bundle.unlink(missing_ok=True)
         base.run(worker, f"install -d -m 0755 {base.q(worker_run)}/bundle && tar -C {base.q(worker_run)}/bundle -xzf {base.q(worker_run)}/bundle.tgz")
-        print(f"[gate3:{workers_count}x{capacity}] worker/plugin bundle installed", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] worker/plugin bundle installed", flush=True)
         base.put_text(server, f"{server_run}/server.yaml", server_config(workers_count, capacity))
         base.put_text(server, f"{server_run}/load_client.py", LOAD_CLIENT, 0o755)
         base.put_text(server, f"{server_run}/stress_test_common.py", COMMON_SOURCE)
@@ -1126,10 +1148,10 @@ def run_scale(
         base.put_text(worker, f"{worker_run}/ark_real_llm_proxy.py", REAL_LLM_PROXY_SOURCE, 0o700)
         base.put_text(worker, f"{worker_run}/ark_real_llm_preflight.py", REAL_LLM_PREFLIGHT_SOURCE, 0o700)
         base.put_text(worker, f"{worker_run}/worker_fleet_supervisor.py", FLEET_SUPERVISOR_SOURCE, 0o700)
-        print(f"[gate3:{workers_count}x{capacity}] runtime scripts uploaded", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] runtime scripts uploaded", flush=True)
         worker_dataset = f"{worker_run}/DSCodeBench.json"
         if model_mode == "simulator":
-            print(f"[gate3:{workers_count}x{capacity}] copying DSCodeBench dataset to worker", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] copying DSCodeBench dataset to worker", flush=True)
             with tempfile.NamedTemporaryFile(prefix=run_id, suffix="-dscodebench.json", delete=False) as tmp:
                 local_dataset = Path(tmp.name)
             try:
@@ -1139,13 +1161,13 @@ def run_scale(
                     sftp.put(str(local_dataset), worker_dataset)
             finally:
                 local_dataset.unlink(missing_ok=True)
-            print(f"[gate3:{workers_count}x{capacity}] DSCodeBench dataset copied", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] DSCodeBench dataset copied", flush=True)
             if simulator_mode == "trace_replay":
                 effective_trace_corpus_path = _prepare_worker_trace_corpus(
                     worker, worker_run, trace_corpus_path, run_id
                 )
                 print(
-                    f"[gate3:{workers_count}x{capacity}] DSCodeBench trace corpus ready "
+                    f"[dscodebench_pressure:{workers_count}x{capacity}] DSCodeBench trace corpus ready "
                     f"path={effective_trace_corpus_path}",
                     flush=True,
                 )
@@ -1157,7 +1179,7 @@ def run_scale(
                 0o600,
             )
         put_worker_config_archive(worker, worker_run, worker_documents, run_id)
-        print(f"[gate3:{workers_count}x{capacity}] worker configs archive uploaded count={len(worker_documents)}", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] worker configs archive uploaded count={len(worker_documents)}", flush=True)
         # load_client.py 需要 Python 版 protobuf message，所以每次用当前 proto 生成。
         proto_root = f"{base.SOURCE_REPO}/proto"
         proto = " ".join([
@@ -1167,7 +1189,7 @@ def run_scale(
         ])
         base.run(server, proto)
         base.run(server, f"touch {base.q(server_run)}/generated/uenv/__init__.py {base.q(server_run)}/generated/uenv/v1/__init__.py")
-        print(f"[gate3:{workers_count}x{capacity}] generated Python protobuf stubs", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] generated Python protobuf stubs", flush=True)
         # 关闭 trajectory/obs，减少压测以外的写入和背景工作。
         # Scale acceptance needs the assignment.worker_id on every completion
         # to prove that all real Workers, rather than only N registry entries,
@@ -1226,7 +1248,7 @@ def run_scale(
                 f"--url http://127.0.0.1:{base.MODEL_PORT}/v1",
                 timeout=240,
             )
-            print(f"[gate3:{workers_count}x{capacity}] {preflight_out.strip()}", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] {preflight_out.strip()}", flush=True)
         # 每个 worker 都有独立 yaml、独立 WAL 和独立日志，方便定位某个 worker 的问题。
         worker_env = {
             "UENV_SERVER_CONFIG_STRICT": "1",
@@ -1328,7 +1350,7 @@ def run_scale(
                 f"--wait-seconds {endpoint_ready_timeout}",
                 timeout=endpoint_ready_timeout + 15,
             )
-        print(f"[gate3:{workers_count}x{capacity}] private Worker range endpoints reachable", flush=True)
+        print(f"[dscodebench_pressure:{workers_count}x{capacity}] private Worker range endpoints reachable", flush=True)
         base.assert_protected_unchanged(server, before)
         # manifest 记录本轮实际启动的端口、PID 和受保护 server 快照。
         # 后续排查时先看 manifest，再看 result/log。
@@ -1442,17 +1464,17 @@ def run_scale(
                 "--exact-batches", str(exact_batches),
                 "--episode-batch-size", str(episode_batch_size),
                 "--concurrent-batches", str(concurrent_batches),
-                "--model-name", ("proxy-selected-versioned-model" if model_mode == "real" else "gate3-code-model"),
+                "--model-name", ("proxy-selected-versioned-model" if model_mode == "real" else "dscodebench-pressure-model"),
             ]
             if effective_trace_corpus_path:
                 load_client_args.extend(["--trace-corpus-path", effective_trace_corpus_path])
             command = " ".join(load_client_args)
-            print(f"[gate3:{workers_count}x{capacity}] mode={mode} start", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] mode={mode} start", flush=True)
             command_timeout = registration_timeout + max(batch_timeout, duration + 240)
             _, out, err = base.run(server, command, timeout=command_timeout)
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
-            step_stats = _model_step_stats(worker, f"gate3-{run_id}-{mode}-")
+            step_stats = _model_step_stats(worker, f"dscodebench_pressure-{run_id}-{mode}-")
             result["model_step_stats"] = step_stats
             trace_replay_stats = (
                 step_stats.get("simulator", {}).get("trace_replay", {})
@@ -1522,7 +1544,7 @@ def run_scale(
                     )
             results.append(result)
             (local_run / f"result-{mode}.json").write_text(json.dumps(result, indent=2, sort_keys=True))
-            print(f"[gate3:{workers_count}x{capacity}] mode={mode} PASS throughput={result['throughput_eps']:.2f} ep/s", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] mode={mode} PASS throughput={result['throughput_eps']:.2f} ep/s", flush=True)
         (local_run / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
         if model_mode == "real" and real_llm_trace_output_dir:
             remote_trace_archive = f"{worker_run}/dscodebench-trace-corpus.tgz"
@@ -1601,7 +1623,7 @@ def run_scale(
             except Exception as exc: cleanup_errors.append(str(exc))
         if cleanup_errors:
             (local_run / "cleanup-errors.txt").write_text("\n".join(cleanup_errors))
-            print(f"[gate3:{workers_count}x{capacity}] cleanup ERRORS={cleanup_errors}", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] cleanup ERRORS={cleanup_errors}", flush=True)
             outcome = {
                 "run_id": run_id,
                 "scale": f"{workers_count}x{capacity}",
@@ -1609,7 +1631,7 @@ def run_scale(
                 "error": "cleanup failed: " + " | ".join(cleanup_errors),
             }
         else:
-            print(f"[gate3:{workers_count}x{capacity}] cleanup complete", flush=True)
+            print(f"[dscodebench_pressure:{workers_count}x{capacity}] cleanup complete", flush=True)
         for client in (worker, server):
             if client: client.close()
     assert outcome is not None
@@ -1617,7 +1639,7 @@ def run_scale(
 
 
 def main() -> int:
-    """Gate3 command entry for real-Worker Gate3 and scale pressure runs."""
+    """DSCodeBench pressure command entry for real-Worker DSCodeBench pressure and scale pressure runs."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration", type=int, default=30)
     parser.add_argument("--workers", type=int, default=1)
@@ -1638,7 +1660,7 @@ def main() -> int:
         "--model-mode",
         choices=("real", "simulator"),
         default="real",
-        help="Gate3 defaults to the real Ark LLM; simulator must be explicitly selected.",
+        help="DSCodeBench pressure defaults to the real Ark LLM; simulator must be explicitly selected.",
     )
     parser.add_argument(
         "--llm-config",
@@ -1695,8 +1717,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--acceptance-purpose",
-        choices=("gate3-real-llm", "worker-scale", "single-worker-diagnostic"),
-        default="gate3-real-llm",
+        choices=("dscodebench_pressure-real-llm", "worker-scale", "single-worker-diagnostic"),
+        default="dscodebench_pressure-real-llm",
     )
     parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-gate-artifacts")
     base.add_runtime_arguments(parser, require_code_plugin=True)
@@ -1758,8 +1780,8 @@ def main() -> int:
     if not 1 <= args.plugin_ready_timeout_seconds <= 300:
         raise SystemExit("--plugin-ready-timeout-seconds must be between 1 and 300")
     modes = tuple(args.mode or MODES)
-    if args.acceptance_purpose == "gate3-real-llm" and args.model_mode != "real":
-        raise SystemExit("Gate3 acceptance requires --model-mode real")
+    if args.acceptance_purpose == "dscodebench_pressure-real-llm" and args.model_mode != "real":
+        raise SystemExit("DSCodeBench pressure acceptance requires --model-mode real")
     if args.acceptance_purpose == "worker-scale":
         if args.model_mode != "simulator" or args.exact_batches <= 0:
             raise SystemExit("worker-scale requires simulator and --exact-batches > 0")
@@ -1847,9 +1869,9 @@ def main() -> int:
         args.code_python,
     )
     summaries = [summary]
-    summary_path = args.artifacts / f"gate3-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    summary_path = args.artifacts / f"dscodebench-pressure-summary-{time.strftime('%Y%m%d-%H%M%S')}.json"
     summary_path.write_text(json.dumps(summaries, indent=2, sort_keys=True))
-    print(f"[gate3] summary={summary_path}", flush=True)
+    print(f"[dscodebench_pressure] summary={summary_path}", flush=True)
     return 0 if summary["status"] == "passed" else 1
 
 

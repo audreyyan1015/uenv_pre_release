@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Run Gate3 and Gate4 as one protected, reproducible scale-stress suite.
+﻿#!/usr/bin/env python3
+"""Run DSCodeBench pressure and SWE-bench Pro pressure as one protected, reproducible scale-stress suite.
 
 The suite is an orchestrator.  It must run on a control machine that can SSH to
 the Server and Worker hosts.  It never installs or restarts the protected
@@ -23,7 +23,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "stress_suite.json"
 ALLOWED_EXPOSED_PORTS = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
-GATE3_MODES = {"sync", "one_step_off_policy", "fully_async"}
+PARALLEL_MODES = {"sync", "one_step_off_policy", "fully_async"}
 
 
 def latency_config(section: dict[str, Any], field: str = "simulator_latency_ms") -> dict[str, float]:
@@ -49,18 +49,18 @@ def load_suite_config(path: Path) -> dict[str, Any]:
     document = json.loads(path.read_text(encoding="utf-8"))
     if document.get("schema_version") != 1:
         raise ValueError("stress suite schema_version must be 1")
-    gate3 = document.get("gate3")
-    gate4 = document.get("gate4")
+    dscodebench_pressure = document.get("dscodebench_pressure")
+    swebench_pro_pressure = document.get("swebench_pro_pressure")
     worker_scale = document.get("worker_scale")
     trace_collection = document.get("trace_collection")
-    if not isinstance(gate3, dict) or not isinstance(gate4, dict) or not isinstance(worker_scale, dict):
-        raise ValueError("stress suite requires gate3, gate4 and worker_scale objects")
+    if not isinstance(dscodebench_pressure, dict) or not isinstance(swebench_pro_pressure, dict) or not isinstance(worker_scale, dict):
+        raise ValueError("stress suite requires dscodebench_pressure, swebench_pro_pressure and worker_scale objects")
     if not isinstance(trace_collection, dict):
         raise ValueError("stress suite requires a trace_collection object")
     dscodebench_collection = trace_collection.get("dscodebench")
-    swe_collection = trace_collection.get("swebench_verified")
+    swe_collection = trace_collection.get("swebench_pro")
     if not isinstance(dscodebench_collection, dict) or not isinstance(swe_collection, dict):
-        raise ValueError("trace_collection requires dscodebench and swebench_verified objects")
+        raise ValueError("trace_collection requires dscodebench and swebench_pro objects")
     if int(dscodebench_collection.get("dataset_count", 0)) != 100:
         raise ValueError("DSCodeBench real-LLM trace collection must sample exactly 100 records")
     if int(dscodebench_collection.get("collection_concurrency", 0)) != 100:
@@ -68,92 +68,95 @@ def load_suite_config(path: Path) -> dict[str, Any]:
     if bool(dscodebench_collection.get("uses_1024_workers", True)):
         raise ValueError("DSCodeBench trace collection must not use 1024 Workers")
     if int(swe_collection.get("instance_count", 0)) != 50:
-        raise ValueError("SWE-bench Verified real-LLM trace collection must sample exactly 50 instances")
+        raise ValueError("SWE-bench Pro real-LLM trace collection must sample exactly 50 instances")
     swe_concurrency = int(swe_collection.get("collection_concurrency", 0))
     if not 1 <= swe_concurrency <= 50:
-        raise ValueError("SWE-bench Verified real-LLM trace collection concurrency must be in [1, 50]")
+        raise ValueError("SWE-bench Pro real-LLM trace collection concurrency must be in [1, 50]")
     if int(swe_collection.get("target_valid_traces", 50)) != 50:
-        raise ValueError("SWE-bench Verified trace collection target_valid_traces must be 50")
+        raise ValueError("SWE-bench Pro trace collection target_valid_traces must be 50")
     if bool(swe_collection.get("uses_1024_workers", True)):
-        raise ValueError("SWE-bench Verified trace collection must not use 1024 Workers")
-    modes = gate3.get("modes")
-    if not isinstance(modes, list) or not modes or set(modes) - GATE3_MODES:
-        raise ValueError(f"invalid Gate3 modes: {modes!r}")
-    if gate3.get("model_mode") != "simulator":
-        raise ValueError("scale stress requires Gate3 model_mode=simulator")
-    gate3_simulator_mode = str(gate3.get("simulator_mode", "template"))
-    if gate3_simulator_mode not in {"template", "trace_replay"}:
-        raise ValueError("Gate3 simulator_mode must be template or trace_replay")
-    if gate3_simulator_mode != "trace_replay":
-        raise ValueError("Gate3 pressure evidence requires simulator_mode=trace_replay")
-    latency_config(gate3)
-    if not str(gate3.get("trace_corpus_path", "")).strip():
-        raise ValueError("Gate3 trace_replay requires trace_corpus_path")
-    gate3_sampling = str(gate3.get("trace_sampling_strategy", "problem_then_turn"))
-    if gate3_sampling not in {"problem_then_turn", "turn_only"}:
-        raise ValueError("Gate3 trace_sampling_strategy is invalid")
-    if int(gate3.get("workers", 0)) < 1024:
-        raise ValueError("Gate3 pressure evidence requires at least 1024 Workers")
-    capacity = int(gate3.get("capacity_per_worker", 0))
-    batch_size = int(gate3.get("episode_batch_size", gate3.get("workers", 0)))
-    exact_batches = int(gate3.get("exact_batches_per_mode", 0))
-    min_waves = int(gate3.get("min_episode_waves", 10))
-    if batch_size * exact_batches < int(gate3["workers"]) * capacity * min_waves:
-        raise ValueError("Gate3 total episodes per mode must be at least workers * capacity * min_episode_waves")
-    if gate4.get("mode") != "llm":
-        raise ValueError("the integrated acceptance suite requires Gate4 mode=llm")
-    gate4_parallel_modes = gate4.get("parallel_modes")
+        raise ValueError("SWE-bench Pro trace collection must not use 1024 Workers")
+    modes = dscodebench_pressure.get("modes")
+    if not isinstance(modes, list) or not modes or set(modes) - PARALLEL_MODES:
+        raise ValueError(f"invalid DSCodeBench pressure modes: {modes!r}")
+    if dscodebench_pressure.get("model_mode") != "simulator":
+        raise ValueError("scale stress requires DSCodeBench pressure model_mode=simulator")
+    dscodebench_pressure_simulator_mode = str(dscodebench_pressure.get("simulator_mode", "template"))
+    if dscodebench_pressure_simulator_mode not in {"template", "trace_replay"}:
+        raise ValueError("DSCodeBench pressure simulator_mode must be template or trace_replay")
+    if dscodebench_pressure_simulator_mode != "trace_replay":
+        raise ValueError("DSCodeBench pressure pressure evidence requires simulator_mode=trace_replay")
+    latency_config(dscodebench_pressure)
+    if not str(dscodebench_pressure.get("trace_corpus_path", "")).strip():
+        raise ValueError("DSCodeBench pressure trace_replay requires trace_corpus_path")
+    dscodebench_pressure_sampling = str(dscodebench_pressure.get("trace_sampling_strategy", "problem_then_turn"))
+    if dscodebench_pressure_sampling not in {"problem_then_turn", "turn_only"}:
+        raise ValueError("DSCodeBench pressure trace_sampling_strategy is invalid")
+    if int(dscodebench_pressure.get("workers", 0)) < 1024:
+        raise ValueError("DSCodeBench pressure pressure evidence requires at least 1024 Workers")
+    capacity = int(dscodebench_pressure.get("capacity_per_worker", 0))
+    batch_size = int(dscodebench_pressure.get("episode_batch_size", dscodebench_pressure.get("workers", 0)))
+    exact_batches = int(dscodebench_pressure.get("exact_batches_per_mode", 0))
+    min_waves = int(dscodebench_pressure.get("min_episode_waves", 10))
+    if batch_size * exact_batches < int(dscodebench_pressure["workers"]) * capacity * min_waves:
+        raise ValueError("DSCodeBench pressure total episodes per mode must be at least workers * capacity * min_episode_waves")
+    if swebench_pro_pressure.get("mode") != "llm":
+        raise ValueError("the integrated acceptance suite requires SWE-bench Pro pressure mode=llm")
+    swebench_pro_pressure_parallel_modes = swebench_pro_pressure.get("parallel_modes")
     if (
-        not isinstance(gate4_parallel_modes, list)
-        or set(gate4_parallel_modes) != GATE3_MODES
+        not isinstance(swebench_pro_pressure_parallel_modes, list)
+        or set(swebench_pro_pressure_parallel_modes) != PARALLEL_MODES
     ):
-        raise ValueError("Gate4 must cover sync, one_step_off_policy and fully_async parallel_modes")
-    llm_kind = str(gate4.get("llm_kind", "simulator"))
+        raise ValueError("SWE-bench Pro pressure must cover sync, one_step_off_policy and fully_async parallel_modes")
+    llm_kind = str(swebench_pro_pressure.get("llm_kind", "simulator"))
     if llm_kind not in {"simulator", "real"}:
-        raise ValueError("Gate4 llm_kind must be simulator or real")
+        raise ValueError("SWE-bench Pro pressure llm_kind must be simulator or real")
     if llm_kind == "simulator":
-        latency_config(gate4)
-        gate4_wrong_steps = gate4.get("simulator_wrong_steps", {})
+        latency_config(swebench_pro_pressure)
+        swebench_pro_pressure_wrong_steps = swebench_pro_pressure.get("simulator_wrong_steps", {})
         if not (
             0
-            <= int(gate4_wrong_steps.get("min", 0))
-            <= float(gate4_wrong_steps.get("mean", 0))
-            <= int(gate4_wrong_steps.get("max", 0))
+            <= int(swebench_pro_pressure_wrong_steps.get("min", 0))
+            <= float(swebench_pro_pressure_wrong_steps.get("mean", 0))
+            <= int(swebench_pro_pressure_wrong_steps.get("max", 0))
         ):
-            raise ValueError("Gate4 simulator wrong_steps must satisfy 0 <= min <= mean <= max")
-        if float(gate4_wrong_steps.get("std", 0)) < 0:
-            raise ValueError("Gate4 simulator wrong_steps std must be non-negative")
-        if not 0 <= float(gate4.get("simulator_repair_success_rate", 0)) <= 1:
-            raise ValueError("Gate4 simulator_repair_success_rate must be in [0, 1]")
-        simulator_mode = str(gate4.get("simulator_mode", "template"))
+            raise ValueError("SWE-bench Pro pressure simulator wrong_steps must satisfy 0 <= min <= mean <= max")
+        if float(swebench_pro_pressure_wrong_steps.get("std", 0)) < 0:
+            raise ValueError("SWE-bench Pro pressure simulator wrong_steps std must be non-negative")
+        if not 0 <= float(swebench_pro_pressure.get("simulator_repair_success_rate", 0)) <= 1:
+            raise ValueError("SWE-bench Pro pressure simulator_repair_success_rate must be in [0, 1]")
+        simulator_mode = str(swebench_pro_pressure.get("simulator_mode", "template"))
         if simulator_mode not in {"template", "trace_replay"}:
-            raise ValueError("Gate4 simulator_mode must be template or trace_replay")
-        if simulator_mode == "trace_replay" and not str(gate4.get("trace_corpus_path", "")).strip():
-            raise ValueError("Gate4 trace_replay requires trace_corpus_path")
-        sampling = str(gate4.get("trace_sampling_strategy", "instance_then_turn"))
+            raise ValueError("SWE-bench Pro pressure simulator_mode must be template or trace_replay")
+        if simulator_mode == "trace_replay" and not str(swebench_pro_pressure.get("trace_corpus_path", "")).strip():
+            raise ValueError("SWE-bench Pro pressure trace_replay requires trace_corpus_path")
+        sampling = str(swebench_pro_pressure.get("trace_sampling_strategy", "instance_then_turn"))
         if sampling not in {"instance_then_turn", "turn_only"}:
-            raise ValueError("Gate4 trace_sampling_strategy is invalid")
-    concurrencies = gate4.get("concurrencies")
+            raise ValueError("SWE-bench Pro pressure trace_sampling_strategy is invalid")
+    concurrencies = swebench_pro_pressure.get("concurrencies")
     if not isinstance(concurrencies, list) or not concurrencies or any(int(value) <= 0 for value in concurrencies):
-        raise ValueError("Gate4 concurrencies must be positive integers")
-    if int(gate4.get("instance_count", 0)) < 50:
-        raise ValueError("Gate4 SWE-bench Verified coverage requires at least 50 sampled instances")
-    gate4_workers = int(gate4.get("registered_workers", 1))
-    gate4_capacity = int(gate4.get("worker_capacity", 1))
-    gate4_waves = int(gate4.get("min_episode_waves", 10))
-    gate4_total_episodes = int(gate4.get("total_episodes", 0))
-    if gate4_workers < 1024:
-        raise ValueError("Gate4 scale evidence requires at least 1024 registered Workers")
-    if gate4_capacity < 1:
-        raise ValueError("Gate4 worker_capacity must be positive")
-    if gate4_total_episodes < gate4_workers * gate4_capacity * gate4_waves:
-        raise ValueError("Gate4 total_episodes must be at least registered_workers * worker_capacity * min_episode_waves")
-    if llm_kind != "simulator" or str(gate4.get("simulator_mode", "")) != "trace_replay":
-        raise ValueError("Gate4 1024 Worker scale requires simulator trace_replay")
-    min_steps = int(gate3.get("min_steps", 0))
-    max_steps = int(gate3.get("max_steps", 0))
+        raise ValueError("SWE-bench Pro pressure concurrencies must be positive integers")
+    if int(swebench_pro_pressure.get("instance_count", 0)) < 50:
+        raise ValueError("SWE-bench Pro pressure coverage requires at least 50 sampled instances")
+    for field in ("dataset_catalog", "instance_list"):
+        if not str(swebench_pro_pressure.get(field, "")).strip():
+            raise ValueError(f"SWE-bench Pro pressure requires {field}")
+    swebench_pro_pressure_workers = int(swebench_pro_pressure.get("registered_workers", 1))
+    swebench_pro_pressure_capacity = int(swebench_pro_pressure.get("worker_capacity", 1))
+    swebench_pro_pressure_waves = int(swebench_pro_pressure.get("min_episode_waves", 10))
+    swebench_pro_pressure_total_episodes = int(swebench_pro_pressure.get("total_episodes", 0))
+    if swebench_pro_pressure_workers < 1024:
+        raise ValueError("SWE-bench Pro pressure scale evidence requires at least 1024 registered Workers")
+    if swebench_pro_pressure_capacity < 1:
+        raise ValueError("SWE-bench Pro pressure worker_capacity must be positive")
+    if swebench_pro_pressure_total_episodes < swebench_pro_pressure_workers * swebench_pro_pressure_capacity * swebench_pro_pressure_waves:
+        raise ValueError("SWE-bench Pro pressure total_episodes must be at least registered_workers * worker_capacity * min_episode_waves")
+    if llm_kind != "simulator" or str(swebench_pro_pressure.get("simulator_mode", "")) != "trace_replay":
+        raise ValueError("SWE-bench Pro pressure 1024 Worker scale requires simulator trace_replay")
+    min_steps = int(dscodebench_pressure.get("min_steps", 0))
+    max_steps = int(dscodebench_pressure.get("max_steps", 0))
     if min_steps < 2 or max_steps < min_steps:
-        raise ValueError("Gate3 requires 2 <= min_steps <= max_steps")
+        raise ValueError("DSCodeBench pressure requires 2 <= min_steps <= max_steps")
     if not worker_scale.get("enabled", False):
         return document
     if worker_scale.get("model_mode") != "trace_replay_simulator":
@@ -218,36 +221,36 @@ def parse_port_range(label: str, value: str) -> tuple[int, int]:
 def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None:
     for label in ("source_repo", "server_bin", "worker_bin", "code_plugin_bin"):
         require_absolute(f"--{label.replace('_', '-')}", str(getattr(args, label)))
-    if config["gate4"].get("llm_kind") == "real":
+    if config["swebench_pro_pressure"].get("llm_kind") == "real":
         require_absolute("--llm-config", str(args.llm_config))
-    gate4 = config["gate4"]
-    gate4_model_port = int(gate4.get("model_port", args.model_port))
-    gate4_gateway_port = int(gate4.get("gateway_port", args.gateway_port))
-    gate4_agent_api_port = int(gate4.get("agent_api_port", args.agent_api_port))
-    gate4_agent_health_port = int(gate4.get("agent_health_port", args.agent_health_port))
-    gate4_workers = int(gate4.get("registered_workers", 1))
-    gate3_workers = int(config["gate3"].get("workers", 1))
+    swebench_pro_pressure = config["swebench_pro_pressure"]
+    swebench_pro_pressure_model_port = int(swebench_pro_pressure.get("model_port", args.model_port))
+    swebench_pro_pressure_gateway_port = int(swebench_pro_pressure.get("gateway_port", args.gateway_port))
+    swebench_pro_pressure_agent_api_port = int(swebench_pro_pressure.get("agent_api_port", args.agent_api_port))
+    swebench_pro_pressure_agent_health_port = int(swebench_pro_pressure.get("agent_health_port", args.agent_health_port))
+    swebench_pro_pressure_workers = int(swebench_pro_pressure.get("registered_workers", 1))
+    dscodebench_pressure_workers = int(config["dscodebench_pressure"].get("workers", 1))
     exposed_ports = {
         "server": args.server_port,
-        "model": gate4_model_port,
-        "agent API": gate4_agent_api_port,
-        "agent health": gate4_agent_health_port,
+        "model": swebench_pro_pressure_model_port,
+        "agent API": swebench_pro_pressure_agent_api_port,
+        "agent health": swebench_pro_pressure_agent_health_port,
     }
-    if gate3_workers == 1 and gate4_workers == 1:
+    if dscodebench_pressure_workers == 1 and swebench_pro_pressure_workers == 1:
         exposed_ports["worker"] = args.worker_port
-        exposed_ports["gateway"] = gate4_gateway_port
+        exposed_ports["gateway"] = swebench_pro_pressure_gateway_port
     for label, port in exposed_ports.items():
         if port not in ALLOWED_EXPOSED_PORTS:
             raise ValueError(f"{label} port {port} is not in the explicitly allowed exposed-port set")
     protected = set(args.protected_port)
-    requested = {args.server_port, gate4_model_port}
-    if gate3_workers == 1 and gate4_workers == 1:
-        requested.update({args.worker_port, gate4_gateway_port})
+    requested = {args.server_port, swebench_pro_pressure_model_port}
+    if dscodebench_pressure_workers == 1 and swebench_pro_pressure_workers == 1:
+        requested.update({args.worker_port, swebench_pro_pressure_gateway_port})
     overlap = protected & requested
     if overlap:
         raise ValueError(f"isolated suite ports overlap protected ports: {sorted(overlap)}")
-    gate3 = config["gate3"]
-    workers = int(gate3["workers"])
+    dscodebench_pressure = config["dscodebench_pressure"]
+    workers = int(dscodebench_pressure["workers"])
     worker_scale = config["worker_scale"]
     max_scale_workers = max(
         [workers] + [int(value) for value in worker_scale.get("tiers", [])]
@@ -262,8 +265,6 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
             raise ValueError(f"worker-scale model port {scale_model_port} overlaps a protected port")
     if (workers > 1 or config["worker_scale"].get("enabled", True)) and not args.private_worker_port_range:
         raise ValueError("multi-Worker execution requires --private-worker-port-range")
-    if int(config["gate4"].get("registered_workers", 1)) > 1 and not args.private_gateway_port_range:
-        raise ValueError("Gate4 multi-Worker execution requires --private-gateway-port-range")
     private_ranges: list[tuple[str, int, int]] = []
     if args.private_worker_port_range:
         start, end = parse_port_range("--private-worker-port-range", args.private_worker_port_range)
@@ -272,13 +273,13 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
             raise ValueError(
                 f"private Worker range must start at {args.worker_port} and contain at least {max_scale_workers} ports"
             )
-        if start <= gate4_model_port <= end:
+        if start <= swebench_pro_pressure_model_port <= end:
             raise ValueError(
-                f"model port {gate4_model_port} overlaps the private Worker port range {start}-{end}"
+                f"model port {swebench_pro_pressure_model_port} overlaps the private Worker port range {start}-{end}"
             )
         for label, port in {
-            "agent API": gate4_agent_api_port,
-            "agent health": gate4_agent_health_port,
+            "agent API": swebench_pro_pressure_agent_api_port,
+            "agent health": swebench_pro_pressure_agent_health_port,
         }.items():
             if start <= port <= end:
                 raise ValueError(f"{label} port {port} overlaps the private Worker port range {start}-{end}")
@@ -286,29 +287,31 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
             raise ValueError(
                 f"worker-scale model port {scale_model_port} overlaps the {max_scale_workers}-Worker port range"
             )
+    if int(config["swebench_pro_pressure"].get("registered_workers", 1)) > 1 and not getattr(args, "private_gateway_port_range", ""):
+        raise ValueError("SWE-bench Pro pressure multi-Worker execution requires --private-gateway-port-range")
     if args.private_gateway_port_range:
-        gate4_workers = int(config["gate4"].get("registered_workers", 1))
+        swebench_pro_pressure_workers = int(config["swebench_pro_pressure"].get("registered_workers", 1))
         start, end = parse_port_range("--private-gateway-port-range", args.private_gateway_port_range)
         private_ranges.append(("Gateway", start, end))
-        if start != gate4_gateway_port or end - start + 1 < gate4_workers:
+        if start != swebench_pro_pressure_gateway_port or end - start + 1 < swebench_pro_pressure_workers:
             raise ValueError(
-                f"private Gateway range must start at {gate4_gateway_port} and contain at least {gate4_workers} ports"
+                f"private Gateway range must start at {swebench_pro_pressure_gateway_port} and contain at least {swebench_pro_pressure_workers} ports"
             )
         for label, port in {
             "server": args.server_port,
-            "model": gate4_model_port,
+            "model": swebench_pro_pressure_model_port,
             "worker-scale model": scale_model_port,
-            "agent API": gate4_agent_api_port,
-            "agent health": gate4_agent_health_port,
+            "agent API": swebench_pro_pressure_agent_api_port,
+            "agent health": swebench_pro_pressure_agent_health_port,
         }.items():
             if start <= port <= end:
                 raise ValueError(f"{label} port {port} overlaps the private Gateway port range {start}-{end}")
     obs_start = args.obs_port
-    obs_end = args.obs_port + max(int(config["gate4"].get("registered_workers", 1)), max_scale_workers) - 1
+    obs_end = args.obs_port + max(int(config["swebench_pro_pressure"].get("registered_workers", 1)), max_scale_workers) - 1
     for label, port in {
-        "model": gate4_model_port,
-        "agent API": gate4_agent_api_port,
-        "agent health": gate4_agent_health_port,
+        "model": swebench_pro_pressure_model_port,
+        "agent API": swebench_pro_pressure_agent_api_port,
+        "agent health": swebench_pro_pressure_agent_health_port,
     }.items():
         if obs_start <= port <= obs_end:
             raise ValueError(f"{label} port {port} overlaps the Observability port range {obs_start}-{obs_end}")
@@ -343,12 +346,12 @@ def common_child_args(args: argparse.Namespace, *, model_port: int | None = None
     return command
 
 
-def gate3_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
-    gate = config["gate3"]
+def dscodebench_pressure_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
+    gate = config["dscodebench_pressure"]
     latency = latency_config(gate)
     command = [
         sys.executable,
-        str(HERE / "run_distributed_gate3_code.py"),
+        str(HERE / "run_dscodebench_pressure.py"),
         "--duration", str(gate["duration_seconds_per_mode"]),
         "--workers", str(gate["workers"]),
         "--capacity", str(gate["capacity_per_worker"]),
@@ -404,11 +407,14 @@ def worker_scale_command(
     gate = config["worker_scale"]
     episode_batch_size = int(gate["episode_batch_size"])
     exact_batches = workers * int(gate["episodes_per_worker"]) // episode_batch_size
-    concurrent_batches = exact_batches
+    concurrent_batches = max(
+        1,
+        workers * int(gate["capacity_per_worker"]) // episode_batch_size,
+    )
     latency = latency_config(gate)
     command = [
         sys.executable,
-        str(HERE / "run_distributed_gate3_code.py"),
+        str(HERE / "run_dscodebench_pressure.py"),
         "--duration", "1",
         "--workers", str(workers),
         "--capacity", str(gate["capacity_per_worker"]),
@@ -452,8 +458,8 @@ def worker_scale_command(
     return command + common_child_args(args, model_port=int(gate["model_port"]))
 
 
-def gate4_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
-    gate = config["gate4"]
+def swebench_pro_pressure_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
+    gate = config["swebench_pro_pressure"]
     latency = latency_config(gate)
     model_port = int(gate.get("model_port", args.model_port))
     gateway_port = int(gate.get("gateway_port", args.gateway_port))
@@ -461,13 +467,15 @@ def gate4_command(args: argparse.Namespace, config: dict[str, Any], artifacts: P
     agent_health_port = int(gate.get("agent_health_port", args.agent_health_port))
     command = [
         sys.executable,
-        str(HERE / "run_distributed_gate4_swe.py"),
+        str(HERE / "run_swebench_pro_pressure.py"),
         "--mode", "llm",
         "--llm-kind", str(gate["llm_kind"]),
         "--max-steps", str(gate["max_steps"]),
         "--openhands-max-iterations", str(gate["openhands_max_iterations"]),
         "--instance-count", str(gate["instance_count"]),
         "--instance-seed", str(gate["instance_seed"]),
+        "--dataset-catalog", str(gate["dataset_catalog"]),
+        "--instance-list", str(gate["instance_list"]),
         "--registered-workers", str(gate.get("registered_workers", 1)),
         "--worker-capacity", str(gate.get("worker_capacity", 1)),
         "--total-episodes", str(gate.get("total_episodes", 0)),
@@ -650,6 +658,22 @@ def scale_resource_observation(
     }
 
 
+def scale_resource_gate(
+    scenario: dict[str, Any],
+    current_workers: int,
+    next_workers: int | None,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Compatibility entrypoint used by preflight tests and staged scale runs."""
+    result = scale_resource_observation(scenario, current_workers, next_workers, config)
+    result["passed"] = bool(
+        result.get("available")
+        and result.get("available_memory_above_reference")
+        and result.get("projected_memory_above_reference")
+    )
+    return result
+
+
 def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     if "UENV_PASS" not in os.environ:
         raise RuntimeError("UENV_PASS is required in the environment")
@@ -662,7 +686,7 @@ def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
         protected = base.protected_snapshot(server)
         base.assert_protected_unchanged(server, protected)
         source_and_binaries = base.source_and_binary_manifest(server, include_code_plugin=True)
-        dataset_paths = {str(config["gate3"]["dataset_jsonl"])}
+        dataset_paths = {str(config["dscodebench_pressure"]["dataset_jsonl"])}
         if config["worker_scale"].get("enabled", False):
             dataset_paths.add(str(config["worker_scale"]["dataset_jsonl"]))
         dataset_paths = sorted(dataset_paths)
@@ -673,7 +697,7 @@ def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
             datasets[path] = dataset_hash.split()[0]
         llm_config_sha256 = ""
         llm_config_mode = ""
-        if config["gate4"].get("llm_kind") == "real":
+        if config["swebench_pro_pressure"].get("llm_kind") == "real":
             _, mode_text, _ = base.run(worker, f"stat -c %a {base.q(args.llm_config)}")
             if mode_text.strip() != "600":
                 raise RuntimeError("real OpenHands LLM config must have mode 0600")
@@ -686,7 +710,7 @@ def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
             "llm_config_path": args.llm_config,
             "llm_config_sha256": llm_config_sha256,
             "llm_config_mode": llm_config_mode,
-            "llm_kind": config["gate4"].get("llm_kind"),
+            "llm_kind": config["swebench_pro_pressure"].get("llm_kind"),
             "datasets": datasets,
         }
     finally:
@@ -708,9 +732,16 @@ def assert_protected_after(args: argparse.Namespace, before: dict[str, Any]) -> 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "scenario",
+        nargs="?",
+        default="suite",
+        choices=("suite", "dscodebench-pressure", "swebench-pro-pressure"),
+        help="Run both scale scenarios or one dataset-named pressure scenario.",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-suite-artifacts")
-    parser.add_argument("--execute", action="store_true", help="Actually run Gate3 then Gate4; omit for protected preflight only.")
+    parser.add_argument("--execute", action="store_true", help="Actually run DSCodeBench pressure then SWE-bench Pro pressure; omit for protected preflight only.")
     parser.add_argument("--private-worker-port-range", default="")
     parser.add_argument("--private-gateway-port-range", default="")
     parser.add_argument("--llm-config", default="")
@@ -752,6 +783,7 @@ def main() -> int:
     document: dict[str, Any] = {
         "schema_version": 1,
         "suite_id": suite_id,
+        "scenario": args.scenario,
         "status": "preflight_passed",
         "executed": args.execute,
         "config_path": str(args.config),
@@ -763,11 +795,11 @@ def main() -> int:
     summary_path = suite_root / "summary.json"
     if not args.execute:
         planned_commands: dict[str, Any] = {}
-        if config["gate3"].get("enabled", True):
-            planned_commands["gate3"] = gate3_command(args, config, suite_root / "gate3")
-        if config["gate4"].get("enabled", True):
-            planned_commands["gate4"] = gate4_command(args, config, suite_root / "gate4")
-        if config["worker_scale"].get("enabled", False):
+        if args.scenario in {"suite", "dscodebench-pressure"} and config["dscodebench_pressure"].get("enabled", True):
+            planned_commands["dscodebench_pressure"] = dscodebench_pressure_command(args, config, suite_root / "dscodebench_pressure")
+        if args.scenario in {"suite", "swebench-pro-pressure"} and config["swebench_pro_pressure"].get("enabled", True):
+            planned_commands["swebench_pro_pressure"] = swebench_pro_pressure_command(args, config, suite_root / "swebench_pro_pressure")
+        if args.scenario in {"suite", "dscodebench-pressure"} and config["worker_scale"].get("enabled", False):
             planned_commands["worker_scale"] = [
                 worker_scale_command(args, config, workers, suite_root / f"worker-scale-{workers:04d}")
                 for workers in config["worker_scale"]["tiers"]
@@ -778,21 +810,21 @@ def main() -> int:
         return 0
 
     try:
-        if config["gate3"].get("enabled", True):
+        if args.scenario in {"suite", "dscodebench-pressure"} and config["dscodebench_pressure"].get("enabled", True):
             document["scenarios"].append(run_child(
-                "gate3-1024-simulator",
-                gate3_command(args, config, suite_root / "gate3"),
-                suite_root / "gate3",
-                "gate3-summary-*.json",
+                "dscodebench-pressure-1024-simulator",
+                dscodebench_pressure_command(args, config, suite_root / "dscodebench_pressure"),
+                suite_root / "dscodebench_pressure",
+                "dscodebench-pressure-summary-*.json",
             ))
-        if config["gate4"].get("enabled", True):
+        if args.scenario in {"suite", "swebench-pro-pressure"} and config["swebench_pro_pressure"].get("enabled", True):
             document["scenarios"].append(run_child(
-                f"gate4-openhands-{config['gate4'].get('registered_workers', 1)}workers-trace-replay",
-                gate4_command(args, config, suite_root / "gate4"),
-                suite_root / "gate4",
-                "gate4-summary-*.json",
+                f"swebench-pro-pressure-openhands-{config['swebench_pro_pressure'].get('registered_workers', 1)}workers-trace-replay",
+                swebench_pro_pressure_command(args, config, suite_root / "swebench_pro_pressure"),
+                suite_root / "swebench_pro_pressure",
+                "swebench-pro-pressure-summary-*.json",
             ))
-        if config["worker_scale"].get("enabled", True):
+        if args.scenario in {"suite", "dscodebench-pressure"} and config["worker_scale"].get("enabled", True):
             tiers = [int(value) for value in config["worker_scale"]["tiers"]]
             for index, workers in enumerate(tiers):
                 scale_artifacts = suite_root / f"worker-scale-{workers:04d}"
@@ -800,7 +832,7 @@ def main() -> int:
                     f"worker-scale-{workers}",
                     worker_scale_command(args, config, workers, scale_artifacts),
                     scale_artifacts,
-                    "gate3-summary-*.json",
+                    "dscodebench-pressure-summary-*.json",
                 )
                 document["scenarios"].append(scenario)
                 if scenario["status"] != "passed":
