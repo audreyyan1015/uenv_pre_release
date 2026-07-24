@@ -3,18 +3,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::State;
 use axum::routing::get;
-use axum::Router;
 use tonic::transport::Server;
 
 use crate::control_plane::client::{
-    detect_resource_spec, ControlPlane, SchedulerControlPlaneClient, SchedulerMode,
+    ControlPlane, SchedulerControlPlaneClient, SchedulerMode, detect_resource_spec,
 };
 use crate::episode::executor::EpisodeExecutor;
-use crate::llm::LlmConfig;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
 use crate::hub::{self, EnvResolver};
+use crate::llm::LlmConfig;
 use crate::metrics::MetricsExporter;
 use crate::plugin::host::PluginHost;
 use crate::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
@@ -226,6 +226,7 @@ impl WorkerRuntime {
         control_plane.spawn_heartbeat_loop();
         let wal = WalWriter::new(&self.wal_dir)?;
         metrics.set_wal_pending_records(wal.pending_count());
+        metrics.set_wal_quarantined_records(wal.quarantined_count());
         control_plane.spawn_replay_loop(wal.clone(), metrics.clone());
 
         // SWE-bench 实例目录：优先 Hub 下发，失败回退本地 fixtures（与 env manifest 降级一致）。
@@ -265,14 +266,15 @@ impl WorkerRuntime {
             );
         }
         let swe_pool = Arc::new(
-            crate::swe::instance_pool::SweInstancePool::new(swe_store.clone(), swe_runtime, swe_capacity)
-                .with_metrics(metrics.clone())
-                .with_seccomp_dir(swe_seccomp_dir)
-                .with_env_package(swe_env_package)
-                .with_trajectory_meta(
-                    worker_id,
-                    gateway_public_url(&self.gateway_listen),
-                ),
+            crate::swe::instance_pool::SweInstancePool::new(
+                swe_store.clone(),
+                swe_runtime,
+                swe_capacity,
+            )
+            .with_metrics(metrics.clone())
+            .with_seccomp_dir(swe_seccomp_dir)
+            .with_env_package(swe_env_package)
+            .with_trajectory_meta(worker_id, gateway_public_url(&self.gateway_listen)),
         );
 
         // M2-1 / M4-4：启动按 catalog 子集预热镜像（去冷拉延迟）；M0-3/M4-3 可选 warm tag 写回。
@@ -280,9 +282,10 @@ impl WorkerRuntime {
             let pool = swe_pool.clone();
             let ids = self.swe_prewarm.clone();
             let warm_tag = self.swe_warm_tag;
-            let (ok, fail) = tokio::task::spawn_blocking(move || pool.prewarm_images(&ids, warm_tag))
-                .await
-                .unwrap_or((0, 0));
+            let (ok, fail) =
+                tokio::task::spawn_blocking(move || pool.prewarm_images(&ids, warm_tag))
+                    .await
+                    .unwrap_or((0, 0));
             tracing::info!(
                 trace_id = "runtime",
                 worker_id = "worker",
@@ -299,13 +302,8 @@ impl WorkerRuntime {
             let listen = self.gateway_listen.clone();
             let api_key = self.gateway_api_key.clone();
             tokio::spawn(async move {
-                if let Err(err) = crate::runtime_gateway::serve_gateway(
-                    pool,
-                    listen,
-                    api_key,
-                    gw_public,
-                )
-                .await
+                if let Err(err) =
+                    crate::runtime_gateway::serve_gateway(pool, listen, api_key, gw_public).await
                 {
                     tracing::error!(
                         trace_id = "runtime",
@@ -332,14 +330,23 @@ impl WorkerRuntime {
             wal,
             self.disconnect_dispatch_policy,
         );
-        spawn_observability_server(metrics, self.metrics_listen.clone(), self.health_listen.clone()).await?;
+        spawn_observability_server(
+            metrics,
+            self.metrics_listen.clone(),
+            self.health_listen.clone(),
+        )
+        .await?;
         let addr: SocketAddr = self.listen.parse()?;
         // 长耗时 episode（OlymMATH thinking 可达数分钟）期间 DispatchEpisode 可能长时间
         // 只有 progress/heartbeat frame。开启 HTTP/2 + TCP keepalive，避免中间层/对端空闲重置。
-        let http2_keepalive_interval =
-            Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS", 30));
-        let http2_keepalive_timeout =
-            Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS", 10));
+        let http2_keepalive_interval = Duration::from_secs(env_u64_default(
+            "UENV_WORKER_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS",
+            30,
+        ));
+        let http2_keepalive_timeout = Duration::from_secs(env_u64_default(
+            "UENV_WORKER_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS",
+            10,
+        ));
         let tcp_keepalive =
             Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_TCP_KEEPALIVE_SECS", 60));
         let max_message_bytes =
@@ -445,7 +452,9 @@ fn load_env_package_dir(
 }
 
 /// Build RegisterWorker.synced_env_packages from a synced EnvPackage directory.
-fn load_synced_env_packages(env_package_dir: Option<&str>) -> Vec<crate::proto::scheduler::v1::SyncedEnvPackage> {
+fn load_synced_env_packages(
+    env_package_dir: Option<&str>,
+) -> Vec<crate::proto::scheduler::v1::SyncedEnvPackage> {
     use crate::proto::scheduler::v1::SyncedEnvPackage;
     use crate::swe::env_package::EnvPackageDir;
     let Some(dir) = env_package_dir
@@ -486,8 +495,8 @@ async fn load_swe_catalog(
     env_package_dir: Option<&str>,
 ) -> crate::swe::dataset::InstanceStore {
     use crate::swe::dataset::InstanceStore;
-    let local_path =
-        std::env::var("UENV_SWE_INSTANCES").unwrap_or_else(|_| "fixtures/swe/swe_instances.json".to_string());
+    let local_path = std::env::var("UENV_SWE_INSTANCES")
+        .unwrap_or_else(|_| "fixtures/swe/swe_instances.json".to_string());
     let variants: Vec<String> = if variants.is_empty() {
         vec!["verified".to_string()]
     } else {
@@ -667,7 +676,9 @@ async fn load_swe_catalog(
 
 /// Startup validation common to every catalog source: warn on image-namespace
 /// violations (Pro must not occupy `sweb.eval.*`) and return the store.
-fn finalize_catalog(merged: crate::swe::dataset::InstanceStore) -> crate::swe::dataset::InstanceStore {
+fn finalize_catalog(
+    merged: crate::swe::dataset::InstanceStore,
+) -> crate::swe::dataset::InstanceStore {
     let violations = merged.image_namespace_violations();
     if !violations.is_empty() {
         tracing::warn!(
@@ -688,7 +699,9 @@ async fn spawn_observability_server(
     health_listen: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if metrics_listen != health_listen {
-        return Err("metrics_listen and health_listen must be equal in current implementation".into());
+        return Err(
+            "metrics_listen and health_listen must be equal in current implementation".into(),
+        );
     }
     let addr: SocketAddr = metrics_listen.parse()?;
     let app = Router::new()

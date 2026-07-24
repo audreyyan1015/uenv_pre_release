@@ -297,6 +297,40 @@ class FakeCoreStreamStub:
         raise AssertionError("streaming client should not call ExecuteBatch")
 
 
+class FakeStatusCode:
+    name = "UNAVAILABLE"
+
+
+class FakeTransportError(RuntimeError):
+    def code(self):
+        return FakeStatusCode()
+
+
+class FlakyCoreBatchStub(FakeCoreBatchStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests = []
+
+    def ExecuteBatch(self, request, timeout=None):
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise FakeTransportError("temporary transport failure")
+        return super().ExecuteBatch(request, timeout=timeout)
+
+
+class FlakyCoreStreamStub(FakeCoreStreamStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def ExecuteBatchStream(self, samples, timeout=None):
+        self.calls += 1
+        for index, sample in enumerate(samples):
+            if self.calls == 1 and index == 1:
+                raise FakeTransportError("stream interrupted")
+            yield from super().ExecuteBatchStream([sample], timeout=timeout)
+
+
 class UEnvAgentLoopTest(unittest.TestCase):
     def test_build_episode_request_uses_prd_episode_shape(self) -> None:
         loop = UEnvAgentLoop(
@@ -892,6 +926,56 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual([sample["sample_index"] for sample in stub.seen_samples], [0, 1, 2])
         self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
         self.assertEqual([result.summary.total_reward for result in results], [10.0, 11.0, 12.0])
+
+    def test_rust_core_client_retries_unary_transport_with_same_request(self) -> None:
+        stub = FlakyCoreBatchStub()
+        client = RustCoreEpisodeClient(
+            RustCoreClientConfig(transport_retry_attempts=2, transport_retry_delay_seconds=0),
+            stub=stub,
+        )
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt="question",
+            sample_kwargs={"extra_info": {"batch_id": "retry-unary"}},
+        )
+
+        result = client.submit_episode(request)
+
+        self.assertEqual(result.request_id, request.request_id)
+        self.assertEqual(len(stub.requests), 2)
+        self.assertIs(stub.requests[0], stub.requests[1])
+
+    def test_rust_core_client_stream_retry_only_resubmits_unfinished_requests(self) -> None:
+        stub = FlakyCoreStreamStub()
+        client = RustCoreEpisodeClient(
+            RustCoreClientConfig(
+                streaming=True,
+                transport_retry_attempts=2,
+                transport_retry_delay_seconds=0,
+            ),
+            stub=stub,
+        )
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+        requests = [
+            loop.build_episode_request(
+                sampling_params={},
+                prompt_ids=[10],
+                raw_prompt=f"question-{index}",
+                sample_kwargs={"extra_info": {"batch_id": "retry-stream", "sample_index": index}},
+            )
+            for index in range(3)
+        ]
+
+        results = list(client.submit_episode_stream(requests))
+
+        self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
+        self.assertEqual(stub.calls, 2)
+        self.assertEqual(
+            [sample["request_id"] for sample in stub.seen_samples],
+            [request.request_id for request in requests],
+        )
 
     def test_env_type_routes_validation_benchmarks_to_math(self) -> None:
         loop = UEnvAgentLoop(

@@ -17,8 +17,10 @@ use crate::proto::scheduler::v1::{
     RegisterWorkerRequest, RegisterWorkerResponse, ReportResultRequest, ReportResultResponse,
     WorkerInfo,
 };
+use crate::result_finalizer::{
+    ResultPersistenceContext, ResultTiming, complete_episode_result, persist_episode_result,
+};
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
-use crate::result_finalizer::{complete_episode_result, ResultPersistenceContext, ResultTiming};
 use crate::state::ServerState;
 
 /// worker control plane gRPC 服务实现。
@@ -208,20 +210,40 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
 
         self.state.sweep_ttl_caches();
 
-        // 非 0 epoch 必须和当前 server 匹配，防止旧 server 实例的结果污染当前状态。
+        // 正常结果使用当前 epoch。重启前 lease 的旧 epoch 只有在持久化 dispatch
+        // 精确匹配 Worker/token 时才放行。
+        let mut recovered_dispatch = None;
         if req.server_epoch != 0 && req.server_epoch != self.state.epoch() {
-            warn!(
-                worker_id = %req.worker_id,
-                report_epoch = req.server_epoch,
-                current_epoch = self.state.epoch(),
-                "report_result_stale_epoch_rejected"
-            );
-            return Ok(response(
-                false,
-                false,
-                "STALE_EPOCH",
-                "server epoch mismatch",
-            ));
+            if let Some(store) = self.state.persistence_store() {
+                match store.get_dispatch(&req.dispatch_lease_id).await {
+                    Ok(Some(dispatch))
+                        if dispatch.worker_id == req.worker_id
+                            && dispatch.dispatch_token == req.dispatch_token
+                            && dispatch.server_epoch == req.server_epoch =>
+                    {
+                        recovered_dispatch = Some(dispatch);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.state.mark_persistence_unhealthy(&error);
+                        return Err(Status::unavailable("persistence unavailable"));
+                    }
+                }
+            }
+            if recovered_dispatch.is_none() {
+                warn!(
+                    worker_id = %req.worker_id,
+                    report_epoch = req.server_epoch,
+                    current_epoch = self.state.epoch(),
+                    "report_result_stale_epoch_rejected"
+                );
+                return Ok(response(
+                    false,
+                    false,
+                    "STALE_EPOCH",
+                    "server epoch mismatch",
+                ));
+            }
         }
         if req.idempotency_key.is_empty() {
             warn!(worker_id = %req.worker_id, "report_result_empty_idempotency_key_rejected");
@@ -232,14 +254,16 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 "empty idempotency_key",
             ));
         }
-        // 同一个 idempotency_key 重试时直接返回第一次处理结果。
-        if let Some(record) = self.state.idempotency_cache.get(&req.idempotency_key) {
-            let code = if record.ack {
-                "DUPLICATE_ACCEPTED"
-            } else {
-                "DUPLICATE_REJECTED"
-            };
-            return Ok(response(record.ack, true, code, &record.message));
+        // 纯内存测试路径保留原缓存；生产持久化路径会连同 checksum 校验。
+        if self.state.persistence_store().is_none() {
+            if let Some(record) = self.state.idempotency_cache.get(&req.idempotency_key) {
+                let code = if record.ack {
+                    "DUPLICATE_ACCEPTED"
+                } else {
+                    "DUPLICATE_REJECTED"
+                };
+                return Ok(response(record.ack, true, code, &record.message));
+            }
         }
         let Some(mut result) = req.result else {
             warn!(worker_id = %req.worker_id, "report_result_missing_result_rejected");
@@ -262,6 +286,57 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
 
         let episode_id = result.episode_id.clone();
         let attempt_id = result.attempt_id;
+        if let Some(dispatch) = &recovered_dispatch {
+            if dispatch.episode_id != episode_id || dispatch.attempt_id != attempt_id {
+                return Ok(response(
+                    false,
+                    false,
+                    "DISPATCH_MISMATCH",
+                    "recovered dispatch does not match result identity",
+                ));
+            }
+        }
+        let result_checksum = crate::persistence::result_checksum(&result);
+        let persisted_idempotency = crate::persistence::IdempotencyRecord {
+            idempotency_key: req.idempotency_key.clone(),
+            episode_id: episode_id.clone(),
+            attempt_id,
+            dispatch_lease_id: req.dispatch_lease_id.clone(),
+            worker_id: req.worker_id.clone(),
+            server_epoch: req.server_epoch,
+            result_checksum: result_checksum.clone(),
+            ack: true,
+            code: "ACCEPTED".to_string(),
+            message: "accepted".to_string(),
+            expires_at_ms: crate::persistence::now_ms().saturating_add(
+                (self.state.persistence_idempotency_ttl_secs as i64).saturating_mul(1_000),
+            ),
+        };
+        if let Some(store) = self.state.persistence_store() {
+            match store.check_idempotency(persisted_idempotency.clone()).await {
+                Ok(crate::persistence::IdempotencyDecision::Replay(record)) => {
+                    return Ok(response(
+                        record.ack,
+                        true,
+                        "DUPLICATE_ACCEPTED",
+                        &record.message,
+                    ));
+                }
+                Ok(crate::persistence::IdempotencyDecision::Conflict(_)) => {
+                    return Ok(response(
+                        false,
+                        true,
+                        "IDEMPOTENCY_CONFLICT",
+                        "idempotency key reused with different report",
+                    ));
+                }
+                Ok(crate::persistence::IdempotencyDecision::Missing) => {}
+                Err(error) => {
+                    self.state.mark_persistence_unhealthy(&error);
+                    return Err(Status::unavailable("persistence unavailable"));
+                }
+            }
+        }
         let pending_key = (
             episode_id.clone(),
             attempt_id,
@@ -341,6 +416,27 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
         let Some((_, pending)) = removed else {
             // pending 不存在时不一定是内部错误。可能是重复上报、超时后 late report、
             // 取消后 late report，或者 worker 使用了未知 lease。
+            if let Some(store) = self.state.persistence_store() {
+                match store
+                    .get_terminal_outcome(&episode_id, attempt_id, &req.dispatch_lease_id)
+                    .await
+                {
+                    Ok(Some(outcome)) => {
+                        let code = if outcome.code == "ACCEPTED" {
+                            "ALREADY_COMPLETED".to_string()
+                        } else {
+                            outcome.code
+                        };
+                        remember(false, &code, &outcome.message);
+                        return Ok(response(false, true, &code, &outcome.message));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.state.mark_persistence_unhealthy(&error);
+                        return Err(Status::unavailable("persistence unavailable"));
+                    }
+                }
+            }
             let (code, message) =
                 if let Some(outcome) = self.state.result_outcomes.get(&pending_key) {
                     if outcome.code == "ACCEPTED" {
@@ -384,11 +480,33 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             &pending.ctx.request,
             result,
             Some(timing),
-            Some(ResultPersistenceContext::native(
-                req.worker_id.clone(),
-                req.idempotency_key.clone(),
-            )),
+            None,
             false,
+        );
+        if let Some(store) = self.state.persistence_store() {
+            if let Err(error) = store
+                .commit_report_result(
+                    result.clone(),
+                    persisted_idempotency,
+                    "ACCEPTED",
+                    "accepted",
+                )
+                .await
+            {
+                self.state.pending_results.insert(pending_key, pending);
+                self.state.mark_persistence_unhealthy(&error);
+                return Ok(response(
+                    false,
+                    false,
+                    "PERSISTENCE_FAILED",
+                    "result was not committed; retry with the same idempotency key",
+                ));
+            }
+        }
+        persist_episode_result(
+            &self.state,
+            &result,
+            ResultPersistenceContext::native(req.worker_id.clone(), req.idempotency_key.clone()),
         );
 
         // 结果已经被接受后，后续同 lease 的不同 idempotency_key 上报也要得到稳定语义。
@@ -468,7 +586,9 @@ mod tests {
         }
     }
 
-    fn pending_result(tx: tokio::sync::oneshot::Sender<EpisodeResult>) -> crate::state::PendingResult {
+    fn pending_result(
+        tx: tokio::sync::oneshot::Sender<EpisodeResult>,
+    ) -> crate::state::PendingResult {
         let enqueue_at = Instant::now();
         let mut request = EpisodeRequest {
             episode_id: "ep1".to_string(),
@@ -481,7 +601,9 @@ mod tests {
             )]),
             ..Default::default()
         };
-        request.metadata.insert("custom_key".to_string(), "custom_value".to_string());
+        request
+            .metadata
+            .insert("custom_key".to_string(), "custom_value".to_string());
         let ctx = Arc::new(EpisodeContext::from_request(
             &request,
             "sync",
@@ -559,7 +681,10 @@ mod tests {
         assert_eq!(response.code, "ACCEPTED");
 
         let result = rx.await.expect("result delivered");
-        assert_eq!(result.metadata.get("custom_key").map(String::as_str), Some("custom_value"));
+        assert_eq!(
+            result.metadata.get("custom_key").map(String::as_str),
+            Some("custom_value")
+        );
         assert_eq!(result.parallel_mode, "sync");
         assert!(!result.metadata.contains_key("parallel_mode"));
     }
@@ -583,10 +708,11 @@ mod tests {
             .into_inner();
         assert!(!response.ack);
         assert_eq!(response.code, "WORKER_MISMATCH");
-        assert!(svc
-            .state
-            .pending_results
-            .contains_key(&("ep1".to_string(), 1, "lease-1".to_string())));
+        assert!(svc.state.pending_results.contains_key(&(
+            "ep1".to_string(),
+            1,
+            "lease-1".to_string()
+        )));
     }
 
     #[tokio::test]
@@ -608,10 +734,11 @@ mod tests {
             .into_inner();
         assert!(!response.ack);
         assert_eq!(response.code, "TOKEN_MISMATCH");
-        assert!(svc
-            .state
-            .pending_results
-            .contains_key(&("ep1".to_string(), 1, "lease-1".to_string())));
+        assert!(svc.state.pending_results.contains_key(&(
+            "ep1".to_string(),
+            1,
+            "lease-1".to_string()
+        )));
     }
 
     #[tokio::test]

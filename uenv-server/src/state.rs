@@ -65,10 +65,23 @@ pub struct ServerState {
     pub admission: AdmissionController,
     /// trajectory 持久化存储。未配置时结果仍会返回，只是不写入该存储。
     pub trajectory_store: std::sync::OnceLock<Arc<crate::trajectory::TrajectoryStore>>,
+    /// Server 运行状态数据库。纯内存测试入口保持为空，生产入口默认设置。
+    pub persistence: std::sync::OnceLock<Arc<crate::persistence::PersistenceStore>>,
+    /// 持久化 writer/readiness 是否健康。
+    pub persistence_ready: std::sync::atomic::AtomicBool,
+    /// 正常停机开始后置 false，拒绝新的 Episode，但继续接收结果回填。
+    pub accepting_episodes: std::sync::atomic::AtomicBool,
+    pub persistence_terminal_ttl_secs: u64,
+    pub persistence_idempotency_ttl_secs: u64,
+    pub persistence_max_completed_entries: usize,
+    pub persistence_max_result_bytes: u64,
+    pub persistence_shutdown_grace_secs: u64,
     /// SWE agent 注册表，记录 agent pool、agent 心跳、agent 容量。
     pub agent_registry: Arc<crate::agent_pool::AgentRegistry>,
     /// SWE AgentJob 队列，负责 pending job 和 in-flight job 状态。
     pub agent_job_queue: Arc<crate::agent_job::AgentJobQueue>,
+    /// 生产持久化路径中的后台执行 owner 与重复提交 attach 表。
+    pub episode_coordinator: Arc<crate::episode_coordinator::EpisodeCoordinator>,
 }
 
 /// native worker dispatch 后，server 通知 worker 取消时需要的信息。
@@ -248,8 +261,17 @@ impl ServerState {
             agent_job_pickup_timeout_secs: config.episode.agent_job_pickup_timeout_secs,
             admission: AdmissionController::new(&config.episode),
             trajectory_store: std::sync::OnceLock::new(),
+            persistence: std::sync::OnceLock::new(),
+            persistence_ready: std::sync::atomic::AtomicBool::new(true),
+            accepting_episodes: std::sync::atomic::AtomicBool::new(true),
+            persistence_terminal_ttl_secs: config.persistence.terminal_ttl_secs,
+            persistence_idempotency_ttl_secs: config.persistence.idempotency_ttl_secs,
+            persistence_max_completed_entries: config.persistence.max_completed_entries,
+            persistence_max_result_bytes: config.persistence.max_result_bytes,
+            persistence_shutdown_grace_secs: config.persistence.shutdown_grace_secs,
             agent_registry,
             agent_job_queue,
+            episode_coordinator: Arc::new(crate::episode_coordinator::EpisodeCoordinator::new()),
         }
     }
 
@@ -260,7 +282,32 @@ impl ServerState {
     /// 生成新的 dispatch lease id。
     pub fn next_lease_id(&self) -> String {
         let seq = self.next_lease_seq.fetch_add(1, Ordering::Relaxed);
-        format!("lease-{seq}")
+        format!("lease-{}-{seq}", self.epoch())
+    }
+
+    pub fn persistence_store(&self) -> Option<&Arc<crate::persistence::PersistenceStore>> {
+        self.persistence.get()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.persistence_ready.load(Ordering::Acquire)
+            && self
+                .persistence_store()
+                .map(|store| store.health().healthy)
+                .unwrap_or(true)
+    }
+
+    pub fn is_accepting_episodes(&self) -> bool {
+        self.accepting_episodes.load(Ordering::Acquire) && self.is_ready()
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.accepting_episodes.store(false, Ordering::Release);
+    }
+
+    pub fn mark_persistence_unhealthy(&self, error: &anyhow::Error) {
+        self.persistence_ready.store(false, Ordering::Release);
+        tracing::error!(error = %error, "persistence_marked_unhealthy");
     }
 
     pub fn outcome_ttl(&self) -> Duration {

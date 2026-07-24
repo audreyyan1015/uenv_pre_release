@@ -27,6 +27,22 @@ episode:
   # episode 完成广播 channel 的容量，按最大 Worker 数 x 32 估算
   broadcast_capacity: 1024
 
+# Server 运行状态持久化默认开启。生产部署使用 worktree 之外的绝对路径。
+persistence:
+  enabled: true
+  db_path: /home/uenv/server-state/server-state.db
+  busy_timeout_ms: 5000
+  terminal_ttl_secs: 86400
+  idempotency_ttl_secs: 3600
+  recovery_grace_secs: 30
+  max_completed_entries: 100000
+  max_result_bytes: 16777216
+  max_database_bytes: 107374182400
+  max_wal_bytes: 1073741824
+  min_free_space_bytes: 10737418240
+  writer_queue_capacity: 4096
+  shutdown_grace_secs: 45
+
 pool:
   max_idle: 16
   warmup_enabled: true
