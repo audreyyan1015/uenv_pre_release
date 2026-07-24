@@ -270,6 +270,12 @@ def histogram(values):
         out[key] = out.get(key, 0) + 1
     return dict(sorted(out.items(), key=lambda item: int(item[0])))
 
+def task_id_matches_prefix(task_id, prefix):
+    if not prefix:
+        return True
+    prefixes = {prefix, prefix.replace("_", "-")}
+    return any(task_id.startswith(candidate) for candidate in prefixes)
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -281,20 +287,20 @@ class Handler(BaseHTTPRequestHandler):
             counts = {
                 task_id: count
                 for task_id, count in attempts_by_task.items()
-                if not prefix or task_id.startswith(prefix)
+                if task_id_matches_prefix(task_id, prefix)
             }
             profiles = {
                 task_id: profile
                 for task_id, profile in profiles_by_task.items()
-                if not prefix or task_id.startswith(prefix)
+                if task_id_matches_prefix(task_id, prefix)
             }
             replay_hits = sum(
                 count for task_id, count in trace_hits_by_task.items()
-                if not prefix or task_id.startswith(prefix)
+                if task_id_matches_prefix(task_id, prefix)
             )
             replay_misses = sum(
                 count for task_id, count in trace_misses_by_task.items()
-                if not prefix or task_id.startswith(prefix)
+                if task_id_matches_prefix(task_id, prefix)
             )
             observed_latencies = list(observed_latencies_ms)
         ordered = sorted(counts.values())
@@ -1474,7 +1480,7 @@ def run_scale(
             _, out, err = base.run(server, command, timeout=command_timeout)
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
-            step_stats = _model_step_stats(worker, f"dscodebench_pressure-{run_id}-{mode}-")
+            step_stats = _model_step_stats(worker, f"dscodebench-pressure-{run_id}-{mode}-")
             result["model_step_stats"] = step_stats
             trace_replay_stats = (
                 step_stats.get("simulator", {}).get("trace_replay", {})

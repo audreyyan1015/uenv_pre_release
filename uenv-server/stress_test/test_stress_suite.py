@@ -9,13 +9,33 @@ import unittest
 import run_stress_suite
 import run_dscodebench_pressure
 import run_swebench_pro_pressure
+import distributed_stress_runtime
 import stress_test_common
 
 
 class StressSuiteTests(unittest.TestCase):
     def test_embedded_pressure_clients_compile(self):
         compile(run_dscodebench_pressure.LOAD_CLIENT, "<dscodebench-client>", "exec")
+        compile(run_dscodebench_pressure.MODEL_SIMULATOR, "<dscodebench-model-simulator>", "exec")
         compile(run_swebench_pro_pressure.SWE_CLIENT, "<swebench-pro-client>", "exec")
+
+    def test_dscodebench_model_stats_prefix_matches_task_ids(self):
+        source = Path(__file__).with_name("run_dscodebench_pressure.py").read_text(encoding="utf-8-sig")
+        self.assertIn(
+            'task_id = f"dscodebench-pressure-{args.run_id}-{args.mode}-{batch_id}-{index}"',
+            source,
+        )
+        self.assertIn(
+            'step_stats = _model_step_stats(worker, f"dscodebench-pressure-{run_id}-{mode}-")',
+            source,
+        )
+        self.assertIn("def task_id_matches_prefix(task_id, prefix):", source)
+
+    def test_runtime_defaults_use_current_worker_hosts(self):
+        self.assertEqual(distributed_stress_runtime.WORKER_HOST, "8.130.65.20")
+        self.assertEqual(distributed_stress_runtime.WORKER_PRIVATE_IP, "192.168.0.139")
+        self.assertIn("8.145.51.129", distributed_stress_runtime.EXPECTED_HOST_FINGERPRINTS)
+        self.assertNotIn("8.130.86.71", distributed_stress_runtime.EXPECTED_HOST_FINGERPRINTS)
 
     def test_scale_config_requires_1024_simulator_and_10_waves(self):
         config = run_stress_suite.load_suite_config(
