@@ -14,12 +14,14 @@ scheduler:
   mode: "remote"
 
 env:
-  types: ["math", "code", "swe"]
+  # qa = 单轮问答/分类验证环境（原 math 更名，plugins/qa 复用 math 判分）。
+  # math 已退役：勿再注册；误发 env_type=math 会得到 Server「no worker supports env type」。
+  types: ["qa", "code", "swe"]
   backend: "process"
   plugin_dir: "/root/UEnv/plugins"
 
 pool:
-  # VeRL math rollout 与 SWE 共用 Worker；math 插件需预热，避免首条 Dispatch「plugin not ready」
+  # qa / code / swe 共用 Worker；预热避免首条 Dispatch「plugin not ready」
   warmup_size: 4
   prewarm_on_startup: true
   max_idle_time: 300
