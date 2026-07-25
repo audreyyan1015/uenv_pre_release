@@ -1,0 +1,27 @@
+[Unit]
+# ToolEnv Agent 常驻：注册到 Server Agent 池并循环领取 env_type=code 的 AgentJob（B3）。
+# 与 OpenHands 的 uenv-agent-poller.service 同机隔离：独立 venv / 独立 pool_id / 独立 unit。
+# 启用前需确认 /opt/uenv-toolenv/app/scripts/toolenv/toolenv_agent_poller.py 已部署。
+Description=UEnv ToolEnv Agent poller (208.77 -> Server AgentControlService)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/uenv-toolenv/app
+Environment=PYTHONPATH=/opt/uenv-toolenv/app/uenv-bridge/src:/opt/uenv-toolenv/app/uenv-bridge/scripts/benchmark:/root/UEnv/integrations/openhands
+Environment=PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+Environment=TOOLENV_SANDBOX_PYTHON=/opt/uenv-toolenv/sandbox-venv/bin/python
+Environment=TOOLENV_OH_RUNTIME=/root/UEnv/integrations/openhands
+Environment=TOOLENV_RUNS_DIR=/opt/uenv-toolenv/runs
+Environment=TOOLENV_APP_DIR=/opt/uenv-toolenv/app
+EnvironmentFile=/etc/uenv-toolenv.env
+ExecStart=/opt/uenv-toolenv/venv/bin/python /opt/uenv-toolenv/app/scripts/toolenv/toolenv_agent_poller.py
+# 注：agent stubs 应安装到 uenv-bridge/src/uenv/v1/，避免与 uenv.bridge 包名冲突。
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

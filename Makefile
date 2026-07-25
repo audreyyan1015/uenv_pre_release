@@ -78,16 +78,23 @@ proto-adapter-core:
 		--python_out=uenv-bridge/src/uenv/bridge/gen \
 		--grpc_python_out=uenv-bridge/src/uenv/bridge/gen
 
-# Agent 池控制面 Python stub（208.77 OpenHands runner 连 Server 用）。
-# agent.proto 包名 uenv.v1、无 import，生成 agent_pb2.py / agent_pb2_grpc.py。
+# Agent 池控制面 Python stub（208.77 OpenHands / ToolEnv poller 连 Server 用）。
+# 产出 integrations/openhands/uenv_runtime/gen/uenv/v1/{agent,episode,common}_pb2*.py
+# ToolEnv bootstrap 会再把 stubs 合并进 uenv-bridge/src/uenv/v1/，避免与 uenv.bridge 抢包名。
 proto-agent-python:
-	mkdir -p integrations/openhands/uenv_runtime/gen
+	mkdir -p integrations/openhands/uenv_runtime/gen/uenv/v1
 	touch integrations/openhands/uenv_runtime/gen/__init__.py
+	touch integrations/openhands/uenv_runtime/gen/uenv/__init__.py
+	touch integrations/openhands/uenv_runtime/gen/uenv/v1/__init__.py
 	$(PYTHON) -m grpc_tools.protoc \
 		-I=$(PROTO_ROOT) \
+		$(PROTO_ROOT)/uenv/v1/common.proto \
+		$(PROTO_ROOT)/uenv/v1/episode.proto \
 		$(PROTO_ROOT)/uenv/v1/agent.proto \
 		--python_out=integrations/openhands/uenv_runtime/gen \
 		--grpc_python_out=integrations/openhands/uenv_runtime/gen
+	@echo "generated under integrations/openhands/uenv_runtime/gen/uenv/v1/"
+	@PYTHONPATH=integrations/openhands/uenv_runtime/gen $(PYTHON) -c "from uenv.v1 import agent_pb2; assert 'task_payload_json' in {f.name for f in agent_pb2.AgentJob.DESCRIPTOR.fields}; print('ok task_payload_json')"
 
 # ─── Build (每个 part 独立编译，target 在各自目录内) ──────────
 build: build-server build-worker build-mock-scheduler build-hub build-adapter-core
