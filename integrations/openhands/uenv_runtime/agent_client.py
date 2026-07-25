@@ -242,4 +242,5 @@ def _job_from_proto(job: Any) -> AgentJob:
         episode_id=job.episode_id,
         llm_config_path=job.llm_config_path,
         mode=job.mode or "llm",
+        task_payload_json=getattr(job, "task_payload_json", "") or "",
     )
