@@ -366,6 +366,21 @@ def _read_reward(out_dir: Path) -> tuple[str, float, str, dict[str, Any]]:
     tid = ref.get("trajectory_id") if isinstance(ref, dict) else None
     trajectory_id = str(tid) if tid else ""  # null/缺失 → 空串，不要变成 "None"
     rollout_fields = _read_rollout_fields(out_dir, doc)
+    metadata: dict[str, str] = {
+        "tests_passed": str(doc.get("tests_passed", "")),
+        "tests_total": str(doc.get("tests_total", "")),
+        "resolved": str(doc.get("resolved", "")),
+    }
+    bundle_path = out_dir / "trajectory_bundle.json"
+    if bundle_path.is_file():
+        try:
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+            diff = str((bundle.get("artifact") or {}).get("git_diff") or "")
+            metadata["git_diff_bytes"] = str(len(diff))
+            metadata["git_diff_nonempty"] = "1" if diff.strip() else "0"
+        except Exception:  # noqa: BLE001
+            pass
+    rollout_fields.update(metadata)
     # driver 正常退出即视为 completed（reward 承载评分；resolved 与否由 reward 反映）。
     status = "completed"
     return status, reward, trajectory_id, rollout_fields
@@ -441,7 +456,36 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
                 trajectory_id=trajectory_id,
                 error_message=err,
                 agent_id=agent_id,
-                **rollout_fields,
+                metadata={
+                    k: str(v)
+                    for k, v in rollout_fields.items()
+                    if k
+                    in (
+                        "tests_passed",
+                        "tests_total",
+                        "resolved",
+                        "git_diff_bytes",
+                        "git_diff_nonempty",
+                    )
+                    and v not in (None, "")
+                },
+                **{
+                    key: rollout_fields[key]
+                    for key in (
+                        "parallel_mode",
+                        "rollout_param_version",
+                        "rollout_policy_version",
+                        "rollout_log_probs",
+                        "worker_start_ts",
+                        "worker_finish_ts",
+                        "result_ready_ts",
+                        "worker_latency_ms",
+                        "model_latency_ms",
+                        "response_ids",
+                        "response_mask",
+                    )
+                    if key in rollout_fields
+                },
             )
             response_ids = rollout_fields.get("response_ids") or []
             print(

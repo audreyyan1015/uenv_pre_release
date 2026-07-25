@@ -319,7 +319,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
 
         payload = json.loads(request.payload.decode("utf-8"))
-        self.assertEqual(request.env_type, "math")
+        self.assertEqual(request.env_type, "qa")
         self.assertEqual(request.max_steps, 7)
         self.assertEqual(request.model_endpoint, "http://policy.example/v1")
         self.assertEqual(payload["framework"], "verl")
@@ -841,6 +841,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         }
         request = EpisodeRequest(
             request_id="clean-context-1",
+            # 兼容期回归：显式 env_type=math 的历史请求仍需可被受理（Worker 双注册）
             env_type="math",
             payload=json.dumps(payload).encode("utf-8"),
             parallel_mode="sync",
@@ -893,7 +894,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
         self.assertEqual([result.summary.total_reward for result in results], [10.0, 11.0, 12.0])
 
-    def test_env_type_routes_validation_benchmarks_to_math(self) -> None:
+    def test_env_type_routes_validation_benchmarks_to_qa(self) -> None:
         loop = UEnvAgentLoop(
             tokenizer=FakeTokenizer(),
             client=RecordingEpisodeClient(self._result_with_token_ids()),
@@ -906,7 +907,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
             "olymmath-hard",
         ):
             with self.subTest(data_source=data_source):
-                self.assertEqual(loop._env_type({"data_source": data_source}), "math")
+                self.assertEqual(loop._env_type({"data_source": data_source}), "qa")
 
     def test_build_episode_request_writes_explicit_dataset_for_pubmedqa(self) -> None:
         loop = UEnvAgentLoop(
@@ -926,7 +927,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
         payload = json.loads(request.payload.decode("utf-8"))
 
-        self.assertEqual(request.env_type, "math")
+        self.assertEqual(request.env_type, "qa")
         self.assertEqual(payload["env_config"]["dataset"], "pubmedqa")
         self.assertEqual(payload["env_config"]["data_source"], "pubmedqa")
 

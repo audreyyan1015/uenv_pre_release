@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from openhands.sdk.llm import TextContent
 from openhands.sdk.tool import ToolExecutor
@@ -14,17 +14,83 @@ from openhands.tools.terminal.definition import TerminalAction, TerminalObservat
 from openhands.tools.terminal.metadata import CmdOutputMetadata
 
 from .workspace import UEnvWorkspace
+from .workspace_utils import is_uenv_gateway_workspace
+
+_UENV_PATCH_APPLIED = False
 
 if TYPE_CHECKING:
     from openhands.sdk.conversation import LocalConversation
+
+
+def collect_tool_patch_status(conv_state: Any) -> dict[str, Any]:
+    """Instantiate terminal/file_editor tools and record executor class names."""
+    from openhands.sdk.tool.registry import resolve_tool
+    from openhands.sdk.tool.spec import Tool
+    from openhands.tools.file_editor.definition import FileEditorTool
+    from openhands.tools.terminal.definition import TerminalTool
+
+    ws = conv_state.workspace
+    doc: dict[str, Any] = {
+        "workspace_type": type(ws).__name__,
+        "workspace_module": type(ws).__module__,
+        "is_uenv_gateway_workspace": is_uenv_gateway_workspace(ws),
+        "gateway_url": getattr(ws, "gateway_url", None),
+        "instance_id": getattr(ws, "instance_id", None),
+        "working_dir": getattr(ws, "working_dir", None),
+        "container_working_dir": getattr(ws, "remote_working_dir", None)
+        or getattr(ws, "container_working_dir", None),
+    }
+    # Prefer registry resolve_tool (same path as Agent._initialize), not class.create
+    # which can look patched while the registry still holds a stale create closure.
+    try:
+        term = resolve_tool(Tool(name=TerminalTool.name), conv_state)
+        doc["terminal_executor"] = type(term[0].executor).__name__ if term else None
+        doc["terminal_uses_gateway"] = "UEnvGateway" in (doc["terminal_executor"] or "")
+    except Exception as e:  # noqa: BLE001
+        doc["terminal_error"] = repr(e)
+    try:
+        fe = resolve_tool(Tool(name=FileEditorTool.name), conv_state)
+        doc["file_editor_executor"] = type(fe[0].executor).__name__ if fe else None
+        doc["file_editor_uses_gateway"] = "UEnvGateway" in (
+            doc["file_editor_executor"] or ""
+        )
+    except Exception as e:  # noqa: BLE001
+        doc["file_editor_error"] = repr(e)
+    doc["patch_ok"] = bool(
+        doc.get("terminal_uses_gateway") and doc.get("file_editor_uses_gateway")
+    )
+    return doc
 
 
 def _abs_path(workspace: UEnvWorkspace, path: str) -> str:
     p = path.strip()
     if p.startswith("/"):
         return p
-    wd = workspace.working_dir.rstrip("/")
+    wd = getattr(workspace, "remote_working_dir", None) or workspace.working_dir
+    wd = str(wd).rstrip("/")
     return f"{wd}/{p}"
+
+
+def _assert_path_in_workspace(workspace: UEnvWorkspace, path: str) -> None:
+    """Reject cross-repo hallucination (e.g. writing openlibrary paths in qutebrowser)."""
+    wd = (
+        getattr(workspace, "remote_working_dir", None) or workspace.working_dir or "/app"
+    )
+    wd = str(wd).rstrip("/") or "/app"
+    abs_path = _abs_path(workspace, path)
+    if not (abs_path == wd or abs_path.startswith(wd + "/")):
+        raise RuntimeError(
+            f"path {abs_path!r} is outside workspace {wd!r}; "
+            f"only edit under {wd}"
+        )
+    instance = (getattr(workspace, "instance_id", None) or "").lower()
+    lowered = abs_path.lower()
+    if "openlibrary" in lowered and "openlibrary" not in instance:
+        raise RuntimeError(
+            f"refusing path {abs_path!r}: this instance is {instance!r}, "
+            "not openlibrary. Stay inside the checked-out repository under "
+            f"{wd} (e.g. qutebrowser/, internal/, src/)."
+        )
 
 
 class UEnvGatewayTerminalExecutor(ToolExecutor[TerminalAction, TerminalObservation]):
@@ -55,14 +121,54 @@ class UEnvGatewayTerminalExecutor(ToolExecutor[TerminalAction, TerminalObservati
                 command=cmd,
                 is_error=False,
             )
-        r = self._ws.execute_command(cmd, cwd=self._ws.working_dir)
+        # Soft-guard: refuse cd/edits that clearly target wrong repos / host clones.
+        instance = (getattr(self._ws, "instance_id", None) or "").lower()
+        wd = getattr(self._ws, "remote_working_dir", None) or getattr(
+            self._ws, "working_dir", "/app"
+        )
+        lowered = cmd.lower()
+        if "openlibrary" not in instance and "openlibrary" in lowered:
+            return TerminalObservation.from_text(
+                text=(
+                    "Refusing command that references openlibrary — this instance "
+                    f"is {instance!r}. Stay under {wd}."
+                ),
+                command=cmd,
+                is_error=True,
+            )
+        # Agent often `git clone` / `cp -r` into /tmp/<repo> then edits there;
+        # grader only sees /app. Block the common failure modes.
+        if any(
+            p in lowered
+            for p in (
+                " /tmp/",
+                "cd /tmp",
+                "clone /tmp",
+                "/tmp/qutebrowser",
+                "/tmp/nodebb",
+                "/tmp/ansible",
+                "/tmp/openlibrary",
+            )
+        ) and "/tmp/gold.patch" not in lowered and "/tmp/uenv" not in lowered:
+            return TerminalObservation.from_text(
+                text=(
+                    f"Refusing command that uses /tmp worktrees. "
+                    f"The repository is already at {wd}; stay there "
+                    f"(do not clone or copy the repo under /tmp)."
+                ),
+                command=cmd,
+                is_error=True,
+            )
+        r = self._ws.execute_command(
+            cmd, cwd=getattr(self._ws, "remote_working_dir", self._ws.working_dir)
+        )
         text = r.stdout
         if r.stderr:
             text = (text + "\n" + r.stderr).strip() if text else r.stderr
         meta = CmdOutputMetadata(
             exit_code=r.exit_code,
             pid=-1,
-            working_dir=self._ws.working_dir,
+            working_dir=self._ws.remote_working_dir,
         )
         return TerminalObservation(
             command=cmd,
@@ -88,6 +194,7 @@ class UEnvGatewayFileEditorExecutor(ToolExecutor[FileEditorAction, FileEditorObs
         path = _abs_path(self._ws, action.path)
         cmd = action.command
         try:
+            _assert_path_in_workspace(self._ws, path)
             if cmd == "view":
                 return self._view(path, action.view_range)
             if cmd == "create":
@@ -168,8 +275,9 @@ class UEnvGatewayFileEditorExecutor(ToolExecutor[FileEditorAction, FileEditorObs
         )
 
 
-def patch_openhands_tools_for_uenv() -> None:
+def patch_openhands_tools_for_uenv() -> dict[str, Any]:
     """Route terminal/file_editor to UEnv gateway when workspace is UEnvWorkspace."""
+    global _UENV_PATCH_APPLIED
     import os
     from collections.abc import Sequence
 
@@ -177,6 +285,13 @@ def patch_openhands_tools_for_uenv() -> None:
     from openhands.sdk.tool import ToolDefinition, ToolExecutor
     from openhands.tools.file_editor.definition import FileEditorTool
     from openhands.tools.terminal.definition import TerminalTool
+
+    status: dict[str, Any] = {"patched": False}
+
+    if _UENV_PATCH_APPLIED:
+        status["patched"] = True
+        status["already_patched"] = True
+        return status
 
     _orig_terminal = TerminalTool.create.__func__  # type: ignore[attr-defined]
     _orig_file = FileEditorTool.create.__func__  # type: ignore[attr-defined]
@@ -192,7 +307,7 @@ def patch_openhands_tools_for_uenv() -> None:
         executor: ToolExecutor | None = None,
     ) -> Sequence[ToolDefinition]:
         ws = conv_state.workspace
-        if isinstance(ws, UEnvWorkspace):
+        if is_uenv_gateway_workspace(ws):
             import platform
 
             from openhands.sdk.tool import ToolAnnotations
@@ -241,7 +356,7 @@ def patch_openhands_tools_for_uenv() -> None:
         conv_state: ConversationState,
     ) -> Sequence[ToolDefinition]:
         ws = conv_state.workspace
-        if isinstance(ws, UEnvWorkspace):
+        if is_uenv_gateway_workspace(ws):
             return _build_file_editor_tool(conv_state, UEnvGatewayFileEditorExecutor(ws))
         return _orig_file(cls, conv_state)
 
@@ -266,7 +381,9 @@ def patch_openhands_tools_for_uenv() -> None:
             )
         else:
             tool_description = TOOL_DESCRIPTION
-        working_dir = conv_state.workspace.working_dir
+        working_dir = getattr(
+            conv_state.workspace, "remote_working_dir", None
+        ) or conv_state.workspace.working_dir
         enhanced_description = (
             f"{tool_description}\n\n"
             f"Your current working directory is: {working_dir}\n"
@@ -300,3 +417,14 @@ def patch_openhands_tools_for_uenv() -> None:
     os.path.isdir = _isdir  # type: ignore[assignment]
     TerminalTool.create = _terminal_create  # type: ignore[method-assign]
     FileEditorTool.create = _file_create  # type: ignore[method-assign]
+    # CRITICAL: Tool registry closes over create() at import/register time.
+    # Patching the classmethod alone leaves resolve_tool() on the stale local
+    # executors — re-register so Agent._initialize picks up gateway tools.
+    from openhands.sdk.tool.registry import register_tool
+
+    register_tool(TerminalTool.name, TerminalTool)
+    register_tool(FileEditorTool.name, FileEditorTool)
+    status["reregistered"] = [TerminalTool.name, FileEditorTool.name]
+    _UENV_PATCH_APPLIED = True
+    status["patched"] = True
+    return status
