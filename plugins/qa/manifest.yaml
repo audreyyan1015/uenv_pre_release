@@ -1,0 +1,24 @@
+env_type: qa
+version: "0.1.0"
+supported_backends:
+  - process
+ipc: proto-uds
+entry: ./run.sh
+description: QaEnv — single-turn QA / classification verification environment (reused math scoring)
+# 判分与金标绑定：详见 RUBRIC.md；Hub 发版时应带对齐 digest。
+runtime_plugin: uenv-math-plugin
+compat_aliases:
+  - math
+rubric_doc: ./RUBRIC.md
+tags:
+  - qa
+  - reasoning
+  - validation
+  - single-turn
+datasets:
+  - gsm8k
+  - pubmedqa
+  - scitab
+  - olymmath
+  - olymmath-easy
+  - olymmath-hard
