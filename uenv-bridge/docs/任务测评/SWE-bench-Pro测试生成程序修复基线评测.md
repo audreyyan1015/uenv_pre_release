@@ -1,27 +1,28 @@
-# SWE-bench-Pro 测试生成/程序修复基线评测
+# SWE-bench-Pro 测试生成/程序修复 UEnv 基线评测
 
-> 日期：2026-07-12  
-> 阶段：Eval-first，未进行后训练  
-> 任务书条目：4. 测试生成/程序修复  
-> Benchmark：SWE-bench-Pro public test split  
+> 日期：2026-07-20
+> 阶段：Eval-first，未进行后训练
+> 任务书条目：4. 测试生成/程序修复
+> Benchmark：SWE-bench-Pro public test split
 > 目标模型：`Qwen/Qwen3.6-35B-A3B`
+> 正式口径：接入 UEnv，Worker SWE 环境 + OpenHands Agent 执行，`MAX_TOKENS=8192`，`THINKING_TOKEN_BUDGET=4096`，`workspace_dir=/app`
 
 ## 1. 任务说明
 
-SWE-bench-Pro 是长程软件工程任务评测。每条样本给定一个真实代码仓库、base commit、issue 描述、需求说明、接口信息和测试集合，模型需要生成一个 git unified diff patch。官方评测会把 patch 应用到对应实例镜像中，运行 fail-to-pass 与 pass-to-pass 测试，最终统计 resolved / resolve rate。
+SWE-bench-Pro 是长程软件工程任务评测。每条样本给定一个真实代码仓库、base commit、issue 描述、需求说明、接口信息和测试集合，模型需要通过 OpenHands 工具调用生成修复 patch，并由 Worker/Agent 侧执行官方测试，最终返回 `resolved`。
 
-本阶段不进行后训练，只验证基准模型在 SWE-bench-Pro 上的 patch 生成链路，并尝试接通官方 local Docker evaluator。
+本阶段不进行 SFT、RL 或其他后训练，只验证基准模型通过 UEnv 链路执行 SWE-bench-Pro 的基线表现。
 
 ## 2. 数据集
 
-数据来源为 Hugging Face：
+数据来源：
 
 ```text
 ScaleAI/SWE-bench_Pro
 split: test
 ```
 
-本地数据已落地：
+本地数据：
 
 ```text
 data/benchmarks/swebenchpro/test.jsonl
@@ -31,24 +32,6 @@ data/benchmarks/swebenchpro/dataset_summary.json
 
 样本总数：731。
 
-仓库分布：
-
-| repo | 样本数 |
-|---|---:|
-| NodeBB/NodeBB | 44 |
-| qutebrowser/qutebrowser | 79 |
-| ansible/ansible | 96 |
-| internetarchive/openlibrary | 91 |
-| gravitational/teleport | 76 |
-| navidrome/navidrome | 57 |
-| element-hq/element-web | 56 |
-| future-architect/vuls | 62 |
-| protonmail/webclients | 65 |
-| flipt-io/flipt | 85 |
-| tutao/tutanota | 20 |
-
-语言分布：
-
 | 语言 | 样本数 |
 |---|---:|
 | Python | 266 |
@@ -56,301 +39,240 @@ data/benchmarks/swebenchpro/dataset_summary.json
 | JavaScript | 165 |
 | TypeScript | 20 |
 
-主要字段：
-
-| 字段 | 说明 |
-|---|---|
-| `instance_id` | SWE-bench-Pro 实例 ID。 |
-| `repo` | GitHub 仓库名。 |
-| `base_commit` | 需要应用 patch 的基准 commit。 |
-| `problem_statement` | issue 描述。 |
-| `requirements` | 修复需要满足的需求。 |
-| `interface` | 涉及的接口、路径和输入输出说明。 |
-| `patch` | 官方 gold patch。 |
-| `test_patch` | 官方测试补丁。 |
-| `fail_to_pass` | 修复后必须通过的测试。 |
-| `pass_to_pass` | 修复后不能回归的测试。 |
-| `dockerhub_tag` | 官方实例镜像 tag。 |
-
-## 3. 评价指标
-
-官方主指标为 resolve rate：
+## 3. UEnv 评测链路
 
 ```text
-resolve_rate = resolved_count / evaluated_count
+SWE-bench-Pro 样本
+  -> Adapter 构造 EpisodeRequest
+  -> Adapter Core / Server
+  -> Worker SWE 环境
+  -> OpenHands Agent pool
+  -> Agent 使用 llm_config 访问 Adapter Model Gateway
+  -> OpenHands 修改目标 repo 并生成 patch
+  -> Worker 执行官方 fail-to-pass / pass-to-pass 测试
+  -> EpisodeResult 返回 Adapter
+  -> Adapter 汇总 resolved / status / error
 ```
 
-一条样本被判定为 resolved，需要满足：
+Adapter 侧 request 中主要传入 `instance_id`、`repo`、`base_commit`、`dockerhub_tag`、`env_package_id`、`workspace_dir`、`driver_entrypoint`、`llm_config_path` 等字段。`model_endpoint.url` 设置为 Adapter Model Gateway 的 worker-visible URL；OpenHands Agent 侧根据 `LLM_CONFIG_PATH` 访问模型，因此该配置文件里的 `base_url` 也需要指向同一个 gateway。
 
-1. 生成 patch 可以应用到实例仓库。
-2. `fail_to_pass` 测试全部通过。
-3. `pass_to_pass` 测试全部保持通过。
-
-在官方 Docker evaluator 接通前，本地脚本只统计 patch 生成阶段的格式指标：
-
-| 指标 | 说明 |
-|---|---|
-| `nonempty_patch_rate` | 能否从模型输出中抽取到非空 patch。 |
-| `diff_git_patch_rate` | patch 是否包含 `diff --git` 文件 diff 头。 |
-| `hunk_patch_rate` | patch 是否包含 `@@` hunk。 |
-| `output_tokens_*` | 输出 token 数统计。 |
-
-这些格式指标只能说明模型输出是否像 patch，不等同于官方 resolved 分数。
-
-## 4. 评测实现
-
-新增脚本：
-
-```text
-scripts/benchmark/evaluate_swebenchpro.py
-scripts/benchmark/run_swebenchpro_baseline.sh
-```
-
-脚本分为四个阶段：
-
-| 阶段 | 命令 | 说明 |
-|---|---|---|
-| 数据准备 | `prepare` | 从 `ScaleAI/SWE-bench_Pro` 下载 test split，保存 JSONL/CSV。 |
-| Patch 生成 | `generate` | 使用 vLLM 加载 `Qwen/Qwen3.6-35B-A3B`，生成 patch。 |
-| 官方资产下载 | `download-official-assets` | 从官方仓库下载每个实例的 `run_script.sh`、`parser.py`、Dockerfile。 |
-| 结果汇总 | `summarize` | 汇总生成格式指标；若已有官方 evaluator 输出，则汇总 resolve rate。 |
-
-官方 evaluator 文件已放在：
-
-```text
-/data/ronghao/third_party/SWE-bench_Pro-os
-```
-
-说明：官方 local Docker evaluator 需要拉取 `jefzda/sweap-images:<dockerhub_tag>` 实例镜像。当前本机 DockerHub 镜像访问存在阻塞，因此还没有得到有效的官方 resolved 分数。
-
-## 5. 全量基线配置
+## 4. UEnv 全量配置
 
 | 配置 | 值 |
 |---|---|
-| 评测口径 | 直接 vLLM 生成 patch + 官方 local Docker evaluator 分批按需评测 |
-| 模型 | `Qwen/Qwen3.6-35B-A3B` |
-| 生成镜像 `GEN_IMAGE` | `localhost/vllm-openai:v0.19.0-cu130` |
-| 评测镜像 `EVAL_IMAGE` | `localhost/uenv-bridge-verl:layer4-build` |
-| 模型目录 `MODEL_DIR` | `/data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B` |
-| GPU | 8 张 A100 |
-| Tensor parallel | 8 |
-| `MAX_MODEL_LEN` | 16384 |
-| `MAX_TOKENS` | 4096 |
-| `TEMPERATURE` | 0.2 |
-| `TOP_P` | 1.0 |
-| Thinking mode | 关闭，`DISABLE_THINKING=1` |
-| 数据集 | SWE-bench-Pro public test split，全量 731 条 |
-| 输出目录 | `temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/` |
-| 官方 evaluator 资产 | `/data/ronghao/third_party/SWE-bench_Pro-os` |
-| 主镜像源 | `docker.1panel.live/jefzda` |
-| 重试镜像源 | `hub.rat.dev/jefzda` |
-| 分批大小 | 首轮 `BATCH_SIZE=10`，失败重试 `BATCH_SIZE=5` |
-| evaluator 并发 | `OFFICIAL_NUM_WORKERS=1` |
-| 镜像清理 | `CLEAN_IMAGES_AFTER_BATCH=1` |
-| 后训练 | 未进行 SFT/RL，Eval-first 基线 |
-
-## 6. 运行命令
-
-### 6.1 数据准备
-
-```bash
-cd /data/ronghao/uenv/uenv-bridge
-
-RUN_GENERATE=0 \
-RUN_SUMMARIZE=0 \
-./scripts/benchmark/run_swebenchpro_baseline.sh
-```
-
-### 6.2 生成 smoke
-
-```bash
-cd /data/ronghao/uenv/uenv-bridge
-
-RUN_PREPARE=0 \
-RUN_OFFICIAL_EVALUATE=0 \
-LIMIT=2 \
-OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_smoke_limit2 \
-./scripts/benchmark/run_swebenchpro_baseline.sh
-```
-
-关键参数：
-
-| 参数 | 值 |
-|---|---|
-| `GEN_IMAGE` | `localhost/vllm-openai:v0.19.0-cu130` |
-| `EVAL_IMAGE` | `localhost/uenv-bridge-verl:layer4-build` |
-| `MODEL_DIR` | `/data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B` |
-| `TENSOR_PARALLEL_SIZE` | `8` |
-| `MAX_MODEL_LEN` | `16384` |
-| `MAX_TOKENS` | `4096` |
-| `TEMPERATURE` | `0.2` |
-| `TOP_P` | `1.0` |
-| `DISABLE_THINKING` | `1` |
-
-### 6.3 全量 patch 生成命令
-
-该命令只生成 patch 和格式指标，不运行官方 Docker evaluator：
-
-```bash
-cd /data/ronghao/uenv/uenv-bridge
-
-nohup env RUN_PREPARE=0 \
-RUN_OFFICIAL_EVALUATE=0 \
-LIMIT= \
-OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full \
-TENSOR_PARALLEL_SIZE=8 \
-MAX_MODEL_LEN=16384 \
-MAX_TOKENS=4096 \
-./scripts/benchmark/run_swebenchpro_baseline.sh \
-> /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full.log 2>&1 &
-```
-
-### 6.4 官方 evaluator 分批按需评测
-
-SWE-bench-Pro 官方 evaluator 需要按样本拉取 `jefzda/sweap-images:<dockerhub_tag>` 实例镜像。731 个镜像全部预拉会占用 TB 级 Docker root 空间，因此当前采用“分批评测、按需拉取、每批结束清理镜像”的方式。
-
-新增脚本：
-
-```text
-scripts/benchmark/run_swebenchpro_official_batches.py
-scripts/benchmark/run_swebenchpro_official_batches.sh
-```
-
-首轮建议使用 `docker.1panel.live/jefzda`：
-
-```bash
-cd /data/ronghao/uenv/uenv-bridge
-
-BATCH_ROOT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_1panel \
-DOCKERHUB_USERNAME=docker.1panel.live/jefzda \
-BATCH_SIZE=10 \
-OFFICIAL_NUM_WORKERS=1 \
-CLEAN_IMAGES_AFTER_BATCH=1 \
-OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full \
-./scripts/benchmark/run_swebenchpro_official_batches.sh
-```
-
-如果首轮出现镜像拉取失败，脚本会输出：
-
-```text
-official_eval_batches_1panel/pull_failed_instance_ids.txt
-```
-
-第二轮只重跑镜像失败样本，并换用 `hub.rat.dev/jefzda`：
-
-```bash
-cd /data/ronghao/uenv/uenv-bridge
-
-BATCH_ROOT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_hubrat_retry \
-EXTRA_MERGE_ROOTS=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_1panel \
-INSTANCE_ID_FILE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_1panel/pull_failed_instance_ids.txt \
-DOCKERHUB_USERNAME=hub.rat.dev/jefzda \
-BATCH_SIZE=5 \
-OFFICIAL_NUM_WORKERS=1 \
-CLEAN_IMAGES_AFTER_BATCH=1 \
-OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full \
-./scripts/benchmark/run_swebenchpro_official_batches.sh
-```
-
-查看最终合并结果：
-
-```bash
-cat /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_hubrat_retry/official_metrics.json
-cat /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_hubrat_retry/pull_failed_instance_ids.txt
-```
-
-断点续跑说明：
-
-1. `status=done` 的 batch 会自动跳过。
-2. `status=failed` 或 `status=running` 的 batch 会重新进入调度。
-3. 重新调度 failed/running batch 时，脚本会先扫描该 batch 目录下已有的 `*_output.json`。已有 output 的 instance 会被视为已完成，不再提交给官方 evaluator。
-4. 对这些已完成 instance，脚本会按官方逻辑从 output 中重新计算 resolved 结果，并写入该 batch 的 `eval_results.json`。
-5. 只有没有 `*_output.json` 的 instance 会被重新运行。若需要强制重跑全部 case，可设置 `REDO_BATCHES=1` 或 `SKIP_COMPLETED_INSTANCES=0`。
-
-## 7. 当前结果
-
-### 7.1 数据准备结果
-
-已完成 `ScaleAI/SWE-bench_Pro` public test split 下载和本地落地：
-
-| 项 | 值 |
-|---|---:|
+| Adapter 运行脚本 | `scripts/benchmark/run_swebenchpro_uenv_baseline.sh` |
+| Adapter Core endpoint | `8.130.75.157:8088` |
+| 数据集 | `data/benchmarks/swebenchpro/test.jsonl` |
 | 样本数 | 731 |
-| 仓库数 | 11 |
-| Python 样本数 | 266 |
-| Go 样本数 | 280 |
-| JavaScript 样本数 | 165 |
-| TypeScript 样本数 | 20 |
+| 模型服务 | Adapter 侧 vLLM + Adapter Model Gateway |
+| vLLM endpoint | `http://127.0.0.1:18081/v1` |
+| vLLM 端口 | `18081` |
+| vLLM `max_model_len` | 65536 |
+| Adapter Model Gateway | `http://10.10.20.142:18097/v1` |
+| Gateway upstream | `http://127.0.0.1:18081/v1` |
+| UEnv batch size | 1 |
+| `MAX_TOKENS` | 8192 |
+| `THINKING_TOKEN_BUDGET` | 4096 |
+| `TEMPERATURE` | 0.0 |
+| `TOP_P` | 1.0 |
+| Episode timeout | 7200s |
+| Client timeout | 7600s |
+| Benchmark variant | `pro` |
+| Command mode | `full_shell` |
+| Env package | `swe-bench-pro@0.3.4` |
+| Agent bridge | `uenv-agent-openhands@1.0.0` |
+| Agent pool | `openhands-default` |
+| Driver entrypoint | `run_swebenchpro_official.py` |
+| Workspace dir | `/app` |
+| OpenHands LLM config | `/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json` |
+| Max iterations | 50 |
+| 输出目录 | `temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_thinking8192_budget4096_20260719_205350/` |
 
-### 7.2 Qwen patch 生成 smoke
+OpenHands LLM 配置文件位于 208.77 Agent 机器上。本轮 208.77 通过本地 SSH 隧道 `127.0.0.1:18194` 访问 7142 上的 Adapter Model Gateway，因此该配置文件中的 `base_url` 使用 Agent 侧本地地址：
 
-结果路径：
-
-```text
-temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_smoke_limit2/generations.json
-temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_smoke_limit2/patches.json
-temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_smoke_limit2/generation_metrics.json
+```json
+{
+  "model": "openai/Qwen/Qwen3.6-35B-A3B",
+  "base_url": "http://127.0.0.1:18194/v1",
+  "api_key": "EMPTY",
+  "temperature": 0.0,
+  "max_output_tokens": 8192,
+  "timeout": 7200,
+  "request_timeout": 7200,
+  "num_retries": 2
+}
 ```
 
-生成指标：
+SWE-bench-Pro 和其他四类 benchmark 的启动流程保持一致：先启动 vLLM，再启动 Adapter Model Gateway，最后运行 UEnv 评测脚本。区别只在于 SWE 的模型调用由 OpenHands Agent 根据 `LLM_CONFIG_PATH` 发起，因此这个 config 文件必须指向 Agent 侧可访问的同一个 gateway；当前 208.77 使用 `127.0.0.1:18194 -> 10.10.20.142:18097` 的隧道。
 
-| 样本数 | nonempty_patch_rate | diff_git_patch_rate | hunk_patch_rate | output_tokens_min | output_tokens_max | output_tokens_avg |
-|---:|---:|---:|---:|---:|---:|---:|
-| 2 | 1.000 | 1.000 | 1.000 | 1228 | 4096 | 2662.00 |
+## 5. 运行命令
 
-观察：
+从零开始运行时，先启动 8GPU vLLM，监听本机 `18081`：
 
-1. 两条样本都能抽取到非空 `diff --git` patch，并包含 hunk。
-2. 第 1 条样本触达 `MAX_TOKENS=4096`，说明 SWE-bench-Pro patch 生成可能需要更长输出或更强约束。
-3. 第 2 条样本生成内容包含测试文件修改倾向，说明“patch 格式正确”并不代表可通过官方 resolved 评测。
+```bash
+cd /data/ronghao/uenv/uenv-bridge
 
-### 7.3 官方 evaluator 验证状态
+BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_thinking8192_budget4096_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$BASE"
 
-已下载全量官方评测资产：
+podman rm -f uenv-swebenchpro-vllm-18081 2>/dev/null || true
 
-```text
-run_scripts/<instance_id>/run_script.sh
-run_scripts/<instance_id>/parser.py
-dockerfiles/base_dockerfile/<instance_id>/Dockerfile
-dockerfiles/instance_dockerfile/<instance_id>/Dockerfile
+podman run -d --name uenv-swebenchpro-vllm-18081 \
+  --entrypoint python3 \
+  --network host \
+  --pids-limit=-1 \
+  --shm-size=64g \
+  --device nvidia.com/gpu=all \
+  -v /data/ronghao:/data/ronghao \
+  -w /data/ronghao/uenv/uenv-bridge \
+  localhost/vllm-openai:v0.19.0-cu130 \
+  -m vllm.entrypoints.openai.api_server \
+  --model /data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B \
+  --served-model-name Qwen/Qwen3.6-35B-A3B \
+  --host 0.0.0.0 \
+  --port 18081 \
+  --tensor-parallel-size 8 \
+  --max-model-len 65536 \
+  --gpu-memory-utilization 0.90 \
+  --reasoning-parser qwen3 \
+  --reasoning-config "{\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}" \
+  --trust-remote-code
 ```
 
-并完成全量 patch 生成：
+可用下面命令确认 vLLM 已就绪：
+
+```bash
+curl --noproxy '*' http://127.0.0.1:18081/v1/models
+```
+
+在独立终端启动 Worker/OpenHands 可访问的 adapter model gateway，转发到本机 vLLM：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_thinking8192_budget4096_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$BASE"
+
+PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
+  --upstream http://127.0.0.1:18081/v1 \
+  --bind-host 0.0.0.0 \
+  --port 18097 \
+  --public-url http://10.10.20.142:18097/v1 \
+  --request-timeout-seconds 7200 \
+  --enable-thinking \
+  --thinking-token-budget 4096 \
+  --strip-reasoning \
+  --log-path "$BASE/model-gateway-swe-thinking-budget4096.jsonl"
+```
+
+可用下面命令确认 gateway 已就绪：
+
+```bash
+curl --noproxy '*' http://127.0.0.1:18097/v1/models
+```
+
+通过 UEnv 跑 SWE-bench-Pro 全量任务：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_thinking8192_budget4096_20260719_205350
+mkdir -p "$OUT"
+
+nohup env \
+REPO_DIR=/data/ronghao/uenv/uenv-bridge \
+DATA_PATH=/data/ronghao/uenv/uenv-bridge/data/benchmarks/swebenchpro/test.jsonl \
+OUTPUT_DIR="$OUT" \
+UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18097/v1 \
+UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
+LIMIT= \
+BATCH_SIZE=1 \
+MAX_TOKENS=8192 \
+THINKING_TOKEN_BUDGET=4096 \
+TEMPERATURE=0.0 \
+TOP_P=1.0 \
+TIMEOUT_SECONDS=7200 \
+CLIENT_TIMEOUT_SECONDS=7600 \
+BENCHMARK_VARIANT=pro \
+COMMAND_MODE=full_shell \
+ENV_PACKAGE_ID=swe-bench-pro \
+ENV_PACKAGE_VERSION=0.3.4 \
+AGENT_BRIDGE_ID=uenv-agent-openhands \
+AGENT_BRIDGE_VERSION=1.0.0 \
+AGENT_POOL_ID=openhands-default \
+DRIVER_ENTRYPOINT=run_swebenchpro_official.py \
+WORKSPACE_DIR=/app \
+LLM_CONFIG_PATH=/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json \
+MAX_ITERATIONS=50 \
+RESUME=0 \
+./scripts/benchmark/run_swebenchpro_uenv_baseline.sh \
+> "$OUT/run.log" 2>&1 &
+
+echo $! > "$OUT/run.pid"
+```
+
+查看运行进度：
+
+```bash
+tail -f /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_thinking8192_budget4096_20260719_205350/run.log
+```
+
+汇总当前结果：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import collections
+import json
+
+out = Path("/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_thinking8192_budget4096_20260719_205350")
+rows = [json.loads(line) for line in (out / "uenv_results.jsonl").open(encoding="utf-8") if line.strip()]
+
+print("results", len(rows))
+print("status", dict(collections.Counter(row.get("uenv_status") for row in rows)))
+print("resolved", dict(collections.Counter(str(row.get("resolved")) for row in rows)))
+PY
+```
+
+## 6. 当前结果
+
+截至当前结果文件：
+
+```text
+temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_thinking8192_budget4096_20260719_205350/uenv_results.jsonl
+```
+
+统计如下：
 
 | 指标 | 值 |
 |---|---:|
-| 样本数 | 731 |
-| nonempty_patch_rate | 1.000 |
-| diff_git_patch_rate | 1.000 |
-| hunk_patch_rate | 1.000 |
-| output_tokens_min | 99 |
-| output_tokens_max | 4096 |
-| output_tokens_avg | 1836.66 |
+| 数据集样本数 | 731 |
+| 已返回 result | 184 |
+| `uenv_status=completed` | 146 |
+| `uenv_status=failed` | 38 |
+| `resolved=true` | 0 |
+| `resolved=false` | 184 |
+| 当前 resolved rate | 0.0000 |
 
-曾使用 `docker.1ms.run/jefzda` 尝试全量官方 evaluator。该次运行得到 `resolve_rate=0`，但不能视为有效模型分数，原因是 724/731 个样本在拉取实例镜像时 404，只有 7 条真正进入容器测试。
+38 条 failed 的错误分布：
 
-后续镜像源探测结果：
-
-| 镜像源 | 代表性 manifest 探测 | 结论 |
+| 错误类型 | 数量 | 说明 |
 |---|---:|---|
-| `docker.1ms.run/jefzda` | 33/33 失败 | 不再作为主源。 |
-| `docker.1panel.live/jefzda` | 33/33 成功 | 首轮主源，但需要控制频率避免 Cloudflare 429。 |
-| `hub.rat.dev/jefzda` | 33/33 成功 | 失败重试备选源。 |
-| `docker.m.daocloud.io` | 非白名单拒绝 | 不适用。 |
-| `dockerproxy.com` / `dockerpull.*` | 本机超时 | 不适用。 |
+| `ContextWindowExceededError` | 29 | OpenHands 多轮工具调用后累计 prompt 接近或超过 vLLM `65536` 上下文限制 |
+| timeout | 2 | HTTP / socket / episode 等待超时 |
+| other | 7 | 需要结合 Worker / OpenHands trajectory 继续排查 |
 
-新增 batch runner smoke 已完成：
+当前最重要的现象不是少量上下文超长或 timeout，而是已经 completed 的 146 条样本也全部 `resolved=false`。这需要 Worker/Agent 侧结合 OpenHands trajectory、最终 `git diff`、modified files、测试执行目录和测试日志继续定位。
 
-```text
-temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_full/official_eval_batches_smoke
-```
+## 7. 当前结论
 
-该 smoke 验证了 batch 切分、官方 evaluator 调用、日志记录、pull-failed 识别、镜像清理和结果合并流程。由于 1panel 当时返回 429，样本未进入真实测试容器；该失败被记录到 `pull_failed_instance_ids.txt`，可用第二轮换源重试。
+SWE-bench-Pro 的 UEnv 调度链路已经可以返回 result，但当前 184 条已返回样本中没有任何 resolved 样本。后续排查重点应放在 Worker/OpenHands 层面：
 
-后续又使用已失败的 `batch_00011` 目录验证了 case 级断点续跑：该 batch 中已有 5 个 instance 产出 `*_output.json`，重新调度时脚本只提交剩余 5 个 instance，同时把已有 5 个 output 补算进 `eval_results.json`。
+1. OpenHands 实际工作目录是否就是目标 repo 根目录 `/app`。
+2. 最终 patch 是否真实修改了目标 repo 下的源码文件。
+3. Worker 是否正确收集 OpenHands 最终 `git diff`。
+4. 官方测试是否在正确的 repo、base commit 和容器环境中执行。
+5. 对 `ContextWindowExceededError` 样本，是否需要 Worker/Agent 侧启用更强的 history truncation 或降低 OpenHands 单次输出预算。
 
-## 8. 结论
-
-当前已经完成 SWE-bench-Pro 数据集下载、字段确认、patch 生成脚本编写，以及 Qwen3.6-35B-A3B 的 2 条样本生成 smoke。模型能够生成可抽取的 unified diff patch，但 smoke 中已经出现输出过长和修改测试文件的风险，后续需要依赖官方 evaluator 才能得到真实 resolve rate。
-
-官方 evaluator 侧当前不再采用一次性全量预拉镜像的方案，而是采用第 6.4 节的分批按需评测方案。该方案可以在当前 Docker root 空间有限的情况下继续推进全部 731 个 case，并通过 `pull_failed_instance_ids.txt` 将网络/镜像失败样本与真实未 resolved 样本区分开。
+历史上曾做过“直接 vLLM 生成 patch + 官方 Docker evaluator”的早期实验，使用 `MAX_TOKENS=4096`、`TEMPERATURE=0.2`、thinking 关闭。该实验只作为历史参考，不是当前 UEnv 正式运行命令。

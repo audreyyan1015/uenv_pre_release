@@ -1,0 +1,28 @@
+[Unit]
+# DSCodeBench Agent 轨道（ToolEnv）评测批次。%i 即 RUN_NAME，产物落在 /opt/uenv-toolenv/runs/%i。
+# 用法：systemctl start uenv-toolenv-eval@fullrun_20260726
+# 覆盖单次参数：systemctl set-environment 不可靠，改用 drop-in 或 /etc/uenv-toolenv.env
+Description=UEnv DSCodeBench ToolEnv agentic eval (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/uenv-toolenv/app
+Environment=REPO_DIR=/opt/uenv-toolenv/app
+Environment=BRIDGE_DIR=/opt/uenv-toolenv/app/uenv-bridge
+Environment=AGENT_PYTHON=/opt/uenv-toolenv/venv/bin/python
+Environment=PYTHON_BIN=/opt/uenv-toolenv/sandbox-venv/bin/python
+Environment=OUTPUT_ROOT=/opt/uenv-toolenv/runs
+Environment=PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+Environment=RUN_NAME=%i
+EnvironmentFile=/etc/uenv-toolenv.env
+ExecStart=/usr/bin/env bash /opt/uenv-toolenv/app/uenv-bridge/scripts/benchmark/run_dscodebench_agent_toolenv.sh
+TimeoutStartSec=0
+# 评测低分不算失败；只有脚本异常退出才标 failed
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

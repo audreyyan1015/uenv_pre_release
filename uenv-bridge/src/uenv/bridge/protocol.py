@@ -68,6 +68,8 @@ class EpisodeResult:
     summary: EpisodeSummary = field(default_factory=EpisodeSummary)
     error_code: int | None = None
     error_message: str = ""
+    trajectory_id: str = ""
+    metadata: dict[str, str] = field(default_factory=dict)
     rollout_param_version: int | None = None
     rollout_policy_version: str | None = None
     rollout_log_probs: list[float] = field(default_factory=list)

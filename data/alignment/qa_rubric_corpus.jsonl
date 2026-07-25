@@ -1,0 +1,58 @@
+{"case_id": "gsm8k-001", "dataset": "gsm8k", "action": "Natalia sold 48 clips in April and 24 in May.\n#### 72", "target": "72", "note": "官方 #### 约定，正例"}
+{"case_id": "gsm8k-002", "dataset": "gsm8k", "action": "Let me compute step by step.\n#### 19", "target": "20", "note": "#### 约定，负例"}
+{"case_id": "gsm8k-003", "dataset": "gsm8k", "action": "72", "target": "72", "note": "裸答案，无标记"}
+{"case_id": "gsm8k-004", "dataset": "gsm8k", "action": "#### 1,200", "target": "1200", "note": "千分位逗号"}
+{"case_id": "gsm8k-005", "dataset": "gsm8k", "action": "#### $18", "target": "18", "note": "货币符号"}
+{"case_id": "gsm8k-006", "dataset": "gsm8k", "action": "#### 3.5", "target": "3.5", "note": "小数"}
+{"case_id": "gsm8k-007", "dataset": "gsm8k", "action": "#### -7", "target": "-7", "note": "负数"}
+{"case_id": "gsm8k-008", "dataset": "gsm8k", "action": "first #### 5\nthen #### 9", "target": "9", "note": "多个 ####，取最后"}
+{"case_id": "gsm8k-009", "dataset": "gsm8k", "action": "The answer is 72 dollars.", "target": "72", "note": "自然语言无标记（预期口径差异点）"}
+{"case_id": "gsm8k-010", "dataset": "gsm8k", "action": "", "target": "72", "note": "空输出"}
+{"case_id": "gsm8k-011", "dataset": "gsm8k", "action": "#### 72 ", "target": "72", "note": "尾随空白"}
+{"case_id": "gsm8k-012", "dataset": "gsm8k", "action": "#### 072", "target": "72", "note": "前导零"}
+{"case_id": "gsm8k-013", "dataset": "gsm8k", "action": "#### 1/2", "target": "0.5", "note": "分数 vs 小数（数学等价，字符串不等）"}
+{"case_id": "gsm8k-014", "dataset": "gsm8k", "action": "#### 8", "target": "8.0", "note": "整数 vs 浮点写法"}
+{"case_id": "olymmath-001", "dataset": "olymmath-easy", "action": "Therefore the answer is \\boxed{16}", "target": "16", "note": "boxed 正例"}
+{"case_id": "olymmath-002", "dataset": "olymmath-easy", "action": "\\boxed{19}", "target": "20", "note": "boxed 负例"}
+{"case_id": "olymmath-003", "dataset": "olymmath-easy", "action": "\\boxed{\\sqrt{33}}", "target": "\\sqrt{33}", "note": "LaTeX 根号"}
+{"case_id": "olymmath-004", "dataset": "olymmath-easy", "action": "\\boxed{\\frac{1}{2}}", "target": "\\frac{1}{2}", "note": "LaTeX 分数"}
+{"case_id": "olymmath-005", "dataset": "olymmath-easy", "action": "\\boxed{\\frac{1}{2}}", "target": "0.5", "note": "分数与小数等价（math_verify 应判等）"}
+{"case_id": "olymmath-006", "dataset": "olymmath-hard", "action": "first \\boxed{3} then \\boxed{7}", "target": "7", "note": "多个 boxed，取最后"}
+{"case_id": "olymmath-007", "dataset": "olymmath-hard", "action": "答案是 \\boxed{42}。", "target": "42", "note": "中文上下文（UTF-8 边界）"}
+{"case_id": "olymmath-008", "dataset": "olymmath-easy", "action": "\\boxed{(1,2)}", "target": "(1,2)", "note": "区间/有序对"}
+{"case_id": "olymmath-009", "dataset": "olymmath-easy", "action": "#### 16", "target": "16", "note": "olymmath 输出退化为 #### 约定"}
+{"case_id": "olymmath-010", "dataset": "olymmath-easy", "action": "\\boxed{2\\sqrt{3}}", "target": "2\\sqrt{3}", "note": "系数根号"}
+{"case_id": "olymmath-011", "dataset": "olymmath-easy", "action": "\\boxed{16", "target": "16", "note": "未配平括号"}
+{"case_id": "olymmath-012", "dataset": "olymmath-easy", "action": "", "target": "16", "note": "空输出"}
+{"case_id": "olymmath-013", "dataset": "olymmath-hard", "action": "\\boxed{\\pi}", "target": "\\pi", "note": "符号常量"}
+{"case_id": "olymmath-014", "dataset": "olymmath-easy", "action": "\\boxed{100\\%}", "target": "100\\%", "note": "百分号转义"}
+{"case_id": "pubmedqa-001", "dataset": "pubmedqa", "action": "Based on the abstract, the answer is yes.", "target": "yes", "note": "yes 正例"}
+{"case_id": "pubmedqa-002", "dataset": "pubmedqa", "action": "no", "target": "no", "note": "裸标签 no"}
+{"case_id": "pubmedqa-003", "dataset": "pubmedqa", "action": "The evidence is inconclusive, so maybe.", "target": "maybe", "note": "maybe 正例"}
+{"case_id": "pubmedqa-004", "dataset": "pubmedqa", "action": "yes", "target": "no", "note": "标签不符"}
+{"case_id": "pubmedqa-005", "dataset": "pubmedqa", "action": "Answer: YES", "target": "yes", "note": "大小写"}
+{"case_id": "pubmedqa-006", "dataset": "pubmedqa", "action": "There is no clear evidence; maybe.", "target": "maybe", "note": "先出现 no 再出现 maybe（抽取顺序敏感）"}
+{"case_id": "pubmedqa-007", "dataset": "pubmedqa", "action": "I cannot determine.", "target": "maybe", "note": "无标签词"}
+{"case_id": "pubmedqa-008", "dataset": "pubmedqa", "action": "", "target": "yes", "note": "空输出"}
+{"case_id": "pubmedqa-009", "dataset": "pubmedqa", "action": "**yes**", "target": "yes", "note": "markdown 包裹"}
+{"case_id": "pubmedqa-010", "dataset": "pubmedqa", "action": "The answer is yes, but no for subgroup B.", "target": "yes", "note": "同时含 yes/no"}
+{"case_id": "pubmedqa-011", "dataset": "pubmedqa", "action": "Nonetheless the effect holds: yes.", "target": "yes", "note": "no 作为子串出现在 Nonetheless 中"}
+{"case_id": "scitab-001", "dataset": "scitab", "action": "The claim is supports by the table.", "target": "supports", "note": "supports 正例"}
+{"case_id": "scitab-002", "dataset": "scitab", "action": "refutes", "target": "refutes", "note": "裸标签 refutes"}
+{"case_id": "scitab-003", "dataset": "scitab", "action": "The table does not contain the needed column: not enough info.", "target": "not enough info", "note": "三分类第三类"}
+{"case_id": "scitab-004", "dataset": "scitab", "action": "supports", "target": "refutes", "note": "标签不符"}
+{"case_id": "scitab-005", "dataset": "scitab", "action": "SUPPORTS", "target": "supports", "note": "大小写"}
+{"case_id": "scitab-006", "dataset": "scitab", "action": "The evidence supports the claim, it does not refute it.", "target": "supports", "note": "同时含 supports/refute"}
+{"case_id": "scitab-007", "dataset": "scitab", "action": "not enough information", "target": "not enough info", "note": "同义变体写法"}
+{"case_id": "scitab-008", "dataset": "scitab", "action": "", "target": "supports", "note": "空输出"}
+{"case_id": "scitab-009", "dataset": "scitab", "action": "**refutes**", "target": "refutes", "note": "markdown 包裹"}
+{"case_id": "scitab-010", "dataset": "scitab", "action": "Answer: NOT ENOUGH INFO", "target": "not enough info", "note": "大写多词标签"}
+{"case_id": "scitab-011", "dataset": "scitab", "action": "unsupported", "target": "refutes", "note": "非法标签词"}
+{"case_id": "regress-olymmath-empty", "dataset": "olymmath-easy", "action": "", "target": "16", "note": "回归：空输出曾因双向子串包含被判满分"}
+{"case_id": "regress-olymmath-blank", "dataset": "olymmath-easy", "action": "   ", "target": "16", "note": "回归：纯空白同上"}
+{"case_id": "regress-olymmath-partial-6", "dataset": "olymmath-easy", "action": "\\boxed{6}", "target": "16", "note": "回归：答案子串 6 曾命中 target 16"}
+{"case_id": "regress-olymmath-partial-1", "dataset": "olymmath-easy", "action": "\\boxed{1}", "target": "16", "note": "回归：答案子串 1 曾命中 target 16"}
+{"case_id": "regress-olymmath-assign", "dataset": "olymmath-easy", "action": "\\boxed{x = \\frac{7}{3}}", "target": "\\frac{7}{3}", "note": "赋值前缀应被剥离"}
+{"case_id": "regress-olymmath-longlhs", "dataset": "olymmath-easy", "action": "\\boxed{abcd=5}", "target": "5", "note": "长左侧不得当赋值前缀吞掉"}
+{"case_id": "regress-gsm8k-empty-marker", "dataset": "gsm8k", "action": "#### ", "target": "72", "note": "回归：#### 后为空不得计分"}
+{"case_id": "regress-gsm8k-partial", "dataset": "gsm8k", "action": "#### 7", "target": "72", "note": "回归：部分数字不得计分"}

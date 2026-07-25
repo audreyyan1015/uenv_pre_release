@@ -1,0 +1,132 @@
+{
+  "problem_count": 1000,
+  "completed_count": 1000,
+  "failed_count": 0,
+  "executed_count": 892,
+  "passed_count": 281,
+  "error_count": 329,
+  "wrong_answer_count": 390,
+  "error_category_counts": {
+    "candidate_runtime_error": 223,
+    "wrong_answer": 390,
+    "harness_error": 74,
+    "dependency_error": 9,
+    "timeout": 23
+  },
+  "completion_rate": 1.0,
+  "execution_rate": 0.892,
+  "pass_at_1": 0.281,
+  "reward_accuracy": 0.281,
+  "library_distribution": {
+    "numpy": 131,
+    "pandas": 92,
+    "scipy": 112,
+    "sklearn": 108,
+    "matplotlib": 105,
+    "seaborn": 83,
+    "tensorflow": 110,
+    "pytorch": 101,
+    "keras": 104,
+    "lightgbm": 54
+  },
+  "by_library": {
+    "keras": {
+      "problem_count": 104,
+      "completion_rate": 1.0,
+      "execution_rate": 0.8461538461538461,
+      "pass_at_1": 0.20192307692307693,
+      "error_count": 43,
+      "wrong_answer_count": 40
+    },
+    "lightgbm": {
+      "problem_count": 54,
+      "completion_rate": 1.0,
+      "execution_rate": 0.37037037037037035,
+      "pass_at_1": 0.07407407407407407,
+      "error_count": 44,
+      "wrong_answer_count": 6
+    },
+    "matplotlib": {
+      "problem_count": 105,
+      "completion_rate": 1.0,
+      "execution_rate": 0.9809523809523809,
+      "pass_at_1": 0.3238095238095238,
+      "error_count": 15,
+      "wrong_answer_count": 56
+    },
+    "numpy": {
+      "problem_count": 131,
+      "completion_rate": 1.0,
+      "execution_rate": 0.9770992366412213,
+      "pass_at_1": 0.3969465648854962,
+      "error_count": 35,
+      "wrong_answer_count": 44
+    },
+    "pandas": {
+      "problem_count": 92,
+      "completion_rate": 1.0,
+      "execution_rate": 0.8369565217391305,
+      "pass_at_1": 0.31521739130434784,
+      "error_count": 31,
+      "wrong_answer_count": 32
+    },
+    "pytorch": {
+      "problem_count": 101,
+      "completion_rate": 1.0,
+      "execution_rate": 0.9900990099009901,
+      "pass_at_1": 0.39603960396039606,
+      "error_count": 34,
+      "wrong_answer_count": 27
+    },
+    "scipy": {
+      "problem_count": 112,
+      "completion_rate": 1.0,
+      "execution_rate": 0.875,
+      "pass_at_1": 0.30357142857142855,
+      "error_count": 38,
+      "wrong_answer_count": 40
+    },
+    "seaborn": {
+      "problem_count": 83,
+      "completion_rate": 1.0,
+      "execution_rate": 0.9397590361445783,
+      "pass_at_1": 0.1686746987951807,
+      "error_count": 18,
+      "wrong_answer_count": 51
+    },
+    "sklearn": {
+      "problem_count": 108,
+      "completion_rate": 1.0,
+      "execution_rate": 0.8333333333333334,
+      "pass_at_1": 0.3611111111111111,
+      "error_count": 32,
+      "wrong_answer_count": 37
+    },
+    "tensorflow": {
+      "problem_count": 110,
+      "completion_rate": 1.0,
+      "execution_rate": 1.0,
+      "pass_at_1": 0.12727272727272726,
+      "error_count": 39,
+      "wrong_answer_count": 57
+    }
+  },
+  "uenv": {
+    "adapter_core_endpoint": "8.130.75.157:8088",
+    "model_endpoint": "http://10.10.20.142:18094/v1",
+    "model_name": "Qwen/Qwen3.6-35B-A3B",
+    "batch_id": "dscodebench-uenv-20260720_002259",
+    "batch_size": 1,
+    "prompt_style": "official_fenced",
+    "inference_mode": "uenv_generate",
+    "evaluation_mode": "inline_harness",
+    "enable_thinking": true,
+    "preserve_thinking": false,
+    "thinking_token_budget": 16384,
+    "max_tokens": 32768,
+    "test_case_number": 200,
+    "code_timeout_secs": 300,
+    "resume": false,
+    "remaining_requests_at_start": 1000
+  }
+}

@@ -1,11 +1,11 @@
 # OlymMATH 数学题求解 UEnv 基线评测
 
-> 日期：2026-07-17
+> 日期：2026-07-19 / 2026-07-20 失败样本补测
 > 阶段：Eval-first，未进行后训练
 > 任务书条目：5. 数学题求解
 > Benchmark：OlymMATH-EASY / OlymMATH-HARD
 > 目标模型：`Qwen/Qwen3.6-35B-A3B`
-> 正式口径：接入 UEnv，thinking 开启，`MAX_TOKENS=32768`，`thinking_token_budget=16384`，`preserve_thinking=false`，`strip_reasoning=true`，全量 400 题
+> 正式口径：接入 UEnv，thinking 开启，`MAX_TOKENS=32768`，`thinking_token_budget=16384`，`preserve_thinking=false`，`strip_reasoning=true`，全量 400 题；初始全量后对 failed 样本执行 resume 补测
 
 ## 1. 任务说明
 
@@ -81,11 +81,11 @@ OlymMATH 样本
 | `TEMPERATURE` | 0.0 |
 | `TOP_P` | 1.0 |
 | 数据集 | EN-EASY、EN-HARD、ZH-EASY、ZH-HARD |
-| 断点续跑 | 关闭，`RESUME=0` |
+| 断点续跑 | 初始全量 `RESUME=0`；失败样本补测 `RESUME=1` |
 
 ## 5. 运行命令
 
-启动 8GPU vLLM，监听本机 `18081`。由于当前 `localhost/uenv-bridge-verl:layer4-build` 内的 vLLM 版本不能识别 Qwen3.6 MoE，本轮使用 `localhost/vllm-openai:v0.19.0-cu130`：
+从零开始运行时，先启动 8GPU vLLM，监听本机 `18081`。由于当前 `localhost/uenv-bridge-verl:layer4-build` 内的 vLLM 版本不能识别 Qwen3.6 MoE，本轮使用 `localhost/vllm-openai:v0.19.0-cu130`：
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
@@ -93,8 +93,10 @@ cd /data/ronghao/uenv/uenv-bridge
 BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_reasoning_budget_20260715_111008
 mkdir -p "$BASE"
 
-podman run --rm \
-  --entrypoint bash \
+podman rm -f uenv-olymmath-vllm-18081 2>/dev/null || true
+
+podman run -d --name uenv-olymmath-vllm-18081 \
+  --entrypoint python3 \
   --network host \
   --pids-limit=-1 \
   --shm-size=64g \
@@ -102,18 +104,17 @@ podman run --rm \
   -v /data/ronghao:/data/ronghao \
   -w /data/ronghao/uenv/uenv-bridge \
   localhost/vllm-openai:v0.19.0-cu130 \
-  -lc 'exec python3 -m vllm.entrypoints.openai.api_server \
-    --model /data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B \
-    --served-model-name Qwen/Qwen3.6-35B-A3B \
-    --host 0.0.0.0 \
-    --port 18081 \
-    --tensor-parallel-size 8 \
-    --max-model-len 65536 \
-    --gpu-memory-utilization 0.90 \
-    --reasoning-parser qwen3 \
-    --reasoning-config "{\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}" \
-    --trust-remote-code \
-    > /data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_reasoning_budget_20260715_111008/vllm_reasoning_content_budget16384_65536.log 2>&1'
+  -m vllm.entrypoints.openai.api_server \
+  --model /data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B \
+  --served-model-name Qwen/Qwen3.6-35B-A3B \
+  --host 0.0.0.0 \
+  --port 18081 \
+  --tensor-parallel-size 8 \
+  --max-model-len 65536 \
+  --gpu-memory-utilization 0.90 \
+  --reasoning-parser qwen3 \
+  --reasoning-config "{\"reasoning_start_str\":\"<think>\",\"reasoning_end_str\":\"</think>\"}" \
+  --trust-remote-code
 ```
 
 可用下面命令确认 vLLM 已就绪：
@@ -122,7 +123,7 @@ podman run --rm \
 curl --noproxy '*' http://127.0.0.1:18081/v1/models
 ```
 
-启动 Worker 可访问的 adapter model gateway，转发到本机 vLLM：
+在独立终端启动 Worker 可访问的 adapter model gateway，转发到本机 vLLM：
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
@@ -152,7 +153,7 @@ curl --noproxy '*' http://127.0.0.1:18094/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005
 mkdir -p "$OUT"
 
 RESUME=0 \
@@ -166,26 +167,51 @@ PROMPT_STYLE=official \
 MAX_TOKENS=32768 \
 ENABLE_THINKING=1 \
 PRESERVE_THINKING=0 \
-STRIP_REASONING=1 \
 THINKING_TOKEN_BUDGET=16384 \
 TEMPERATURE=0.0 \
 TOP_P=1.0 \
 TIMEOUT_SECONDS=7200 \
 CLIENT_TIMEOUT_SECONDS=7800 \
-./scripts/benchmark/run_olymmath_uenv_baseline.sh 2>&1 | tee "$OUT/full_noresume.log"
+./scripts/benchmark/run_olymmath_uenv_baseline.sh
+```
+
+初始全量运行中有 22 条样本因 Server/Worker 侧 episode 重试耗尽失败，随后使用同一输出目录按 `qid` 跳过已完成样本，只重测失败样本：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005
+
+RESUME=1 \
+OUTPUT_DIR="$OUT" \
+UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18094/v1 \
+UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
+DATASETS=EN-EASY,EN-HARD,ZH-EASY,ZH-HARD \
+BATCH_SIZE=1 \
+PROMPT_STYLE=official \
+MAX_TOKENS=32768 \
+ENABLE_THINKING=1 \
+PRESERVE_THINKING=0 \
+THINKING_TOKEN_BUDGET=16384 \
+TEMPERATURE=0.0 \
+TOP_P=1.0 \
+TIMEOUT_SECONDS=7200 \
+CLIENT_TIMEOUT_SECONDS=7800 \
+./scripts/benchmark/run_olymmath_uenv_baseline.sh 2>&1 | tee "$OUT/resume_failed_20260720_olymmath.log"
 ```
 
 本轮正式结果目录：
 
 ```text
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/
 ```
 
 ## 6. 正式结果
 
 | 模型 | 样本数 | requests | results | completed | failed | UEnv reward accuracy | completed-only reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `Qwen/Qwen3.6-35B-A3B` | 400 | 400 | 400 | 251 | 149 | 0.3900 | 0.6215 | 0.6125 |
+| `Qwen/Qwen3.6-35B-A3B` | 400 | 400 | 400 | 400 | 0 | 0.6575 | 0.6575 | 0.9500 |
 
 说明：
 
@@ -194,112 +220,120 @@ temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507
 | `UEnv reward accuracy` | 全量 400 条样本上，Worker 返回 `EpisodeResult.summary.total_reward` 的均值 |
 | `completed-only reward accuracy` | 只在 `uenv_status=completed` 的样本上计算 reward 均值 |
 | `Parse rate` | Adapter 本地从 `raw_output` 中抽取到最终答案的比例；UEnv 正确性主口径仍以 Worker reward 为准 |
+| `parsed accuracy` | 只在 Adapter 成功抽取最终答案的样本上计算正确率，本轮为 0.6921 |
+| `requests/results` | 表中按 `qid` 取最新记录统计为 400/400；由于 resume 在同一 jsonl 中追加 22 条补测记录，原始 `uenv_requests.jsonl` 和 `uenv_results.jsonl` 各有 422 行 |
 
 按子集：
 
 | 子集 | 样本数 | completed | failed | UEnv reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|
-| EN-EASY | 100 | 99 | 1 | 0.8300 | 0.9800 |
-| EN-HARD | 100 | 99 | 1 | 0.4600 | 0.9600 |
-| ZH-EASY | 100 | 19 | 81 | 0.1500 | 0.1800 |
-| ZH-HARD | 100 | 34 | 66 | 0.1200 | 0.3300 |
+| EN-EASY | 100 | 100 | 0 | 0.7900 | 0.9800 |
+| EN-HARD | 100 | 100 | 0 | 0.5000 | 0.9600 |
+| ZH-EASY | 100 | 100 | 0 | 0.8000 | 0.9500 |
+| ZH-HARD | 100 | 100 | 0 | 0.5400 | 0.9100 |
 
 按语言：
 
 | 语言 | 样本数 | completed | failed | UEnv reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|
-| EN | 200 | 198 | 2 | 0.6450 | 0.9700 |
-| ZH | 200 | 53 | 147 | 0.1350 | 0.2550 |
+| EN | 200 | 200 | 0 | 0.6450 | 0.9700 |
+| ZH | 200 | 200 | 0 | 0.6700 | 0.9300 |
 
 按难度：
 
 | 难度 | 样本数 | completed | failed | UEnv reward accuracy | Parse rate |
 |---|---:|---:|---:|---:|---:|
-| EASY | 200 | 118 | 82 | 0.4900 | 0.5800 |
-| HARD | 200 | 133 | 67 | 0.2900 | 0.6450 |
+| EASY | 200 | 200 | 0 | 0.7950 | 0.9650 |
+| HARD | 200 | 200 | 0 | 0.5200 | 0.9350 |
 
 按学科：
 
-| 学科 | 样本数 | Parse rate | UEnv reward accuracy |
-|---|---:|---:|---:|
-| Algebra | 50 | 0.9600 | 0.6200 |
-| Combinatorics | 54 | 0.9630 | 0.4815 |
-| Geometry | 58 | 0.9828 | 0.7931 |
-| Number Theory | 38 | 0.9737 | 0.6842 |
-| 代数 | 50 | 0.3200 | 0.2000 |
-| 几何 | 58 | 0.2241 | 0.1552 |
-| 数论 | 38 | 0.2632 | 0.0789 |
-| 组合 | 54 | 0.2222 | 0.0926 |
+| 学科 | 样本数 | completed | failed | Parse rate | UEnv reward accuracy |
+|---|---:|---:|---:|---:|---:|
+| Algebra | 50 | 50 | 0 | 0.9800 | 0.7200 |
+| Combinatorics | 54 | 54 | 0 | 0.9815 | 0.5000 |
+| Geometry | 58 | 58 | 0 | 0.9828 | 0.7241 |
+| Number Theory | 38 | 38 | 0 | 0.9211 | 0.6316 |
+| 代数 | 50 | 50 | 0 | 0.9600 | 0.7400 |
+| 几何 | 58 | 58 | 0 | 0.9310 | 0.7586 |
+| 数论 | 38 | 38 | 0 | 0.8684 | 0.6316 |
+| 组合 | 54 | 54 | 0 | 0.9444 | 0.5370 |
 
 答案抽取与判分分布：
 
 | 项 | 数量 |
 |---|---:|
-| `answer_phrase` 抽取 | 2 |
-| `boxed` 抽取 | 243 |
-| 未抽取到最终答案 | 155 |
-| Worker reward 正确 | 156 |
-| Worker reward 不正确 | 244 |
+| `answer_phrase` 抽取 | 4 |
+| `boxed` 抽取 | 376 |
+| 未抽取到最终答案 | 20 |
+| Worker reward 正确 | 263 |
+| Worker reward 不正确 | 137 |
 
 ## 7. 运行稳定性
 
 | 项 | 值 |
 |---|---:|
-| 总运行时间 | 约 16 小时 18 分钟 |
-| 平均 episode 耗时 | 146.76s |
-| completed 平均 episode 耗时 | 82.29s |
-| failed 平均 episode 耗时 | 255.37s |
+| 初始全量运行时间 | 约 9 小时 26 分钟 |
+| 失败样本补测运行时间 | 约 29 分 25 秒 |
+| 最新 400 条样本平均 episode 耗时 | 89.11s |
 | Worker 并发 / UEnv batch size | 1 |
-| Gateway `/v1/chat/completions` 调用 | 698 |
-| Gateway HTTP 200 | 698 |
-| Gateway error | 0 |
-| Gateway 平均 latency | 83.71s |
-| completed 样本 `raw_output` 字符数均值 | 2477.86 |
-| completed 样本 `raw_output` 字符数范围 | 9 - 8206 |
+| 补测启动时剩余失败样本 | 22 |
+| 补测后 failed | 0 |
+| Gateway 初始全量 `/v1/chat/completions` 调用 | 389 |
+| Gateway 初始全量 `/v1/models` 调用 | 1 |
+| Gateway 初始全量 HTTP 200 | 390 |
+| Gateway 初始全量 error | 0 |
+| Gateway 初始全量 `/v1/chat/completions` 平均 latency | 82.12s |
+| completed 样本 `raw_output` 字符数均值 | 2430.10 |
+| completed 样本 `raw_output` 字符数范围 | 24 - 8206 |
 
-失败情况：
+初始失败样本补测情况：
 
 | 项 | 值 |
 |---|---|
-| 失败样本数 | 149 |
-| 失败错误码 | `5001` |
-| 本地结果中的错误信息 | `episode ... exceeded max attempts (3)` |
-| Gateway 侧情况 | 当前时间窗口内 698 次 `/v1/chat/completions` 均为 HTTP 200，未记录 gateway error |
-| 失败分布 | EN 2 条，ZH 147 条；主要集中在中文 EASY/HARD |
+| 初始失败样本数 | 22 |
+| 初始失败错误码 | `5001` |
+| 初始错误信息 | `episode ... exceeded max attempts (3)` |
+| 失败分布 | 22 条全部来自 EN-EASY，样本编号集中在 `OlymMATH-EASY-64-EN` 至 `OlymMATH-EASY-85-EN` |
+| 补测方式 | `RESUME=1`，同一输出目录下按 `qid` 跳过已完成样本，只发送 failed 样本 |
+| 补测结果 | 22 条全部恢复为 `completed` |
+| 补测样本 reward | 16 条为 1.0，6 条为 0.0 |
 
-因此，本轮失败主要表现为 Server/Worker 侧 episode 三次尝试后仍未完成，而不是 adapter gateway 无法访问 vLLM。中文样本失败比例明显高于英文样本，需要后续结合 Worker 日志继续定位是判分、输出解析、超时控制还是中文 prompt 处理导致。
+因此，初始失败更像是运行期间 Server/Worker 侧 episode 重试、服务状态或调度稳定性问题，而不是模型本身无法回答这些样本。补测后 22 条均成功返回，最终 OlymMATH 正式口径使用按 `qid` 去重后的最新结果。
 
 ## 8. 输出截断与字段缺口
 
 | 观察项 | 数量 |
 |---|---:|
-| completed 样本 | 251 |
-| failed 空输出样本 | 149 |
-| completed 样本中出现 `\boxed{}` | 243 |
-| completed 样本中没有 `\boxed{}` | 8 |
-| completed 样本中出现 `</think>` | 0 |
+| completed 样本 | 400 |
+| failed 空输出样本 | 0 |
+| completed 样本中出现 `\boxed{}` | 376 |
+| completed 样本中没有 `\boxed{}` | 24 |
+| completed 样本中出现 `</think>` | 2 |
 
-本轮 gateway 使用 `--strip-reasoning`，因此 completed 样本的 `raw_output` 中没有 `</think>` 是预期现象，不能据此判断 thinking 是否被截断。当前 `EpisodeResult` 和 `model-gateway.jsonl` 没有保存 vLLM 原始 `finish_reason`，后续需要 Worker 将 vLLM 的 `finish_reason` 写回 `EpisodeResult.trajectory.steps[i].info.finish_reason`，才能准确区分 `stop`、`length` 和传输失败。
+本轮 gateway 使用 `--strip-reasoning`，绝大多数 completed 样本的 `raw_output` 中不再包含独立 reasoning 内容。仍有 2 条 completed 样本出现字面量 `</think>`，需要后续结合原始 vLLM 响应确认是模型把标签写入最终 content，还是 reasoning 字段剥离仍有边界情况。当前 `EpisodeResult` 和 `model-gateway.jsonl` 没有保存 vLLM 原始 `finish_reason`，后续需要 Worker 将 vLLM 的 `finish_reason` 写回 `EpisodeResult.trajectory.steps[i].info.finish_reason`，才能准确区分 `stop`、`length` 和传输失败。
 
 当前 UEnv driver 的 `avg_output_tokens` 为 0，是因为 Worker 返回的 `EpisodeResult` 未携带 token id 数组；该项在 UEnv 口径下暂不作为有效指标。
 
 ## 9. 输出文件
 
 ```text
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/metrics.json
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/predictions_official.json
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/predictions.jsonl
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/predictions.csv
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/uenv_requests.jsonl
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/uenv_results.jsonl
-temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_long_full_noresume_20260716_150507/full_noresume.log
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/metrics.json
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/predictions_official.json
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/predictions.jsonl
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/predictions.csv
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/uenv_requests.jsonl
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/uenv_results.jsonl
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/full.log
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/resume_failed_20260720_olymmath.log
+temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005/run_full_olymmath_uenv.sh
 temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_reasoning_budget_20260715_111008/model-gateway-thinking-strip-reasoning-18094-budget16384.jsonl
 ```
 
 ## 10. 当前结论
 
-本轮已经完成 OlymMATH 400 题 UEnv thinking 全量非 resume 评测，Adapter 侧成功记录 400 条 request 和 400 条 result，说明全量请求和结果聚合链路是闭合的。
+本轮已经完成 OlymMATH 400 题 UEnv thinking 全量评测，并在初始 22 条 failed 后使用 `RESUME=1` 做失败样本补测。按 `qid` 取最新结果后，400 条样本全部为 `completed`，说明全量请求、失败补测和结果聚合链路是闭合的。
 
-从指标看，整体 UEnv reward accuracy 为 0.3900；如果只看 completed 样本，reward accuracy 为 0.6215。英文子集结果明显好于中文子集：EN reward accuracy 为 0.6450，ZH reward accuracy 为 0.1350。主要限制不是模型 endpoint 或 gateway 失败，而是 149 条 episode 在 Server/Worker 侧达到三次尝试上限后失败，且失败几乎全部集中在中文样本。
+从指标看，最终整体 UEnv reward accuracy 为 0.6575，parse rate 为 0.9500。中文子集本轮表现略高于英文子集：ZH reward accuracy 为 0.6700，EN reward accuracy 为 0.6450；难度上 EASY 为 0.7950，HARD 为 0.5200。
 
-因此，本轮结果可以作为“UEnv 链路全量 OlymMATH thinking 口径”的阶段性基线，但不能只按 0.3900 评价模型能力；后续应优先定位中文样本 failed 的根因，并补充 `finish_reason`、Worker 原始错误和 retry attempt 级日志，区分模型答案质量、输出解析和服务稳定性三类问题。
+因此，本轮结果可以作为“UEnv 链路全量 OlymMATH thinking 口径”的正式基线。稳定性层面，初始 22 条 EN-EASY 连续 failed 经补测全部恢复，后续仍建议补充 `finish_reason`、Worker 原始错误和 retry attempt 级日志，区分模型答案质量、输出解析和服务稳定性三类问题。

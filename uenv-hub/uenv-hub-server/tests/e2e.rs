@@ -138,18 +138,34 @@ async fn full_publish_query_yank_sync_flow() {
 
     // Templates are seeded and downloadable.
     let templates = client.list_templates().await.unwrap();
-    assert_eq!(templates.len(), 4);
-    let archive = client.fetch_template("math").await.unwrap();
+    assert_eq!(templates.len(), 5);
+    assert!(templates.iter().any(|t| t.name == "qa"));
+    let archive = client.fetch_template("qa").await.unwrap();
     assert_eq!(&archive[..2], &[0x1f, 0x8b]);
 }
 
-/// The standardized seed (五类 Benchmark §2 / H-1..H-3) must publish `math`
-/// v0.2.0 and `code` v0.2.0 with the supported-dataset `config_schema.dataset`
-/// enum (the Bridge routing contract) plus a populated OpenEnv interface.
+/// The standardized seed (五类 Benchmark §2 / H-1..H-3) must publish `qa`
+/// (and its deprecated `math` alias) v0.2.0 plus `code` v0.2.0 with the
+/// supported-dataset `config_schema.dataset` enum (the Bridge routing contract)
+/// and a populated OpenEnv interface.
 #[tokio::test]
 async fn seeded_math_code_envs_are_standardized() {
     let (addr, _tmp) = spawn_server().await;
     let client = HttpClient::new(format!("http://{addr}"), None);
+
+    // `qa` 是正式名，Worker/Bridge 默认走它；`math` 仅兼容期保留。
+    let qa = client.get_version("qa", "latest").await.unwrap();
+    assert_eq!(qa.version, "0.2.0", "qa must seed the standardized v0.2.0");
+    let qa_datasets: Vec<String> = qa
+        .config_schema
+        .as_ref()
+        .and_then(|s| s["properties"]["dataset"]["enum"].as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    for d in ["gsm8k", "pubmedqa", "scitab", "olymmath", "olymmath-easy", "olymmath-hard"] {
+        assert!(qa_datasets.iter().any(|x| x == d), "qa dataset `{d}` missing from config enum");
+    }
+    assert!(qa.interface.action.is_some(), "qa must carry an OpenEnv action schema");
 
     let math = client.get_version("math", "latest").await.unwrap();
     assert_eq!(math.version, "0.2.0", "math must seed the standardized v0.2.0");
