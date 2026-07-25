@@ -65,3 +65,4 @@ secrets/*
 # SWE 本地/离线联调运行产物
 /swe-wal/
 swe-worker.log
+/temp
