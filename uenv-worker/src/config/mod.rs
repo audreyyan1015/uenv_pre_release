@@ -222,7 +222,7 @@ impl Default for WorkerConfig {
                 mode: "remote".to_string(),
             },
             env: EnvConfig {
-                types: vec!["math".to_string()],
+                types: vec!["qa".to_string()],
                 backend: "process".to_string(),
                 plugin_dir: "./plugins".to_string(),
             },

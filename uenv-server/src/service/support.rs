@@ -137,9 +137,20 @@ impl CodeAgentSpec {
         if task_id.is_empty() {
             return None;
         }
+        // agent_bridge_id 缺失/为空时默认 toolenv bridge：registry 对空 bridge_id 一律判
+        // 匹配，不填默认会导致缺字段的 code agent job 被 OpenHands 池领走。空 version 在
+        // registry 匹配规则里表示「bridge 名匹配即可」，所以这里只需兜底 bridge 名。
+        let agent_bridge_id = {
+            let b = s("agent_bridge_id");
+            if b.is_empty() {
+                "uenv-agent-toolenv".to_string()
+            } else {
+                b
+            }
+        };
         Some(CodeAgentSpec {
             task_id,
-            agent_bridge_id: s("agent_bridge_id"),
+            agent_bridge_id,
             agent_bridge_version: s("agent_bridge_version"),
             agent_pool_id: s("agent_pool_id"),
             mode: {
