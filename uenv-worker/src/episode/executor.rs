@@ -268,6 +268,7 @@ impl EpisodeExecutor {
             current_observation = step.observation;
             steps.push(step_record.clone());
 
+            // StreamReport 须带 correlation_id / worker_id / report_type，供 Server Obs 转译 STEP_*。
             stream_reports.push(StreamReport {
                 episode_id: episode.episode_id.clone(),
                 attempt_id: episode.attempt_id,

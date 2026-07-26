@@ -1,7 +1,7 @@
 //! Official OpenEnv-style scaffold templates (L13).
 //!
-//! Rather than checking binary `tar.gz` blobs into git, the four official
-//! templates (`echo` / `math` / `code` / `agent`) are described as in-memory
+//! Rather than checking binary `tar.gz` blobs into git, the official
+//! templates (`echo` / `qa` / `math` / `code` / `agent`) are described as in-memory
 //! file sets and packed on demand. This keeps the source reviewable and the
 //! checksum reproducible. `seed` stores the packed archives into the
 //! `env_templates` table; the server streams them to the CLI.
@@ -21,11 +21,15 @@ pub struct Template {
     pub files: Vec<(String, String)>,
 }
 
-/// All four official templates.
+/// All official templates. `math` is kept as a deprecated alias of `qa`.
 pub fn all() -> Vec<Template> {
     vec![
         build("echo", "Minimal echo environment: returns the action verbatim."),
-        build("math", "Arithmetic/algebra problem-solving environment."),
+        build(
+            "qa",
+            "Single-turn QA / classification verification environment (rubric scoring).",
+        ),
+        build("math", "Deprecated alias of `qa` (single-turn verification)."),
         build("code", "Code-execution / unit-test reward environment."),
         build("agent", "Multi-turn tool-using agent environment."),
     ]

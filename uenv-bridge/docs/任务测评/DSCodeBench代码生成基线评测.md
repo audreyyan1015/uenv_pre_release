@@ -8,6 +8,8 @@
 
 本文档只保留接入 UEnv 后的正式全量测评口径：UEnv 全链路，thinking 开启，`MAX_TOKENS=32768`，`THINKING_TOKEN_BUDGET=16384`。
 
+> **轨道说明**：本文档是**官方单轮轨道**（一次生成即判分，指标 `pass@1`），是对外可比的基线口径。另有 Agent 轨道（多轮 `run_python` 自测 + `submit_code` 定稿，指标 `agentic_pass@1`）见 [DSCodeBench Agent 轨道评测(ToolEnv)](./DSCodeBench-Agent轨道评测(ToolEnv).md)，输出目录与报告独立，两者指标**不可直接比较**。
+
 ## 2. 数据集
 
 数据集来源为 DSCodeBench 官方仓库，本地保存在：

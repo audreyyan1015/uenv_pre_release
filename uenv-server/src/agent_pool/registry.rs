@@ -189,6 +189,17 @@ impl AgentRegistry {
         a.last_heartbeat_at.elapsed().as_secs() > self.heartbeat_timeout_secs
     }
 
+    /// 当前心跳超时的 Agent id 列表（复用 is_stale 阈值判定）。
+    /// 供后台 reaper 对掉线 Agent 名下 in-flight job 做失败收口。
+    pub fn stale_agent_ids(&self) -> Vec<String> {
+        self.agents
+            .read()
+            .iter()
+            .filter(|a| self.is_stale(a))
+            .map(|a| a.agent_id.clone())
+            .collect()
+    }
+
     fn capacity_of(a: &AgentInfo) -> u32 {
         if a.max_concurrent > 0 {
             a.max_concurrent
