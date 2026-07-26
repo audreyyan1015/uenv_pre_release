@@ -77,6 +77,7 @@ def row_to_instance(r: dict) -> dict:
     row = {
         "instance_id": r["instance_id"],
         "repo": r.get("repo", ""),
+        "repo_language": lang or None,
         "version": "pro",
         "base_commit": r.get("base_commit", ""),
         "benchmark_variant": "pro",

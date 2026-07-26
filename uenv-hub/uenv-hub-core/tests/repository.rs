@@ -177,8 +177,8 @@ async fn templates_seeded_and_fetchable() {
     let s = store().await;
     uenv_hub_core::seed::seed_templates(&s).await.unwrap();
     let list = s.list_templates().await.unwrap();
-    assert_eq!(list.len(), 4);
-    let (bytes, sha) = s.get_template_archive("math").await.unwrap();
+    assert_eq!(list.len(), 5);
+    let (bytes, sha) = s.get_template_archive("qa").await.unwrap();
     assert!(!bytes.is_empty());
     assert!(sha.is_some());
 }

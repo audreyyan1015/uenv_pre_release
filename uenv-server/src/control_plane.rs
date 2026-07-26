@@ -101,6 +101,10 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
             self.state
                 .admission
                 .on_capacity_changed(registration.old_capacity, registration.new_capacity);
+            crate::obs::try_emit(
+                &self.state,
+                crate::obs::worker_registered(&worker_id, self.state.epoch()),
+            );
         }
 
         Ok(Response::new(RegisterWorkerResponse {
@@ -163,6 +167,10 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                             max_load = heartbeat.max_load,
                             lag_ms = lag_ms,
                             "heartbeat_received"
+                        );
+                        crate::obs::try_emit(
+                            &state,
+                            crate::obs::worker_heartbeat(&heartbeat.worker_id, state.epoch()),
                         );
 
                         let resp = HeartbeatResponse {

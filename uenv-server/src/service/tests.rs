@@ -179,4 +179,31 @@ mod tests {
             Some("timeout")
         );
     }
+
+    #[test]
+    fn code_agent_spec_defaults_to_toolenv_bridge_when_missing() {
+        let req = EpisodeRequest {
+            payload: br#"{"execution_mode":"agent","task_id":"t-1"}"#.to_vec(),
+            ..Default::default()
+        };
+
+        let spec = CodeAgentSpec::from_payload(&req).expect("code agent spec");
+
+        assert_eq!(spec.agent_bridge_id, "uenv-agent-toolenv");
+        assert!(spec.agent_bridge_version.is_empty());
+    }
+
+    #[test]
+    fn code_agent_spec_keeps_explicit_bridge() {
+        let req = EpisodeRequest {
+            payload: br#"{"execution_mode":"agent","task_id":"t-1","agent_bridge_id":"custom-bridge","agent_bridge_version":"1.2.3"}"#
+                .to_vec(),
+            ..Default::default()
+        };
+
+        let spec = CodeAgentSpec::from_payload(&req).expect("code agent spec");
+
+        assert_eq!(spec.agent_bridge_id, "custom-bridge");
+        assert_eq!(spec.agent_bridge_version, "1.2.3");
+    }
 }
