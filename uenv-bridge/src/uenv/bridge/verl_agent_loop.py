@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import time
 import uuid
@@ -103,6 +104,9 @@ except Exception:
 
     def rollout_trace_op(func):
         return func
+
+
+logger = logging.getLogger(__name__)
 
 
 def _optional_string(value: Any) -> str | None:
@@ -915,7 +919,15 @@ class UEnvAgentLoop(AgentLoopBase):
             return "code"
         if "agent" in lowered:
             return "agent"
-        return self.config_for_uenv.default_env_type
+        env_type = self.config_for_uenv.default_env_type
+        logger.warning(
+            "_env_type fallback to default_env_type=%s; unmatched sample kwargs: task_name=%r ability=%r data_source=%r",
+            env_type,
+            sample_kwargs.get("task_name"),
+            sample_kwargs.get("ability"),
+            sample_kwargs.get("data_source"),
+        )
+        return env_type
 
     def _task_name(self, sample_kwargs: dict[str, Any], env_type: str) -> str:
         for key in ("task_name", "ability", "data_source"):
