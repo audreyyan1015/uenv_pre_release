@@ -950,6 +950,16 @@ impl UEnvEpisodeService {
             "code_agent_job_dispatched"
         );
 
+        // 与 native 派发路径一致补发 dispatched obs 事件；worker_id 用 agent-pool 占位，
+        // 与上方 active_episodes 的占位约定保持一致，否则前端工作流从 submit 直接跳终态。
+        for ev in crate::obs::episode_dispatched(
+            &req,
+            &format!("agent-pool:{pool_id}"),
+            self.state.epoch(),
+        ) {
+            crate::obs::try_emit(&self.state, ev);
+        }
+
         let mut deadline_sleep = Box::pin(tokio::time::sleep_until(
             tokio::time::Instant::from_std(deadline),
         ));

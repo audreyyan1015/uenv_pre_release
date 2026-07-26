@@ -1,7 +1,9 @@
 # Math 环境与术语规范 — 可证明性与 DSCode Agent 选型
 
-> 日期：2026-07-22  
-> 范围：UEnv `env_type=math` 性质确认、公开验证环境改造选型、狭义/广义概念划分、DSCodeBench Agent 评测建议  
+> 日期：2026-07-22
+> 范围：UEnv `env_type=math` 性质确认、公开验证环境改造选型、狭义/广义概念划分、DSCodeBench Agent 评测建议
+> 实施规划：[验证型环境改造与DSCode-Agent评测-实施规划](./验证型环境改造与DSCode-Agent评测-实施规划.md)（`math`→`qa` 改造 + ToolEnv 分轨）
+> 跨模块清单：[跨模块调整清单-qa改造与ToolEnv-Agent](./跨模块调整清单-qa改造与ToolEnv-Agent.md)
 > 关联文档：[五类 Benchmark Worker 支持现状](../260709/五类Benchmark-Worker支持现状与跨层调整.md)、[Hub 环境标准化指南](../../hub/uenv-hub环境标准化指南.md)、[DSCodeBench 基线评测](../../../uenv-bridge/docs/任务测评/DSCodeBench代码生成基线评测.md)
 
 ---
@@ -84,16 +86,16 @@ UEnv 的 `env_type=math`（MathEnv）在 PRD 中属于「3 核心自研」之一
 
 理由：
 
-1. **`SingleTurnEnv` 与当前 math 语义完全一致**  
+1. **`SingleTurnEnv` 与当前 math 语义完全一致**
    一次 prompt → 一次 completion → Rubric 打分，对应 UEnv 的 `Reset → Infer → Step → reward`。
 
-2. **原生支持「单轮 + 多任务类型」扩展模式**  
+2. **原生支持「单轮 + 多任务类型」扩展模式**
    官方文档将 SingleTurnEnv 用于 Q&A、**text classification**、summarization 等；通过 `dataset` 字段 + 自定义 `Rubric(funcs=[...])` 即可覆盖 pubmedqa（三分类）、scitab（三分类）、gsm8k/olymmath（math rubric），与 UEnv `dataset` 路由模型同构。
 
-3. **内置 `MathRubric` 可直接对齐 gsm8k / olymmath**  
+3. **内置 `MathRubric` 可直接对齐 gsm8k / olymmath**
    支持 `\boxed{}` 提取与符号等价（可对接 `math_verify`），用于 golden 对齐与逐步替换自写 `olymmath` 归一化。
 
-4. **OpenEnv 可作为对外契约层，而非判分来源**  
+4. **OpenEnv 可作为对外契约层，而非判分来源**
    UEnv Hub 已对齐 OpenEnv `interface`（Action/Observation/State）；可用 `openenv import` 将 verifiers 环境包装为标准 Gym API，与 [标准化环境定义规范](../../hub/260716-标准化环境定义规范.md) 一致，但**判分逻辑仍以 verifiers Rubric 为权威**。
 
 ### 3.4 建议改造路径（不改 `env_type=math` 调度键）
@@ -197,7 +199,7 @@ Adapter 构造 EpisodeRequest
   → reward 0/1
 ```
 
-脚本：`uenv-bridge/scripts/benchmark/evaluate_dscodebench_uenv.py`  
+脚本：`uenv-bridge/scripts/benchmark/evaluate_dscodebench_uenv.py`
 文档：[DSCodeBench 代码生成基线评测](../../../uenv-bridge/docs/任务测评/DSCodeBench代码生成基线评测.md)
 
 | 属性 | 当前实现 |
