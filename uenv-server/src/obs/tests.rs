@@ -105,3 +105,86 @@ fn episode_delta_uses_run_entity_key() {
     assert!(delta.patch.get("tree").is_some());
     assert!(delta.patch.get("episodes").is_some());
 }
+
+#[test]
+fn terminal_events_close_run_and_step_tree_nodes() {
+    let mut engine = MergeEngine::default();
+    let run = "run-tree-close";
+    let ep = "ep-tree-close";
+    let ts = now_ms();
+    let base = ObservabilityEvent {
+        event_id: "e0".into(),
+        schema_version: "1".into(),
+        correlation_id: "c-tree".into(),
+        training_run_id: Some(run.into()),
+        adapter_run_id: None,
+        batch_id: Some("b-tree".into()),
+        episode_id: Some(ep.into()),
+        attempt_id: Some(1),
+        worker_id: Some("w-tree".into()),
+        env_instance_id: None,
+        step_index: Some(0),
+        dispatch_lease_id: None,
+        scheduler_epoch: None,
+        env_type: Some("qa".into()),
+        source_id: "test-tree".into(),
+        module: "server".into(),
+        entity_type: "episode".into(),
+        entity_id: ep.into(),
+        event_type: "RUN_STARTED".into(),
+        seq: 1,
+        source_ts: ts,
+        payload: None,
+    };
+
+    for (seq, event_type) in [
+        (1, "RUN_STARTED"),
+        (2, "EPISODE_SUBMITTED"),
+        (3, "EPISODE_DISPATCHED"),
+        (4, "STEP_STARTED"),
+        (5, "EPISODE_COMPLETED"),
+        (6, "EPISODE_CLOSED"),
+        (7, "RUN_CLOSED"),
+    ] {
+        let ev = ObservabilityEvent {
+            event_id: format!("e{seq}"),
+            event_type: event_type.into(),
+            seq,
+            ..base.clone()
+        };
+        assert!(matches!(
+            engine.apply(&ev, ts + seq as i64).disposition,
+            event::Disposition::Accepted
+        ));
+    }
+
+    let state = engine.get(run).expect("run state");
+    assert_eq!(state.run_state, "CLOSED");
+    assert_eq!(
+        state
+            .tree
+            .nodes
+            .iter()
+            .find(|n| n.node_id == format!("run:{run}"))
+            .map(|n| n.status.as_str()),
+        Some("CLOSED")
+    );
+    assert_eq!(
+        state
+            .tree
+            .nodes
+            .iter()
+            .find(|n| n.node_id == format!("episode:{ep}"))
+            .map(|n| n.status.as_str()),
+        Some("DONE")
+    );
+    assert_eq!(
+        state
+            .tree
+            .nodes
+            .iter()
+            .find(|n| n.node_id == format!("step:{ep}:0"))
+            .map(|n| n.status.as_str()),
+        Some("DONE")
+    );
+}
