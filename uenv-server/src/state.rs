@@ -65,6 +65,8 @@ pub struct ServerState {
     pub admission: AdmissionController,
     /// trajectory 持久化存储。未配置时结果仍会返回，只是不写入该存储。
     pub trajectory_store: std::sync::OnceLock<Arc<crate::trajectory::TrajectoryStore>>,
+    /// 观测聚合句柄。未配置时 emit 为空操作。
+    pub obs: std::sync::OnceLock<crate::obs::ObsHandle>,
     /// SWE agent 注册表，记录 agent pool、agent 心跳、agent 容量。
     pub agent_registry: Arc<crate::agent_pool::AgentRegistry>,
     /// SWE AgentJob 队列，负责 pending job 和 in-flight job 状态。
@@ -248,6 +250,7 @@ impl ServerState {
             agent_job_pickup_timeout_secs: config.episode.agent_job_pickup_timeout_secs,
             admission: AdmissionController::new(&config.episode),
             trajectory_store: std::sync::OnceLock::new(),
+            obs: std::sync::OnceLock::new(),
             agent_registry,
             agent_job_queue,
         }
