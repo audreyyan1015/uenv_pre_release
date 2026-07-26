@@ -69,5 +69,7 @@ pub fn create_state_with_config(config: &ServerConfig) -> Arc<state::ServerState
     ));
     // TTL sweeper 负责周期性清理取消、幂等和异步结果缓存，避免长期运行后状态表无限增长。
     state::spawn_ttl_sweeper(Arc::clone(&state));
+    // agent 掉线 reaper 负责对 stale agent 名下 in-flight job 做快速失败收口。
+    state::spawn_agent_job_reaper(Arc::clone(&state));
     state
 }
