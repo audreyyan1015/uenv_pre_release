@@ -287,14 +287,23 @@ impl AgentControlService for AgentControlServiceImpl {
     }
 
     /// Agent 心跳：刷新健康时间并校准负载。
+    ///
+    /// 未注册的 agent_id 返回 NOT_FOUND：Server 重启后内存注册表清空，
+    /// Agent 需要这个明确信号触发重新 RegisterAgent，而不是静默心跳落空。
     async fn agent_heartbeat(
         &self,
         request: Request<AgentHeartbeatRequest>,
     ) -> Result<Response<AgentHeartbeatResponse>, Status> {
         let req = request.into_inner();
         let known = self.registry.heartbeat(&req.agent_id, req.active_jobs);
+        if !known {
+            return Err(Status::not_found(format!(
+                "unknown agent_id={}, re-register required",
+                req.agent_id
+            )));
+        }
         Ok(Response::new(AgentHeartbeatResponse {
-            ok: known,
+            ok: true,
             next_heartbeat_interval_ms: self.heartbeat_interval_ms,
         }))
     }
@@ -316,6 +325,14 @@ impl AgentControlService for AgentControlServiceImpl {
                 has_job: false,
                 job: None,
             }));
+        }
+        // 与心跳一致：未注册的 agent poll 返回 NOT_FOUND，触发 Agent 侧重新注册，
+        // 避免 Server 重启后 Agent 永远 poll 空转。
+        if !self.registry.is_registered(&polling_agent_id) {
+            return Err(Status::not_found(format!(
+                "unknown agent_id={}, re-register required",
+                polling_agent_id
+            )));
         }
 
         let Some(job) = (|| {
@@ -797,5 +814,57 @@ mod tests {
 
         assert!(!late.ack);
         assert_eq!(late.code, "UNKNOWN_JOB");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_unknown_agent_returns_not_found() {
+        let (svc, _queue, _registry) = svc();
+
+        let err = svc
+            .agent_heartbeat(Request::new(AgentHeartbeatRequest {
+                agent_id: "ghost".to_string(),
+                active_jobs: 0,
+                timestamp_ms: 0,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_registered_agent_ok() {
+        let (svc, _queue, _registry) = svc();
+
+        let resp = svc
+            .agent_heartbeat(Request::new(AgentHeartbeatRequest {
+                agent_id: "a1".to_string(),
+                active_jobs: 0,
+                timestamp_ms: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.ok);
+        assert_eq!(resp.next_heartbeat_interval_ms, 5000);
+    }
+
+    #[tokio::test]
+    async fn poll_unknown_agent_returns_not_found() {
+        let (svc, queue, _registry) = svc();
+        let _rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
+
+        let err = svc
+            .poll_agent_job(Request::new(PollAgentJobRequest {
+                agent_pool_id: "openhands-default".to_string(),
+                worker_id: "ghost".to_string(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        // 未注册 agent 的 poll 不得消费队列中的 job。
+        assert!(queue.is_pending("openhands-default", "job-1"));
     }
 }

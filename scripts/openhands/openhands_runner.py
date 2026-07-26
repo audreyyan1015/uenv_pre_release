@@ -252,9 +252,12 @@ def _import_agent_client():
     gen_dir = os.path.join(BRIDGE_DIR, "uenv_runtime", "gen")
     if os.path.isdir(gen_dir) and gen_dir not in sys.path:
         sys.path.insert(0, gen_dir)
-    from uenv_runtime.agent_client import AgentControlClient  # noqa: PLC0415
+    from uenv_runtime.agent_client import (  # noqa: PLC0415
+        AgentControlClient,
+        AgentRegistrationLost,
+    )
 
-    return AgentControlClient
+    return AgentControlClient, AgentRegistrationLost
 
 
 def _int_list(value: Any) -> list[int]:
@@ -594,7 +597,7 @@ def _register_agent_once(
     return True
 
 
-def _heartbeat_loop(client: Any, agent_state: dict[str, Any]) -> None:
+def _heartbeat_loop(client: Any, agent_state: dict[str, Any], registration_lost_exc: Any) -> None:
     while not _stop.is_set():
         with _registration_lock:
             agent_id = str(agent_state.get("agent_id") or "")
@@ -606,6 +609,12 @@ def _heartbeat_loop(client: Any, agent_state: dict[str, Any]) -> None:
             with _active_lock:
                 active = _active_jobs
             client.agent_heartbeat(agent_id, active, int(time.time() * 1000))
+        except registration_lost_exc:
+            print(
+                "[agent-poll] server lost registration (NOT_FOUND), re-registering",
+                flush=True,
+            )
+            _mark_agent_unregistered(agent_state, "registration_lost")
         except Exception as exc:  # noqa: BLE001
             print(f"[agent-poll] heartbeat failed: {exc}", flush=True)
             _mark_agent_unregistered(agent_state, "heartbeat_failed")
@@ -618,7 +627,7 @@ def _poll_loop() -> None:
         print("[agent-poll] UENV_SERVER_ENDPOINT unset; poll mode disabled", flush=True)
         return
     try:
-        AgentControlClient = _import_agent_client()
+        AgentControlClient, AgentRegistrationLost = _import_agent_client()
         # __init__ ???? grpc + stub??? grpcio / ??? stub ??????
         # ?? catch????? poll ?????? HTTP ???
         client = AgentControlClient(SERVER_ENDPOINT)
@@ -639,7 +648,11 @@ def _poll_loop() -> None:
     if _stop.is_set():
         return
 
-    threading.Thread(target=_heartbeat_loop, args=(client, agent_state), daemon=True).start()
+    threading.Thread(
+        target=_heartbeat_loop,
+        args=(client, agent_state, AgentRegistrationLost),
+        daemon=True,
+    ).start()
 
     while not _stop.is_set():
         with _registration_lock:
@@ -660,6 +673,14 @@ def _poll_loop() -> None:
             continue
         try:
             job = client.poll_agent_job(AGENT_POOL_ID, agent_id)
+        except AgentRegistrationLost:
+            print(
+                "[agent-poll] server lost registration (NOT_FOUND), re-registering",
+                flush=True,
+            )
+            _mark_agent_unregistered(agent_state, "registration_lost")
+            _stop.wait(POLL_INTERVAL_SEC)
+            continue
         except Exception as exc:  # noqa: BLE001
             print(f"[agent-poll] PollAgentJob failed: {exc}", flush=True)
             _mark_agent_unregistered(agent_state, "poll_failed")
