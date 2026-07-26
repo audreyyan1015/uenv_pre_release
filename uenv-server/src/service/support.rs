@@ -2,9 +2,13 @@
 // 主要功能：封装 worker dispatch、SweAgentSpec::from_payload、AsyncRequestContext、parallel_mode 提取和 gateway session 数据类型。
 // 大致工作流：episode.rs 在进入后端前解析 spec/context，在派发和结果整理时复用这些 helper。
 
-async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::Result<()> {
+async fn dispatch_to_worker(
+    state: &std::sync::Arc<crate::state::ServerState>,
+    endpoint: &str,
+    request: EpisodeRequest,
+) -> anyhow::Result<()> {
     // service 层只关心“派发是否成功”，具体 gRPC 客户端细节放在 ports 模块中。
-    crate::ports::dispatch_to_worker(endpoint, request).await
+    crate::ports::dispatch_to_worker(state, endpoint, request).await
 }
 
 

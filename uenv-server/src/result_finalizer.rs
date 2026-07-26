@@ -344,6 +344,9 @@ pub(crate) fn complete_episode_result(
     // 所有完成路径都按同一顺序处理：补齐/校验结果 -> 可选持久化 -> 可选广播。
     // 这个顺序保证下游看到的结果和落库结果具有相同字段语义。
     let result = finalize_or_protocol_failed(req, result, timing);
+    for ev in crate::obs::episode_terminal(req, &result, state.epoch()) {
+        crate::obs::try_emit(state, ev);
+    }
     if let Some(context) = persistence {
         persist_episode_result(state, &result, context);
     }
