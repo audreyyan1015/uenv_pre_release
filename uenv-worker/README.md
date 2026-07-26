@@ -47,13 +47,14 @@ uenv-worker health
 
 ## 环境插件与按需拉起
 
-Phase 0 环境：`plugins/math/`（`env_type=math`, `ipc=proto-uds`）；GSM8K 为 `payload.dataset=gsm8k`。
+正式单轮验证环境：`plugins/qa/`（`env_type=qa`，复用 `uenv-math-plugin` 判分）；金标契约见 `plugins/qa/RUBRIC.md`。  
+**`math` 已退役**：Worker `env.types` 勿再注册 `math`；误发会得到 Server `no worker supports env type`。插件二进制可留作回滚。
 
-默认 **`prewarm_on_startup: false`**：Worker 启动不预创建实例；首条 `DispatchEpisode(env_type=math)` 时从池 acquire（池空则 spawn）。可选 Hub：
+默认 **`prewarm_on_startup: false`**：Worker 启动不预创建实例；首条 `DispatchEpisode` 时从池 acquire（池空则 spawn）。可选 Hub：
 
 ```bash
 UENV_HUB_ENDPOINT=http://127.0.0.1:8080
-UENV_ENV_TYPES=math
+UENV_ENV_TYPES=qa,code
 UENV_PREWARM_ON_STARTUP=false   # 或 true 恢复启动即 prewarm
 uenv-worker serve --config config/uenv-worker.yaml
 ```
@@ -65,7 +66,7 @@ uenv-worker serve --config config/uenv-worker.yaml
 MVP 阶段使用独立 crate `uenv-mock-scheduler` 作为 ControlPlane，无需完整 `uenv-server`：
 
 ```bash
-uenv-mock-scheduler serve --fixture-dir ./fixtures/math
+uenv-mock-scheduler serve --fixture-dir ./fixtures/qa
 uenv-worker serve --config config/uenv-worker.yaml
 ```
 

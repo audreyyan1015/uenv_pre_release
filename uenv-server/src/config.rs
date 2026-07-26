@@ -67,6 +67,9 @@ pub struct EpisodeConfig {
     /// async result 缓存最大条数。0 表示不保存异步结果。
     pub completed_async_max_entries: usize,
     pub agent_job_pickup_timeout_secs: u64,
+    /// agent 掉线 reaper 的扫描周期（默认 15s）。每周期对心跳超时的 agent
+    /// 名下 in-flight job 做失败收口，让等待中的 episode 立刻醒来。
+    pub agent_job_reap_interval_secs: u64,
 }
 
 /// Server 状态数据库配置。
@@ -127,6 +130,7 @@ impl Default for EpisodeConfig {
             completed_async_ttl_secs: 3600,
             completed_async_max_entries: 10000,
             agent_job_pickup_timeout_secs: 30,
+            agent_job_reap_interval_secs: 15,
         }
     }
 }
@@ -291,6 +295,7 @@ episode:
   completed_async_ttl_secs: 60
   completed_async_max_entries: 128
   agent_job_pickup_timeout_secs: 7
+  agent_job_reap_interval_secs: 9
 "#;
 
     #[test]
@@ -311,6 +316,7 @@ episode:
         assert_eq!(cfg.episode.agent_job_pickup_timeout_secs, 30);
         assert!(cfg.persistence.enabled);
         assert_eq!(cfg.persistence.db_path, "./server-state/server-state.db");
+        assert_eq!(cfg.episode.agent_job_reap_interval_secs, 15);
     }
 
     #[test]
@@ -331,6 +337,7 @@ episode:
         assert_eq!(cfg.episode.completed_async_ttl_secs, 60);
         assert_eq!(cfg.episode.completed_async_max_entries, 128);
         assert_eq!(cfg.episode.agent_job_pickup_timeout_secs, 7);
+        assert_eq!(cfg.episode.agent_job_reap_interval_secs, 9);
     }
 
     #[test]
@@ -356,6 +363,7 @@ episode:
         assert_eq!(state.completed_async_ttl_secs, 60);
         assert_eq!(state.completed_async_max_entries, 128);
         assert_eq!(state.agent_job_pickup_timeout_secs, 7);
+        assert_eq!(state.agent_job_reap_interval_secs, 9);
     }
 
     #[test]

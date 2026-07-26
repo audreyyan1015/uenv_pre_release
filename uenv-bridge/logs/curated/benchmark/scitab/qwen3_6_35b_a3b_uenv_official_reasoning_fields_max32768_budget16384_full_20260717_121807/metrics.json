@@ -1,0 +1,75 @@
+{
+  "sample_count": 1224,
+  "parsed_count": 1224,
+  "unparsed_count": 0,
+  "parse_rate": 1.0,
+  "accuracy": 0.7450980392156863,
+  "parsed_accuracy": 0.7450980392156863,
+  "macro_f1": 0.7339825969740027,
+  "label_distribution": {
+    "supports": 457,
+    "not enough info": 356,
+    "refutes": 411
+  },
+  "prediction_distribution": {
+    "supports": 572,
+    "not enough info": 241,
+    "refutes": 411
+  },
+  "per_class": {
+    "supports": {
+      "precision": 0.7027972027972028,
+      "recall": 0.8796498905908097,
+      "f1": 0.7813411078717202,
+      "support": 457
+    },
+    "refutes": {
+      "precision": 0.7639902676399026,
+      "recall": 0.7639902676399026,
+      "f1": 0.7639902676399025,
+      "support": 411
+    },
+    "not enough info": {
+      "precision": 0.8132780082987552,
+      "recall": 0.550561797752809,
+      "f1": 0.6566164154103853,
+      "support": 356
+    }
+  },
+  "confusion": {
+    "supports": {
+      "supports": 402,
+      "refutes": 28,
+      "not enough info": 27,
+      "unparsed": 0
+    },
+    "refutes": {
+      "supports": 79,
+      "refutes": 314,
+      "not enough info": 18,
+      "unparsed": 0
+    },
+    "not enough info": {
+      "supports": 91,
+      "refutes": 69,
+      "not enough info": 196,
+      "unparsed": 0
+    }
+  },
+  "uenv": {
+    "completed_count": 1224,
+    "failed_count": 0,
+    "reward_accuracy": 0.7450980392156863,
+    "adapter_core_endpoint": "8.130.75.157:8088",
+    "model_endpoint": "http://10.10.20.142:18096/v1",
+    "model_name": "Qwen/Qwen3.6-35B-A3B",
+    "batch_id": "scitab-uenv-20260716_211808",
+    "batch_size": 1,
+    "prompt_style": "official",
+    "inference_mode": "uenv_generate",
+    "enable_thinking": true,
+    "preserve_thinking": true,
+    "thinking_token_budget": 16384,
+    "max_tokens": 32768
+  }
+}

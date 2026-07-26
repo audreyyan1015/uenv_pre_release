@@ -14,7 +14,7 @@ scheduler:
   mode: "remote"                # UENV_SCHEDULER_MODE: remote | mock
 
 env:
-  types: ["math", "code"]              # UENV_ENV_TYPES — Phase 0 MathEnv
+  types: ["qa", "code"]                # UENV_ENV_TYPES — qa（单轮问答/分类验证，原 math）+ code
   backend: "process"            # UENV_BACKEND
   plugin_dir: "./plugins"       # UENV_PLUGIN_DIR
 

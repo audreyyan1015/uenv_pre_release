@@ -1,0 +1,75 @@
+{
+  "sample_count": 1000,
+  "parsed_count": 1000,
+  "unparsed_count": 0,
+  "parse_rate": 1.0,
+  "accuracy": 0.8,
+  "parsed_accuracy": 0.8,
+  "macro_f1": 0.5912178881281102,
+  "label_distribution": {
+    "yes": 552,
+    "no": 338,
+    "maybe": 110
+  },
+  "prediction_distribution": {
+    "yes": 619,
+    "no": 354,
+    "maybe": 27
+  },
+  "per_class": {
+    "yes": {
+      "precision": 0.815831987075929,
+      "recall": 0.9148550724637681,
+      "f1": 0.8625106746370623,
+      "support": 552
+    },
+    "no": {
+      "precision": 0.8192090395480226,
+      "recall": 0.8579881656804734,
+      "f1": 0.8381502890173411,
+      "support": 338
+    },
+    "maybe": {
+      "precision": 0.18518518518518517,
+      "recall": 0.045454545454545456,
+      "f1": 0.072992700729927,
+      "support": 110
+    }
+  },
+  "confusion": {
+    "yes": {
+      "yes": 505,
+      "no": 32,
+      "maybe": 15,
+      "unparsed": 0
+    },
+    "no": {
+      "yes": 41,
+      "no": 290,
+      "maybe": 7,
+      "unparsed": 0
+    },
+    "maybe": {
+      "yes": 73,
+      "no": 32,
+      "maybe": 5,
+      "unparsed": 0
+    }
+  },
+  "uenv": {
+    "completed_count": 1000,
+    "failed_count": 0,
+    "reward_accuracy": 0.8,
+    "adapter_core_endpoint": "8.130.75.157:8088",
+    "model_endpoint": "http://10.10.20.142:18096/v1",
+    "model_name": "Qwen/Qwen3.6-35B-A3B",
+    "batch_id": "pubmedqa-uenv-20260716_201446",
+    "batch_size": 1,
+    "prompt_style": "official",
+    "inference_mode": "uenv_generate",
+    "enable_thinking": true,
+    "preserve_thinking": true,
+    "thinking_token_budget": 16384,
+    "max_tokens": 32768
+  }
+}

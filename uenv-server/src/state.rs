@@ -61,6 +61,8 @@ pub struct ServerState {
     pub report_result_idempotency_ttl_secs: u64,
     /// SWE AgentJob 创建后等待 agent 领取的秒数。
     pub agent_job_pickup_timeout_secs: u64,
+    /// agent 掉线 reaper 的扫描周期秒数。
+    pub agent_job_reap_interval_secs: u64,
     /// episode 进入执行区前的并发/排队控制器。
     pub admission: AdmissionController,
     /// trajectory 持久化存储。未配置时结果仍会返回，只是不写入该存储。
@@ -76,6 +78,8 @@ pub struct ServerState {
     pub persistence_max_completed_entries: usize,
     pub persistence_max_result_bytes: u64,
     pub persistence_shutdown_grace_secs: u64,
+    /// 观测聚合句柄。未配置时 emit 为空操作。
+    pub obs: std::sync::OnceLock<crate::obs::ObsHandle>,
     /// SWE agent 注册表，记录 agent pool、agent 心跳、agent 容量。
     pub agent_registry: Arc<crate::agent_pool::AgentRegistry>,
     /// SWE AgentJob 队列，负责 pending job 和 in-flight job 状态。
@@ -259,6 +263,7 @@ impl ServerState {
                 3600,
             ),
             agent_job_pickup_timeout_secs: config.episode.agent_job_pickup_timeout_secs,
+            agent_job_reap_interval_secs: config.episode.agent_job_reap_interval_secs,
             admission: AdmissionController::new(&config.episode),
             trajectory_store: std::sync::OnceLock::new(),
             persistence: std::sync::OnceLock::new(),
@@ -269,6 +274,7 @@ impl ServerState {
             persistence_max_completed_entries: config.persistence.max_completed_entries,
             persistence_max_result_bytes: config.persistence.max_result_bytes,
             persistence_shutdown_grace_secs: config.persistence.shutdown_grace_secs,
+            obs: std::sync::OnceLock::new(),
             agent_registry,
             agent_job_queue,
             episode_coordinator: Arc::new(crate::episode_coordinator::EpisodeCoordinator::new()),
@@ -369,6 +375,29 @@ pub fn spawn_ttl_sweeper(state: Arc<ServerState>) {
             loop {
                 interval.tick().await;
                 state.sweep_ttl_caches();
+            }
+        });
+    }
+}
+
+/// 启动 agent 掉线 reaper。
+///
+/// 周期性地对心跳超时（stale）的 Agent 名下 in-flight job 做 server 发起的失败收口，
+/// 通过与 CompleteAgentJob 相同的 oneshot 通知路径立刻唤醒等待的 episode，
+/// 避免 episode 在 agent 掉线后睡满全局 timeout 才收口。
+/// 如果当前线程没有 tokio runtime，就跳过启动；这样单元测试或同步初始化不会 panic。
+pub fn spawn_agent_job_reaper(state: Arc<ServerState>) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(
+                state.agent_job_reap_interval_secs.max(1),
+            ));
+            loop {
+                interval.tick().await;
+                let reaped = state.agent_job_queue.reap_stale_agent_jobs();
+                if !reaped.is_empty() {
+                    tracing::warn!(reaped_jobs = ?reaped, "agent_job_reaper_reaped");
+                }
             }
         });
     }

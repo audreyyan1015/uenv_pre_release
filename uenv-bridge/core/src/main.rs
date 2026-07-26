@@ -98,6 +98,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 可视化 Obs HTTP（默认 :50053）：事件聚合 + SSE，供 frontend 消费。
+    {
+        let obs_cfg = uenv_server::obs::ObsConfig::from_env();
+        if let Some(obs) = uenv_server::obs::open(&obs_cfg) {
+            let _ = state.obs.set(obs.clone());
+            tracing::info!(
+                listen = %obs_cfg.http_listen,
+                data_dir = %obs_cfg.data_dir.display(),
+                "obs_server_spawning"
+            );
+            tokio::spawn(uenv_server::obs::serve(obs, obs_cfg));
+        }
+    }
+
     // admin HTTP: start before serving gRPC so it's available immediately
     if config.admin_http_port > 0 {
         let admin_state = Arc::clone(&state);

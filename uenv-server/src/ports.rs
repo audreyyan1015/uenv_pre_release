@@ -25,6 +25,7 @@ pub(crate) trait WorkerDispatchPort: Send + Sync {
     /// 路径处理。
     fn dispatch_episode<'a>(
         &'a self,
+        state: &'a std::sync::Arc<crate::state::ServerState>,
         endpoint: &'a str,
         request: EpisodeRequest,
         accepted: Option<tokio::sync::oneshot::Sender<()>>,
@@ -54,6 +55,7 @@ pub(crate) struct TonicWorkerDispatchClient;
 impl WorkerDispatchPort for TonicWorkerDispatchClient {
     fn dispatch_episode<'a>(
         &'a self,
+        state: &'a std::sync::Arc<crate::state::ServerState>,
         endpoint: &'a str,
         request: EpisodeRequest,
         accepted: Option<tokio::sync::oneshot::Sender<()>>,
@@ -63,8 +65,9 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
             let mut client: WorkerGrpcServiceClient<Channel> =
                 WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
             let dispatch = DispatchEpisodeRequest {
-                episode: Some(request),
+                episode: Some(request.clone()),
             };
+            let epoch = state.epoch();
             let mut stream = client.dispatch_episode(dispatch).await?.into_inner();
             if let Some(accepted) = accepted {
                 let _ = accepted.send(());
@@ -77,6 +80,9 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
                     current_step = report.current_step,
                     "stream_report"
                 );
+                if let Some(ev) = crate::obs::from_stream_report(&report, Some(&request), epoch) {
+                    crate::obs::try_emit(state, ev);
+                }
             }
             Ok(())
         })
@@ -245,12 +251,13 @@ impl GatewaySessionPort for ReqwestGatewaySessionClient {
 }
 
 pub(crate) async fn dispatch_to_worker(
+    state: &std::sync::Arc<crate::state::ServerState>,
     endpoint: &str,
     request: EpisodeRequest,
     accepted: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> anyhow::Result<()> {
     TonicWorkerDispatchClient
-        .dispatch_episode(endpoint, request, accepted)
+        .dispatch_episode(state, endpoint, request, accepted)
         .await
 }
 

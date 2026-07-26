@@ -188,6 +188,10 @@ impl UEnvEpisodeService {
         };
 
         let backend = select_execution_backend(&req);
+        crate::obs::try_emit(
+            &self.state,
+            crate::obs::episode_submitted(&req, self.state.epoch()),
+        );
         // 后端选择只决定执行路径，不改变前面建立的 active/cancel/deadline 约束。
         backend
             .execute(self, req, deadline, Arc::clone(&handle), async_context)
@@ -364,6 +368,13 @@ impl UEnvEpisodeService {
                 dispatch_lease_id = %req.dispatch_lease_id,
                 "episode_dispatching"
             );
+            for ev in crate::obs::episode_dispatched(
+                &req,
+                &assignment.worker_id,
+                self.state.epoch(),
+            ) {
+                crate::obs::try_emit(&self.state, ev);
+            }
 
             let retry_reason: Option<String> = tokio::select! {
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
@@ -428,6 +439,7 @@ impl UEnvEpisodeService {
                 }
 
                 dispatch_result = dispatch_to_worker(
+                    &self.state,
                     &assignment.endpoint,
                     req.clone(),
                     accepted_sender,
@@ -875,6 +887,7 @@ impl UEnvEpisodeService {
             parallel_mode: req.parallel_mode.clone(),
             enqueue_ts: req.enqueue_ts,
             metadata: req.metadata.clone(),
+            task_payload_json: String::new(),
         };
         if let Some(store) = self.state.persistence_store() {
             let deadline_at_ms = crate::persistence::now_ms().saturating_add(
@@ -1039,6 +1052,239 @@ impl UEnvEpisodeService {
                 job_id.clone(),
                 req.env_package_id.clone(),
                 agent_bridge_version.clone(),
+            )),
+            true,
+        );
+        Ok(result)
+    }
+
+    /// Code ToolEnv Agent 编排：投递 AgentJob 到 ToolEnv 池，**不**创建 worker gateway session。
+    ///
+    /// 与 SWE 路径的差别：
+    /// - ToolEnv Agent 在自己的沙箱里跑 `run_python`，不访问 Worker 侧 runtime；
+    /// - 因此不需要 `gateway_public_url` / `for-episode` session；
+    /// - 也不占用 Worker 调度名额（Agent 定稿后的官方 harness 判分仍由 Agent 侧自建
+    ///   shim → Adapter Core → Worker 的 native code 路径完成，不在本编排内）。
+    pub(crate) async fn submit_code_agent_episode(
+        &self,
+        req: EpisodeRequest,
+        spec: CodeAgentSpec,
+        deadline: Instant,
+        handle: Arc<EpisodeHandle>,
+        async_context: AsyncRequestContext,
+    ) -> anyhow::Result<EpisodeResult> {
+        let episode_id = req.episode_id.clone();
+        let run_id = format!("run-{episode_id}");
+        let pool_id = self
+            .state
+            .agent_registry
+            .resolve_pool_id(
+                &spec.agent_pool_id,
+                &spec.agent_bridge_id,
+                &spec.agent_bridge_version,
+                "",
+                &spec.pool_selector,
+            )
+            .map_err(|e| anyhow::anyhow!("select agent failed: {e}"))?;
+        let sem = self.state.agent_registry.pool_semaphore(&pool_id);
+
+        let _permit = loop {
+            if handle.cancel_token.is_cancelled() {
+                return Ok(broadcast_cancelled_for_request(&self.state, &req));
+            }
+            if Instant::now() > deadline {
+                return Ok(broadcast_timeout_for_request(
+                    &self.state,
+                    &req,
+                    format!("code agent episode {episode_id} timeout acquiring agent slot"),
+                    Some(ResultTiming {
+                        enqueue_at: async_context.enqueue_at,
+                        dispatch_at: None,
+                        dispatch_ts: None,
+                    }),
+                ));
+            }
+            match sem.clone().try_acquire_owned() {
+                Ok(p) => break p,
+                Err(_) => {
+                    tokio::select! {
+                        _ = handle.cancel_token.cancelled() => {
+                            return Ok(broadcast_cancelled_for_request(&self.state, &req));
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(self.state.schedule_retry_interval_ms)) => {}
+                    }
+                }
+            }
+        };
+
+        tracing::info!(
+            episode_id = %episode_id,
+            batch_id = %req.correlation_id,
+            pool_id = %pool_id,
+            task_id = %spec.task_id,
+            agent_bridge_id = %spec.agent_bridge_id,
+            agent_bridge_version = %spec.agent_bridge_version,
+            "code_agent_slot_acquired"
+        );
+
+        self.state.active_episodes.insert(
+            episode_id.clone(),
+            ActiveEpisode {
+                episode_id: episode_id.clone(),
+                attempt_id: req.attempt_id,
+                // 无 worker 参与编排，占位记录方便 admin 查询。
+                worker_id: format!("agent-pool:{pool_id}"),
+                started_at: Instant::now(),
+                parallel_mode: async_context.parallel_mode.clone(),
+                enqueue_at: async_context.enqueue_at,
+                enqueue_ts: async_context.enqueue_ts,
+                batch_id: req.correlation_id.clone(),
+            },
+        );
+
+        let job_id = format!("job-{episode_id}");
+        let job = AgentJob {
+            job_id: job_id.clone(),
+            run_id: run_id.clone(),
+            // ToolEnv 不需要 gateway；字段留空，Agent poller 按 task_payload_json 执行。
+            gateway_url: String::new(),
+            gateway_api_key: String::new(),
+            session_id: String::new(),
+            instance_id: spec.task_id.clone(),
+            benchmark_variant: String::new(),
+            env_package_id: req.env_package_id.clone(),
+            env_package_version: req.env_package_version.clone(),
+            agent_bridge_id: spec.agent_bridge_id.clone(),
+            agent_bridge_version: spec.agent_bridge_version.clone(),
+            driver_entrypoint: String::new(),
+            model_endpoint_config: req.model_endpoint_config.clone(),
+            max_iterations: spec.max_iterations,
+            workspace_dir: String::new(),
+            episode_id: episode_id.clone(),
+            llm_config_path: String::new(),
+            mode: spec.mode.clone(),
+            parallel_mode: req.parallel_mode.clone(),
+            enqueue_ts: req.enqueue_ts,
+            metadata: req.metadata.clone(),
+            task_payload_json: spec.task_payload_json.clone(),
+        };
+        let mut rx = self.state.agent_job_queue.enqueue(&pool_id, job);
+        handle.set_agent_job(pool_id.clone(), job_id.clone());
+
+        info!(
+            episode_id = %episode_id,
+            run_id = %run_id,
+            job_id = %job_id,
+            pool_id = %pool_id,
+            task_id = %spec.task_id,
+            "code_agent_job_dispatched"
+        );
+
+        // 与 native 派发路径一致补发 dispatched obs 事件；worker_id 用 agent-pool 占位，
+        // 与上方 active_episodes 的占位约定保持一致，否则前端工作流从 submit 直接跳终态。
+        for ev in crate::obs::episode_dispatched(
+            &req,
+            &format!("agent-pool:{pool_id}"),
+            self.state.epoch(),
+        ) {
+            crate::obs::try_emit(&self.state, ev);
+        }
+
+        let mut deadline_sleep = Box::pin(tokio::time::sleep_until(
+            tokio::time::Instant::from_std(deadline),
+        ));
+        let pickup_deadline =
+            Instant::now() + Duration::from_secs(self.state.agent_job_pickup_timeout_secs.max(1));
+        let mut pickup_sleep = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+            pickup_deadline,
+        )));
+        let mut pickup_checked = false;
+        let agent_bridge_version = spec.agent_bridge_version.clone();
+
+        let result = loop {
+            tokio::select! {
+                _ = &mut deadline_sleep => {
+                    self.state.active_episodes.remove(&episode_id);
+                    self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                    break broadcast_timeout_for_request(
+                        &self.state,
+                        &req,
+                        format!("code agent episode {episode_id} timeout waiting for agent completion"),
+                        Some(ResultTiming {
+                            enqueue_at: async_context.enqueue_at,
+                            dispatch_at: None,
+                            dispatch_ts: None,
+                        }),
+                    );
+                }
+                _ = &mut pickup_sleep, if !pickup_checked => {
+                    pickup_checked = true;
+                    if self.state.agent_job_queue.is_pending(&pool_id, &job_id) {
+                        self.state.active_episodes.remove(&episode_id);
+                        self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                        break broadcast_timeout_for_request(
+                            &self.state,
+                            &req,
+                            format!("code agent episode {episode_id} timeout waiting for agent pickup"),
+                            Some(ResultTiming {
+                                enqueue_at: async_context.enqueue_at,
+                                dispatch_at: None,
+                                dispatch_ts: None,
+                            }),
+                        );
+                    }
+                }
+                _ = handle.cancel_token.cancelled() => {
+                    self.state.active_episodes.remove(&episode_id);
+                    self.state.agent_job_queue.abandon(&pool_id, &job_id);
+                    break broadcast_cancelled_for_request(&self.state, &req);
+                }
+                done = &mut rx => {
+                    self.state.active_episodes.remove(&episode_id);
+                    match done {
+                        Ok(completion) => {
+                            // 与 SWE agent 路径一致：complete_agent_job（或 reaper）已在发送前
+                            // 把 complete 转成 EpisodeResult（持久化开启时并已终态落盘），
+                            // 这里直接采用，保证与已确认终态字节一致。
+                            let complete = completion.complete;
+                            let status = if complete.status.is_empty() {
+                                "completed".to_string()
+                            } else {
+                                complete.status.clone()
+                            };
+                            let result = completion.result;
+                            info!(
+                                episode_id = %episode_id,
+                                run_id = %run_id,
+                                job_id = %complete.job_id,
+                                pool_id = %pool_id,
+                                status = %status,
+                                reward = complete.reward,
+                                "code_agent_episode_completed"
+                            );
+                            break result;
+                        }
+                        Err(_) => {
+                            anyhow::bail!("code agent episode {episode_id} completion channel closed");
+                        }
+                    }
+                }
+            }
+        };
+
+        // 与 SWE agent 路径一致：CompleteAgentJob ACK 前已终态落盘，这里不再补充
+        // 非确定 timing 字段，保证协调器的重复 commit 与已确认终态字节一致。
+        let timing = None;
+        let result = complete_episode_result(
+            &self.state,
+            &req,
+            result,
+            timing,
+            Some(ResultPersistenceContext::swe_agent(
+                format!("agent-pool:{pool_id}"),
+                job_id.clone(),
+                req.env_package_id.clone(),
+                agent_bridge_version,
             )),
             true,
         );

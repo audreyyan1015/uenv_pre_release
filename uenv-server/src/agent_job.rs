@@ -176,6 +176,66 @@ impl AgentJobQueue {
         }
         tracing::warn!(job_id = %job_id, pool_id = %pool_id, "agent_job_abandoned");
     }
+
+    /// 对所有心跳超时（stale）的 Agent 名下 in-flight job 做 server 发起的失败收口。
+    ///
+    /// 通过与 CompleteAgentJob 相同的 oneshot 通知路径唤醒等待的 episode（status=failed，
+    /// error_message 标明 agent 掉线），并回收 Agent 负载、清 in-flight——语义与
+    /// abandon 一致，区别是这里会向 waiter 投递失败结果而不是静默丢弃。
+    /// reaper 移除 in-flight 后，agent 迟到的 complete 会得到 UNKNOWN_JOB（既有行为）。
+    ///
+    /// 只处理已领取（agent_id 非空）的 job；仍 pending 的 job 留给存活 Agent 领取。
+    /// 返回被收口的 job_id 列表。
+    pub fn reap_stale_agent_jobs(&self) -> Vec<String> {
+        let mut reaped = Vec::new();
+        for agent_id in self.registry.stale_agent_ids() {
+            let job_ids: Vec<String> = self
+                .in_flight
+                .iter()
+                .filter(|e| e.value().agent_id == agent_id)
+                .map(|e| e.key().clone())
+                .collect();
+            for job_id in job_ids {
+                let Some((_, inflight)) = self.in_flight.remove(&job_id) else {
+                    continue;
+                };
+                self.registry.decrement_load(&inflight.agent_id);
+                tracing::warn!(
+                    job_id = %job_id,
+                    agent_id = %inflight.agent_id,
+                    run_id = %inflight.run_id,
+                    "agent_job_reaped"
+                );
+                let complete = AgentJobCompleteRequest {
+                    job_id: job_id.clone(),
+                    run_id: inflight.run_id.clone(),
+                    status: "failed".to_string(),
+                    error_message: format!(
+                        "agent {} stale/disconnected: heartbeat timeout",
+                        inflight.agent_id
+                    ),
+                    agent_id: inflight.agent_id.clone(),
+                    metadata: std::collections::HashMap::from([(
+                        "failure_source".to_string(),
+                        "agent_stale_reaper".to_string(),
+                    )]),
+                    ..Default::default()
+                };
+                // 与 complete_agent_job 的非持久化分支一致：complete → EpisodeResult，
+                // 包成 AgentJobCompletion 唤醒 waiter（attempt 0 / session 取 job 记录）。
+                let result = crate::service::agent_complete_to_episode_result(
+                    &complete,
+                    &inflight.job.episode_id,
+                    0,
+                    &inflight.job.session_id,
+                    "failed",
+                );
+                let _ = inflight.done.send(AgentJobCompletion { complete, result });
+                reaped.push(job_id);
+            }
+        }
+        reaped
+    }
 }
 
 /// AgentControlService 的实现，持有队列与注册表。
@@ -625,5 +685,117 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(ok.ack);
+    }
+
+    /// 把 a2 重新注册为心跳超时的 stale agent（register 幂等替换），
+    /// 模拟 poll 领取 job 之后掉线的场景。
+    fn make_a2_stale(registry: &Arc<AgentRegistry>) {
+        let mut stale = agent("a2", "2.0.0");
+        stale.last_heartbeat_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(120);
+        registry.register(stale);
+    }
+
+    async fn poll_job_to_a2(svc: &AgentControlServiceImpl, queue: &Arc<AgentJobQueue>) {
+        queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
+        let resp = svc
+            .poll_agent_job(Request::new(PollAgentJobRequest {
+                agent_pool_id: "openhands-default".to_string(),
+                worker_id: "a2".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.has_job);
+    }
+
+    #[tokio::test]
+    async fn reaper_fails_in_flight_job_of_stale_agent_and_wakes_waiter() {
+        let (svc, queue, registry) = svc();
+        let rx = {
+            let rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
+            let resp = svc
+                .poll_agent_job(Request::new(PollAgentJobRequest {
+                    agent_pool_id: "openhands-default".to_string(),
+                    worker_id: "a2".to_string(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(resp.has_job);
+            rx
+        };
+        make_a2_stale(&registry);
+
+        let reaped = queue.reap_stale_agent_jobs();
+
+        assert_eq!(reaped, vec!["job-1".to_string()]);
+        assert_eq!(queue.in_flight_len(), 0);
+        let completion = rx.await.expect("waiter woken by reaper");
+        let complete = completion.complete;
+        assert_eq!(complete.status, "failed");
+        assert!(complete.error_message.contains("stale"));
+        assert_eq!(completion.result.status, "failed");
+        assert!(completion.result.error_message.contains("stale"));
+        assert_eq!(
+            complete.metadata.get("failure_source").map(String::as_str),
+            Some("agent_stale_reaper")
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_leaves_healthy_agent_jobs_untouched() {
+        let (svc, queue, _registry) = svc();
+        poll_job_to_a2(&svc, &queue).await;
+
+        let reaped = queue.reap_stale_agent_jobs();
+
+        assert!(reaped.is_empty());
+        assert_eq!(
+            queue.in_flight_snapshot(),
+            vec![("job-1".to_string(), "a2".to_string())]
+        );
+        // 健康 agent 的 complete 仍被正常接受。
+        let ok = svc
+            .complete_agent_job(Request::new(AgentJobCompleteRequest {
+                job_id: "job-1".to_string(),
+                run_id: "run-1".to_string(),
+                status: "completed".to_string(),
+                reward: 1.0,
+                trajectory_id: String::new(),
+                error_message: String::new(),
+                agent_id: "a2".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ok.ack);
+    }
+
+    #[tokio::test]
+    async fn late_complete_after_reap_gets_unknown_job() {
+        let (svc, queue, registry) = svc();
+        poll_job_to_a2(&svc, &queue).await;
+        make_a2_stale(&registry);
+        assert_eq!(queue.reap_stale_agent_jobs(), vec!["job-1".to_string()]);
+
+        let late = svc
+            .complete_agent_job(Request::new(AgentJobCompleteRequest {
+                job_id: "job-1".to_string(),
+                run_id: "run-1".to_string(),
+                status: "completed".to_string(),
+                reward: 1.0,
+                trajectory_id: String::new(),
+                error_message: String::new(),
+                agent_id: "a2".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!late.ack);
+        assert_eq!(late.code, "UNKNOWN_JOB");
     }
 }
