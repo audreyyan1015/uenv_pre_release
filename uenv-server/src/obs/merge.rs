@@ -148,6 +148,7 @@ impl MergeEngine {
                 }
                 let state = self.get_or_create(run_id);
                 state.run_state = "RUNNING".into();
+                set_run_tree_status(state, "ACTIVE");
                 set_workflow_active(state, "submit", "ACTIVE", ev);
                 Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
             }
@@ -157,6 +158,7 @@ impl MergeEngine {
                 }
                 let state = self.get_or_create(run_id);
                 state.run_state = "STOPPING".into();
+                set_run_tree_status(state, "ACTIVE");
                 Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
             }
             "RUN_CLOSED" => {
@@ -166,6 +168,7 @@ impl MergeEngine {
                 }
                 let state = self.get_or_create(run_id);
                 state.run_state = "CLOSED".into();
+                set_run_tree_status(state, "CLOSED");
                 set_workflow_stage_status(state, "done", "DONE");
                 Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
             }
@@ -275,6 +278,7 @@ impl MergeEngine {
                     set_workflow_active(state, "report", "DONE", ev);
                     set_workflow_active(state, "done", status, ev);
                     upsert_tree_episode(state, &ep_id, ev, status);
+                    close_tree_steps_for_episode(state, &ep_id, status);
                 }
                 let state = self.runs.get(run_id).unwrap();
                 Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
@@ -385,6 +389,13 @@ fn chain_patch_delta(
     run_delta(run_id, event_seq, ingest_ts, ev, state)
 }
 
+fn set_run_tree_status(state: &mut ChainState, status: &str) {
+    let node_id = format!("run:{}", state.training_run_id);
+    if let Some(n) = state.tree.nodes.iter_mut().find(|n| n.node_id == node_id) {
+        n.status = status.into();
+    }
+}
+
 fn set_workflow_active(state: &mut ChainState, node_id: &str, status: &str, ev: &ObservabilityEvent) {
     set_workflow_stage_status(state, node_id, status);
     if let Some(n) = state.workflow.nodes.iter_mut().find(|n| n.node_id == node_id) {
@@ -487,6 +498,15 @@ fn upsert_tree_step(state: &mut ChainState, episode_id: &str, step: i32, ev: &Ob
         meta: json!({ "step_index": step }),
     });
     bump_children(state, &parent);
+}
+
+fn close_tree_steps_for_episode(state: &mut ChainState, episode_id: &str, status: &str) {
+    let parent = format!("episode:{episode_id}");
+    for n in state.tree.nodes.iter_mut().filter(|n| n.parent_id == parent) {
+        if n.kind == "step" && n.status == "ACTIVE" {
+            n.status = status.into();
+        }
+    }
 }
 
 fn bump_children(state: &mut ChainState, parent_id: &str) {
