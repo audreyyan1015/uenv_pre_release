@@ -163,6 +163,12 @@ impl AgentRegistry {
         self.agents.read().len()
     }
 
+    /// agent_id 是否已注册（不区分是否 stale）。心跳/poll 据此对未注册 Agent 快速失败，
+    /// 让 Agent 侧知道需要重新 RegisterAgent（Server 重启后内存注册表清空）。
+    pub fn is_registered(&self, agent_id: &str) -> bool {
+        self.agents.read().iter().any(|a| a.agent_id == agent_id)
+    }
+
     /// 只读快照：供 admin HTTP 展示 Agent 池状态。
     pub fn snapshot(&self) -> Vec<AgentSnapshot> {
         self.agents
