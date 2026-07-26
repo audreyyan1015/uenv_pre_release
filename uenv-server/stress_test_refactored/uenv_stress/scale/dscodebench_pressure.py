@@ -25,7 +25,7 @@ import tempfile
 import time
 import uuid
 
-import distributed_stress_runtime as base
+from uenv_stress.core import distributed_runtime as base
 
 
 # 三种并行模式都要测，避免只验证同步路径。
@@ -33,10 +33,19 @@ MODES = ("sync", "one_step_off_policy", "fully_async")
 
 # load_client.py 会被写入远端 /tmp/uenv-<run_id>/ 运行目录。
 # 它需要导入 stress_test_common.py，所以这里提前读取文件内容，后面一并下发。
-COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text(encoding="utf-8")
-REAL_LLM_PROXY_SOURCE = Path(__file__).with_name("ark_real_llm_proxy.py").read_text(encoding="utf-8")
-REAL_LLM_PREFLIGHT_SOURCE = Path(__file__).with_name("ark_real_llm_preflight.py").read_text(encoding="utf-8")
-FLEET_SUPERVISOR_SOURCE = Path(__file__).with_name("worker_fleet_supervisor.py").read_text(encoding="utf-8")
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
+COMMON_SOURCE = (PACKAGE_DIR / "core" / "stress_test_common.py").read_text(
+    encoding="utf-8-sig"
+)
+REAL_LLM_PROXY_SOURCE = (PACKAGE_DIR / "providers" / "ark" / "proxy.py").read_text(
+    encoding="utf-8"
+)
+REAL_LLM_PREFLIGHT_SOURCE = (
+    PACKAGE_DIR / "providers" / "ark" / "preflight.py"
+).read_text(encoding="utf-8")
+FLEET_SUPERVISOR_SOURCE = (
+    PACKAGE_DIR / "core" / "fleet_supervisor.py"
+).read_text(encoding="utf-8")
 
 
 def put_worker_config_archive(worker, worker_run: str, documents: dict[str, tuple[str, int]], run_id: str) -> None:
@@ -99,8 +108,8 @@ parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), de
 parser.add_argument("--trace-corpus-path", default="")
 parser.add_argument(
     "--trace-sampling-strategy",
-    choices=("problem_then_turn", "turn_only"),
-    default="problem_then_turn",
+    choices=("round_robin_episode",),
+    default="round_robin_episode",
 )
 args = parser.parse_args()
 attempts_by_task = {}
@@ -108,9 +117,12 @@ profiles_by_task = {}
 attempts_lock = threading.Lock()
 dataset_oracle = {}
 trace_records = []
-trace_by_problem_turn = {}
-trace_by_turn = {}
-trace_by_problem = {}
+trace_episodes_by_id = {}
+trace_episodes = []
+trace_assignment_by_task = {}
+trace_cursor = 0
+trace_selection_counts = {}
+trace_exhausted_turn_reuses = 0
 trace_hits = 0
 trace_misses = 0
 trace_hits_by_task = {}
@@ -122,6 +134,32 @@ if args.dataset_jsonl:
             if line.strip():
                 row = json.loads(line)
                 dataset_oracle[str(row["problem_id"])] = str(row["ground_truth_code"])
+
+def expand_trace_document(document):
+    if not isinstance(document, dict):
+        return
+    turns = document.get("turns")
+    has_direct_output = any(
+        document.get(field) is not None
+        for field in ("assistant_output", "response_text", "content", "response")
+    )
+    if isinstance(turns, list) and not has_direct_output:
+        parent_fields = {
+            field: document.get(field)
+            for field in (
+                "trace_id", "episode_id", "task_id", "request_id",
+                "dataset_problem_id", "problem_id", "benchmark", "dataset",
+                "source", "schema_version",
+            )
+            if document.get(field) is not None
+        }
+        for turn in turns:
+            if isinstance(turn, dict):
+                expanded = dict(parent_fields)
+                expanded.update(turn)
+                yield expanded
+        return
+    yield document
 
 def iter_json_records(path):
     if not path:
@@ -144,21 +182,21 @@ def iter_json_records(path):
             with candidate.open("r", encoding="utf-8") as source:
                 for line in source:
                     if line.strip():
-                        yield json.loads(line)
+                        yield from expand_trace_document(json.loads(line))
         elif candidate.suffix.lower() == ".json":
             document = json.loads(candidate.read_text(encoding="utf-8"))
             if isinstance(document, list):
                 for item in document:
                     if isinstance(item, dict):
-                        yield item
+                        yield from expand_trace_document(item)
             elif isinstance(document, dict):
                 records = document.get("records") or document.get("turns") or document.get("trace")
                 if isinstance(records, list):
                     for item in records:
                         if isinstance(item, dict):
-                            yield item
+                            yield from expand_trace_document(item)
                 else:
-                    yield document
+                    yield from expand_trace_document(document)
 
 def normalize_response_ids(values):
     out = []
@@ -169,9 +207,10 @@ def normalize_response_ids(values):
             out.append(int(value))
     return out
 
-def normalize_trace_record(raw):
+def normalize_trace_record(raw, episode=None):
     if not isinstance(raw, dict):
         return None
+    episode = episode if isinstance(episode, dict) else {}
     output = raw.get("assistant_output")
     if output is None:
         output = raw.get("response_text") or raw.get("content")
@@ -189,35 +228,60 @@ def normalize_trace_record(raw):
         turn_index = int(raw.get("turn_index", raw.get("attempt", 1)))
     except Exception:
         turn_index = 1
+    trace_id = str(
+        raw.get("trace_id")
+        or episode.get("trace_id")
+        or raw.get("episode_id")
+        or episode.get("episode_id")
+        or raw.get("task_id")
+        or raw.get("request_id")
+        or raw.get("provider_response_id")
+        or ""
+    )
     return {
         "schema_version": int(raw.get("schema_version", 1) or 1),
         "benchmark": str(raw.get("benchmark") or raw.get("dataset") or "DSCodeBench"),
         "task_id": str(raw.get("task_id", "")),
+        "trace_id": trace_id,
         "dataset_problem_id": str(raw.get("dataset_problem_id") or raw.get("problem_id") or ""),
         "turn_index": max(1, turn_index),
         "assistant_output": output,
         "response_ids": response_ids,
         "logprobs": logprobs,
-        "latency_ms": float(raw.get("latency_ms", 0) or 0),
+        "latency_ms": float(raw.get("replay_wait_ms", 0) or 0),
+        "latency_source": str(raw.get("latency_source", "")),
         "provider_response_id": str(raw.get("provider_response_id", "")),
         "source": str(raw.get("source", "")),
     }
 
 if args.trace_corpus_path:
     for raw_record in iter_json_records(args.trace_corpus_path):
-        record = normalize_trace_record(raw_record)
-        if not record:
-            continue
-        trace_records.append(record)
-        problem_id = record["dataset_problem_id"]
-        turn = record["turn_index"]
-        if problem_id:
-            trace_by_problem_turn.setdefault((problem_id, turn), []).append(record)
-            trace_by_problem.setdefault(problem_id, []).append(record)
-        trace_by_turn.setdefault(turn, []).append(record)
+        raw_turns = raw_record.get("turns") if isinstance(raw_record, dict) else None
+        candidates = raw_turns if isinstance(raw_turns, list) else [raw_record]
+        for raw_turn in candidates:
+            record = normalize_trace_record(raw_turn, raw_record)
+            if not record:
+                continue
+            if not record["trace_id"]:
+                record["trace_id"] = f"record-{len(trace_records):08d}"
+            trace_records.append(record)
+            trace_episodes_by_id.setdefault(record["trace_id"], []).append(record)
+
+for trace_id, turns in trace_episodes_by_id.items():
+    trace_episodes.append({
+        "trace_id": trace_id,
+        "turns": sorted(turns, key=lambda item: int(item["turn_index"])),
+    })
 
 if args.simulator_mode == "trace_replay" and not trace_records:
     raise SystemExit("--simulator-mode trace_replay requires a non-empty DSCodeBench trace corpus")
+if args.simulator_mode == "trace_replay" and any(
+    record["latency_ms"] <= 0 or not record["latency_source"]
+    for record in trace_records
+):
+    raise SystemExit(
+        "trace_replay requires positive replay_wait_ms and latency_source on every turn"
+    )
 
 def clamp(value, lower, upper):
     return max(lower, min(upper, value))
@@ -234,24 +298,27 @@ def sample_profile(task_id):
     latency = 0.0 if args.zero_latency else clamp(latency, args.latency_min_ms, args.latency_max_ms)
     return {"wrong_steps": wrong, "latency_ms": latency}
 
-def choose_record(candidates, task_id, attempt):
-    if not candidates:
-        return None
-    rng = deterministic_rng(f"{task_id}:{attempt}:trace")
-    return candidates[rng.randrange(len(candidates))]
-
-def replay_record(task_id, dataset_problem_id, attempt):
-    if args.trace_sampling_strategy == "problem_then_turn":
-        record = choose_record(trace_by_problem_turn.get((dataset_problem_id, attempt), []), task_id, attempt)
-        if record:
-            return record
-        record = choose_record(trace_by_problem.get(dataset_problem_id, []), task_id, attempt)
-        if record:
-            return record
-    record = choose_record(trace_by_turn.get(attempt, []), task_id, attempt)
-    if record:
-        return record
-    return choose_record(trace_records, task_id, attempt)
+def replay_record(task_id, attempt):
+    """Round-robin whole collected trajectories, then advance turns in-place."""
+    global trace_cursor, trace_exhausted_turn_reuses
+    if not trace_episodes:
+        return None, None
+    if task_id not in trace_assignment_by_task:
+        slot = trace_cursor % len(trace_episodes)
+        trace_cursor += 1
+        trace_assignment_by_task[task_id] = slot
+        trace_id = trace_episodes[slot]["trace_id"]
+        trace_selection_counts[trace_id] = trace_selection_counts.get(trace_id, 0) + 1
+    slot = trace_assignment_by_task[task_id]
+    episode = trace_episodes[slot]
+    turns = episode["turns"]
+    if not turns:
+        return episode, None
+    turn_slot = max(attempt - 1, 0)
+    if turn_slot >= len(turns):
+        trace_exhausted_turn_reuses += 1
+        turn_slot = len(turns) - 1
+    return episode, turns[turn_slot]
 
 def numeric_stats(values):
     values = list(values)
@@ -304,6 +371,9 @@ class Handler(BaseHTTPRequestHandler):
                 if task_id_matches_prefix(task_id, prefix)
             )
             observed_latencies = list(observed_latencies_ms)
+            replay_cursor = trace_cursor
+            replay_selection_counts = dict(trace_selection_counts)
+            exhausted_turn_reuses = trace_exhausted_turn_reuses
         ordered = sorted(counts.values())
         wrong_steps = [int(profile["wrong_steps"]) for profile in profiles.values()]
         latencies = [float(profile["latency_ms"]) for profile in profiles.values()]
@@ -343,11 +413,22 @@ class Handler(BaseHTTPRequestHandler):
                 "trace_replay": {
                     "corpus_path": args.trace_corpus_path,
                     "records": len(trace_records),
+                    "trajectories": len(trace_episodes),
                     "sampling_strategy": args.trace_sampling_strategy,
+                    "assigned_episodes": replay_cursor,
+                    "completed_cycles": (
+                        replay_cursor // len(trace_episodes) if trace_episodes else 0
+                    ),
+                    "next_trace_slot": (
+                        replay_cursor % len(trace_episodes) if trace_episodes else 0
+                    ),
+                    "trace_selection_counts": replay_selection_counts,
+                    "exhausted_turn_reuses": exhausted_turn_reuses,
                     "hits": replay_hits,
                     "misses": replay_misses,
                     "contract": {
-                        "selection_keys": ["dataset_problem_id", "turn_index"],
+                        "selection_keys": ["dataset", "episode_arrival_ordinal", "turn_index"],
+                        "episode_binding": "one assigned trajectory for the Episode lifetime",
                         "output_fields": ["assistant_output", "response_ids", "logprobs", "latency_ms"],
                     },
                 },
@@ -384,13 +465,17 @@ class Handler(BaseHTTPRequestHandler):
             attempt = attempts_by_task.get(task_id, 0) + 1
             attempts_by_task[task_id] = attempt
             profile = profiles_by_task.setdefault(task_id, sample_profile(task_id))
-        trace_record = replay_record(task_id, dataset_problem_id, attempt) if args.simulator_mode == "trace_replay" else None
+            trace_episode, trace_record = (
+                replay_record(task_id, attempt)
+                if args.simulator_mode == "trace_replay"
+                else (None, None)
+            )
         sleep_ms = 0.0
-        if trace_record and trace_record.get("latency_ms", 0) > 0:
+        if trace_record:
             sleep_ms = (
                 0.0
                 if args.zero_latency
-                else float(clamp(trace_record["latency_ms"], args.latency_min_ms, args.latency_max_ms))
+                else float(trace_record["latency_ms"])
             )
         else:
             sleep_ms = float(profile["latency_ms"])
@@ -409,6 +494,7 @@ class Handler(BaseHTTPRequestHandler):
             if not logprobs:
                 logprobs = [{"token": content, "token_id": response_ids[0], "logprob": -0.1}]
             trace_source = {
+                "trace_id": (trace_episode or {}).get("trace_id", ""),
                 "provider_response_id": trace_record.get("provider_response_id", ""),
                 "dataset_problem_id": trace_record.get("dataset_problem_id", ""),
                 "turn_index": trace_record.get("turn_index", attempt),
@@ -500,7 +586,7 @@ parser.add_argument("--model-name", required=True)
 parser.add_argument("--model-mode", choices=("real", "simulator"), required=True)
 parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
 parser.add_argument("--trace-corpus-path", default="")
-parser.add_argument("--trace-sampling-strategy", choices=("problem_then_turn", "turn_only"), default="problem_then_turn")
+parser.add_argument("--trace-sampling-strategy", choices=("round_robin_episode",), default="round_robin_episode")
 parser.add_argument("--dataset-jsonl", required=True)
 parser.add_argument("--dataset-limit", type=int, default=8)
 parser.add_argument("--dataset-offset", type=int, default=0)
@@ -568,6 +654,7 @@ async def main():
     latencies = []
     actual_step_counts = []
     training_trace_token_counts = []
+    episode_observations = []
     dataset_problem_usage = {}
     lock = asyncio.Lock()
     semaphore = asyncio.Semaphore(concurrent_batches)
@@ -604,6 +691,8 @@ async def main():
                 "max_steps": args.max_steps,
                 "dataset": "DSCodeBench",
                 "dataset_problem_id": problem_id,
+                "sequence": sample_ordinal,
+                "replay_strategy": "round_robin_episode",
             },
             timeout_seconds=args.batch_timeout,
             max_steps=args.max_steps,
@@ -622,10 +711,12 @@ async def main():
             make_sample(batch_id, index, current_batch * episode_batch_size + index)
             for index in range(episode_batch_size)
         ]
+        planned_at = time.time()
         expected_ids = [sample.request_id for sample in samples]
         async with lock:
             submitted += len(samples)
         started = time.monotonic()
+        dispatched_at = time.time()
         try:
             response = await execute(
                 adapter_core_pb2.ExecuteBatchRequest(
@@ -633,8 +724,21 @@ async def main():
                 ), timeout=args.batch_timeout,
             )
             elapsed = (time.monotonic() - started) * 1000
+            terminal_at = time.time()
+            batch_observations = stress_common.observe_episode_batch(
+                samples,
+                response.results,
+                suite="scale",
+                run_id=args.run_id,
+                phase=args.mode,
+                planned_at=planned_at,
+                dispatched_at=dispatched_at,
+                terminal_at=terminal_at,
+                batch_rpc_latency_ms=elapsed,
+            )
             async with lock:
                 latencies.append(elapsed)
+                episode_observations.extend(batch_observations)
                 result_counts = {}
                 for result in response.results:
                     result_counts[result.request_id] = result_counts.get(result.request_id, 0) + 1
@@ -662,8 +766,23 @@ async def main():
                     else:
                         failed += 1
         except grpc.RpcError as exc:
+            terminal_at = time.time()
+            batch_observations = stress_common.observe_episode_batch(
+                samples,
+                [],
+                suite="scale",
+                run_id=args.run_id,
+                phase=args.mode,
+                planned_at=planned_at,
+                dispatched_at=dispatched_at,
+                terminal_at=terminal_at,
+                batch_rpc_latency_ms=(time.monotonic() - started) * 1000,
+                rpc_error_code=exc.code().name if exc.code() else "UNKNOWN",
+                rpc_error_message=exc.details() or "",
+            )
             async with lock:
                 rpc_errors += len(samples)
+                episode_observations.extend(batch_observations)
                 missing_result_ids.extend(expected_ids)
                 if len(rpc_error_details) < 10:
                     rpc_error_details.append({
@@ -786,6 +905,18 @@ async def main():
         "task_count": len(training_trace_token_counts),
         "min_response_tokens": min(training_trace_token_counts) if training_trace_token_counts else 0,
         "total_response_tokens": sum(training_trace_token_counts),
+    }
+    observation_path = args.output + ".episode-observations.jsonl"
+    observation_count = stress_common.write_episode_observations_jsonl(
+        observation_path, episode_observations
+    )
+    document["episode_observations"] = {
+        "schema_version": stress_common.EPISODE_OBSERVATION_SCHEMA_VERSION,
+        "artifact_path": observation_path,
+        "row_count": observation_count,
+        "submitted_count": submitted,
+        "complete": observation_count == submitted,
+        "worker_attribution": "unavailable_in_adapter_result",
     }
     with open(args.output, "w", encoding="utf-8") as target:
         json.dump(document, target, indent=2, sort_keys=True)
@@ -969,6 +1100,25 @@ def _model_step_stats(worker_clients: dict, prefix: str) -> dict:
         merged_replay = dict(first_simulator.get("trace_replay", {}))
         merged_replay["hits"] = sum(int(item.get("trace_replay", {}).get("hits", 0)) for item in simulators)
         merged_replay["misses"] = sum(int(item.get("trace_replay", {}).get("misses", 0)) for item in simulators)
+        merged_replay["assigned_episodes"] = sum(
+            int(item.get("trace_replay", {}).get("assigned_episodes", 0))
+            for item in simulators
+        )
+        merged_replay["completed_cycles"] = sum(
+            int(item.get("trace_replay", {}).get("completed_cycles", 0))
+            for item in simulators
+        )
+        merged_replay["exhausted_turn_reuses"] = sum(
+            int(item.get("trace_replay", {}).get("exhausted_turn_reuses", 0))
+            for item in simulators
+        )
+        selection_counts: dict[str, int] = {}
+        for item in simulators:
+            for trace_id, count in item.get("trace_replay", {}).get(
+                "trace_selection_counts", {}
+            ).items():
+                selection_counts[trace_id] = selection_counts.get(trace_id, 0) + int(count)
+        merged_replay["trace_selection_counts"] = selection_counts
         merged_simulator["trace_replay"] = merged_replay
     examples: dict = {}
     profile_examples: dict = {}
@@ -1002,7 +1152,12 @@ def _line_worker_id(line: str) -> str:
     return match.group(1).strip('",') if match else ""
 
 
-def _completed_worker_coverage(server, log_path: str, worker_prefix: str) -> dict:
+def _completed_worker_coverage(
+    server,
+    log_path: str,
+    worker_prefix: str,
+    request_prefix: str = "",
+) -> dict:
     """Summarize per-Worker episode load from server logs.
 
     The server's `episode_completed` marker is the authoritative observed
@@ -1020,6 +1175,8 @@ def _completed_worker_coverage(server, log_path: str, worker_prefix: str) -> dic
         "lease_granted",
     )
     for line_no, line in enumerate(base.get_text(server, log_path).splitlines(), start=1):
+        if request_prefix and request_prefix not in line:
+            continue
         worker_id = _line_worker_id(line)
         if not worker_id.startswith(worker_prefix):
             continue
@@ -1107,6 +1264,14 @@ def _prepare_worker_trace_corpus(worker, worker_run: str, trace_corpus_path: str
     raise ValueError(
         "--trace-corpus-path must be a Worker absolute path or an existing local file/directory"
     )
+
+
+# Public compatibility names used by other real-Worker scale lanes. They keep
+# fleet startup and dispatch-coverage semantics aligned while the remaining
+# workload-specific implementation is migrated into smaller core modules.
+isolated_server_config = server_config
+parse_private_worker_ports = _parse_private_port_range
+completed_worker_coverage = _completed_worker_coverage
 
 
 def run_scale(
@@ -1638,6 +1803,12 @@ def run_scale(
             _, out, err = base.run(server, command, timeout=command_timeout)
             if err: print(err, flush=True)
             result = json.loads(base.get_text(server, remote_result))
+            local_observations = local_run / f"episode-observations-{mode}.jsonl"
+            local_observations.write_text(
+                base.get_text(server, remote_result + ".episode-observations.jsonl"),
+                encoding="utf-8",
+            )
+            result["episode_observations"]["local_artifact"] = str(local_observations)
             step_stats = _model_step_stats(worker_clients, f"dscodebench-pressure-{run_id}-{mode}-")
             result["model_step_stats"] = step_stats
             trace_replay_stats = (
@@ -1649,7 +1820,13 @@ def run_scale(
                 "required": model_mode == "simulator" and simulator_mode == "trace_replay",
                 "corpus_path": trace_replay_stats.get("corpus_path", effective_trace_corpus_path),
                 "records": trace_replay_stats.get("records", 0),
+                "trajectories": trace_replay_stats.get("trajectories", 0),
                 "sampling_strategy": trace_replay_stats.get("sampling_strategy", trace_sampling_strategy),
+                "assigned_episodes": trace_replay_stats.get("assigned_episodes", 0),
+                "completed_cycles": trace_replay_stats.get("completed_cycles", 0),
+                "next_trace_slot": trace_replay_stats.get("next_trace_slot", 0),
+                "trace_selection_counts": trace_replay_stats.get("trace_selection_counts", {}),
+                "exhausted_turn_reuses": trace_replay_stats.get("exhausted_turn_reuses", 0),
                 "hits": trace_replay_stats.get("hits", 0),
                 "misses": trace_replay_stats.get("misses", 0),
                 "passed": (
@@ -1657,6 +1834,9 @@ def run_scale(
                     or simulator_mode != "trace_replay"
                     or (
                         trace_replay_stats.get("records", 0) > 0
+                        and trace_replay_stats.get("trajectories", 0) > 1
+                        and trace_replay_stats.get("sampling_strategy") == "round_robin_episode"
+                        and len(trace_replay_stats.get("trace_selection_counts", {})) > 1
                         and trace_replay_stats.get("hits", 0) == step_stats.get("total_model_calls", 0)
                         and trace_replay_stats.get("misses", 0) == 0
                     )
@@ -1697,6 +1877,7 @@ def run_scale(
                     server,
                     f"{server_run}/server.log",
                     f"stress-{run_id}-worker-",
+                    f"dscodebench-pressure-{run_id}-{mode}-",
                 )
                 coverage["expected_workers"] = workers_count
                 coverage["passed"] = coverage["unique_completed_workers"] == workers_count
@@ -1833,6 +2014,13 @@ def run_scale(
         for client in (*worker_clients.values(), server):
             if client: client.close()
     assert outcome is not None
+    outcome["cleanup"] = {
+        "attempted": True,
+        "passed": not cleanup_errors,
+        "errors": cleanup_errors,
+        "protected_process_unchanged": not cleanup_errors,
+        "isolated_ports_released": not cleanup_errors,
+    }
     return outcome
 
 
@@ -1903,7 +2091,7 @@ def main() -> int:
     parser.add_argument("--simulator-seed", type=int, default=20260720)
     parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
     parser.add_argument("--trace-corpus-path", default="")
-    parser.add_argument("--trace-sampling-strategy", choices=("problem_then_turn", "turn_only"), default="problem_then_turn")
+    parser.add_argument("--trace-sampling-strategy", choices=("round_robin_episode",), default="round_robin_episode")
     parser.add_argument("--min-scale-episode-waves", type=int, default=10)
     parser.add_argument("--plugin-ready-timeout-seconds", type=int, default=2)
     parser.add_argument("--worker-register-max-attempts", type=int, default=5)

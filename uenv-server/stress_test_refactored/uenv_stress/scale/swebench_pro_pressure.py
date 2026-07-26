@@ -25,7 +25,7 @@ import tempfile
 import time
 import uuid
 
-import distributed_stress_runtime as base
+from uenv_stress.core import distributed_runtime as base
 
 
 # SWE worker 会打开 runtime gateway，OpenHands agent 通过这个 gateway 执行任务。
@@ -39,8 +39,13 @@ DEFAULT_INSTANCE_ID = "astropy__astropy-7166"
 DEFAULT_KNOWN_IMAGE = "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest"
 DEFAULT_KNOWN_IMAGE_ID = "sha256:6909381901b865b904d9cfce69e412f659de0dc1e0454abb052c88b116654a83"
 OPENHANDS_PYTHON = "/usr/bin/python3.12"
-COMMON_SOURCE = Path(__file__).with_name("stress_test_common.py").read_text(encoding="utf-8")
-FLEET_SUPERVISOR_SOURCE = Path(__file__).with_name("worker_fleet_supervisor.py").read_text(encoding="utf-8")
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
+COMMON_SOURCE = (PACKAGE_DIR / "core" / "stress_test_common.py").read_text(
+    encoding="utf-8-sig"
+)
+FLEET_SUPERVISOR_SOURCE = (
+    PACKAGE_DIR / "core" / "fleet_supervisor.py"
+).read_text(encoding="utf-8")
 
 
 def put_worker_config_archive(worker, worker_run: str, documents: dict[str, tuple[str, int]], run_id: str) -> None:
@@ -157,7 +162,7 @@ import random
 import re
 import threading
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
@@ -170,7 +175,7 @@ parser.add_argument("--zero-latency", action="store_true")
 parser.add_argument("--model", default="openai/uenv-swe-simulator")
 parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
 parser.add_argument("--trace-corpus-path", default="")
-parser.add_argument("--trace-sampling-strategy", choices=("instance_then_turn", "turn_only"), default="instance_then_turn")
+parser.add_argument("--trace-sampling-strategy", choices=("round_robin_episode",), default="round_robin_episode")
 parser.add_argument("--wrong-steps-mean", type=float, default=2)
 parser.add_argument("--wrong-steps-std", type=float, default=1)
 parser.add_argument("--wrong-steps-min", type=int, default=0)
@@ -186,6 +191,10 @@ trace_replay_misses = 0
 profiles_by_task = {}
 attempts_by_task = {}
 observed_latencies_ms = []
+trace_assignment_by_task = {}
+trace_selection_counts = {}
+trace_cursor = 0
+trace_exhausted_turn_reuses = 0
 lock = threading.Lock()
 
 
@@ -218,6 +227,22 @@ def load_trace_corpus(path_text):
 
 
 TRACE_CORPUS = load_trace_corpus(args.trace_corpus_path)
+REPLAY_EPISODES = [
+    episode for episode in TRACE_CORPUS
+    if isinstance(episode, dict) and isinstance(episode.get("turns"), list)
+    and episode.get("turns")
+]
+if args.simulator_mode == "trace_replay":
+    for episode in REPLAY_EPISODES:
+        if any(
+            float(turn.get("replay_wait_ms", 0) or 0) <= 0
+            or not str(turn.get("latency_source", ""))
+            for turn in episode.get("turns", [])
+        ):
+            raise SystemExit(
+                "trace_replay requires positive replay_wait_ms and "
+                "latency_source on every turn"
+            )
 
 
 def clamp(value, lower, upper):
@@ -243,7 +268,7 @@ def extract_text(value):
     return ""
 
 
-def request_fingerprint(document):
+def request_fingerprint(document, episode_id=""):
     messages = document.get("messages", [])
     user_texts = [
         extract_text(message.get("content", ""))
@@ -254,7 +279,9 @@ def request_fingerprint(document):
     instance_match = re.search(r"([A-Za-z0-9_.-]+__[A-Za-z0-9_.-]+-\d+)", seed_text)
     instance_id = instance_match.group(1) if instance_match else "unknown-instance"
     prompt_hash = hashlib.sha256(seed_text.encode("utf-8", errors="ignore")).hexdigest()[:12]
-    return f"{instance_id}:{prompt_hash}", instance_id
+    if episode_id:
+        return f"episode:{episode_id}", instance_id
+    return f"fallback:{instance_id}:{prompt_hash}", instance_id
 
 
 def profile_for(task_key, instance_id):
@@ -278,22 +305,36 @@ def sample_latency(label):
     return float(clamp(latency, args.latency_min_ms, args.latency_max_ms))
 
 
-def choose_trace_turn(instance_id, attempt):
-    candidates = [
-        episode for episode in TRACE_CORPUS
-        if isinstance(episode, dict) and isinstance(episode.get("turns"), list)
-    ]
-    if args.trace_sampling_strategy == "instance_then_turn" and instance_id != "unknown-instance":
-        matched = [episode for episode in candidates if str(episode.get("instance_id")) == instance_id]
-        if matched:
-            candidates = matched
-    if not candidates:
+def trace_identity(episode, slot):
+    return str(
+        episode.get("trace_id")
+        or episode.get("episode_id")
+        or episode.get("run_id")
+        or f"trace-{slot:08d}"
+    )
+
+
+def choose_trace_turn(task_key, attempt):
+    """Assign one whole collected trace per new Episode in arrival order."""
+    global trace_cursor, trace_exhausted_turn_reuses
+    if not REPLAY_EPISODES:
         return None, None
-    episode = candidates[(attempt - 1) % len(candidates)]
+    if task_key not in trace_assignment_by_task:
+        slot = trace_cursor % len(REPLAY_EPISODES)
+        trace_cursor += 1
+        trace_assignment_by_task[task_key] = slot
+        trace_id = trace_identity(REPLAY_EPISODES[slot], slot)
+        trace_selection_counts[trace_id] = trace_selection_counts.get(trace_id, 0) + 1
+    slot = trace_assignment_by_task[task_key]
+    episode = REPLAY_EPISODES[slot]
     turns = episode.get("turns") or []
     if not turns:
         return episode, None
-    turn = turns[min(max(attempt - 1, 0), len(turns) - 1)]
+    turn_slot = max(attempt - 1, 0)
+    if turn_slot >= len(turns):
+        trace_exhausted_turn_reuses += 1
+        turn_slot = len(turns) - 1
+    turn = turns[turn_slot]
     return episode, turn
 
 
@@ -327,6 +368,9 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 profiles = dict(profiles_by_task)
                 attempts = dict(attempts_by_task)
+                replay_cursor = trace_cursor
+                replay_selection_counts = dict(trace_selection_counts)
+                exhausted_turn_reuses = trace_exhausted_turn_reuses
             wrong_steps = [int(profile["wrong_steps"]) for profile in profiles.values()]
             latencies = list(observed_latencies_ms)
             self.send_json(200, {
@@ -342,8 +386,18 @@ class Handler(BaseHTTPRequestHandler):
                     "mode": args.simulator_mode,
                     "seed": args.seed,
                     "trace_corpus_path": args.trace_corpus_path,
-                    "trace_episode_count": len(TRACE_CORPUS),
+                    "trace_episode_count": len(REPLAY_EPISODES),
                     "trace_sampling_strategy": args.trace_sampling_strategy,
+                    "assigned_episodes": replay_cursor,
+                    "completed_cycles": (
+                        replay_cursor // len(REPLAY_EPISODES) if REPLAY_EPISODES else 0
+                    ),
+                    "next_trace_slot": (
+                        replay_cursor % len(REPLAY_EPISODES) if REPLAY_EPISODES else 0
+                    ),
+                    "trace_selection_counts": replay_selection_counts,
+                    "exhausted_turn_reuses": exhausted_turn_reuses,
+                    "episode_binding": "one assigned trajectory for the Episode lifetime",
                     "zero_latency": args.zero_latency,
                     "latency_distribution_ms": {
                         "mean": args.latency_mean_ms,
@@ -369,7 +423,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global calls, tokenization_calls, trace_replay_hits, trace_replay_misses
-        parsed_path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        parsed_path = parsed_url.path
         size = int(self.headers.get("content-length", "0"))
         raw_body = b""
         if size:
@@ -401,15 +456,21 @@ class Handler(BaseHTTPRequestHandler):
             document = json.loads(raw_body.decode() or "{}")
         except Exception:
             document = {}
-        task_key, instance_id = request_fingerprint(document)
+        episode_id = (
+            str(self.headers.get("X-UEnv-Episode-Id", "")).strip()
+            or str((parse_qs(parsed_url.query).get("uenv_episode_id") or [""])[0]).strip()
+        )
+        task_key, instance_id = request_fingerprint(document, episode_id)
         with lock:
             profile = profiles_by_task.setdefault(task_key, profile_for(task_key, instance_id))
             attempt = attempts_by_task.get(task_key, 0) + 1
             attempts_by_task[task_key] = attempt
+            trace_episode, trace_turn = (
+                choose_trace_turn(task_key, attempt)
+                if args.simulator_mode == "trace_replay"
+                else (None, None)
+            )
         calls += 1
-        trace_episode = trace_turn = None
-        if args.simulator_mode == "trace_replay":
-            trace_episode, trace_turn = choose_trace_turn(instance_id, attempt)
         if trace_turn:
             trace_replay_hits += 1
             content = str(trace_turn.get("assistant_output") or trace_turn.get("text") or "")
@@ -419,13 +480,17 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(value, (int, float))
             ]
             response_id = response_ids[0] if response_ids else 1000 + calls
-            trace_latency = float(trace_turn.get("latency_ms") or 0.0)
+            trace_latency = float(trace_turn["replay_wait_ms"])
             sleep_ms = 0.0 if args.zero_latency else (
-                trace_latency if trace_latency > 0 else sample_latency(f"{task_key}:{attempt}:trace")
+                trace_latency
             )
             phase = "trace_replay"
             simulated_reward = float((trace_episode or {}).get("result", {}).get("reward", 0.0) or 0.0)
             trace_source = {
+                "trace_id": trace_identity(
+                    trace_episode or {},
+                    trace_assignment_by_task.get(task_key, -1),
+                ),
                 "corpus_run_id": (trace_episode or {}).get("run_id", ""),
                 "corpus_instance_id": (trace_episode or {}).get("instance_id", ""),
                 "turn_index": trace_turn.get("turn_index"),
@@ -678,19 +743,23 @@ while planned < target_episodes:
                 "dataset": "SWE-bench Pro",
                 "instance_id": instance_id,
                 "episode_ordinal": ordinal,
+                "replay_strategy": "round_robin_episode",
             },
             timeout_seconds=args.batch_timeout,
             max_steps=args.max_steps,
         )
         samples.append(sample)
         expected_ids.append(sample.request_id)
-    batch_specs.append((len(batch_specs), batch_id, current_size, samples, expected_ids))
+    batch_specs.append((
+        len(batch_specs), batch_id, current_size, samples, expected_ids, time.time()
+    ))
     planned += current_size
 
 
 def execute_batch(batch_spec):
-    batch_index, batch_id, current_size, samples, expected_ids = batch_spec
+    batch_index, batch_id, current_size, samples, expected_ids, planned_at = batch_spec
     batch_started = time.monotonic()
+    dispatched_at = time.time()
     try:
         response = execute(
             adapter_core_pb2.ExecuteBatchRequest(
@@ -699,6 +768,7 @@ def execute_batch(batch_spec):
             timeout=args.batch_timeout + 60,
         )
     except grpc.RpcError as exc:
+        latency_ms = (time.monotonic() - batch_started) * 1000
         return {
             "batch_index": batch_index,
             "batch_id": batch_id,
@@ -711,8 +781,21 @@ def execute_batch(batch_spec):
                 "code": exc.code().name if exc.code() else "UNKNOWN",
                 "details": exc.details() or "",
             },
-            "latency_ms": (time.monotonic() - batch_started) * 1000,
+            "latency_ms": latency_ms,
             "results": [],
+            "episode_observations": stress_common.observe_episode_batch(
+                samples,
+                [],
+                suite="scale",
+                run_id=args.run_id,
+                phase=args.parallel_mode,
+                planned_at=planned_at,
+                dispatched_at=dispatched_at,
+                terminal_at=time.time(),
+                batch_rpc_latency_ms=latency_ms,
+                rpc_error_code=exc.code().name if exc.code() else "UNKNOWN",
+                rpc_error_message=exc.details() or "",
+            ),
             "missing_result_ids": expected_ids,
             "duplicate_result_ids": [],
         }
@@ -738,6 +821,17 @@ def execute_batch(batch_spec):
         request_id for request_id, count in result_counts.items() if count > 1
     )
     unknown_result_ids = sorted(received_ids - set(expected_ids))
+    episode_observations = stress_common.observe_episode_batch(
+        samples,
+        parsed_results,
+        suite="scale",
+        run_id=args.run_id,
+        phase=args.parallel_mode,
+        planned_at=planned_at,
+        dispatched_at=dispatched_at,
+        terminal_at=time.time(),
+        batch_rpc_latency_ms=latency_ms,
+    )
     return {
         "batch_index": batch_index,
         "batch_id": batch_id,
@@ -753,6 +847,7 @@ def execute_batch(batch_spec):
         "rpc_error_episodes": 0,
         "latency_ms": latency_ms,
         "results": parsed_results,
+        "episode_observations": episode_observations,
         "result_count": len(response.results),
         "expected_result_count": current_size,
         "missing_result_ids": missing_result_ids,
@@ -766,11 +861,12 @@ max_in_flight_batches = len(batch_specs)
 missing_result_ids = []
 duplicate_result_ids = []
 unknown_result_ids = []
+episode_observations = []
 with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as executor:
     future_to_batch = {executor.submit(execute_batch, spec): spec for spec in batch_specs}
     client_submit_seconds = time.monotonic() - submit_started
     for future in concurrent.futures.as_completed(future_to_batch):
-        _, batch_id, current_size, _, expected_ids = future_to_batch[future]
+        _, batch_id, current_size, samples, expected_ids, planned_at = future_to_batch[future]
         try:
             batch_result = future.result()
         except Exception as exc:
@@ -784,6 +880,19 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as
                 "rpc_error": {"code": type(exc).__name__, "details": str(exc)},
                 "latency_ms": 0,
                 "results": [],
+                "episode_observations": stress_common.observe_episode_batch(
+                    samples,
+                    [],
+                    suite="scale",
+                    run_id=args.run_id,
+                    phase=args.parallel_mode,
+                    planned_at=planned_at,
+                    dispatched_at=planned_at,
+                    terminal_at=time.time(),
+                    batch_rpc_latency_ms=0,
+                    rpc_error_code=type(exc).__name__,
+                    rpc_error_message=str(exc),
+                ),
                 "missing_result_ids": expected_ids,
                 "duplicate_result_ids": [],
                 "unknown_result_ids": [],
@@ -795,6 +904,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as
         rpc_error_episodes += int(batch_result.get("rpc_error_episodes", 0))
         latencies.append(float(batch_result.get("latency_ms", 0)))
         all_results.extend(batch_result.get("results", []))
+        episode_observations.extend(batch_result.get("episode_observations", []))
         missing_result_ids.extend(batch_result.get("missing_result_ids", []))
         duplicate_result_ids.extend(batch_result.get("duplicate_result_ids", []))
         unknown_result_ids.extend(batch_result.get("unknown_result_ids", []))
@@ -865,6 +975,18 @@ document["dataset"] = {
     "reuse_factor": submitted / len(set(instance_ids)) if instance_ids else 0.0,
     "instance_usage_top20": dict(sorted(instance_usage.items(), key=lambda item: (-item[1], item[0]))[:20]),
     "sampling_unit": "episode",
+}
+observation_path = args.output + ".episode-observations.jsonl"
+observation_count = stress_common.write_episode_observations_jsonl(
+    observation_path, episode_observations
+)
+document["episode_observations"] = {
+    "schema_version": stress_common.EPISODE_OBSERVATION_SCHEMA_VERSION,
+    "artifact_path": observation_path,
+    "row_count": observation_count,
+    "submitted_count": submitted,
+    "complete": observation_count == submitted,
+    "worker_attribution": "unavailable_in_adapter_result",
 }
 with open(args.output, "w", encoding="utf-8") as destination:
     json.dump(document, destination, indent=2, sort_keys=True)
@@ -2086,7 +2208,7 @@ def run_one(
                 f"cp -a {base.q(base.SOURCE_REPO)}/integrations {base.q(server_run)}/bundle/",
                 f"install -d -m 0755 {base.q(server_run)}/bundle/scripts/openhands {base.q(server_run)}/bundle/uenv-server/stress_test {base.q(server_run)}/bundle/config/swe",
                 f"install -m 0755 {base.q(base.SOURCE_REPO)}/scripts/openhands/openhands_runner.py {base.q(server_run)}/bundle/scripts/openhands/openhands_runner.py",
-                f"install -m 0755 {base.q(base.SOURCE_REPO)}/uenv-server/stress_test/run_openhands_stress.sh {base.q(server_run)}/bundle/uenv-server/stress_test/run_openhands_stress.sh",
+                f"install -m 0755 {base.q(base.SOURCE_REPO)}/uenv-server/stress_test_refactored/uenv_stress/scripts/run_openhands_stress.sh {base.q(server_run)}/bundle/uenv-server/stress_test/run_openhands_stress.sh",
                 f"install -m 0644 {base.q(args.dataset_catalog)} {base.q(server_run)}/bundle/config/swe/pro.json",
                 f"tar -C {base.q(server_run)}/bundle -czf {base.q(server_run)}/bundle.tgz .",
                 f"sha256sum {base.q(server_run)}/bundle.tgz > {base.q(server_run)}/bundle.tgz.sha256",
@@ -2546,6 +2668,17 @@ def run_one(
             print(client_err)
         result_text = base.get_text(server, f"{server_run}/result.json")
         result_document = json.loads(result_text)
+        local_observations = local_run / "episode-observations.jsonl"
+        local_observations.write_text(
+            base.get_text(
+                server,
+                f"{server_run}/result.json.episode-observations.jsonl",
+            ),
+            encoding="utf-8",
+        )
+        result_document["episode_observations"]["local_artifact"] = str(
+            local_observations
+        )
         if args.registered_workers > 1 or scale_purpose.startswith("single_worker"):
             coverage = completed_worker_coverage(server, f"{server_run}/server.log", worker_prefix)
             coverage["expected_workers"] = args.registered_workers
@@ -2577,7 +2710,31 @@ def run_one(
             llm_stats = {
                 "trace_replay_hits": sum(int(stats.get("trace_replay_hits", 0)) for stats in llm_stats_by_node.values()),
                 "trace_replay_misses": sum(int(stats.get("trace_replay_misses", 0)) for stats in llm_stats_by_node.values()),
+                "assigned_episodes": sum(
+                    int(stats.get("simulator", {}).get("assigned_episodes", 0))
+                    for stats in llm_stats_by_node.values()
+                ),
+                "completed_cycles": sum(
+                    int(stats.get("simulator", {}).get("completed_cycles", 0))
+                    for stats in llm_stats_by_node.values()
+                ),
+                "sampling_strategies": sorted({
+                    str(stats.get("simulator", {}).get("trace_sampling_strategy", ""))
+                    for stats in llm_stats_by_node.values()
+                }),
+                "distinct_traces_used": len({
+                    trace_id
+                    for stats in llm_stats_by_node.values()
+                    for trace_id in stats.get("simulator", {}).get(
+                        "trace_selection_counts", {}
+                    )
+                }),
             }
+            llm_stats_text = json.dumps(
+                {"aggregate": llm_stats, "per_node": llm_stats_by_node},
+                indent=2,
+                sort_keys=True,
+            )
         else:
             llm_stats_text = "{}"
             llm_stats = {}
@@ -2586,6 +2743,26 @@ def run_one(
                 raise RuntimeError(f"SWE-bench Pro pressure trace replay had misses: {llm_stats}")
             if int(llm_stats.get("trace_replay_hits", 0)) <= 0:
                 raise RuntimeError(f"SWE-bench Pro pressure trace replay had no hits: {llm_stats}")
+            if llm_stats.get("sampling_strategies") != ["round_robin_episode"]:
+                raise RuntimeError(
+                    f"SWE-bench Pro pressure did not use round-robin Episode replay: {llm_stats}"
+                )
+            if int(llm_stats.get("distinct_traces_used", 0)) <= 1:
+                raise RuntimeError(
+                    f"SWE-bench Pro pressure did not rotate across multiple traces: {llm_stats}"
+                )
+        result_document["trace_replay"] = {
+            "required": args.llm_kind == "simulator" and args.simulator_mode == "trace_replay",
+            "calls": (
+                int(llm_stats.get("trace_replay_hits", 0))
+                + int(llm_stats.get("trace_replay_misses", 0))
+            ),
+            "hits": int(llm_stats.get("trace_replay_hits", 0)),
+            "misses": int(llm_stats.get("trace_replay_misses", 0)),
+            "assigned_episodes": int(llm_stats.get("assigned_episodes", 0)),
+            "sampling_strategy": args.trace_sampling_strategy,
+            "distinct_traces_used": int(llm_stats.get("distinct_traces_used", 0)),
+        }
         # OpenHands trace 产物分散在各节点本机的 worker_run 下，逐节点 find 再收集。
         trace_corpus_docs = []
         trace_corpus_dir = local_run / "trace-corpus"
@@ -2914,6 +3091,16 @@ def run_one(
             result_code = 1
         else:
             print("[cleanup] owned processes/containers stopped; protected server unchanged")
+        (local_run / "cleanup.json").write_text(
+            json.dumps({
+                "attempted": True,
+                "passed": not cleanup_errors,
+                "errors": cleanup_errors,
+                "protected_process_unchanged": not cleanup_errors,
+                "isolated_ports_released": not cleanup_errors,
+            }, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         if error:
             (local_run / "error.txt").write_text(error)
         for client in (*worker_clients.values(), server):
@@ -2973,7 +3160,7 @@ def main() -> int:
     parser.add_argument("--simulator-seed", type=int, default=20260720)
     parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
     parser.add_argument("--trace-corpus-path", default="")
-    parser.add_argument("--trace-sampling-strategy", choices=("instance_then_turn", "turn_only"), default="instance_then_turn")
+    parser.add_argument("--trace-sampling-strategy", choices=("round_robin_episode",), default="round_robin_episode")
     parser.add_argument("--trace-source-model", default=os.environ.get("UENV_TRACE_SOURCE_MODEL", "doubao"))
     parser.add_argument("--trace-source-version", default=os.environ.get("UENV_TRACE_SOURCE_VERSION", ""))
     parser.add_argument("--freeze-trace-corpus-path", default="")
@@ -3155,6 +3342,7 @@ def main() -> int:
                 try:
                     result_document = json.loads(latest_result.read_text(encoding="utf-8"))
                     item["result_path"] = str(latest_result)
+                    item["result"] = result_document
                     if "scale" in result_document:
                         item["scale"] = result_document["scale"]
                     for key in ("resource_observations", "host_resource_metrics", "fleet_resource_metrics"):
@@ -3163,6 +3351,18 @@ def main() -> int:
                 except (OSError, json.JSONDecodeError):
                     item["result_path"] = str(latest_result)
                     item["resource_observations_error"] = "failed to parse latest result.json"
+            latest_cleanup = newest_local_artifact(args.artifacts, "cleanup.json")
+            if latest_cleanup is not None:
+                try:
+                    item["cleanup"] = json.loads(
+                        latest_cleanup.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    item["cleanup"] = {
+                        "attempted": True,
+                        "passed": False,
+                        "errors": ["failed to parse cleanup.json"],
+                    }
             summary.append(item)
             print(f"[swebench_pro_pressure] parallel_mode={parallel_mode} concurrency={concurrency} done returncode={returncode}", flush=True)
             if returncode != 0:
