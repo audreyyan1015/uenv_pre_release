@@ -40,7 +40,7 @@ WORKER_CAPACITY      = 8        # 每 worker 最大并发 episode 数
 BATCH_SIZE           = 64       # 每次 ExecuteBatch 的 episode 数
 N_CONCURRENT_BATCHES = 32       # 并发 batch 数（semaphore 限流）
 TEST_DURATION        = 1800     # 测试时长（秒）——延迟最长 10min，至少跑 30min
-ENV_TYPE             = "math"
+ENV_TYPE             = "qa"
 
 # ── Mock LLM 参数 ─────────────────────────────────────────────────────────────
 LLM_PORT         = 18080
