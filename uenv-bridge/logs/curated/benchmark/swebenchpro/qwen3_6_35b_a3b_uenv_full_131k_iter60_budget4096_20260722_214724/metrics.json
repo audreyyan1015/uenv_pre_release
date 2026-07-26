@@ -1,0 +1,42 @@
+{
+  "sample_count": 731,
+  "resolved_count": 106,
+  "resolve_rate": 0.14500683994528044,
+  "completed_count": 675,
+  "failed_count": 56,
+  "status_counts": {
+    "completed": 675,
+    "failed": 56
+  },
+  "repo_distribution": {
+    "NodeBB/NodeBB": 44,
+    "qutebrowser/qutebrowser": 79,
+    "ansible/ansible": 96,
+    "internetarchive/openlibrary": 91,
+    "gravitational/teleport": 76,
+    "navidrome/navidrome": 57,
+    "element-hq/element-web": 56,
+    "future-architect/vuls": 62,
+    "protonmail/webclients": 65,
+    "flipt-io/flipt": 85,
+    "tutao/tutanota": 20
+  },
+  "adapter_core_endpoint": "8.130.75.157:8088",
+  "model_endpoint": "http://127.0.0.1:18194/v1",
+  "model_name": "Qwen/Qwen3.6-35B-A3B",
+  "batch_id": "swebenchpro-uenv-20260722_064823",
+  "batch_size": 1,
+  "benchmark_variant": "pro",
+  "env_package_id": "swe-bench-pro",
+  "env_package_version": "0.3.4",
+  "agent_pool_id": "openhands-default",
+  "agent_bridge_id": "uenv-agent-openhands",
+  "agent_bridge_version": "1.0.0",
+  "llm_config_path": "/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json",
+  "max_iterations": 60,
+  "max_tokens": 8192,
+  "thinking_token_budget": 4096,
+  "inference_mode": "uenv_swe_agent",
+  "thinking": "enabled_by_llm_config",
+  "resumed_skipped_count": 0
+}
