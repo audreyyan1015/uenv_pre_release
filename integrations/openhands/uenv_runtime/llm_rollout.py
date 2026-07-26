@@ -111,6 +111,7 @@ class RolloutTraceCollector:
         token_groups = self._tokenize([item["text"] for item in self._responses])
         response_ids: list[int] = []
         rollout_log_probs: list[float] = []
+        turns: list[dict[str, Any]] = []
         for index, (item, token_ids) in enumerate(zip(self._responses, token_groups, strict=True)):
             logprobs = item["logprobs"]
             if len(token_ids) != len(logprobs):
@@ -120,9 +121,22 @@ class RolloutTraceCollector:
                 )
             response_ids.extend(token_ids)
             rollout_log_probs.extend(logprobs)
+            turns.append(
+                {
+                    "turn_index": index,
+                    "assistant_output": item["text"],
+                    "response_ids": token_ids,
+                    "logprobs": logprobs,
+                    "provider_response_id": item["response_id"],
+                }
+            )
         if not response_ids:
             raise RuntimeError("Ark tokenization returned no response ids")
         return {
+            "schema_version": 1,
+            "corpus_kind": "openhands_real_llm_trace_rollout",
+            "source_model": self.model,
+            "turns": turns,
             "rollout_trace": {
                 "response_ids": response_ids,
                 "response_mask": [1] * len(response_ids),

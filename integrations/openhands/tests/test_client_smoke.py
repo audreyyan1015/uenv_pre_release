@@ -18,6 +18,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from uenv_runtime import UEnvGatewayClient, UEnvRuntime  # noqa: E402
+from uenv_runtime.llm_rollout import RolloutTraceCollector  # noqa: E402
 from uenv_runtime.runtime import _attr  # noqa: E402
 
 
@@ -30,6 +31,42 @@ class FakeWrite:
     def __init__(self, path, content):
         self.path = path
         self.content = content
+
+
+class FakeLogprobRecord:
+    def __init__(self, token, logprob):
+        self.token = token
+        self.logprob = logprob
+
+
+class FakeChoice:
+    def __init__(self):
+        self.logprobs = {"content": [
+            FakeLogprobRecord("OK", -0.1),
+            FakeLogprobRecord(".", -0.2),
+        ]}
+
+
+class FakeRawResponse:
+    id = "chatcmpl-test"
+    choices = [FakeChoice()]
+
+
+class FakeResponse:
+    raw_response = FakeRawResponse()
+
+
+class OfflineRolloutCollector(RolloutTraceCollector):
+    def __init__(self):
+        self._api_key = "test"
+        self._base_url = "http://127.0.0.1"
+        self.model = "volcengine/doubao-test"
+        self._provider_model = "doubao-test"
+        self._responses = []
+
+    def _tokenize(self, texts):
+        self.assert_texts = texts
+        return [[101, 102]]
 
 
 class OfflineAdapterTests(unittest.TestCase):
@@ -53,6 +90,16 @@ class OfflineAdapterTests(unittest.TestCase):
         rt.run_action(FakeCmd("ls"))
         rt.run_action(FakeWrite("/p", "c"))
         self.assertEqual([c[0] for c in calls], ["run", "write"])
+
+    def test_rollout_collector_exports_replay_turns(self):
+        collector = OfflineRolloutCollector()
+        collector.record(FakeResponse())
+        document = collector.finalize()
+        self.assertEqual(document["source_model"], "volcengine/doubao-test")
+        self.assertEqual(document["turns"][0]["assistant_output"], "OK.")
+        self.assertEqual(document["turns"][0]["response_ids"], [101, 102])
+        self.assertEqual(document["turns"][0]["logprobs"], [-0.1, -0.2])
+        self.assertEqual(document["rollout_trace"]["response_ids"], [101, 102])
 
 
 class LiveGatewayTest(unittest.TestCase):

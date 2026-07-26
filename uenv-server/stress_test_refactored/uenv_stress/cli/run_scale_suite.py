@@ -19,11 +19,27 @@ import sys
 import time
 from typing import Any
 
+from uenv_stress.core.runtime_config import load_runtime_inventory
+from uenv_stress.core import suite_metrics
 
-HERE = Path(__file__).resolve().parent
-DEFAULT_CONFIG = HERE / "stress_suite.json"
-ALLOWED_EXPOSED_PORTS = {5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888}
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = PACKAGE_ROOT / "uenv_stress" / "config"
+DEFAULT_CONFIG = CONFIG_DIR / "scale_suite.json"
+DEFAULT_TRACE_CONFIG = CONFIG_DIR / "trace_collection.json"
+DEFAULT_RUNTIME_CONFIG = CONFIG_DIR / "runtime_hosts.json"
+ALLOWED_EXPOSED_PORTS = {
+    5432, 6379, 8000, 8077, 8088, 8099, 8777, 8888, 22000
+}
 PARALLEL_MODES = {"sync", "one_step_off_policy", "fully_async"}
+SCALE_DATASETS = {
+    "dscodebench",
+    "swebench_pro",
+    "olymmath",
+    "scitab",
+    "pubmedqa",
+}
+MATH_RULE_TASKS = {"olymmath", "scitab", "pubmedqa"}
 
 
 def latency_config(section: dict[str, Any], field: str = "simulator_latency_ms") -> dict[str, float]:
@@ -45,22 +61,49 @@ def latency_config(section: dict[str, Any], field: str = "simulator_latency_ms")
     return result
 
 
-def load_suite_config(path: Path) -> dict[str, Any]:
+def load_suite_config(
+    path: Path,
+    trace_config_path: Path = DEFAULT_TRACE_CONFIG,
+) -> dict[str, Any]:
     document = json.loads(path.read_text(encoding="utf-8"))
     if document.get("schema_version") != 1:
         raise ValueError("stress suite schema_version must be 1")
+    trace_document = json.loads(trace_config_path.read_text(encoding="utf-8"))
+    if trace_document.get("schema_version") != 1:
+        raise ValueError("trace collection schema_version must be 1")
+    document["trace_collection"] = {
+        key: value
+        for key, value in trace_document.items()
+        if key != "schema_version"
+    }
     dscodebench_pressure = document.get("dscodebench_pressure")
     swebench_pro_pressure = document.get("swebench_pro_pressure")
+    math_rule_pressure = document.get("math_rule_pressure")
     worker_scale = document.get("worker_scale")
     trace_collection = document.get("trace_collection")
-    if not isinstance(dscodebench_pressure, dict) or not isinstance(swebench_pro_pressure, dict) or not isinstance(worker_scale, dict):
-        raise ValueError("stress suite requires dscodebench_pressure, swebench_pro_pressure and worker_scale objects")
+    if (
+        not isinstance(dscodebench_pressure, dict)
+        or not isinstance(swebench_pro_pressure, dict)
+        or not isinstance(math_rule_pressure, dict)
+        or not isinstance(worker_scale, dict)
+    ):
+        raise ValueError(
+            "stress suite requires dscodebench_pressure, swebench_pro_pressure, "
+            "math_rule_pressure and worker_scale objects"
+        )
     if not isinstance(trace_collection, dict):
         raise ValueError("stress suite requires a trace_collection object")
     dscodebench_collection = trace_collection.get("dscodebench")
     swe_collection = trace_collection.get("swebench_pro")
-    if not isinstance(dscodebench_collection, dict) or not isinstance(swe_collection, dict):
-        raise ValueError("trace_collection requires dscodebench and swebench_pro objects")
+    math_collection = trace_collection.get("math_rule_tasks")
+    if (
+        not isinstance(dscodebench_collection, dict)
+        or not isinstance(swe_collection, dict)
+        or not isinstance(math_collection, dict)
+    ):
+        raise ValueError(
+            "trace_collection requires dscodebench, swebench_pro and math_rule_tasks objects"
+        )
     if int(dscodebench_collection.get("dataset_count", 0)) != 100:
         raise ValueError("DSCodeBench real-LLM trace collection must sample exactly 100 records")
     if int(dscodebench_collection.get("collection_concurrency", 0)) != 100:
@@ -80,6 +123,12 @@ def load_suite_config(path: Path) -> dict[str, Any]:
         raise ValueError("SWE-bench Pro trace collection must use Doubao as source_model")
     if not str(swe_collection.get("trace_corpus_path", "")).strip():
         raise ValueError("SWE-bench Pro trace collection requires trace_corpus_path")
+    if set(math_collection.get("datasets", [])) != MATH_RULE_TASKS:
+        raise ValueError("Math trace collection must cover exactly all three rule tasks")
+    if int(math_collection.get("samples_per_dataset", 0)) < 100:
+        raise ValueError("Math trace collection requires at least 100 traces per dataset")
+    if bool(math_collection.get("uses_1024_workers", True)):
+        raise ValueError("Math trace collection must remain separate from 1024-Worker pressure")
     modes = dscodebench_pressure.get("modes")
     if not isinstance(modes, list) or not modes or set(modes) - PARALLEL_MODES:
         raise ValueError(f"invalid DSCodeBench pressure modes: {modes!r}")
@@ -93,9 +142,9 @@ def load_suite_config(path: Path) -> dict[str, Any]:
     latency_config(dscodebench_pressure)
     if not str(dscodebench_pressure.get("trace_corpus_path", "")).strip():
         raise ValueError("DSCodeBench pressure trace_replay requires trace_corpus_path")
-    dscodebench_pressure_sampling = str(dscodebench_pressure.get("trace_sampling_strategy", "problem_then_turn"))
-    if dscodebench_pressure_sampling not in {"problem_then_turn", "turn_only"}:
-        raise ValueError("DSCodeBench pressure trace_sampling_strategy is invalid")
+    dscodebench_pressure_sampling = str(dscodebench_pressure.get("trace_sampling_strategy", ""))
+    if dscodebench_pressure_sampling != "round_robin_episode":
+        raise ValueError("DSCodeBench pressure requires trace_sampling_strategy=round_robin_episode")
     if int(dscodebench_pressure.get("workers", 0)) < 1024:
         raise ValueError("DSCodeBench pressure pressure evidence requires at least 1024 Workers")
     capacity = int(dscodebench_pressure.get("capacity_per_worker", 0))
@@ -134,9 +183,9 @@ def load_suite_config(path: Path) -> dict[str, Any]:
             raise ValueError("SWE-bench Pro pressure simulator_mode must be template or trace_replay")
         if simulator_mode == "trace_replay" and not str(swebench_pro_pressure.get("trace_corpus_path", "")).strip():
             raise ValueError("SWE-bench Pro pressure trace_replay requires trace_corpus_path")
-        sampling = str(swebench_pro_pressure.get("trace_sampling_strategy", "instance_then_turn"))
-        if sampling not in {"instance_then_turn", "turn_only"}:
-            raise ValueError("SWE-bench Pro pressure trace_sampling_strategy is invalid")
+        sampling = str(swebench_pro_pressure.get("trace_sampling_strategy", ""))
+        if sampling != "round_robin_episode":
+            raise ValueError("SWE-bench Pro pressure requires trace_sampling_strategy=round_robin_episode")
     concurrencies = swebench_pro_pressure.get("concurrencies")
     if not isinstance(concurrencies, list) or not concurrencies or any(int(value) <= 0 for value in concurrencies):
         raise ValueError("SWE-bench Pro pressure concurrencies must be positive integers")
@@ -157,6 +206,44 @@ def load_suite_config(path: Path) -> dict[str, Any]:
         raise ValueError("SWE-bench Pro pressure total_episodes must be at least registered_workers * worker_capacity * min_episode_waves")
     if llm_kind != "simulator" or str(swebench_pro_pressure.get("simulator_mode", "")) != "trace_replay":
         raise ValueError("SWE-bench Pro pressure 1024 Worker scale requires simulator trace_replay")
+    math_tasks = math_rule_pressure.get("tasks")
+    if not isinstance(math_tasks, dict) or set(math_tasks) != MATH_RULE_TASKS:
+        raise ValueError(
+            "math_rule_pressure.tasks must contain exactly olymmath, scitab and pubmedqa"
+        )
+    if set(math_rule_pressure.get("modes", [])) != PARALLEL_MODES:
+        raise ValueError(
+            "math_rule_pressure must cover sync, one_step_off_policy and fully_async"
+        )
+    if math_rule_pressure.get("model_mode") != "trace_replay_simulator":
+        raise ValueError("math_rule_pressure requires model_mode=trace_replay_simulator")
+    if math_rule_pressure.get("trace_sampling_strategy") != "round_robin_episode":
+        raise ValueError("math_rule_pressure requires trace_sampling_strategy=round_robin_episode")
+    math_workers = int(math_rule_pressure.get("workers", 0))
+    math_capacity = int(math_rule_pressure.get("capacity_per_worker", 0))
+    math_batch_size = int(math_rule_pressure.get("episode_batch_size", 0))
+    math_batches = int(math_rule_pressure.get("exact_batches_per_dataset_mode", 0))
+    math_waves = int(math_rule_pressure.get("min_episode_waves", 0))
+    if math_workers < 1024:
+        raise ValueError("math_rule_pressure scale evidence requires at least 1024 Workers")
+    if math_capacity < 1 or math_batch_size < 1 or math_batches < 1:
+        raise ValueError("math_rule_pressure capacity and batch values must be positive")
+    if math_batch_size * math_batches < math_workers * math_capacity * math_waves:
+        raise ValueError(
+            "every Math rule dataset/mode must submit at least "
+            "workers * capacity_per_worker * min_episode_waves episodes"
+        )
+    latency_config(math_rule_pressure)
+    for task, task_config in math_tasks.items():
+        if not isinstance(task_config, dict):
+            raise ValueError(f"math_rule_pressure.tasks.{task} must be an object")
+        for field in ("dataset_path", "trace_corpus_path"):
+            if not str(task_config.get(field, "")).strip():
+                raise ValueError(f"math_rule_pressure.tasks.{task} requires {field}")
+        if int(task_config.get("dataset_limit", 0)) < 100:
+            raise ValueError(
+                f"math_rule_pressure.tasks.{task}.dataset_limit must be at least 100"
+            )
     min_steps = int(dscodebench_pressure.get("min_steps", 0))
     max_steps = int(dscodebench_pressure.get("max_steps", 0))
     if min_steps < 2 or max_steps < min_steps:
@@ -170,9 +257,9 @@ def load_suite_config(path: Path) -> dict[str, Any]:
         raise ValueError("worker_scale requires simulator_mode=trace_replay")
     if not str(worker_scale.get("trace_corpus_path", "")).strip():
         raise ValueError("worker_scale trace_replay requires trace_corpus_path")
-    worker_scale_sampling = str(worker_scale.get("trace_sampling_strategy", "problem_then_turn"))
-    if worker_scale_sampling not in {"problem_then_turn", "turn_only"}:
-        raise ValueError("worker_scale trace_sampling_strategy is invalid")
+    worker_scale_sampling = str(worker_scale.get("trace_sampling_strategy", ""))
+    if worker_scale_sampling != "round_robin_episode":
+        raise ValueError("worker_scale requires trace_sampling_strategy=round_robin_episode")
     latency_config(worker_scale)
     tiers = worker_scale.get("tiers")
     if not isinstance(tiers, list) or not tiers or min(int(value) for value in tiers) < 1024:
@@ -222,8 +309,20 @@ def parse_port_range(label: str, value: str) -> tuple[int, int]:
     return start, end
 
 
+def effective_llm_kind(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    if getattr(args, "scenario", "") == "swebench-pro-trace-collection":
+        return "real"
+    return str(config["swebench_pro_pressure"].get("llm_kind", "simulator"))
+
+
 def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None:
-    for label in ("source_repo", "server_bin", "worker_bin", "code_plugin_bin"):
+    for label in (
+        "source_repo",
+        "server_bin",
+        "worker_bin",
+        "code_plugin_bin",
+        "math_plugin_bin",
+    ):
         require_absolute(f"--{label.replace('_', '-')}", str(getattr(args, label)))
     scenario = getattr(args, "scenario", "")
     if (
@@ -236,6 +335,9 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
     swebench_pro_pressure_gateway_port = int(swebench_pro_pressure.get("gateway_port", args.gateway_port))
     swebench_pro_pressure_agent_api_port = int(swebench_pro_pressure.get("agent_api_port", args.agent_api_port))
     swebench_pro_pressure_agent_health_port = int(swebench_pro_pressure.get("agent_health_port", args.agent_health_port))
+    math_rule_model_port = int(
+        config["math_rule_pressure"].get("model_port", args.model_port)
+    )
     if scenario == "swebench-pro-trace-collection":
         collection = config["trace_collection"]["swebench_pro"]
         collection_gateway_port = int(collection.get("gateway_port", args.gateway_port))
@@ -258,21 +360,35 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
         return
     swebench_pro_pressure_workers = int(swebench_pro_pressure.get("registered_workers", 1))
     dscodebench_pressure_workers = int(config["dscodebench_pressure"].get("workers", 1))
+    math_rule_workers = int(config["math_rule_pressure"].get("workers", 1))
     exposed_ports = {
         "server": args.server_port,
         "model": swebench_pro_pressure_model_port,
+        "Math model": math_rule_model_port,
         "agent API": swebench_pro_pressure_agent_api_port,
         "agent health": swebench_pro_pressure_agent_health_port,
     }
-    if dscodebench_pressure_workers == 1 and swebench_pro_pressure_workers == 1:
+    if (
+        dscodebench_pressure_workers == 1
+        and swebench_pro_pressure_workers == 1
+        and math_rule_workers == 1
+    ):
         exposed_ports["worker"] = args.worker_port
         exposed_ports["gateway"] = swebench_pro_pressure_gateway_port
     for label, port in exposed_ports.items():
         if port not in ALLOWED_EXPOSED_PORTS:
             raise ValueError(f"{label} port {port} is not in the explicitly allowed exposed-port set")
     protected = set(args.protected_port)
-    requested = {args.server_port, swebench_pro_pressure_model_port}
-    if dscodebench_pressure_workers == 1 and swebench_pro_pressure_workers == 1:
+    requested = {
+        args.server_port,
+        swebench_pro_pressure_model_port,
+        math_rule_model_port,
+    }
+    if (
+        dscodebench_pressure_workers == 1
+        and swebench_pro_pressure_workers == 1
+        and math_rule_workers == 1
+    ):
         requested.update({args.worker_port, swebench_pro_pressure_gateway_port})
     overlap = protected & requested
     if overlap:
@@ -281,7 +397,8 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
     workers = int(dscodebench_pressure["workers"])
     worker_scale = config["worker_scale"]
     max_scale_workers = max(
-        [workers] + [int(value) for value in worker_scale.get("tiers", [])]
+        [workers, math_rule_workers]
+        + [int(value) for value in worker_scale.get("tiers", [])]
     )
     scale_model_port = int(worker_scale.get("model_port", args.model_port))
     if worker_scale.get("enabled", False):
@@ -304,6 +421,10 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
         if start <= swebench_pro_pressure_model_port <= end:
             raise ValueError(
                 f"model port {swebench_pro_pressure_model_port} overlaps the private Worker port range {start}-{end}"
+            )
+        if start <= math_rule_model_port <= end:
+            raise ValueError(
+                f"Math model port {math_rule_model_port} overlaps the private Worker port range {start}-{end}"
             )
         for label, port in {
             "agent API": swebench_pro_pressure_agent_api_port,
@@ -328,6 +449,7 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
         for label, port in {
             "server": args.server_port,
             "model": swebench_pro_pressure_model_port,
+            "Math model": math_rule_model_port,
             "worker-scale model": scale_model_port,
             "agent API": swebench_pro_pressure_agent_api_port,
             "agent health": swebench_pro_pressure_agent_health_port,
@@ -338,6 +460,7 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
     obs_end = args.obs_port + max(int(config["swebench_pro_pressure"].get("registered_workers", 1)), max_scale_workers) - 1
     for label, port in {
         "model": swebench_pro_pressure_model_port,
+        "Math model": math_rule_model_port,
         "agent API": swebench_pro_pressure_agent_api_port,
         "agent health": swebench_pro_pressure_agent_health_port,
     }.items():
@@ -353,12 +476,17 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
                 )
 
 
-def common_child_args(args: argparse.Namespace, *, model_port: int | None = None) -> list[str]:
+def common_child_args(
+    args: argparse.Namespace,
+    *,
+    model_port: int | None = None,
+    plugin_bin: str | None = None,
+) -> list[str]:
     command = [
         "--source-repo", args.source_repo,
         "--server-bin", args.server_bin,
         "--worker-bin", args.worker_bin,
-        "--code-plugin-bin", args.code_plugin_bin,
+        "--code-plugin-bin", args.code_plugin_bin if plugin_bin is None else plugin_bin,
         "--protected-pid", str(args.protected_pid),
         "--server-host", args.server_host,
         "--worker-host", args.worker_host,
@@ -383,7 +511,8 @@ def dscodebench_pressure_command(args: argparse.Namespace, config: dict[str, Any
     latency = latency_config(gate)
     command = [
         sys.executable,
-        str(HERE / "run_dscodebench_pressure.py"),
+        "-m",
+        "uenv_stress.scale.dscodebench_pressure",
         "--duration", str(gate["duration_seconds_per_mode"]),
         "--workers", str(gate["workers"]),
         "--capacity", str(gate["capacity_per_worker"]),
@@ -412,7 +541,7 @@ def dscodebench_pressure_command(args: argparse.Namespace, config: dict[str, Any
         "--simulator-seed", str(gate["simulator_seed"]),
         "--simulator-mode", str(gate.get("simulator_mode", "trace_replay")),
         "--trace-corpus-path", str(gate.get("trace_corpus_path", "")),
-        "--trace-sampling-strategy", str(gate.get("trace_sampling_strategy", "problem_then_turn")),
+        "--trace-sampling-strategy", str(gate["trace_sampling_strategy"]),
         "--min-scale-episode-waves", str(gate["min_episode_waves"]),
         "--acceptance-purpose", "worker-scale",
         "--artifacts", str(artifacts),
@@ -428,6 +557,54 @@ def dscodebench_pressure_command(args: argparse.Namespace, config: dict[str, Any
     if int(gate["workers"]) > 1 and args.private_worker_port_range:
         command.extend(["--private-worker-port-range", args.private_worker_port_range])
     return command + common_child_args(args)
+
+
+def math_rule_pressure_command(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    artifacts: Path,
+) -> list[str]:
+    gate = config["math_rule_pressure"]
+    latency = latency_config(gate)
+    command = [
+        sys.executable,
+        "-m",
+        "uenv_stress.scale.rule_task_pressure",
+        "--workers", str(gate["workers"]),
+        "--capacity", str(gate["capacity_per_worker"]),
+        "--episode-batch-size", str(gate["episode_batch_size"]),
+        "--concurrent-batches", str(gate["concurrent_batches"]),
+        "--exact-batches", str(gate["exact_batches_per_dataset_mode"]),
+        "--min-scale-episode-waves", str(gate["min_episode_waves"]),
+        "--registration-timeout", str(gate["registration_timeout_seconds"]),
+        "--batch-timeout", str(gate["batch_timeout_seconds"]),
+        "--plugin-ready-timeout-seconds", str(gate["plugin_ready_timeout_seconds"]),
+        "--worker-register-max-attempts", str(gate["worker_register_max_attempts"]),
+        "--worker-register-retry-backoff-ms", str(gate["worker_register_retry_backoff_ms"]),
+        "--simulator-seed", str(gate["simulator_seed"]),
+        "--simulator-latency-mean-ms", str(latency["mean"]),
+        "--simulator-latency-std-ms", str(latency["std"]),
+        "--simulator-latency-min-ms", str(latency["min"]),
+        "--simulator-latency-max-ms", str(latency["max"]),
+        "--trace-sampling-strategy", str(gate["trace_sampling_strategy"]),
+        "--evidence-boundary", str(gate["evidence_boundary"]),
+        "--private-worker-port-range", args.private_worker_port_range,
+        "--artifacts", str(artifacts),
+    ]
+    for mode in gate["modes"]:
+        command.extend(["--mode", mode])
+    for task in sorted(MATH_RULE_TASKS):
+        task_config = gate["tasks"][task]
+        command.extend([
+            f"--{task}-dataset", str(task_config["dataset_path"]),
+            f"--{task}-dataset-limit", str(task_config["dataset_limit"]),
+            f"--{task}-trace", str(task_config["trace_corpus_path"]),
+        ])
+    return command + common_child_args(
+        args,
+        model_port=int(gate.get("model_port", args.model_port)),
+        plugin_bin=args.math_plugin_bin,
+    )
 
 
 def worker_scale_command(
@@ -446,7 +623,8 @@ def worker_scale_command(
     latency = latency_config(gate)
     command = [
         sys.executable,
-        str(HERE / "run_dscodebench_pressure.py"),
+        "-m",
+        "uenv_stress.scale.dscodebench_pressure",
         "--duration", "1",
         "--workers", str(workers),
         "--capacity", str(gate["capacity_per_worker"]),
@@ -472,7 +650,7 @@ def worker_scale_command(
         "--simulator-seed", str(gate["simulator_seed"]),
         "--simulator-mode", str(gate.get("simulator_mode", "trace_replay")),
         "--trace-corpus-path", str(gate.get("trace_corpus_path", "")),
-        "--trace-sampling-strategy", str(gate.get("trace_sampling_strategy", "problem_then_turn")),
+        "--trace-sampling-strategy", str(gate["trace_sampling_strategy"]),
         "--min-scale-episode-waves", str(gate.get("min_episode_waves", 10)),
         "--plugin-ready-timeout-seconds", str(gate["plugin_ready_timeout_seconds"]),
         "--worker-register-max-attempts", str(gate["worker_register_max_attempts"]),
@@ -494,12 +672,13 @@ def swebench_pro_pressure_command(args: argparse.Namespace, config: dict[str, An
     gate = config["swebench_pro_pressure"]
     latency = latency_config(gate)
     model_port = int(gate.get("model_port", args.model_port))
-    gateway_port = int(collection.get("gateway_port", args.gateway_port))
-    agent_api_port = int(collection.get("agent_api_port", args.agent_api_port))
-    agent_health_port = int(collection.get("agent_health_port", args.agent_health_port))
+    gateway_port = int(gate.get("gateway_port", args.gateway_port))
+    agent_api_port = int(gate.get("agent_api_port", args.agent_api_port))
+    agent_health_port = int(gate.get("agent_health_port", args.agent_health_port))
     command = [
         sys.executable,
-        str(HERE / "run_swebench_pro_pressure.py"),
+        "-m",
+        "uenv_stress.scale.swebench_pro_pressure",
         "--mode", "llm",
         "--llm-kind", str(gate["llm_kind"]),
         "--max-steps", str(gate["max_steps"]),
@@ -530,7 +709,7 @@ def swebench_pro_pressure_command(args: argparse.Namespace, config: dict[str, An
         "--simulator-seed", str(gate["simulator_seed"]),
         "--simulator-mode", str(gate.get("simulator_mode", "template")),
         "--trace-corpus-path", str(gate.get("trace_corpus_path", "")),
-        "--trace-sampling-strategy", str(gate.get("trace_sampling_strategy", "instance_then_turn")),
+        "--trace-sampling-strategy", str(gate["trace_sampling_strategy"]),
         "--gateway-port", str(gateway_port),
         "--agent-api-port", str(agent_api_port),
         "--agent-health-port", str(agent_health_port),
@@ -564,7 +743,8 @@ def swebench_pro_trace_collection_command(args: argparse.Namespace, config: dict
     agent_health_port = int(collection.get("agent_health_port", args.agent_health_port))
     command = [
         sys.executable,
-        str(HERE / "run_swebench_pro_pressure.py"),
+        "-m",
+        "uenv_stress.scale.swebench_pro_pressure",
         "--mode", "llm",
         "--llm-kind", "real",
         "--llm-config", args.llm_config,
@@ -627,6 +807,23 @@ def collect_records(value: Any, key: str) -> list[Any]:
     return records
 
 
+def scenario_dataset_coverage(scenarios: list[dict[str, Any]]) -> set[str]:
+    covered: set[str] = set()
+    for scenario in scenarios:
+        if scenario.get("status") != "passed":
+            continue
+        name = str(scenario.get("name", ""))
+        if name.startswith("dscodebench-pressure"):
+            covered.add("dscodebench")
+        if name.startswith("swebench-pro-pressure"):
+            covered.add("swebench_pro")
+        if name.startswith("math-rule-pressure"):
+            for value in collect_records(scenario.get("result"), "datasets"):
+                if isinstance(value, list):
+                    covered.update(str(item) for item in value)
+    return covered
+
+
 def run_child(name: str, command: list[str], artifacts: Path, summary_pattern: str) -> dict[str, Any]:
     artifacts.mkdir(parents=True, exist_ok=True)
     log_path = artifacts / f"{name}.log"
@@ -640,7 +837,7 @@ def run_child(name: str, command: list[str], artifacts: Path, summary_pattern: s
         with log_path.open("w", encoding="utf-8") as log:
             process = subprocess.Popen(
                 command,
-                cwd=HERE,
+                cwd=PACKAGE_ROOT,
                 env=os.environ.copy(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -768,7 +965,7 @@ def scale_resource_gate(
 def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     if "UENV_PASS" not in os.environ:
         raise RuntimeError("UENV_PASS is required in the environment")
-    import distributed_stress_runtime as base
+    from uenv_stress.core import distributed_runtime as base
 
     base.configure_from_args(args)
     server = base.connect(base.SERVER_HOST, os.environ["UENV_PASS"])
@@ -783,24 +980,69 @@ def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
             server,
             include_code_plugin=include_code_plugin,
         )
+        if scenario in {"suite", "math-rule-pressure"}:
+            base.run(server, f"test -x {base.q(args.math_plugin_bin)}")
+            _, math_hash, _ = base.run(
+                server, f"sha256sum {base.q(args.math_plugin_bin)}"
+            )
+            source_and_binaries["binaries"]["math_plugin"] = {
+                "path": args.math_plugin_bin,
+                "sha256": math_hash.split()[0],
+            }
         if scenario == "swebench-pro-trace-collection":
             dataset_paths = {
                 str(config["swebench_pro_pressure"]["dataset_catalog"]),
                 str(config["swebench_pro_pressure"]["instance_list"]),
             }
         else:
-            dataset_paths = {str(config["dscodebench_pressure"]["dataset_jsonl"])}
-            if config["worker_scale"].get("enabled", False):
+            dataset_paths = set()
+            if scenario in {"suite", "dscodebench-pressure"}:
+                dataset_paths.add(str(config["dscodebench_pressure"]["dataset_jsonl"]))
+            if scenario in {"suite", "swebench-pro-pressure"}:
+                dataset_paths.update({
+                    str(config["swebench_pro_pressure"]["dataset_catalog"]),
+                    str(config["swebench_pro_pressure"]["instance_list"]),
+                })
+            if scenario in {"suite", "math-rule-pressure"}:
+                dataset_paths.update(
+                    str(value["dataset_path"])
+                    for value in config["math_rule_pressure"]["tasks"].values()
+                )
+            if (
+                scenario in {"suite", "dscodebench-pressure"}
+                and config["worker_scale"].get("enabled", False)
+            ):
                 dataset_paths.add(str(config["worker_scale"]["dataset_jsonl"]))
         dataset_paths = sorted(dataset_paths)
         datasets = {}
         for path in dataset_paths:
-            base.run(server, f"test -f {base.q(path)}")
-            _, dataset_hash, _ = base.run(server, f"sha256sum {base.q(path)}")
-            datasets[path] = dataset_hash.split()[0]
+            base.run(server, f"test -e {base.q(path)}")
+            status, _, _ = base.run(server, f"test -d {base.q(path)}", check=False)
+            if status == 0:
+                _, listing, _ = base.run(
+                    server,
+                    f"find {base.q(path)} -type f -print0 | sort -z | xargs -0 sha256sum",
+                )
+                datasets[path] = hashlib.sha256(listing.encode()).hexdigest()
+            else:
+                _, dataset_hash, _ = base.run(server, f"sha256sum {base.q(path)}")
+                datasets[path] = dataset_hash.split()[0]
+        trace_corpora = {}
+        if scenario in {"suite", "math-rule-pressure"}:
+            for host, worker in worker_clients.items():
+                trace_corpora[host] = {}
+                for task, task_config in config["math_rule_pressure"]["tasks"].items():
+                    path = str(task_config["trace_corpus_path"])
+                    base.run(worker, f"test -f {base.q(path)}")
+                    _, trace_hash, _ = base.run(worker, f"sha256sum {base.q(path)}")
+                    trace_corpora[host][task] = {
+                        "path": path,
+                        "sha256": trace_hash.split()[0],
+                    }
         llm_config_sha256 = ""
         llm_config_mode = ""
-        if config["swebench_pro_pressure"].get("llm_kind") == "real":
+        llm_kind = effective_llm_kind(args, config)
+        if llm_kind == "real":
             # OpenHands runner 落在每个 worker 节点上，逐节点校验 real LLM 配置，
             # 且各节点内容必须一致。
             for host, worker in worker_clients.items():
@@ -822,8 +1064,9 @@ def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
             "llm_config_path": args.llm_config,
             "llm_config_sha256": llm_config_sha256,
             "llm_config_mode": llm_config_mode,
-            "llm_kind": config["swebench_pro_pressure"].get("llm_kind"),
+            "llm_kind": llm_kind,
             "datasets": datasets,
+            "math_trace_corpora": trace_corpora,
         }
     finally:
         for worker in worker_clients.values():
@@ -832,7 +1075,7 @@ def preflight(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any
 
 
 def assert_protected_after(args: argparse.Namespace, before: dict[str, Any]) -> dict[str, Any]:
-    import distributed_stress_runtime as base
+    from uenv_stress.core import distributed_runtime as base
 
     base.configure_from_args(args)
     server = base.connect(base.SERVER_HOST, os.environ["UENV_PASS"])
@@ -843,18 +1086,41 @@ def assert_protected_after(args: argparse.Namespace, before: dict[str, Any]) -> 
         server.close()
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+def parse_args(
+    argv: list[str] | None = None,
+    *,
+    prog: str | None = None,
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument(
         "scenario",
         nargs="?",
         default="suite",
-        choices=("suite", "dscodebench-pressure", "swebench-pro-pressure", "swebench-pro-trace-collection"),
-        help="Run both scale scenarios, one pressure scenario, or the SWE-bench Pro Doubao trace collection scenario.",
+        choices=(
+            "suite",
+            "dscodebench-pressure",
+            "swebench-pro-pressure",
+            "math-rule-pressure",
+            "swebench-pro-trace-collection",
+        ),
+        help=(
+            "Run the five-dataset scale suite, one pressure scenario, or the "
+            "SWE-bench Pro Doubao trace collection scenario."
+        ),
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--artifacts", type=Path, default=Path.cwd() / "distributed-suite-artifacts")
-    parser.add_argument("--execute", action="store_true", help="Actually run DSCodeBench pressure then SWE-bench Pro pressure; omit for protected preflight only.")
+    parser.add_argument("--trace-config", type=Path, default=DEFAULT_TRACE_CONFIG)
+    parser.add_argument("--runtime-config", type=Path, default=DEFAULT_RUNTIME_CONFIG)
+    parser.add_argument(
+        "--artifacts",
+        type=Path,
+        default=Path("/opt/uenv-stress/runs"),
+    )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually run all selected pressure scenarios; omit for protected preflight only.",
+    )
     parser.add_argument("--private-worker-port-range", default="")
     parser.add_argument("--private-gateway-port-range", default="")
     parser.add_argument("--llm-config", default="")
@@ -862,12 +1128,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server-bin", required=True)
     parser.add_argument("--worker-bin", required=True)
     parser.add_argument("--code-plugin-bin", required=True)
+    parser.add_argument("--math-plugin-bin", required=True)
     parser.add_argument("--protected-pid", type=int, required=True)
     parser.add_argument("--protected-port", type=int, action="append", default=[])
-    parser.add_argument("--server-host", default="8.130.75.157")
-    parser.add_argument("--worker-host", default="8.130.65.20")
-    parser.add_argument("--server-private-ip", default="192.168.0.136")
-    parser.add_argument("--worker-private-ip", default="192.168.0.139")
+    parser.add_argument("--server-host", default="")
+    parser.add_argument("--worker-host", default="")
+    parser.add_argument("--server-private-ip", default="")
+    parser.add_argument("--worker-private-ip", default="")
     parser.add_argument(
         "--worker-node",
         action="append",
@@ -885,18 +1152,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gateway-port", type=int, default=8777)
     parser.add_argument("--agent-api-port", type=int, default=8077)
     parser.add_argument("--agent-health-port", type=int, default=8088)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    inventory = load_runtime_inventory(args.runtime_config)
+    args.server_host = args.server_host or inventory.server.ssh_host
+    args.server_private_ip = args.server_private_ip or inventory.server.private_ip
+    args.worker_host = args.worker_host or inventory.workers[0].ssh_host
+    args.worker_private_ip = (
+        args.worker_private_ip or inventory.workers[0].private_ip
+    )
+    if not args.worker_node:
+        args.worker_node = inventory.worker_node_arguments()
+    configured_worker_hosts = {
+        value.split(":", 1)[0].strip() for value in args.worker_node
+    }
+    banned = sorted(configured_worker_hosts & inventory.banned_worker_hosts)
+    if banned:
+        raise ValueError(f"banned worker hosts requested: {banned}")
     if not args.protected_port:
-        args.protected_port = [50052, 8077, 8088]
+        args.protected_port = list(inventory.protected_ports)
     return args
 
 
-def main() -> int:
-    args = parse_args()
+def main(
+    argv: list[str] | None = None,
+    *,
+    prog: str | None = None,
+) -> int:
+    args = parse_args(argv, prog=prog)
     # Child runners use HERE as cwd, so relative artifact roots would otherwise
     # be written under the source tree and become invisible to this collector.
     args.artifacts = args.artifacts.resolve()
-    config = load_suite_config(args.config)
+    config = load_suite_config(args.config, args.trace_config)
     validate_arguments(args, config)
     args.artifacts.mkdir(parents=True, exist_ok=True)
     suite_id = f"scale-stress-suite-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -912,7 +1198,19 @@ def main() -> int:
         "config_path": str(args.config),
         "config_sha256": sha256_file(args.config),
         "config": config,
+        "trace_config_path": str(args.trace_config),
+        "trace_config_sha256": sha256_file(args.trace_config),
+        "runtime_config_path": str(args.runtime_config),
+        "runtime_config_sha256": sha256_file(args.runtime_config),
         "preflight": before,
+        "required_dataset_coverage": (
+            sorted(SCALE_DATASETS) if args.scenario == "suite" else []
+        ),
+        "suite_metrics_contract": {
+            "schema_version": suite_metrics.SUITE_METRICS_SCHEMA_VERSION,
+            "artifact": "suite-metrics.json",
+            "status": "planned" if not args.execute else "pending",
+        },
         "scenarios": [],
     }
     summary_path = suite_root / "summary.json"
@@ -922,6 +1220,10 @@ def main() -> int:
             planned_commands["dscodebench_pressure"] = dscodebench_pressure_command(args, config, suite_root / "dscodebench_pressure")
         if args.scenario in {"suite", "swebench-pro-pressure"} and config["swebench_pro_pressure"].get("enabled", True):
             planned_commands["swebench_pro_pressure"] = swebench_pro_pressure_command(args, config, suite_root / "swebench_pro_pressure")
+        if args.scenario in {"suite", "math-rule-pressure"} and config["math_rule_pressure"].get("enabled", True):
+            planned_commands["math_rule_pressure"] = math_rule_pressure_command(
+                args, config, suite_root / "math_rule_pressure"
+            )
         if args.scenario == "swebench-pro-trace-collection":
             planned_commands["swebench_pro_trace_collection"] = swebench_pro_trace_collection_command(
                 args, config, suite_root / "swebench_pro_trace_collection"
@@ -951,6 +1253,15 @@ def main() -> int:
                 suite_root / "swebench_pro_pressure",
                 "swebench-pro-pressure-summary-*.json",
             ))
+        if args.scenario in {"suite", "math-rule-pressure"} and config["math_rule_pressure"].get("enabled", True):
+            document["scenarios"].append(run_child(
+                f"math-rule-pressure-{config['math_rule_pressure']['workers']}workers-three-datasets",
+                math_rule_pressure_command(
+                    args, config, suite_root / "math_rule_pressure"
+                ),
+                suite_root / "math_rule_pressure",
+                "math-rule-pressure-summary-*.json",
+            ))
         if args.scenario == "swebench-pro-trace-collection":
             document["scenarios"].append(run_child(
                 "swebench-pro-trace-collection-doubao",
@@ -979,8 +1290,27 @@ def main() -> int:
     finally:
         document["protected_after"] = assert_protected_after(args, before["protected_server"])
 
+    covered_datasets = scenario_dataset_coverage(document["scenarios"])
+    coverage_passed = (
+        args.scenario != "suite" or covered_datasets == SCALE_DATASETS
+    )
+    document["dataset_coverage"] = {
+        "required": sorted(SCALE_DATASETS) if args.scenario == "suite" else [],
+        "covered": sorted(covered_datasets),
+        "missing": (
+            sorted(SCALE_DATASETS - covered_datasets)
+            if args.scenario == "suite"
+            else []
+        ),
+        "passed": coverage_passed,
+    }
     document["status"] = (
-        "passed" if document["scenarios"] and all(item["status"] == "passed" for item in document["scenarios"])
+        "passed"
+        if (
+            document["scenarios"]
+            and all(item["status"] == "passed" for item in document["scenarios"])
+            and coverage_passed
+        )
         else "failed"
     )
     document["infrastructure"] = {
@@ -1000,6 +1330,24 @@ def main() -> int:
         }
         for item in document["scenarios"]
     }
+    document["suite_metrics"] = suite_metrics.build_scale_suite_metrics(document)
+    metrics_path = suite_root / "suite-metrics.json"
+    metrics_path.write_text(
+        json.dumps(document["suite_metrics"], indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    document["suite_metrics_contract"].update({
+        "status": "recorded",
+        "artifact": str(metrics_path),
+    })
+    if args.scenario == "suite" and not document["suite_metrics"]["complete"]:
+        document["status"] = "failed"
+        document["infrastructure"]["passed"] = False
+        document["infrastructure"]["suite_metrics_complete"] = False
+    else:
+        document["infrastructure"]["suite_metrics_complete"] = bool(
+            document["suite_metrics"]["complete"]
+        )
     summary_path.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
     print(f"[suite] status={document['status']} summary={summary_path}")
     return 0 if document["status"] == "passed" else 1
