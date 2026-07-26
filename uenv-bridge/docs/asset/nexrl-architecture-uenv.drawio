@@ -1,4 +1,4 @@
-<mxfile host="65bd71144e">
+<mxfile host="65bd71144e" scale="10" border="0">
     <diagram id="nexrl-uenv-architecture" name="NexRL-UEnv-Architecture">
         <mxGraphModel dx="1072" dy="418" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
             <root>
@@ -37,6 +37,14 @@
                 <mxCell id="server" value="UEnv Server / Worker&#xa;environment execution&#xa;reward / trajectory metadata" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;" parent="1" vertex="1">
                     <mxGeometry x="980" y="315" width="240" height="90" as="geometry"/>
                 </mxCell>
+                <mxCell id="6" style="edgeStyle=orthogonalEdgeStyle;html=1;entryX=1;entryY=0.5;entryDx=0;entryDy=0;fontFamily=Helvetica;fontSize=12;fontColor=default;autosize=1;resizable=0;dashed=1;dashPattern=12 12;" edge="1" parent="1" source="gateway" target="infer">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="900" y="500"/>
+                            <mxPoint x="900" y="270"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
                 <mxCell id="gateway" value="Adapter Model Gateway&#xa;multi-endpoint routing&#xa;model version / logprobs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;" parent="1" vertex="1">
                     <mxGeometry x="975" y="460" width="250" height="80" as="geometry"/>
                 </mxCell>
@@ -63,7 +71,7 @@
                         <mxPoint x="645" y="449.9999999999999" as="sourcePoint"/>
                         <mxPoint x="995" y="560" as="targetPoint"/>
                         <Array as="points">
-                            <mxPoint x="435" y="585"/>
+                            <mxPoint x="435" y="565"/>
                         </Array>
                     </mxGeometry>
                 </mxCell>

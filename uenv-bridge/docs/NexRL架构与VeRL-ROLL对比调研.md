@@ -32,13 +32,7 @@ NexRL 的目标不是把所有逻辑塞进一个 trainer 进程，而是把“�
 
 ## 3. 架构图
 
-Draw.io 源文件：
-
-```text
-docs/asset/nexrl-architecture-uenv.drawio
-```
-
-可在 draw.io / diagrams.net 打开该文件。图中左侧是 NexRL 原生组件，右侧是未来 UEnv 可能接入的位置。
+![alt text](asset/nexrl-architecture-uenv.png)
 
 简化流程如下：
 
