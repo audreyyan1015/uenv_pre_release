@@ -61,6 +61,8 @@ pub struct ServerState {
     pub report_result_idempotency_ttl_secs: u64,
     /// SWE AgentJob 创建后等待 agent 领取的秒数。
     pub agent_job_pickup_timeout_secs: u64,
+    /// agent 掉线 reaper 的扫描周期秒数。
+    pub agent_job_reap_interval_secs: u64,
     /// episode 进入执行区前的并发/排队控制器。
     pub admission: AdmissionController,
     /// trajectory 持久化存储。未配置时结果仍会返回，只是不写入该存储。
@@ -248,6 +250,7 @@ impl ServerState {
                 3600,
             ),
             agent_job_pickup_timeout_secs: config.episode.agent_job_pickup_timeout_secs,
+            agent_job_reap_interval_secs: config.episode.agent_job_reap_interval_secs,
             admission: AdmissionController::new(&config.episode),
             trajectory_store: std::sync::OnceLock::new(),
             obs: std::sync::OnceLock::new(),
@@ -325,6 +328,29 @@ pub fn spawn_ttl_sweeper(state: Arc<ServerState>) {
             loop {
                 interval.tick().await;
                 state.sweep_ttl_caches();
+            }
+        });
+    }
+}
+
+/// 启动 agent 掉线 reaper。
+///
+/// 周期性地对心跳超时（stale）的 Agent 名下 in-flight job 做 server 发起的失败收口，
+/// 通过与 CompleteAgentJob 相同的 oneshot 通知路径立刻唤醒等待的 episode，
+/// 避免 episode 在 agent 掉线后睡满全局 timeout 才收口。
+/// 如果当前线程没有 tokio runtime，就跳过启动；这样单元测试或同步初始化不会 panic。
+pub fn spawn_agent_job_reaper(state: Arc<ServerState>) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(
+                state.agent_job_reap_interval_secs.max(1),
+            ));
+            loop {
+                interval.tick().await;
+                let reaped = state.agent_job_queue.reap_stale_agent_jobs();
+                if !reaped.is_empty() {
+                    tracing::warn!(reaped_jobs = ?reaped, "agent_job_reaper_reaped");
+                }
             }
         });
     }
