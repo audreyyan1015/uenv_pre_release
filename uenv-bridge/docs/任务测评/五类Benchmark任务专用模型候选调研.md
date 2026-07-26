@@ -1,6 +1,6 @@
 # 五类 Benchmark 任务专用模型候选调研
 
-> 日期：2026-07-24
+> 日期：2026-07-25
 > 目标：为 UEnv 当前五类 benchmark 各选择 2-3 个更贴近任务领域的模型，作为后续替换基准模型后的对照评测候选。
 > 当前基准模型：`Qwen/Qwen3.6-35B-A3B`
 
@@ -20,8 +20,34 @@
 | PubMedQA | 生物医学阅读理解 | `google/medgemma-27b-text-it` | `BioMistral/BioMistral-7B`、`microsoft/BioGPT-Large-PubMedQA` | 先测 MedGemma / BioMistral，BioGPT 需要 wrapper |
 | SciTab | 科学表格 claim verification | `RUCKBReasoning/TableLLM-13b` | `microsoft/tapex-large-finetuned-tabfact`、`google/tapas-large-finetuned-tabfact` | 先测 TableLLM，TAPEX/TAPAS 需要 wrapper |
 | DSCodeBench | 数据科学代码生成 | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | `Qwen/Qwen2.5-Coder-32B-Instruct`、`deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` | 三者均适合 vLLM/OpenAI 接入 |
-| SWE-bench-Pro | 软件工程程序修复 | `OpenHands/openhands-lm-32b-v0.1` | `SWE-bench/SWE-agent-LM-32B`、`Skywork/Skywork-SWE-32B` | 优先 OpenHands LM，因为当前链路就是 OpenHands |
+| SWE-bench-Pro | 软件工程程序修复 | `all-hands/openhands-lm-32b-v0.1` | `SWE-bench/SWE-agent-LM-32B`、`Skywork/Skywork-SWE-32B` | 优先 OpenHands LM，因为当前链路就是 OpenHands |
 | OlymMATH | 奥赛级数学推理 | `Qwen/Qwen2.5-Math-72B-Instruct` | `deepseek-ai/deepseek-math-7b-rl`、`internlm/internlm2-math-plus-7b` | 先测 Qwen2.5-Math，7B 模型可做低成本对照 |
+
+### 2.1 发布时间与公开成绩
+
+说明：
+
+1. “对应 benchmark 成绩”优先记录与当前五类任务完全同名、同口径的公开成绩。
+2. 若没有公开同名 benchmark 成绩，则明确写“未公开”，并只在“相近公开成绩”列列出可参考的近邻任务分数。
+3. “发布时间”按模型卡、论文、博客或公告的首次公开时间记录；只有相对时间或无法确认精确日期时，写到年份或月份。
+
+| Benchmark | 候选模型 | 发布时间 | 对应 benchmark 成绩 | 相近公开成绩 / 参考口径 | 结论 |
+|---|---|---|---|---|---|
+| PubMedQA | `google/medgemma-27b-text-it` | 2025-05-20（MedGemma v1） | PubMedQA accuracy 76.8 | 同一任务，Google MedGemma v1 model card 报告 | 可直接作为 PubMedQA 领域 chat 基线候选 |
+| PubMedQA | `BioMistral/BioMistral-7B` | 2024-02（BioMistral 论文） | PubMedQA accuracy 37.6±1.5 | BioMistral-DARE 合并变体在同表中更高，但不是该原始 checkpoint | 原始 BioMistral-7B 的 PubMedQA 分数并不突出，适合作领域预训练对照 |
+| PubMedQA | `microsoft/BioGPT-Large-PubMedQA` | 2022-08 / 2022-11（BioGPT 工具与论文） | PubMedQA 81.0 | Microsoft BioGPT 页面报告 BioGPT-Large 在 PubMedQA 上超过此前最佳 78.2 | 分数强，但不是 chat endpoint，需 wrapper |
+| SciTab | `RUCKBReasoning/TableLLM-13b` | 2024 年左右（TableLLM 公开模型/论文期） | 未公开 SciTab 成绩 | 主要公开表格 QA、表格操作与结构化数据处理任务结果 | 最小接入风险低，但 SciTab 收益需 UEnv 实测 |
+| SciTab | `microsoft/tapex-large-finetuned-tabfact` | 2021（TAPEX 论文/模型） | SciTab 2-class macro-F1 56.06 | SciTab 论文零样本表中 `TAPEX-large (TabFact)`；不含 SciTab 三分类完整口径 | 和表格事实核验最接近，但需要 seq2seq wrapper |
+| SciTab | `google/tapas-large-finetuned-tabfact` | 2020（TAPAS 论文/模型） | SciTab 2-class macro-F1 50.30 | SciTab 论文零样本表中 `TAPAS-large (TabFact)`；不含 SciTab 三分类完整口径 | 可做经典表格模型对照，接入成本高于 chat LLM |
+| DSCodeBench | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | 2025-07（Qwen3-Coder 系列） | 未公开 DSCodeBench 成绩 | 官方主要公开 agentic coding、SWE、浏览器和通用代码 benchmark | 最值得优先实测的代码专用模型 |
+| DSCodeBench | `Qwen/Qwen2.5-Coder-32B-Instruct` | 2024-11（Qwen2.5-Coder 系列） | 未公开 DSCodeBench 成绩 | 公开 HumanEval、MBPP、LiveCodeBench 等代码 benchmark 成绩 | 成熟稳定，适合作为 Qwen3-Coder 的旧一代对照 |
+| DSCodeBench | `deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct` | 2024-06（DeepSeek-Coder-V2） | 未公开 DSCodeBench 成绩 | DeepSeek-Coder-V2 系列公开 HumanEval、MBPP、SWE-bench 等结果；Lite checkpoint 的 DSCodeBench 未见公开 | 低成本代码模型对照，需本地复测 |
+| SWE-bench-Pro | `all-hands/openhands-lm-32b-v0.1` | 2025-03-31 | 未公开 SWE-bench-Pro 成绩 | SWE-bench Verified resolve rate 37.2%（OpenHands 博客） | 与当前 OpenHands 链路最匹配，但 Pro 仍需 UEnv 实测 |
+| SWE-bench-Pro | `SWE-bench/SWE-agent-LM-32B` | 2025-04（SWE-smith / SWE-agent-LM） | 未公开 SWE-bench-Pro 成绩 | SWE-bench Verified pass@1 40.2%（SWE-agent-LM 公开说明） | 更贴近 SWE-agent 工具协议，接入 OpenHands 需实测 |
+| SWE-bench-Pro | `Skywork/Skywork-SWE-32B` | 2025 年（Skywork-SWE 模型卡） | 未公开 SWE-bench-Pro 成绩 | SWE-bench Verified pass@1 38.0%，TTS 47.0% | 与 OpenHands 路线接近，适合第二批实测 |
+| OlymMATH | `Qwen/Qwen2.5-Math-72B-Instruct` | 2024-09（Qwen2.5-Math 系列） | 未公开 OlymMATH 成绩 | 官方公开 MATH 强结果，例如 TIR/RM@8 口径下 MATH 92.9 | 数学强基线首选，OlymMATH 必须本地实测 |
+| OlymMATH | `deepseek-ai/deepseek-math-7b-rl` | 2024-02 | 未公开 OlymMATH 成绩 | DeepSeekMath 论文报告 MATH 51.7（无工具、无投票），self-consistency 可到 60.9 | 低成本数学 RL 对照 |
+| OlymMATH | `internlm/internlm2-math-plus-7b` | 2024-05（InternLM2-Math-Plus 系列） | 未公开 OlymMATH 成绩 | 官方主要公开 MATH / OlympiadBench / MathBench 等数学评测，未见 OlymMATH 同口径分数 | 可做中英双语数学对照，需先确认 vLLM/chat template |
 
 ## 3. PubMedQA：文本阅读理解
 
@@ -65,11 +91,11 @@ SWE-bench-Pro 是真实仓库级软件工程 agent 任务。当前 UEnv 链路�
 
 | 模型 | 类型 | 推荐理由 | 接入方式 |
 |---|---|---|---|
-| `OpenHands/openhands-lm-32b-v0.1` | OpenHands 软件工程 agent 模型 | OpenHands LM 明确面向 OpenHands/SWE-bench 场景，model card 报告其在 SWE-Bench Verified 上有 37.2% verified resolve rate，与当前 UEnv 的 OpenHands agent 路线最匹配。 | 首选，替换 OpenHands LLM config 中的 `model/base_url`。 |
+| `all-hands/openhands-lm-32b-v0.1` | OpenHands 软件工程 agent 模型 | OpenHands LM 明确面向 OpenHands/SWE-bench 场景，model card 报告其在 SWE-Bench Verified 上有 37.2% verified resolve rate，与当前 UEnv 的 OpenHands agent 路线最匹配。 | 首选，替换 OpenHands LLM config 中的 `model/base_url`。 |
 | `SWE-bench/SWE-agent-LM-32B` | SWE-agent / SWE-smith 训练模型 | SWE-agent-LM-32B 是面向软件工程任务训练的模型，Hugging Face 页面提供 vLLM 接入说明。 | 可直接 vLLM 接入，但 prompt/工具格式可能更贴近 SWE-agent，需要对 OpenHands 表现做实测。 |
 | `Skywork/Skywork-SWE-32B` | SWE 专用 32B 模型 | Skywork-SWE-32B model card 报告其在 SWE-bench Verified 上达到 38.0% pass@1，并基于 OpenHands agent framework 做评测，适合当前 OpenHands 路线。 | 候选优先级高，但需先确认权重、license 和 vLLM 支持情况。 |
 
-建议：第一轮直接测 `OpenHands/openhands-lm-32b-v0.1`，因为它与现有 OpenHands driver 的行为假设最接近；第二轮再测 `Skywork-SWE-32B` 或 `SWE-agent-LM-32B`。
+建议：第一轮直接测 `all-hands/openhands-lm-32b-v0.1`，因为它与现有 OpenHands driver 的行为假设最接近；第二轮再测 `Skywork-SWE-32B` 或 `SWE-agent-LM-32B`。
 
 ## 7. OlymMATH：数学题求解
 
@@ -90,7 +116,7 @@ OlymMATH 是奥赛级数学推理任务，要求模型输出 `\boxed{}` 最终�
 | 顺序 | Benchmark | 模型 | 原因 |
 |---:|---|---|---|
 | 1 | DSCodeBench | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | 代码专用、OpenAI-compatible 接入自然，能最快看到代码任务收益。 |
-| 2 | SWE-bench-Pro | `OpenHands/openhands-lm-32b-v0.1` | 与当前 OpenHands agent 链路最匹配。 |
+| 2 | SWE-bench-Pro | `all-hands/openhands-lm-32b-v0.1` | 与当前 OpenHands agent 链路最匹配。 |
 | 3 | OlymMATH | `Qwen/Qwen2.5-Math-72B-Instruct` | 数学专用强模型，适合验证 OlymMATH 是否能明显提升。 |
 | 4 | PubMedQA | `google/medgemma-27b-text-it` | 医学 instruction model，最接近当前 chat endpoint 形态。 |
 | 5 | SciTab | `RUCKBReasoning/TableLLM-13b` | 表格 LLM，可先不写 TAPAS/TAPEX wrapper。 |
@@ -129,7 +155,8 @@ OlymMATH 是奥赛级数学推理任务，要求模型输出 `\boxed{}` 最终�
   - [`deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct`](https://huggingface.co/deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct)
 - SWE-bench-Pro / 软件工程 agent 模型：
   - [SWE-Bench Pro public leaderboard](https://labs.scale.com/leaderboard/swe_bench_pro_public)
-  - [`OpenHands/openhands-lm-32b-v0.1`](https://huggingface.co/OpenHands/openhands-lm-32b-v0.1)
+  - [`all-hands/openhands-lm-32b-v0.1`](https://huggingface.co/all-hands/openhands-lm-32b-v0.1)
+  - [OpenHands LM 32B release blog](https://www.openhands.dev/blog/introducing-openhands-lm-32b----a-strong-open-coding-agent-model)
   - [`SWE-bench/SWE-agent-LM-32B`](https://huggingface.co/SWE-bench/SWE-agent-LM-32B)
   - [`Skywork/Skywork-SWE-32B`](https://huggingface.co/Skywork/Skywork-SWE-32B)
 - OlymMATH / 数学模型：
