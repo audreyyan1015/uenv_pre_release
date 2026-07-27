@@ -230,6 +230,29 @@ if args.simulator_mode == "trace_replay":
             )
 
 
+# llm_rollout.RolloutTraceCollector 会把每条 logprob content 的 token 字符串
+# 拼回完整文本再调 /tokenization 取 token_ids，并要求 len(token_ids) ==
+# len(logprobs)。这里的响应把完整 assistant_output 放在第一条 content 的
+# token 里（其余为空串），所以拼回的文本与 assistant_output 完全一致；
+# /tokenization 就用这个映射返回冻结语料里的 response_ids，保证对齐。
+TOKEN_IDS_BY_TEXT = {}
+for episode in REPLAY_EPISODES:
+    for turn in episode.get("turns", []):
+        if not isinstance(turn, dict):
+            continue
+        turn_text = str(turn.get("assistant_output") or turn.get("text") or "")
+        turn_ids = [
+            int(value) for value in turn.get("response_ids", [])
+            if isinstance(value, int)
+        ]
+        turn_logprobs = [
+            value for value in turn.get("logprobs", [])
+            if isinstance(value, (int, float))
+        ]
+        if turn_text and turn_ids and len(turn_ids) == len(turn_logprobs):
+            TOKEN_IDS_BY_TEXT[turn_text] = turn_ids
+
+
 def clamp(value, lower, upper):
     return max(lower, min(upper, value))
 
@@ -394,7 +417,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json(200, {
                 "data": [
-                    {"index": index, "token_ids": [1001 + index]}
+                    {"index": index, "token_ids": TOKEN_IDS_BY_TEXT.get(_text) or [1001 + index]}
                     for index, _text in enumerate(texts)
                 ],
                 "model": args.model,
@@ -484,8 +507,10 @@ class Handler(BaseHTTPRequestHandler):
                 "message": {"role": "assistant", "content": content},
                 "finish_reason": "stop",
                 "logprobs": {"content": [
-                    {"token": content, "token_id": token_id, "logprob": logprob}
-                    for token_id, logprob in zip(response_ids, logprobs)
+                    # token 字符串仅在首条携带完整输出，后续为空串；
+                    # 采集端拼接后恰好还原 assistant_output（见 TOKEN_IDS_BY_TEXT 注释）。
+                    {"token": content if offset == 0 else "", "token_id": token_id, "logprob": logprob}
+                    for offset, (token_id, logprob) in enumerate(zip(response_ids, logprobs))
                 ]},
             }],
             "usage": {"prompt_tokens": 16, "completion_tokens": 32, "total_tokens": 48},
