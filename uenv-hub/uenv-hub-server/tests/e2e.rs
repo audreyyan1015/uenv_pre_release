@@ -72,6 +72,7 @@ fn manifest(version: &str) -> PublishVersionRequest {
         examples: vec![],
         dependencies: None,
         min_uenv_version: None,
+        rubric: None,
     }
 }
 
@@ -95,6 +96,9 @@ async fn full_publish_query_yank_sync_flow() {
             repository: None,
             license: None,
             tags: vec!["e2e".into()],
+            lifecycle: Default::default(),
+            superseded_by: None,
+            compat_aliases: vec![],
         })
         .await
         .unwrap();
@@ -145,9 +149,12 @@ async fn full_publish_query_yank_sync_flow() {
 }
 
 /// The standardized seed (五类 Benchmark §2 / H-1..H-3) must publish `qa`
-/// (and its deprecated `math` alias) v0.2.0 plus `code` v0.2.0 with the
+/// (and its deprecated `math` alias) plus `code` v0.2.0 with the
 /// supported-dataset `config_schema.dataset` enum (the Bridge routing contract)
 /// and a populated OpenEnv interface.
+///
+/// `qa` resolves to v0.3.0, which additionally carries the rubric scoring
+/// contract; v0.2.0 stays published beneath it.
 #[tokio::test]
 async fn seeded_math_code_envs_are_standardized() {
     let (addr, _tmp) = spawn_server().await;
@@ -155,7 +162,11 @@ async fn seeded_math_code_envs_are_standardized() {
 
     // `qa` 是正式名，Worker/Bridge 默认走它；`math` 仅兼容期保留。
     let qa = client.get_version("qa", "latest").await.unwrap();
-    assert_eq!(qa.version, "0.2.0", "qa must seed the standardized v0.2.0");
+    assert_eq!(qa.version, "0.3.0", "qa latest must be the rubric-bearing v0.3.0");
+    assert!(
+        client.get_version("qa", "0.2.0").await.is_ok(),
+        "qa v0.2.0 must remain published for the compatibility window"
+    );
     let qa_datasets: Vec<String> = qa
         .config_schema
         .as_ref()
@@ -194,6 +205,166 @@ async fn seeded_math_code_envs_are_standardized() {
     assert!(code.interface.action.is_some(), "code must carry an OpenEnv action schema");
 }
 
+/// The `math` → `qa` rename must be expressed as lifecycle *labels*, and the
+/// retired name must keep resolving with a 200.
+///
+/// This is the compatibility property the Worker depends on: it resolves every
+/// configured `env.types` entry against `versions/latest` during prewarm and
+/// treats a non-2xx as fatal, so answering 404/410 for `math` would turn the
+/// rename into a Worker startup failure.
+#[tokio::test]
+async fn renamed_env_keeps_resolving_and_advertises_deprecation() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let qa = client.get_env("qa").await.unwrap();
+    assert_eq!(qa.summary.lifecycle, uenv_hub_types::EnvLifecycle::Canonical);
+    assert_eq!(
+        qa.summary.compat_aliases,
+        vec!["math".to_string()],
+        "qa must record the name it took over"
+    );
+
+    let math = client.get_env("math").await.unwrap();
+    assert_eq!(
+        math.summary.lifecycle,
+        uenv_hub_types::EnvLifecycle::Deprecated
+    );
+    assert_eq!(math.summary.superseded_by.as_deref(), Some("qa"));
+
+    // The retired name still serves a manifest, and says where to go next.
+    let raw = reqwest::Client::new()
+        .get(format!("http://{addr}/api/v1/envs/math/versions/latest"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        raw.status(),
+        reqwest::StatusCode::OK,
+        "a deprecated env must stay 200: Workers treat non-2xx as fatal at prewarm"
+    );
+    assert_eq!(raw.headers().get("deprecation").unwrap(), "true");
+    let link = raw.headers().get("link").unwrap().to_str().unwrap();
+    assert!(link.contains("/api/v1/envs/qa/versions/latest"), "{link}");
+    assert!(link.contains("successor-version"), "{link}");
+    let body: uenv_hub_types::FullManifest = raw.json().await.unwrap();
+    assert_eq!(
+        body.deprecation.and_then(|d| d.superseded_by).as_deref(),
+        Some("qa")
+    );
+
+    // `qa` itself carries no deprecation signal.
+    let qa_raw = reqwest::Client::new()
+        .get(format!("http://{addr}/api/v1/envs/qa/versions/latest"))
+        .send()
+        .await
+        .unwrap();
+    assert!(qa_raw.headers().get("deprecation").is_none());
+}
+
+/// The seeded `qa` rubric contract must be served and must be internally
+/// consistent with the alignment run it claims.
+#[tokio::test]
+async fn qa_publishes_the_rubric_scoring_contract() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let qa = client.get_version("qa", "latest").await.unwrap();
+    let rubric = qa.rubric.expect("qa latest must carry a rubric contract");
+    assert_eq!(rubric.schema_version, "1");
+    assert_eq!(
+        rubric.production_scorer.as_deref(),
+        Some("uenv-math-plugin/score_action"),
+        "a trajectory must be traceable to the scorer that produced its reward"
+    );
+    let metrics = rubric
+        .alignment
+        .and_then(|a| a.metrics)
+        .expect("alignment metrics required");
+    assert_eq!(metrics.over_credit_count, 0);
+    assert!(metrics.agreement_rate >= 0.95, "{}", metrics.agreement_rate);
+    // Every dataset the env accepts has a declared scorer.
+    for d in ["gsm8k", "pubmedqa", "scitab", "olymmath"] {
+        assert!(rubric.datasets.contains_key(d), "no scorer declared for {d}");
+    }
+    assert!(qa.latest_eligible, "an aligned rubric must be promotable");
+}
+
+/// A rubric that rewards more generously than the reference scorer must not
+/// become `latest`, but must still publish so its evidence stays auditable.
+#[tokio::test]
+async fn over_credit_rubric_is_published_but_barred_from_latest() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+    let env_type = format!("qa-gate-{}", std::process::id());
+
+    client
+        .create_env(&uenv_hub_types::CreateEnvRequest {
+            env_type: env_type.clone(),
+            namespace: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            tags: vec![],
+            lifecycle: Default::default(),
+            superseded_by: None,
+            compat_aliases: vec![],
+        })
+        .await
+        .unwrap();
+
+    let rubric = |over: i64, rate: f64| uenv_hub_types::RubricSpec {
+        schema_version: "1".into(),
+        backend: Some("verifiers+math_verify".into()),
+        production_scorer: Some("uenv-math-plugin/score_action".into()),
+        alignment: Some(uenv_hub_types::RubricAlignment {
+            corpus_id: Some("corpus@test".into()),
+            corpus_digest: None,
+            report_digest: None,
+            package_ref: None,
+            metrics: Some(uenv_hub_types::RubricMetrics {
+                total: None,
+                agreed: None,
+                agreement_rate: rate,
+                over_credit_count: over,
+                under_credit_count: 0,
+                verifiers_version: None,
+                math_verify_version: None,
+            }),
+        }),
+        datasets: Default::default(),
+        known_gaps: vec![],
+    };
+
+    // A clean baseline, then a higher version that is over-credit.
+    let mut good = manifest("0.1.0");
+    good.rubric = Some(rubric(0, 0.99));
+    let resp = client.publish_version(&env_type, &good).await.unwrap();
+    assert!(resp.promoted_to_latest);
+
+    let mut bad = manifest("0.2.0");
+    bad.rubric = Some(rubric(3, 0.99));
+    let resp = client.publish_version(&env_type, &bad).await.unwrap();
+    assert!(
+        !resp.promoted_to_latest,
+        "over-credit must not be promoted to latest"
+    );
+    assert!(
+        resp.gate_notes.iter().any(|n| n.contains("over-credit")),
+        "the publisher must be told why: {:?}",
+        resp.gate_notes
+    );
+
+    // latest stays on the aligned version, while the barred one is still there.
+    let latest = client.get_version(&env_type, "latest").await.unwrap();
+    assert_eq!(latest.version, "0.1.0");
+    let barred = client.get_version(&env_type, "0.2.0").await.unwrap();
+    assert!(!barred.latest_eligible);
+    assert!(!barred.gate_notes.is_empty());
+}
+
 #[tokio::test]
 async fn unknown_dependency_is_rejected() {
     let (addr, _tmp) = spawn_server().await;
@@ -209,6 +380,9 @@ async fn unknown_dependency_is_rejected() {
             repository: None,
             license: None,
             tags: vec![],
+            lifecycle: Default::default(),
+            superseded_by: None,
+            compat_aliases: vec![],
         })
         .await
         .unwrap();
@@ -272,6 +446,9 @@ async fn invalid_version_is_rejected() {
             repository: None,
             license: None,
             tags: vec![],
+            lifecycle: Default::default(),
+            superseded_by: None,
+            compat_aliases: vec![],
         })
         .await
         .unwrap();
@@ -298,6 +475,7 @@ async fn env_package_publish_manifest_artifact_and_sync_plan() {
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["runtime_gateway".into()],
+            consumers: vec![],
         },
         worker_overlay: serde_json::json!({"swe": {"benchmark_variant": "verified", "image_pull_policy": "local_only"}}),
         agent_defaults: serde_json::json!({}),
@@ -382,6 +560,7 @@ async fn hub_hosts_image_tarball_and_streams_it_to_worker() {
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec![],
+            consumers: vec![],
         },
         worker_overlay: serde_json::json!({"swe": {"image_pull_policy": "local_only"}}),
         agent_defaults: serde_json::json!({}),
@@ -433,3 +612,199 @@ async fn hub_hosts_image_tarball_and_streams_it_to_worker() {
     assert!(!bad.exists());
 }
 
+
+/// The Agent-bridge catalog lists scaffolds with the `bundle_digest` an Agent
+/// reports in `RegisterAgent.synced_agent_bridges`, and lists only packages that
+/// declare an `agent_kind` — a Task Environment bundle must not show up as a
+/// scaffold.
+#[tokio::test]
+async fn agent_bridge_catalog_lists_scaffolds_only() {
+    use uenv_hub_types::{
+        InlineArtifact, InterfaceSchema, PackageContracts, PackagePlatform, PublishPackageRequest,
+    };
+
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let artifact = |name: &str, content: &str| InlineArtifact {
+        name: name.into(),
+        kind: "other".into(),
+        sync_mode: "inline".into(),
+        media_type: Some("text/plain".into()),
+        target_rel_path: Some(name.into()),
+        content: Some(content.to_string()),
+        content_b64: None,
+    };
+    let base = |agent_defaults: serde_json::Value, consumers: Vec<String>| PublishPackageRequest {
+        version: "1.0.0".into(),
+        publisher: Some("tester".into()),
+        description: None,
+        changelog: None,
+        platform: PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["runtime_gateway".into()],
+            consumers,
+        },
+        worker_overlay: serde_json::json!({}),
+        agent_defaults,
+        contracts: PackageContracts::default(),
+        interface: InterfaceSchema::default(),
+        artifacts: vec![artifact("driver.py", "print('drive')\n")],
+        file_artifacts: vec![],
+    };
+
+    client
+        .publish_package(
+            "e2e-agent-toolenv",
+            &base(
+                serde_json::json!({
+                    "agent_kind": "toolenv",
+                    "required_env_types": ["code"]
+                }),
+                vec![uenv_hub_types::CONSUMER_TOOLENV_AGENT.into()],
+            ),
+        )
+        .await
+        .unwrap();
+    // A plain env bundle: no agent_kind, so not a scaffold.
+    client
+        .publish_package(
+            "e2e-plain-bundle",
+            &base(serde_json::json!({}), vec![uenv_hub_types::CONSUMER_WORKER.into()]),
+        )
+        .await
+        .unwrap();
+
+    let bridges = client.list_agent_bridges().await.unwrap();
+    let entry = bridges
+        .iter()
+        .find(|b| b.package_id == "e2e-agent-toolenv")
+        .expect("toolenv scaffold in catalog");
+    assert_eq!(entry.version, "1.0.0");
+    assert_eq!(entry.agent_kind.as_deref(), Some("toolenv"));
+    assert_eq!(entry.required_env_types, vec!["code".to_string()]);
+    assert_eq!(entry.required_worker_features, vec!["runtime_gateway".to_string()]);
+    // Same digest the Agent computes over its synced bundle.
+    let manifest = client
+        .get_package_manifest("e2e-agent-toolenv", "1.0.0")
+        .await
+        .unwrap();
+    assert_eq!(
+        entry.bundle_digest,
+        uenv_hub_core::package::bundle_digest(&manifest.artifacts)
+    );
+    assert!(bridges.iter().all(|b| b.package_id != "e2e-plain-bundle"));
+}
+
+/// `platform.consumers` decides which node roles may consume a package version.
+/// An empty list keeps the pre-`consumers` meaning (Worker only), so packages
+/// published before the field existed do not silently become Agent-visible.
+#[tokio::test]
+async fn package_consumers_are_served_and_gate_roles() {
+    use uenv_hub_types::{
+        InlineArtifact, InterfaceSchema, PackageContracts, PackagePlatform, PublishPackageRequest,
+        CONSUMER_TOOLENV_AGENT, CONSUMER_WORKER,
+    };
+
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let req = PublishPackageRequest {
+        version: "0.1.0".into(),
+        publisher: Some("tester".into()),
+        description: None,
+        changelog: None,
+        platform: PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec![],
+            consumers: vec![CONSUMER_WORKER.into(), CONSUMER_TOOLENV_AGENT.into()],
+        },
+        worker_overlay: serde_json::json!({}),
+        agent_defaults: serde_json::json!({}),
+        contracts: PackageContracts::default(),
+        interface: InterfaceSchema::default(),
+        artifacts: vec![InlineArtifact {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("catalog.json".into()),
+            content: Some("{}".into()),
+            content_b64: None,
+        }],
+        file_artifacts: vec![],
+    };
+    client.publish_package("e2e-dual", &req).await.unwrap();
+
+    let manifest = client.get_package_manifest("e2e-dual", "latest").await.unwrap();
+    assert!(manifest.platform.allows_consumer(CONSUMER_WORKER));
+    assert!(manifest.platform.allows_consumer(CONSUMER_TOOLENV_AGENT));
+    assert!(!manifest.platform.allows_consumer("openhands-agent"));
+
+    // sync-plan carries the same platform block, so the check works from the plan
+    // alone (dry-run path).
+    let plan = client.get_package_sync_plan("e2e-dual", "latest").await.unwrap();
+    assert_eq!(plan.platform.consumers.len(), 2);
+}
+
+/// A rename can be applied to an environment that already exists: `PATCH /envs/{t}`
+/// moves the identity, and the retired name immediately starts advertising its
+/// successor. This is the path `uenv env publish` uses to reconcile an identity it
+/// finds out of date, so a rename does not require re-creating the registry entry.
+#[tokio::test]
+async fn patching_an_existing_env_moves_its_identity() {
+    use uenv_hub_types::{CreateEnvRequest, EnvLifecycle, EnvPatchRequest};
+
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    client
+        .create_env(&CreateEnvRequest {
+            env_type: "legacy-verify".into(),
+            namespace: None,
+            description: Some("to be superseded".into()),
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            tags: vec![],
+            lifecycle: Default::default(),
+            superseded_by: None,
+            compat_aliases: vec![],
+        })
+        .await
+        .unwrap();
+    client
+        .publish_version("legacy-verify", &manifest("0.1.0"))
+        .await
+        .unwrap();
+
+    let patched = client
+        .patch_env(
+            "legacy-verify",
+            &EnvPatchRequest {
+                lifecycle: Some(EnvLifecycle::Deprecated),
+                superseded_by: Some("qa".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(patched.summary.lifecycle, EnvLifecycle::Deprecated);
+    assert_eq!(patched.summary.superseded_by.as_deref(), Some("qa"));
+
+    let raw = reqwest::Client::new()
+        .get(format!("http://{addr}/api/v1/envs/legacy-verify/versions/latest"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), reqwest::StatusCode::OK);
+    assert_eq!(raw.headers().get("deprecation").unwrap(), "true");
+    let body: uenv_hub_types::FullManifest = raw.json().await.unwrap();
+    assert_eq!(
+        body.deprecation.and_then(|d| d.superseded_by).as_deref(),
+        Some("qa")
+    );
+}

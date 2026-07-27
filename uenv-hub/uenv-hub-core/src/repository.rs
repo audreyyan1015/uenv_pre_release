@@ -7,12 +7,22 @@
 
 use crate::auth;
 use crate::convert;
+use crate::domain::rubric::{self, GateOptions as RubricGateOptions};
 use crate::domain::version as ver;
 use crate::error::{HubError, Result};
 use crate::models::*;
 use async_trait::async_trait;
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use uenv_hub_types as dto;
+
+/// Serialize compat aliases for storage; an empty list is stored as NULL so the
+/// "no aliases" state has exactly one representation.
+fn alias_json(aliases: &[String]) -> Result<Option<String>> {
+    if aliases.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string(aliases)?))
+}
 
 /// SQLite-backed implementation of every repository concern.
 #[derive(Clone)]
@@ -188,9 +198,10 @@ impl SqliteStore {
         let ts = now();
         let mut tx = self.pool.begin().await?;
 
+        let aliases = alias_json(&new_env.compat_aliases)?;
         let res = sqlx::query(
-            "INSERT INTO envs (env_type, namespace, description, author, homepage, repository, license, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO envs (env_type, namespace, description, author, homepage, repository, license, created_at, updated_at, lifecycle, superseded_by, compat_aliases) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&new_env.env_type)
         .bind(&new_env.namespace)
@@ -201,6 +212,9 @@ impl SqliteStore {
         .bind(&new_env.license)
         .bind(ts)
         .bind(ts)
+        .bind(new_env.lifecycle.as_str())
+        .bind(&new_env.superseded_by)
+        .bind(&aliases)
         .execute(&mut *tx)
         .await?;
         let env_id = res.last_insert_rowid();
@@ -220,9 +234,11 @@ impl SqliteStore {
     async fn resurrect_env(&self, env_id: i64, new_env: NewEnv) -> Result<dto::EnvDetail> {
         let ts = now();
         let mut tx = self.pool.begin().await?;
+        let aliases = alias_json(&new_env.compat_aliases)?;
         sqlx::query(
             "UPDATE envs SET is_deleted = 0, namespace = ?, description = ?, author = ?, \
-             homepage = ?, repository = ?, license = ?, updated_at = ? WHERE id = ?",
+             homepage = ?, repository = ?, license = ?, updated_at = ?, lifecycle = ?, \
+             superseded_by = ?, compat_aliases = ? WHERE id = ?",
         )
         .bind(&new_env.namespace)
         .bind(&new_env.description)
@@ -231,6 +247,9 @@ impl SqliteStore {
         .bind(&new_env.repository)
         .bind(&new_env.license)
         .bind(ts)
+        .bind(new_env.lifecycle.as_str())
+        .bind(&new_env.superseded_by)
+        .bind(&aliases)
         .bind(env_id)
         .execute(&mut *tx)
         .await?;
@@ -272,6 +291,17 @@ impl SqliteStore {
         }
         if let Some(v) = &patch.license {
             qb.push(", license = ").push_bind(v);
+        }
+        if let Some(v) = &patch.lifecycle {
+            qb.push(", lifecycle = ").push_bind(v.as_str());
+        }
+        if let Some(v) = &patch.superseded_by {
+            qb.push(", superseded_by = ").push_bind(v);
+        }
+        // An explicit empty list clears the aliases, so bind NULL rather than
+        // skipping the column.
+        if let Some(list) = &patch.compat_aliases {
+            qb.push(", compat_aliases = ").push_bind(alias_json(list)?);
         }
         qb.push(" WHERE id = ").push_bind(env.id);
         qb.build().execute(&mut *tx).await?;
@@ -319,6 +349,21 @@ impl SqliteStore {
         Ok(rows.into_iter().map(|(v,)| v).collect())
     }
 
+    /// Versions eligible to *resolve* as `latest`: not yanked and not barred by
+    /// the publish gate. Explicit-version and constraint lookups deliberately do
+    /// not use this — a barred version stays fetchable so its evidence can be
+    /// inspected; it just never becomes the default.
+    async fn latest_eligible_versions(&self, env_id: i64) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT version FROM env_versions \
+             WHERE env_id = ? AND is_yanked = 0 AND latest_eligible = 1",
+        )
+        .bind(env_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(v,)| v).collect())
+    }
+
     /// List all versions of an environment (newest first).
     pub async fn list_versions(&self, env_type: &str) -> Result<Vec<dto::VersionSummary>> {
         let env = self.require_env_row(env_type).await?;
@@ -331,7 +376,11 @@ impl SqliteStore {
         Ok(rows.iter().map(convert::version_summary).collect())
     }
 
-    async fn assemble_manifest(&self, env_type: &str, v: VersionRow) -> Result<ModelManifestAlias> {
+    async fn assemble_manifest(
+        &self,
+        env: &EnvRow,
+        v: VersionRow,
+    ) -> Result<ModelManifestAlias> {
         let image = sqlx::query_as::<_, ImageRow>(
             "SELECT * FROM env_images WHERE version_id = ?",
         )
@@ -345,10 +394,11 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(FullManifest {
-            env_type: env_type.to_string(),
+            env_type: env.env_type.clone(),
             version: v,
             image,
             config,
+            deprecation: env.deprecation_notice(),
         })
     }
 
@@ -363,14 +413,14 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| HubError::not_found("version", format!("{env_type}@{version}")))?;
-        let manifest = self.assemble_manifest(env_type, v).await?;
+        let manifest = self.assemble_manifest(&env, v).await?;
         Ok(convert::full_manifest(&manifest))
     }
 
-    /// Latest non-yanked version manifest.
+    /// Latest manifest: highest version that is neither yanked nor gate-barred.
     pub async fn latest_manifest(&self, env_type: &str) -> Result<dto::FullManifest> {
         let env = self.require_env_row(env_type).await?;
-        let versions = self.version_strings(env.id, false).await?;
+        let versions = self.latest_eligible_versions(env.id).await?;
         let latest = ver::latest(versions.iter().map(String::as_str))
             .ok_or_else(|| HubError::not_found("version", format!("{env_type}@latest")))?;
         self.get_manifest(env_type, &latest).await
@@ -392,11 +442,27 @@ impl SqliteStore {
     }
 
     /// Publish a new version atomically (versions + image + config + latest).
+    ///
+    /// Uses the default rubric promotion gate; see
+    /// [`Self::publish_version_gated`] to override the thresholds.
     pub async fn publish_version(
         &self,
         env_type: &str,
         manifest: NewManifest,
     ) -> Result<dto::FullManifest> {
+        self.publish_version_gated(env_type, manifest, &RubricGateOptions::default())
+            .await
+            .map(|(m, _)| m)
+    }
+
+    /// Publish a new version, returning the manifest and the promotion-gate
+    /// outcome so the caller can report *why* a version did not become `latest`.
+    pub async fn publish_version_gated(
+        &self,
+        env_type: &str,
+        manifest: NewManifest,
+        gate_opts: &RubricGateOptions,
+    ) -> Result<(dto::FullManifest, rubric::GateOutcome)> {
         let env = self.require_env_row(env_type).await?;
         // Reject duplicates up-front for a clean error code.
         let exists: Option<(i64,)> =
@@ -421,6 +487,19 @@ impl SqliteStore {
         };
         let interface = serde_json::to_string(&manifest.interface)?;
         let examples = serde_json::to_string(&manifest.examples)?;
+        let rubric_json = match &manifest.rubric {
+            Some(r) => Some(serde_json::to_string(r)?),
+            None => None,
+        };
+
+        // Promotion gate: a rubric that rewards more generously than the
+        // reference scorer must not silently become the default version.
+        let outcome = rubric::gate(manifest.rubric.as_ref(), gate_opts);
+        let gate_notes = if outcome.notes.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&outcome.notes)?)
+        };
 
         let mut tx = self.pool.begin().await?;
 
@@ -428,8 +507,8 @@ impl SqliteStore {
             "INSERT INTO env_versions \
              (env_id, version, version_normalized, changelog, entrypoint, supported_backends, \
               dependencies, min_uenv_version, base_image, health_check_path, interface_schema, \
-              examples_json, published_by, published_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              examples_json, published_by, published_at, rubric_json, latest_eligible, gate_notes) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(env.id)
         .bind(&manifest.version)
@@ -445,6 +524,9 @@ impl SqliteStore {
         .bind(&examples)
         .bind(manifest.published_by)
         .bind(ts)
+        .bind(&rubric_json)
+        .bind(i64::from(outcome.eligible))
+        .bind(&gate_notes)
         .execute(&mut *tx)
         .await?;
         let version_id = res.last_insert_rowid();
@@ -494,11 +576,13 @@ impl SqliteStore {
         // just inserted). The read happens *inside* the transaction so we don't
         // try to acquire a second pool connection (which would deadlock a
         // single-connection pool, e.g. in-memory SQLite).
-        let all: Vec<(String,)> =
-            sqlx::query_as("SELECT version FROM env_versions WHERE env_id = ? AND is_yanked = 0")
-                .bind(env.id)
-                .fetch_all(&mut *tx)
-                .await?;
+        let all: Vec<(String,)> = sqlx::query_as(
+            "SELECT version FROM env_versions \
+             WHERE env_id = ? AND is_yanked = 0 AND latest_eligible = 1",
+        )
+        .bind(env.id)
+        .fetch_all(&mut *tx)
+        .await?;
         let latest = ver::latest(all.iter().map(|(v,)| v.as_str()));
         sqlx::query("UPDATE envs SET latest_version = ?, updated_at = ? WHERE id = ?")
             .bind(&latest)
@@ -508,7 +592,8 @@ impl SqliteStore {
             .await?;
 
         tx.commit().await?;
-        self.get_manifest(env_type, &manifest.version).await
+        let published = self.get_manifest(env_type, &manifest.version).await?;
+        Ok((published, outcome))
     }
 
     /// Yank a version (mark unusable). Recomputes latest_version.
@@ -529,11 +614,13 @@ impl SqliteStore {
                 format!("{env_type}@{version}"),
             ));
         }
-        let remaining: Vec<(String,)> =
-            sqlx::query_as("SELECT version FROM env_versions WHERE env_id = ? AND is_yanked = 0")
-                .bind(env.id)
-                .fetch_all(&mut *tx)
-                .await?;
+        let remaining: Vec<(String,)> = sqlx::query_as(
+            "SELECT version FROM env_versions \
+             WHERE env_id = ? AND is_yanked = 0 AND latest_eligible = 1",
+        )
+        .bind(env.id)
+        .fetch_all(&mut *tx)
+        .await?;
         let latest = ver::latest(remaining.iter().map(|(v,)| v.as_str()));
         sqlx::query("UPDATE envs SET latest_version = ?, updated_at = ? WHERE id = ?")
             .bind(&latest)
@@ -564,11 +651,11 @@ impl SqliteStore {
                 .bind(vid)
                 .fetch_one(&self.pool)
                 .await?;
-            let env: (String,) = sqlx::query_as("SELECT env_type FROM envs WHERE id = ?")
+            let env = sqlx::query_as::<_, EnvRow>("SELECT * FROM envs WHERE id = ?")
                 .bind(v.env_id)
                 .fetch_one(&self.pool)
                 .await?;
-            let manifest = self.assemble_manifest(&env.0, v).await?;
+            let manifest = self.assemble_manifest(&env, v).await?;
             out.push(convert::full_manifest(&manifest));
         }
         Ok(out)
@@ -986,6 +1073,63 @@ impl SqliteStore {
             per_page,
             total: total.0 as u64,
         })
+    }
+
+    /// The Agent-bridge catalog: the latest non-yanked version of every package
+    /// that declares an `agent_kind` in its agent defaults.
+    ///
+    /// `agent_kind` is what makes a package an Agent scaffold rather than a Task
+    /// Environment bundle, so it is the selector here — a package becomes visible
+    /// to Agent hosts by declaring what it is, not by being named a certain way.
+    /// The returned digest is the same `bundle_digest` an Agent reports in
+    /// `RegisterAgent.synced_agent_bridges`, so the two sides are directly
+    /// comparable.
+    pub async fn list_agent_bridges(&self) -> Result<Vec<dto::AgentBridgeSummary>> {
+        let pkgs = sqlx::query_as::<_, EnvPackageRow>(
+            "SELECT * FROM env_packages WHERE is_deleted = 0 ORDER BY package_id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::new();
+        for pkg in pkgs {
+            let Some(latest) = pkg.latest_version.clone() else {
+                continue;
+            };
+            let row = sqlx::query_as::<_, PackageVersionRow>(
+                "SELECT * FROM env_package_versions \
+                 WHERE package_db_id = ? AND version = ? AND is_yanked = 0",
+            )
+            .bind(pkg.id)
+            .bind(&latest)
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(row) = row else { continue };
+            let manifest: dto::EnvPackageManifest = serde_json::from_str(&row.manifest_json)?;
+            let defaults = &manifest.agent_defaults;
+            let Some(agent_kind) = defaults.get("agent_kind").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let str_list = |key: &str| -> Vec<String> {
+                defaults
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect()
+                    })
+                    .unwrap_or_default()
+            };
+            out.push(dto::AgentBridgeSummary {
+                package_id: manifest.package_id.clone(),
+                version: manifest.version.clone(),
+                bundle_digest: crate::package::bundle_digest(&manifest.artifacts),
+                agent_kind: Some(agent_kind.to_string()),
+                required_env_types: str_list("required_env_types"),
+                required_worker_features: manifest.platform.features.clone(),
+                published_at: row.published_at,
+            });
+        }
+        Ok(out)
     }
 
     /// Fetch one artifact's metadata (storage path + digest) for serving.

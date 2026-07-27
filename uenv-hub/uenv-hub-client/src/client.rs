@@ -363,6 +363,16 @@ impl HttpClient {
         self.send_body(Method::POST, "/api/v1/envs", req).await
     }
 
+    /// Patch an existing environment's registry metadata (Publisher role).
+    pub async fn patch_env(
+        &self,
+        env_type: &str,
+        req: &uenv_hub_types::EnvPatchRequest,
+    ) -> Result<EnvDetail> {
+        self.send_body(Method::PATCH, &format!("/api/v1/envs/{env_type}"), req)
+            .await
+    }
+
     pub async fn list_templates(&self) -> Result<Vec<TemplateSummary>> {
         self.get_json("/api/v1/templates", &[], None).await
     }
@@ -395,6 +405,13 @@ impl HttpClient {
             None,
         )
         .await
+    }
+
+    /// List the Agent-bridge catalog (scaffolds this Hub publishes).
+    pub async fn list_agent_bridges(
+        &self,
+    ) -> Result<Vec<uenv_hub_types::AgentBridgeSummary>> {
+        self.get_json("/api/v1/agent-bridges", &[], None).await
     }
 
     /// Fetch a package version's full manifest (`latest` resolves server-side).

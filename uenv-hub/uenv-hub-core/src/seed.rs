@@ -46,23 +46,39 @@ pub async fn seed_templates(store: &SqliteStore) -> Result<()> {
 /// After publishing `0.2.0`, any non-yanked legacy `1.0.0` placeholder is yanked
 /// so `/versions/latest` resolves to the standardized schema (semver: 1.0.0 > 0.2.0).
 pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
-    // `qa` 是单轮问答/分类验证环境的正式名（原 `math` 更名而来）。两者共用同一份
-    // dataset 路由与判分实现，`math` 保留为兼容别名，训练侧全部切到 `qa` 后可下线。
+    // `qa` 是单轮问答/分类验证任务环境的正式名（原 `math` 更名而来）。两者共用同一份
+    // dataset 路由与判分实现（`plugins/qa/run.sh` 复用 math 插件二进制），差别只在
+    // 身份：`qa` 为 canonical，`math` 标 deprecated 并指回 `qa`。
+    //
+    // 退役用「标记」而非「删除」：Worker 启动时按 env.types 拉
+    // `GET /envs/{env_type}/versions/latest`，在 prewarm_on_startup 打开时把非 2xx
+    // 当致命错误，所以 `math` 必须继续以 200 可解析。
     ensure_env(
         store,
-        "qa",
-        "QaEnv — 单轮问答/分类验证环境 (gsm8k/pubmedqa/scitab/olymmath)",
-        &["qa", "reasoning", "validation", "single-turn"],
+        EnvIdentity {
+            env_type: "qa",
+            description: "QaEnv — 单轮问答/分类验证任务环境 (gsm8k/pubmedqa/scitab/olymmath)",
+            tags: &["qa", "reasoning", "validation", "single-turn"],
+            lifecycle: dto::EnvLifecycle::Canonical,
+            superseded_by: None,
+            compat_aliases: &["math"],
+        },
     )
     .await?;
     ensure_env_version(store, "qa", qa_manifest()).await?;
+    ensure_env_version(store, "qa", qa_rubric_manifest()).await?;
     yank_legacy_placeholder(store, "qa", "1.0.0", "0.2.0").await?;
 
     ensure_env(
         store,
-        "math",
-        "MathEnv — 兼容别名，已更名为 qa（单轮问答/分类验证环境）；新接入请用 qa",
-        &["math", "reasoning", "qa", "validation", "deprecated"],
+        EnvIdentity {
+            env_type: "math",
+            description: "MathEnv — 已更名为 qa（单轮问答/分类验证任务环境）；新接入一律用 qa",
+            tags: &["math", "reasoning", "qa", "validation", "deprecated"],
+            lifecycle: dto::EnvLifecycle::Deprecated,
+            superseded_by: Some("qa"),
+            compat_aliases: &[],
+        },
     )
     .await?;
     ensure_env_version(store, "math", math_manifest()).await?;
@@ -70,9 +86,14 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
 
     ensure_env(
         store,
-        "code",
-        "CodeEnv — 代码执行 + 单测奖励环境 (DSCodeBench)",
-        &["code", "execution"],
+        EnvIdentity {
+            env_type: "code",
+            description: "CodeEnv — 代码执行 + 单测奖励任务环境 (DSCodeBench)",
+            tags: &["code", "execution"],
+            lifecycle: dto::EnvLifecycle::Canonical,
+            superseded_by: None,
+            compat_aliases: &[],
+        },
     )
     .await?;
     ensure_env_version(store, "code", code_manifest()).await?;
@@ -80,9 +101,14 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
 
     ensure_env(
         store,
-        "agent",
-        "Multi-turn tool-using agent environment",
-        &["agent", "multi-turn"],
+        EnvIdentity {
+            env_type: "agent",
+            description: "Multi-turn tool-using agent environment",
+            tags: &["agent", "multi-turn"],
+            lifecycle: dto::EnvLifecycle::Active,
+            superseded_by: None,
+            compat_aliases: &[],
+        },
     )
     .await?;
     ensure_env_version(store, "agent", simple_manifest("agent", "0.1.0")).await?;
@@ -123,27 +149,74 @@ async fn yank_legacy_placeholder(
     Ok(())
 }
 
-/// Create an env row when it does not exist yet (metadata only).
-async fn ensure_env(
-    store: &SqliteStore,
-    env_type: &str,
-    description: &str,
-    tags: &[&str],
-) -> Result<()> {
-    if store.find_env_row(env_type).await?.is_none() {
+/// Registry identity of one environment (capability class).
+struct EnvIdentity<'a> {
+    env_type: &'a str,
+    description: &'a str,
+    tags: &'a [&'a str],
+    lifecycle: dto::EnvLifecycle,
+    /// Successor for a deprecated class.
+    superseded_by: Option<&'a str>,
+    /// Former names kept resolvable.
+    compat_aliases: &'a [&'a str],
+}
+
+/// Create an env row when missing, and reconcile its lifecycle identity when it
+/// already exists.
+///
+/// The reconcile half matters for upgrades: a Hub seeded before the rename
+/// already has `qa` and `math` rows, and their identity would otherwise stay
+/// blank forever. Only the identity fields are touched — description/tags edited
+/// through the API are left alone once the identity already matches.
+async fn ensure_env(store: &SqliteStore, id: EnvIdentity<'_>) -> Result<()> {
+    let aliases: Vec<String> = id.compat_aliases.iter().map(|a| (*a).to_string()).collect();
+    let Some(existing) = store.find_env_row(id.env_type).await? else {
         store
             .create_env(NewEnv {
-                env_type: env_type.into(),
+                env_type: id.env_type.into(),
                 namespace: "default".into(),
-                description: Some(description.into()),
+                description: Some(id.description.into()),
                 author: Some("uenv-team".into()),
                 homepage: None,
                 repository: None,
                 license: Some("Apache-2.0".into()),
-                tags: tags.iter().map(|t| (*t).to_string()).collect(),
+                tags: id.tags.iter().map(|t| (*t).to_string()).collect(),
+                lifecycle: id.lifecycle,
+                superseded_by: id.superseded_by.map(str::to_string),
+                compat_aliases: aliases,
             })
             .await?;
+        return Ok(());
+    };
+
+    let current_aliases: Vec<String> = existing
+        .compat_aliases
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let in_sync = existing.lifecycle() == id.lifecycle
+        && existing.superseded_by.as_deref() == id.superseded_by
+        && current_aliases == aliases;
+    if in_sync {
+        return Ok(());
     }
+
+    store
+        .update_env(
+            id.env_type,
+            crate::models::EnvPatch {
+                lifecycle: Some(id.lifecycle),
+                superseded_by: id.superseded_by.map(str::to_string),
+                compat_aliases: Some(aliases),
+                ..Default::default()
+            },
+        )
+        .await?;
+    tracing::info!(
+        env_type = id.env_type,
+        lifecycle = id.lifecycle.as_str(),
+        "reconciled env lifecycle identity"
+    );
     Ok(())
 }
 
@@ -213,6 +286,7 @@ pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_di
     )
     .await?;
     seed_agent_bridge_openhands(store, artifact_root, catalog_dir).await?;
+    seed_agent_bridge_toolenv(store, artifact_root, catalog_dir).await?;
     seed_benchmark_fixture_packages(store, artifact_root, catalog_dir).await?;
     Ok(())
 }
@@ -320,6 +394,7 @@ async fn seed_math_smoke_fixtures(
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["math_fixtures".into()],
+            consumers: vec![dto::CONSUMER_WORKER.into()],
         },
         worker_overlay: overlay,
         agent_defaults: json!({}),
@@ -425,6 +500,15 @@ pub async fn seed_dscodebench_mvp(
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["dscodebench".into(), "code_eval".into()],
+            // Both the Worker (official harness scoring) and a ToolEnv Agent host
+            // (multi-turn run_python / submit_code) consume this package. Declaring
+            // both here is what makes them provably use one digest instead of two
+            // hand-copied dataset trees — an Agent dry run only predicts the
+            // Worker's verdict if the data and dependency locks are identical.
+            consumers: vec![
+                dto::CONSUMER_WORKER.into(),
+                dto::CONSUMER_TOOLENV_AGENT.into(),
+            ],
         },
         worker_overlay: overlay,
         agent_defaults: json!({}),
@@ -536,6 +620,10 @@ async fn seed_swe_package(
             "swe_instance_pool".into(),
             "trajectory_v2_2".into(),
         ],
+        // The SWE images and catalog are staged on the Worker; the OpenHands
+        // scaffold reaches the container through the Runtime Gateway rather than
+        // by syncing this package itself.
+        consumers: vec![dto::CONSUMER_WORKER.into()],
     };
 
     let req = dto::PublishPackageRequest {
@@ -736,22 +824,26 @@ fn discover_swe_image_tars(
     (artifacts, map)
 }
 
-/// Seed `uenv-agent-openhands@1.0.0` when `integrations/openhands` exists beside the repo.
+/// Seed `uenv-agent-openhands@1.0.1` when `integrations/openhands` exists beside
+/// the repo.
+///
+/// `1.0.1` re-publishes the same bundle with the catalog fields (`agent_kind`,
+/// `required_env_types`) that `1.0.0` predates. A Hub seeded before those fields
+/// existed cannot gain them by re-seeding — seeding is skip-if-present, and
+/// rewriting a published version would break the "no silent overwrite" rule — so
+/// the fields arrive as a new version. The artifacts are byte-identical, so an
+/// Agent that synced `1.0.0` still reports a matching `bundle_digest`.
 pub async fn seed_agent_bridge_openhands(
     store: &SqliteStore,
     artifact_root: &Path,
     catalog_dir: &Path,
 ) -> Result<()> {
     let package_id = "uenv-agent-openhands";
-    let version = "1.0.0";
+    let version = "1.0.1";
     if store.get_package_manifest(package_id, version).await.is_ok() {
         return Ok(());
     }
-    let bridge_root = catalog_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|r| r.join("integrations/openhands"));
-    let Some(src) = bridge_root.filter(|p| p.is_dir()) else {
+    let Some(src) = find_seed_source(catalog_dir, "integrations/openhands") else {
         tracing::warn!(
             package_id,
             "skip agent bridge seed: integrations/openhands not found beside catalog_dir"
@@ -850,12 +942,15 @@ pub async fn seed_agent_bridge_openhands(
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["runtime_gateway".into()],
+            consumers: vec![dto::CONSUMER_OPENHANDS_AGENT.into()],
         },
         worker_overlay: json!({}),
         agent_defaults: json!({
+            "agent_kind": "openhands",
             "driver_entrypoint": "run_swebenchpro_official.py",
             "workspace_dir": "/app",
-            "tools": ["terminal", "file_editor"]
+            "tools": ["terminal", "file_editor"],
+            "required_env_types": ["swe"]
         }),
         contracts: dto::PackageContracts {
             runtime_gateway_api: Some("runtime/v1".into()),
@@ -863,6 +958,138 @@ pub async fn seed_agent_bridge_openhands(
             ..Default::default()
         },
         // Agent-bridge is a code bundle, not an environment → no interface contract.
+        interface: dto::InterfaceSchema::default(),
+        artifacts,
+        file_artifacts: vec![],
+    };
+    package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
+    tracing::info!(package_id, version, "seeded AgentBridgePackage");
+    Ok(())
+}
+
+/// Resolve a seed source directory given `catalog_dir` (`config/swe` by default).
+///
+/// A deployment stages the sources it wants seeded next to the Hub workspace,
+/// while a full checkout has them at the repo root two levels above
+/// `catalog_dir`; both layouts occur, so both are tried instead of forcing one.
+/// Returns `None` when the directory exists in neither.
+fn find_seed_source(catalog_dir: &Path, rel: &str) -> Option<PathBuf> {
+    let hub_root = catalog_dir.parent().and_then(|p| p.parent());
+    let candidates = [
+        hub_root.map(|r| r.join(rel)),
+        hub_root.and_then(|r| r.parent()).map(|r| r.join(rel)),
+        Some(PathBuf::from(rel)),
+    ];
+    candidates.into_iter().flatten().find(|p| p.is_dir())
+}
+
+/// Seed `uenv-agent-toolenv@1.0.0` — the Verifiers-style ToolEnv scaffold that
+/// drives DSCodeBench in agent mode.
+///
+/// The Agent host registers with `agent_bridge_id=uenv-agent-toolenv`, so the Hub
+/// has to publish a package under that exact id; otherwise the id an Agent
+/// reports refers to nothing the Hub can vouch for, and the scaffold keeps
+/// arriving by hand-copy. Sources live in `uenv-bridge/scripts/benchmark/`; a
+/// missing tree is logged and skipped so a partial checkout still boots.
+pub async fn seed_agent_bridge_toolenv(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    catalog_dir: &Path,
+) -> Result<()> {
+    let package_id = "uenv-agent-toolenv";
+    let version = "1.0.0";
+    if store.get_package_manifest(package_id, version).await.is_ok() {
+        return Ok(());
+    }
+    let Some(src) = find_seed_source(catalog_dir, "uenv-bridge/scripts/benchmark") else {
+        tracing::warn!(
+            package_id,
+            "skip toolenv bridge seed: uenv-bridge/scripts/benchmark not found beside catalog_dir"
+        );
+        return Ok(());
+    };
+
+    let mut artifacts: Vec<dto::InlineArtifact> = Vec::new();
+    for (name, kind, rel) in [
+        ("dscode_toolenv_agent.py", "other", "drivers/dscode_toolenv_agent.py"),
+        (
+            "run_dscodebench_agent_toolenv.sh",
+            "other",
+            "drivers/run_dscodebench_agent_toolenv.sh",
+        ),
+        ("report_dscode_agentic.py", "other", "drivers/report_dscode_agentic.py"),
+        ("evaluate_dscodebench.py", "eval_script", "drivers/evaluate_dscodebench.py"),
+    ] {
+        let path = src.join(name);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            tracing::warn!(package_id, file = name, "skip missing toolenv bridge file");
+            continue;
+        };
+        artifacts.push(dto::InlineArtifact {
+            name: name.into(),
+            kind: kind.into(),
+            sync_mode: "inline".into(),
+            media_type: Some("text/plain".into()),
+            target_rel_path: Some(rel.into()),
+            content: Some(content),
+            content_b64: None,
+        });
+    }
+    if artifacts.is_empty() {
+        tracing::warn!(package_id, "skip toolenv bridge seed: no artifacts collected");
+        return Ok(());
+    }
+
+    // The env package the Agent sandbox must agree with, digest and all. Naming
+    // it here is what turns "keep the sandbox in sync" into a checkable claim.
+    let manifest = json!({
+        "package_id": package_id,
+        "version": version,
+        "agent_kind": "toolenv",
+        "required_env_package": "dscodebench@0.1.0",
+        "drivers": ["run_dscodebench_agent_toolenv.sh", "dscode_toolenv_agent.py"],
+    });
+    artifacts.insert(
+        0,
+        dto::InlineArtifact {
+            name: "MANIFEST.json".into(),
+            kind: "other".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("MANIFEST.json".into()),
+            content: Some(serde_json::to_string_pretty(&manifest)?),
+            content_b64: None,
+        },
+    );
+
+    let req = dto::PublishPackageRequest {
+        version: version.into(),
+        publisher: Some("org-uenv-agent".into()),
+        description: Some(
+            "Verifiers-style ToolEnv agent scaffold for DSCodeBench (drivers + reporter)".into(),
+        ),
+        changelog: Some(format!("Seed {package_id}@{version} from {}", src.display())),
+        platform: dto::PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["runtime_gateway".into(), "code_toolenv".into()],
+            consumers: vec![dto::CONSUMER_TOOLENV_AGENT.into()],
+        },
+        worker_overlay: json!({}),
+        agent_defaults: json!({
+            "agent_kind": "toolenv",
+            "driver_entrypoint": "run_dscodebench_agent_toolenv.sh",
+            "tools": ["run_python", "read_file", "write_file", "submit"],
+            "required_env_types": ["code"],
+            "required_env_package": "dscodebench@0.1.0",
+            "evaluation_mode": "inline_harness",
+            "agent_pool_id": "toolenv-default"
+        }),
+        contracts: dto::PackageContracts {
+            runtime_gateway_api: Some("runtime/v1".into()),
+            tool_bridge_schema: Some("toolenv-uenv-v1".into()),
+            ..Default::default()
+        },
         interface: dto::InterfaceSchema::default(),
         artifacts,
         file_artifacts: vec![],
@@ -891,6 +1118,88 @@ fn qa_manifest() -> NewManifest {
         changelog: Some(
             "v0.2.0: 由 math 更名而来的单轮问答/分类验证环境 (gsm8k/pubmedqa/scitab/olymmath[-easy|-hard]); 判分按 dataset 路由，对齐 plugins/qa/manifest.yaml".into(),
         ),
+        ..math_manifest()
+    }
+}
+
+/// `qa@0.3.0` — the first version that carries the **rubric contract**.
+///
+/// A verification environment rewards by rule, so `0.2.0` (which declares only
+/// the dataset routing) leaves a training run unable to say which gold standard
+/// its rewards matched. `0.3.0` adds that statement: which scorer runs in
+/// production, which reference implementation it was compared against, and the
+/// measured agreement over a pinned corpus.
+///
+/// The metrics are the measured ones from the alignment run recorded in
+/// `plugins/qa/RUBRIC.md` (58 corpus cases, 56 agreements → 0.9655, zero
+/// over-credit, two under-credit). `corpus_digest` / `report_digest` are left
+/// unset here on purpose: the seed ships no evidence *bytes*, and inventing a
+/// digest for a file the Hub does not serve would be worse than declaring none.
+/// Publishing them is `uenv env rubric publish` (hosts the corpus/report bytes)
+/// followed by `uenv env rubric import` (derives the block, digests included) and
+/// a new version — never an overwrite of this one.
+fn qa_rubric_manifest() -> NewManifest {
+    let mut datasets: BTreeMap<String, dto::RubricDataset> = BTreeMap::new();
+    for (name, notes) in [
+        ("gsm8k", Some("官方 `#### ` 约定抽取最终答案")),
+        ("pubmedqa", Some("yes/no/maybe 分类判定")),
+        ("scitab", Some("表格陈述支持/反驳分类判定")),
+        ("olymmath", Some("数值等价判定；禁止子串包含")),
+        ("olymmath-easy", Some("同 olymmath，难度切分")),
+        ("olymmath-hard", Some("同 olymmath，难度切分")),
+    ] {
+        datasets.insert(
+            name.to_string(),
+            dto::RubricDataset {
+                scorer: Some(name.to_string()),
+                notes: notes.map(str::to_string),
+            },
+        );
+    }
+
+    NewManifest {
+        version: "0.3.0".into(),
+        changelog: Some(
+            "v0.3.0: 声明 rubric 判分契约 — production_scorer=uenv-math-plugin/score_action, \
+             参照实现 verifiers+math_verify, 对齐率 0.9655 (58 例中 56 例一致), 过宽 0 例, \
+             过严 2 例; 过宽>0 的版本不得 promote 为 latest"
+                .into(),
+        ),
+        rubric: Some(dto::RubricSpec {
+            schema_version: dto::RUBRIC_SCHEMA_VERSION.to_string(),
+            backend: Some("verifiers+math_verify".into()),
+            production_scorer: Some("uenv-math-plugin/score_action".into()),
+            alignment: Some(dto::RubricAlignment {
+                corpus_id: Some("qa_rubric_corpus@2026-07-25".into()),
+                corpus_digest: None,
+                report_digest: None,
+                package_ref: None,
+                metrics: Some(dto::RubricMetrics {
+                    total: Some(58),
+                    agreed: Some(56),
+                    agreement_rate: 56.0 / 58.0,
+                    over_credit_count: 0,
+                    under_credit_count: 2,
+                    verifiers_version: None,
+                    math_verify_version: None,
+                }),
+            }),
+            datasets,
+            known_gaps: vec![
+                dto::RubricGap {
+                    id: "natural_language_without_hash".into(),
+                    severity: "too_strict".into(),
+                    notes: Some(
+                        "自然语言作答且未给出 `#### ` 标记时判 0，参照实现可能判对".into(),
+                    ),
+                },
+                dto::RubricGap {
+                    id: "long_lhs_assignment_rejected".into(),
+                    severity: "intentional".into(),
+                    notes: Some("拒绝把长赋值式当作最终答案，避免过宽".into()),
+                },
+            ],
+        }),
         ..math_manifest()
     }
 }
@@ -971,6 +1280,7 @@ fn math_manifest() -> NewManifest {
             disk_mb: None,
         },
         published_by: None,
+        rubric: None,
     }
 }
 
@@ -1032,6 +1342,7 @@ fn code_manifest() -> NewManifest {
             disk_mb: None,
         },
         published_by: None,
+        rubric: None,
     }
 }
 
@@ -1156,5 +1467,6 @@ fn simple_manifest(env_type: &str, version: &str) -> NewManifest {
             disk_mb: None,
         },
         published_by: None,
+        rubric: None,
     }
 }

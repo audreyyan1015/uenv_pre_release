@@ -4,7 +4,7 @@
 //! This is pure logic (no DB) so it can run identically in the CLI's local
 //! `validate` command and in the server before a publish hits the repository.
 
-use crate::domain::{interface, version};
+use crate::domain::{interface, rubric, version};
 use crate::schema_validator;
 use uenv_hub_types::{
     InterfaceSchema, PublishVersionRequest, Role, TokenInfo, ValidationReport,
@@ -230,6 +230,17 @@ pub fn validate_publish(req: &PublishVersionRequest) -> ValidationReport {
         );
     }
 
+    // Rubric: cross-checked against the dataset routing the version accepts, so
+    // a scorer for a dataset this environment cannot run is caught at publish
+    // time rather than at reward time.
+    if let Some(spec) = &req.rubric {
+        let dataset_keys = req
+            .config_schema
+            .as_ref()
+            .and_then(rubric::dataset_keys_from_config_schema);
+        rubric::validate(spec, dataset_keys.as_deref(), &mut report);
+    }
+
     // Dependency references must be `env_type@version` (or `env_type@^range`).
     if let Some(deps) = &req.dependencies {
         for (i, dep) in deps.requires.iter().enumerate() {
@@ -349,6 +360,7 @@ mod tests {
             examples: vec![],
             dependencies: None,
             min_uenv_version: None,
+            rubric: None,
         }
     }
 

@@ -8,7 +8,7 @@ use crate::middleware::{ensure_role, Principal};
 use crate::service;
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -54,6 +54,8 @@ pub fn build_router(state: AppState) -> Router {
             "/packages/:package_id/versions/:version/artifacts/:name",
             get(get_package_artifact),
         )
+        // Agent-bridge catalog: which Agent scaffolds this Hub publishes.
+        .route("/agent-bridges", get(list_agent_bridges))
         // templates
         .route("/templates", get(list_templates))
         .route("/templates/:name/archive", get(template_archive))
@@ -219,6 +221,34 @@ async fn fetch_manifest(state: &AppState, env_type: &str, version: &str) -> ApiR
     Ok(manifest)
 }
 
+/// Advertise a deprecated environment **in headers on a 200 response**.
+///
+/// Deliberately not 404/410: a Worker resolves `env.types` against
+/// `versions/latest` at boot and, with `prewarm_on_startup` enabled, treats a
+/// non-2xx as fatal. Failing the old name would take down every Worker still
+/// configured with it, i.e. turn a rename into an outage. So the manifest keeps
+/// being served and the migration signal rides along in `Deprecation` /
+/// `Warning` / `Link` (RFC 8594 / RFC 9111 / RFC 8288) plus the `deprecation`
+/// field in the body.
+fn attach_deprecation(mut resp: Response, manifest: &dto::FullManifest) -> Response {
+    let Some(notice) = &manifest.deprecation else {
+        return resp;
+    };
+    let h = resp.headers_mut();
+    h.insert("deprecation", HeaderValue::from_static("true"));
+    if let Ok(v) = HeaderValue::from_str(&format!("299 - \"{}\"", notice.message)) {
+        h.insert("warning", v);
+    }
+    if let Some(next) = &notice.superseded_by {
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "</api/v1/envs/{next}/versions/latest>; rel=\"successor-version\""
+        )) {
+            h.insert(header::LINK, v);
+        }
+    }
+    resp
+}
+
 async fn get_version(
     State(state): State<AppState>,
     _principal: Principal,
@@ -226,7 +256,10 @@ async fn get_version(
     Path((env_type, version)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let manifest = fetch_manifest(&state, &env_type, &version).await?;
-    Ok(json_with_etag(&headers, &manifest))
+    Ok(attach_deprecation(
+        json_with_etag(&headers, &manifest),
+        &manifest,
+    ))
 }
 
 async fn get_interface(
@@ -337,6 +370,20 @@ async fn list_packages(
 ) -> ApiResult<Response> {
     let page = state.store.list_packages(q.page, q.per_page).await?;
     Ok(json_with_etag(&headers, &page))
+}
+
+/// `GET /agent-bridges` — the Agent-bridge catalog.
+///
+/// Returns `package_id` / `version` / `bundle_digest` per scaffold, matching
+/// `uenv.v1.SyncedAgentBridge`, so an operator (or the Server) can check what an
+/// Agent registered against what the Hub actually published.
+async fn list_agent_bridges(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let items = state.store.list_agent_bridges().await?;
+    Ok(json_with_etag(&headers, &items))
 }
 
 /// `POST /packages/{package_id}/versions` — publish a package version.
@@ -494,6 +541,10 @@ async fn publish_version(
             "/api/v1/envs/{}/versions/{}",
             manifest.env_type, manifest.version
         ),
+        // Publishing succeeded either way; the gate only decides whether this
+        // version may resolve as `latest`, and the publisher is told which.
+        promoted_to_latest: manifest.latest_eligible,
+        gate_notes: manifest.gate_notes.clone(),
     };
     Ok((StatusCode::CREATED, Json(resp)))
 }

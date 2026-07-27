@@ -104,6 +104,46 @@ pub struct Page<T> {
 // Environments
 // ---------------------------------------------------------------------------
 
+/// Lifecycle stage of an environment (capability class) in the registry.
+///
+/// An environment names a *Task Environment* capability class (`qa` / `code` /
+/// `swe`), not an Agent scaffold and not a whole Episode Stack. When a class is
+/// renamed, the old name stays resolvable as a [`EnvLifecycle::Deprecated`] entry
+/// pointing at its successor, because Workers pull `versions/latest` at boot and
+/// a hard 404/410 would fail their prewarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvLifecycle {
+    /// Normal, supported environment (the default for anything published).
+    #[default]
+    Active,
+    /// The official entry point for its capability class; aliases point here.
+    Canonical,
+    /// Retired in favour of [`EnvSummary::superseded_by`]; still resolvable.
+    Deprecated,
+}
+
+impl EnvLifecycle {
+    /// Stable wire/DB representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Canonical => "canonical",
+            Self::Deprecated => "deprecated",
+        }
+    }
+
+    /// Parse the DB/wire form, falling back to [`Self::Active`] for unknowns so
+    /// an older server never fails to read a newer row.
+    pub fn parse_or_active(raw: &str) -> Self {
+        match raw {
+            "canonical" => Self::Canonical,
+            "deprecated" => Self::Deprecated,
+            _ => Self::Active,
+        }
+    }
+}
+
 /// Lightweight environment listing entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvSummary {
@@ -115,6 +155,14 @@ pub struct EnvSummary {
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub lifecycle: EnvLifecycle,
+    /// Successor `env_type` for a deprecated environment (e.g. `math` → `qa`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Former names kept resolvable for this environment during migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compat_aliases: Vec<String>,
 }
 
 /// Full environment detail (metadata + latest manifest, when available).
@@ -147,6 +195,12 @@ pub struct CreateEnvRequest {
     pub license: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub lifecycle: EnvLifecycle,
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+    #[serde(default)]
+    pub compat_aliases: Vec<String>,
 }
 
 /// Request body for `PATCH /api/v1/envs/{env_type}` (update metadata).
@@ -166,6 +220,12 @@ pub struct EnvPatchRequest {
     pub license: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<EnvLifecycle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_aliases: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +270,119 @@ pub struct InterfaceSchema {
     pub observation: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Rubric (gold-standard scoring contract)
+// ---------------------------------------------------------------------------
+//
+// A verification-type environment (`qa`) rewards an action by *rule*, so the rule
+// itself is part of the environment contract: without it a training run cannot
+// state which gold standard its rewards were aligned against. The Hub therefore
+// records, per published version, which scorer produced the rewards and how it
+// compared against a reference implementation over a fixed corpus.
+//
+// Metric key naming: the aligner (`verify_qa_rubric_alignment.py`) emits
+// `agreement_rate` / `over_credit_count` / `under_credit_count`, while the design
+// draft used `agreement` / `too_lenient` / `too_strict`. We keep the aligner's
+// names as authoritative (they are what the evidence file actually contains, so
+// no human transcription step can silently invert a count) and accept the draft
+// names as deserialization aliases.
+
+/// Agreement metrics between the production scorer and the reference scorer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RubricMetrics {
+    /// Corpus cases compared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
+    /// Cases where production and reference agreed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreed: Option<i64>,
+    /// Fraction in `[0, 1]`.
+    #[serde(alias = "agreement")]
+    pub agreement_rate: f64,
+    /// Production rewarded, reference did not — the reward-hacking direction.
+    #[serde(alias = "too_lenient")]
+    pub over_credit_count: i64,
+    /// Reference rewarded, production did not — costs recall only.
+    #[serde(alias = "too_strict")]
+    pub under_credit_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifiers_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub math_verify_version: Option<String>,
+}
+
+/// Which corpus/report the metrics came from, so a run is reproducible.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RubricAlignment {
+    /// Human-readable corpus identity, e.g. `qa_rubric_corpus@2026-07-25`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_id: Option<String>,
+    /// `sha256:<hex>` of the corpus file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_digest: Option<String>,
+    /// `sha256:<hex>` of the aligner's metrics report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_digest: Option<String>,
+    /// `package_id@version` of the EnvPackage carrying the corpus/report bytes,
+    /// so the evidence is downloadable from the Hub rather than described only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<RubricMetrics>,
+}
+
+/// Per-dataset scorer routing inside one rubric.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RubricDataset {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// A known, accepted divergence from the reference scorer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RubricGap {
+    pub id: String,
+    /// `too_strict` | `too_lenient` | `intentional`.
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// The scoring contract of a verification-type environment version.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RubricSpec {
+    /// Contract schema version; only `"1"` is currently accepted.
+    pub schema_version: String,
+    /// Reference implementation the production scorer is aligned against,
+    /// e.g. `verifiers+math_verify`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// The scorer that actually produces rewards at runtime,
+    /// e.g. `uenv-math-plugin/score_action`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_scorer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<RubricAlignment>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub datasets: BTreeMap<String, RubricDataset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_gaps: Vec<RubricGap>,
+}
+
+/// The currently accepted [`RubricSpec::schema_version`].
+pub const RUBRIC_SCHEMA_VERSION: &str = "1";
+
+/// Migration guidance attached to responses for a deprecated environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeprecationNotice {
+    /// Successor `env_type`, when one is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    pub message: String,
 }
 
 /// An example `EpisodeRequest` payload for docs / smoke tests.
@@ -272,10 +445,27 @@ pub struct FullManifest {
     pub interface: InterfaceSchema,
     #[serde(default)]
     pub examples: Vec<Example>,
+    /// Scoring contract for verification-type environments (`qa`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubric: Option<RubricSpec>,
     pub is_yanked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yank_reason: Option<String>,
+    /// `false` when a publish-time gate barred this version from becoming
+    /// `versions/latest` (the version itself stays fetchable by exact version).
+    #[serde(default = "default_true")]
+    pub latest_eligible: bool,
+    /// Why the gate barred it, when it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_notes: Vec<String>,
+    /// Present when the *environment* (not this version) is deprecated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecation: Option<DeprecationNotice>,
     pub published_at: i64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Request body for `POST /api/v1/envs/{env_type}/versions`.
@@ -308,6 +498,9 @@ pub struct PublishVersionRequest {
     pub dependencies: Option<Dependencies>,
     #[serde(default)]
     pub min_uenv_version: Option<String>,
+    /// Scoring contract; required for environments that reward by rule.
+    #[serde(default)]
+    pub rubric: Option<RubricSpec>,
 }
 
 /// Response for a successful publish (`201 Created`).
@@ -317,6 +510,12 @@ pub struct PublishVersionResponse {
     pub version: String,
     pub published_at: i64,
     pub manifest_url: String,
+    /// Whether this version is allowed to resolve as `versions/latest`.
+    #[serde(default = "default_true")]
+    pub promoted_to_latest: bool,
+    /// Gate findings; non-empty explains why `promoted_to_latest` is `false`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_notes: Vec<String>,
 }
 
 /// Request body for yanking a version.
@@ -561,6 +760,32 @@ pub struct PackagePlatform {
     /// (e.g. `runtime_gateway`, `trajectory_v2_2`, `swe_instance_pool`).
     #[serde(default)]
     pub features: Vec<String>,
+    /// Node roles allowed to sync this package, e.g. `worker`, `toolenv-agent`,
+    /// `openhands-agent`. Empty means Worker-only (the historical behaviour).
+    ///
+    /// This is what lets an Agent host and a Worker consume *one* package version
+    /// instead of two hand-copied trees: both fetch the same `package_id@version`
+    /// and therefore the same artifact digests, which is the precondition for an
+    /// Agent-side dry run to predict the Worker-side official harness result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumers: Vec<String>,
+}
+
+/// Consumer role: the Worker that executes episodes and scores them.
+pub const CONSUMER_WORKER: &str = "worker";
+/// Consumer role: an Agent host running a ToolEnv-style scaffold.
+pub const CONSUMER_TOOLENV_AGENT: &str = "toolenv-agent";
+/// Consumer role: an Agent host running the OpenHands scaffold.
+pub const CONSUMER_OPENHANDS_AGENT: &str = "openhands-agent";
+
+impl PackagePlatform {
+    /// Whether `consumer` may sync this package. An unset list means Worker-only.
+    pub fn allows_consumer(&self, consumer: &str) -> bool {
+        if self.consumers.is_empty() {
+            return consumer == CONSUMER_WORKER;
+        }
+        self.consumers.iter().any(|c| c == consumer)
+    }
 }
 
 /// Interface-contract version numbers (not runtime URLs).
@@ -736,6 +961,30 @@ pub struct SyncFile {
     pub size_bytes: Option<i64>,
     pub sync_mode: String,
     pub target_rel_path: String,
+}
+
+/// One entry of the Agent-bridge catalog (`GET /api/v1/agent-bridges`).
+///
+/// Field names mirror `uenv.v1.SyncedAgentBridge` (`package_id` / `version` /
+/// `bundle_digest`) so an Agent can report what it synced and the Server can
+/// match it against what the Hub published without a translation table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentBridgeSummary {
+    pub package_id: String,
+    pub version: String,
+    /// Combined digest over the bundle's artifacts — the value an Agent reports
+    /// in `RegisterAgent.synced_agent_bridges[].bundle_digest`.
+    pub bundle_digest: String,
+    /// Scaffold family, e.g. `openhands` | `toolenv`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+    /// Task Environment types this scaffold drives, e.g. `["swe"]`, `["code"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_env_types: Vec<String>,
+    /// Worker platform features the scaffold depends on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_worker_features: Vec<String>,
+    pub published_at: i64,
 }
 
 /// Deterministic fetch plan for `uenv env sync` (`.../sync-plan`).

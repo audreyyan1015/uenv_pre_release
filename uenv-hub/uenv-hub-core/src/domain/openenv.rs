@@ -1441,6 +1441,7 @@ spec_version: 1
             examples: vec![],
             dependencies: Some(Dependencies::default()),
             min_uenv_version: None,
+            rubric: None,
         };
         let report = crate::domain::manifest::validate_manifest(&out.env_type, &req);
         assert!(report.valid, "{:?}", report.issues);
