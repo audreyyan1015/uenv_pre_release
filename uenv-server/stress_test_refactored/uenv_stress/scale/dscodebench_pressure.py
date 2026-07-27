@@ -1757,7 +1757,9 @@ def run_scale(
                     server,
                     f"{server_run}/server.log",
                     f"stress-{run_id}-worker-",
-                    f"dscodebench-pressure-{run_id}-{mode}-",
+                    # 不传 request_prefix：episode_completed 行的 episode/batch ID 是
+                    # 纯 UUID，任何按请求前缀的过滤都会得到 0；worker_prefix 已含
+                    # 本次 run_id（时间戳+哈希），足以把统计限定在本次运行。
                 )
                 coverage["expected_workers"] = workers_count
                 coverage["passed"] = coverage["unique_completed_workers"] == workers_count
