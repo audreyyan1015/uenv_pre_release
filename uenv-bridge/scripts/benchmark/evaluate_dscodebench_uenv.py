@@ -34,6 +34,14 @@ from uenv.bridge.clients import RustCoreClientConfig, RustCoreEpisodeClient
 from uenv.bridge.protocol import MODE_MULTI, EpisodeRequest, EpisodeResult
 
 from evaluate_dscodebench import build_prompt, load_dataset
+from obs_run import (
+    add_obs_args,
+    attach_training_run_id,
+    emit_run_closed,
+    emit_run_started,
+    emit_episode_result,
+    resolve_run_id,
+)
 
 
 DEFAULT_DATA = ROOT / "data/benchmarks/dscodebench/DSCodeBench.json"
@@ -130,6 +138,7 @@ def build_request(
     code_timeout_secs: int,
     seed: int,
     evaluation_mode: str,
+    training_run_id: str,
 ) -> EpisodeRequest:
     problem_id = str(row["problem_id"])
     request_id = f"dscodebench-{problem_id}-{uuid.uuid4().hex[:8]}"
@@ -204,6 +213,7 @@ def build_request(
         },
         "timeout_seconds": timeout_seconds,
     }
+    attach_training_run_id(payload, training_run_id)
     return EpisodeRequest(
         request_id=request_id,
         env_type="code",
@@ -500,6 +510,7 @@ def main() -> int:
     parser.add_argument("--evaluation-mode", default="inline_harness", choices=["inline_harness", "path_harness"])
     parser.add_argument("--requests-log", type=Path, default=None)
     parser.add_argument("--results-log", type=Path, default=None)
+    add_obs_args(parser)
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -520,6 +531,20 @@ def main() -> int:
         max_per_library=args.max_per_library,
     )
     batch_id = f"dscodebench-uenv-{time.strftime('%Y%m%d_%H%M%S')}"
+    training_run_id = resolve_run_id(args.run_id, batch_id)
+    print(
+        json.dumps(
+            {
+                "benchmark": "dscodebench",
+                "training_run_id": training_run_id,
+                "obs_url": args.obs_url,
+                "batch_id": batch_id,
+                "total_examples": len(examples),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     requests = [
         build_request(
             row=row,
@@ -539,6 +564,7 @@ def main() -> int:
             code_timeout_secs=args.code_timeout_secs,
             seed=args.seed + idx,
             evaluation_mode=args.evaluation_mode,
+            training_run_id=training_run_id,
         )
         for idx, row in enumerate(examples)
     ]
@@ -582,6 +608,21 @@ def main() -> int:
         result_log.unlink(missing_ok=True)
         rows: list[dict[str, Any]] = []
 
+    emit_run_started(
+        obs_url=args.obs_url,
+        obs_token=args.obs_token,
+        training_run_id=training_run_id,
+        benchmark="dscodebench",
+        batch_id=batch_id,
+        output_dir=args.output_dir,
+        total_examples=len(examples),
+        payload={
+            "limit": args.limit,
+            "resume": args.resume,
+            "remaining_requests": len(requests),
+            "evaluation_mode": args.evaluation_mode,
+        },
+    )
     client = RustCoreEpisodeClient(
         RustCoreClientConfig(
             endpoint=args.endpoint,
@@ -590,6 +631,7 @@ def main() -> int:
         )
     )
     try:
+        request_payload_by_id = {request.request_id: payload_json(request) for request in requests}
         example_by_id = {str(row["problem_id"]): row for row in examples}
         example_by_request_id = {
             request.request_id: example_by_id[str(payload_json(request)["metadata"]["qid"])]
@@ -613,6 +655,22 @@ def main() -> int:
                 row = result_to_row(example_by_request_id[result.request_id], result, elapsed_ms)
                 rows.append(row)
                 append_jsonl(result_log, row)
+                request_payload = request_payload_by_id.get(result.request_id, {})
+                emit_episode_result(
+                    obs_url=args.obs_url,
+                    obs_token=args.obs_token,
+                    training_run_id=training_run_id,
+                    benchmark="dscodebench",
+                    batch_id=batch_id,
+                    request_id=result.request_id,
+                    status=result.status,
+                    reward=float(result.summary.total_reward or 0.0),
+                    correlation_id=str(request_payload.get("correlation_id") or ""),
+                    env_type="code",
+                    trajectory_id=result.trajectory_id,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                )
     finally:
         client.close()
 
@@ -624,6 +682,8 @@ def main() -> int:
             "adapter_core_endpoint": args.endpoint,
             "model_endpoint": args.model_endpoint,
             "model_name": args.model_name,
+            "training_run_id": training_run_id,
+            "obs_url": args.obs_url,
             "batch_id": batch_id,
             "batch_size": args.batch_size,
             "prompt_style": args.prompt_style,
@@ -637,6 +697,21 @@ def main() -> int:
             "code_timeout_secs": args.code_timeout_secs,
             "resume": args.resume,
             "remaining_requests_at_start": len(requests),
+        },
+    )
+    emit_run_closed(
+        obs_url=args.obs_url,
+        obs_token=args.obs_token,
+        training_run_id=training_run_id,
+        benchmark="dscodebench",
+        batch_id=batch_id,
+        output_dir=args.output_dir,
+        ok=all(row["uenv_status"] == "completed" for row in rows),
+        result_count=len(rows),
+        payload={
+            "completed_count": sum(1 for row in rows if row["uenv_status"] == "completed"),
+            "failed_count": sum(1 for row in rows if row["uenv_status"] != "completed"),
+            "resume": args.resume,
         },
     )
     metrics = json.loads((args.output_dir / "metrics.json").read_text(encoding="utf-8"))

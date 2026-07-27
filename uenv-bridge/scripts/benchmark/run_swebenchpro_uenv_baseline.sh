@@ -5,9 +5,12 @@ IMAGE=${IMAGE:-localhost/uenv-bridge-verl:layer4-build}
 REPO_DIR=${REPO_DIR:-/data/ronghao/uenv/uenv-bridge}
 DATA_PATH=${DATA_PATH:-${REPO_DIR}/data/benchmarks/swebenchpro/test.jsonl}
 OUTPUT_DIR=${OUTPUT_DIR:-${REPO_DIR}/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_agent_full}
+RUN_ID=${RUN_ID:-${UENV_TRAINING_RUN_ID:-}}
 UENV_ADAPTER_CORE_ENDPOINT=${UENV_ADAPTER_CORE_ENDPOINT:-8.130.75.157:8088}
 UENV_ROLLOUT_MODEL_NAME=${UENV_ROLLOUT_MODEL_NAME:-Qwen/Qwen3.6-35B-A3B}
 UENV_ROLLOUT_MODEL_ENDPOINT=${UENV_ROLLOUT_MODEL_ENDPOINT:-}
+UENV_OBS_URL=${UENV_OBS_URL:-}
+UENV_OBS_TOKEN=${UENV_OBS_TOKEN:-}
 LIMIT=${LIMIT:-}
 INSTANCE_ID=${INSTANCE_ID:-}
 BATCH_SIZE=${BATCH_SIZE:-1}
@@ -80,6 +83,15 @@ if [ -n "$INSTANCE_ID" ]; then
 fi
 if [ -n "$POOL_SELECTOR_JSON" ]; then
   ARGS+=(--pool-selector-json "$POOL_SELECTOR_JSON")
+fi
+if [ -n "$RUN_ID" ]; then
+  ARGS+=(--run-id "$RUN_ID")
+fi
+if [ -n "$UENV_OBS_URL" ]; then
+  ARGS+=(--obs-url "$UENV_OBS_URL")
+fi
+if [ -n "$UENV_OBS_TOKEN" ]; then
+  ARGS+=(--obs-token "$UENV_OBS_TOKEN")
 fi
 if [ "$RESUME" = "1" ]; then
   ARGS+=(--resume)
