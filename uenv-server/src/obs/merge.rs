@@ -192,6 +192,7 @@ impl MergeEngine {
                     );
                     set_workflow_active(state, "submit", "DONE", ev);
                     set_workflow_active(state, "dispatch", "ACTIVE", ev);
+                    bump_workflow_stage_count(state, "submit", &ep_id);
                     upsert_tree_episode(state, &ep_id, ev, "ACTIVE");
                 }
                 let state = self.runs.get(run_id).unwrap();
@@ -223,6 +224,7 @@ impl MergeEngine {
                     }
                     set_workflow_active(state, "dispatch", "DONE", ev);
                     set_workflow_active(state, "execute", "ACTIVE", ev);
+                    bump_workflow_stage_count(state, "dispatch", &ep_id);
                     upsert_tree_episode(state, &ep_id, ev, "ACTIVE");
                 }
                 let state = self.runs.get(run_id).unwrap();
@@ -240,6 +242,7 @@ impl MergeEngine {
                         ep.status = "ACTIVE".into();
                     }
                     set_workflow_active(state, "execute", "ACTIVE", ev);
+                    bump_workflow_stage_count(state, "execute", &ep_id);
                     upsert_tree_step(state, &ep_id, step, ev);
                 }
                 let state = self.runs.get(run_id).unwrap();
@@ -277,6 +280,10 @@ impl MergeEngine {
                     set_workflow_active(state, "execute", "DONE", ev);
                     set_workflow_active(state, "report", "DONE", ev);
                     set_workflow_active(state, "done", status, ev);
+                    // EPISODE_FAILED 同样计入 report 与终态（done）；COMPLETED/FAILED 之后的
+                    // CLOSED 事件因 distinct 去重不会重复计数。
+                    bump_workflow_stage_count(state, "report", &ep_id);
+                    bump_workflow_stage_count(state, "done", &ep_id);
                     upsert_tree_episode(state, &ep_id, ev, status);
                     close_tree_steps_for_episode(state, &ep_id, status);
                 }
@@ -393,6 +400,33 @@ fn set_run_tree_status(state: &mut ChainState, status: &str) {
     let node_id = format!("run:{}", state.training_run_id);
     if let Some(n) = state.tree.nodes.iter_mut().find(|n| n.node_id == node_id) {
         n.status = status.into();
+    }
+}
+
+/// 按口径（Docs/adapter/20260727 §2.5）更新 workflow 阶段的「关联实体」计数：
+/// 同一 episode 在同一阶段只计一次（distinct episode，而不是事件次数），
+/// 计数写入 node.payload_summary = {"count": N} 供前端读取。
+/// retry 导致的同 episode 重复 dispatch / 多 step 的 execute 均不重复计数；
+/// 没有 episode_id 的纯 run 事件（ep_id 为空）不影响计数。
+fn bump_workflow_stage_count(state: &mut ChainState, stage: &str, ep_id: &str) {
+    if ep_id.is_empty() {
+        return;
+    }
+    let seen = state
+        .stage_seen_episodes
+        .entry(stage.to_string())
+        .or_default();
+    if !seen.insert(ep_id.to_string()) {
+        return;
+    }
+    let count = seen.len();
+    if let Some(n) = state
+        .workflow
+        .nodes
+        .iter_mut()
+        .find(|n| n.node_id == stage)
+    {
+        n.payload_summary = json!({ "count": count });
     }
 }
 
