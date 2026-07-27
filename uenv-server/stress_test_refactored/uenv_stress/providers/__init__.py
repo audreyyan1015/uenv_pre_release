@@ -1,1 +1,5 @@
-"""External model-provider adapters used only during trace collection."""
+"""外部模型服务适配包。
+
+这个目录只存放轨迹采集阶段需要的模型服务适配代码，例如 Ark 代理和预检。压测 replay 阶段使用已经冻结的真实轨迹，不再直接调用外部模型，因此这里的代码主要服务于采集真实响应和 token 证据。
+
+实现逻辑是：provider 子包负责读取本地安全配置、转发 OpenAI 兼容请求、补充供应商返回的 token 信息，并把调用前的连通性检查与正式压测流程分开。"""

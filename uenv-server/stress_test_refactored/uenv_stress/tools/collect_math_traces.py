@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Collect frozen OlymMATH/SciTab/PubMedQA traces through the real UEnv path."""
+"""OlymMATH、SciTab 和 PubMedQA 真实轨迹采集工具。
+
+这个文件通过真实 UEnv 路径运行规则类任务 evaluator，把后续稳定性 replay 需要的输入、输出、token、时延和校验信息冻结成 JSONL。它用于把一次真实执行结果转化为可复验的轨迹语料。
+
+实现逻辑是：先从数据集根目录按标签或数据集字段做分层抽样；run_evaluators 调用实际 evaluator 生成原始日志；import_raw_sources 把原始结果导入统一目录；convert_task 读取每个任务的原始记录，计算 canonical checksum、估算 token 信息并写入稳定性套件 schema；main 汇总各数据集产物并执行 validate_trace_file 校验。"""
 
 from __future__ import annotations
 

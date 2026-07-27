@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Run DSCodeBench pressure and SWE-bench Pro pressure as one protected, reproducible scale-stress suite.
+"""规模压测套件编排入口。
 
-The suite is an orchestrator.  It must run on a control machine that can SSH to
-the Server and Worker hosts.  It never installs or restarts the protected
-production adapter core; each child gate owns and cleans up its isolated
-processes and ports.
-"""
+这个文件把 DSCodeBench、规则任务和 SWE-bench Pro 的压测命令组合成一次可重复执行的规模压测。它的目标不是证明模型质量，而是验证 Server、Worker、调度、Episode 记录、资源采样和清理逻辑在多场景压力下是否符合预期。
+
+实现逻辑是：先读取 scale_suite.json 和命令行参数，统一校验运行目录、端口范围、worker 主机、LLM 类型、数据集路径和生产保护快照；再分别生成 DSCodeBench、Math/Science 规则任务、SWE-bench Pro 压测或轨迹采集的子命令；每个子命令在隔离目录中运行，完成后收集 summary、episode observation、资源记录和清理记录；最后做场景覆盖检查、资源门限检查和生产进程未受影响检查。"""
 
 from __future__ import annotations
 
@@ -41,24 +39,6 @@ SCALE_DATASETS = {
 }
 MATH_RULE_TASKS = {"olymmath", "scitab", "pubmedqa"}
 
-
-def latency_config(section: dict[str, Any], field: str = "simulator_latency_ms") -> dict[str, float]:
-    value = section.get(field, {})
-    if isinstance(value, dict):
-        result = {
-            "mean": float(value.get("mean", 0.0)),
-            "std": float(value.get("std", 0.0)),
-            "min": float(value.get("min", 0.0)),
-            "max": float(value.get("max", 0.0)),
-        }
-    else:
-        scalar = float(value)
-        result = {"mean": scalar, "std": 0.0, "min": scalar, "max": scalar}
-    if not 0 <= result["min"] <= result["mean"] <= result["max"]:
-        raise ValueError(f"{field} must satisfy 0 <= min <= mean <= max")
-    if result["std"] < 0:
-        raise ValueError(f"{field} std must be non-negative")
-    return result
 
 
 def load_suite_config(
@@ -139,7 +119,6 @@ def load_suite_config(
         raise ValueError("DSCodeBench pressure simulator_mode must be template or trace_replay")
     if dscodebench_pressure_simulator_mode != "trace_replay":
         raise ValueError("DSCodeBench pressure pressure evidence requires simulator_mode=trace_replay")
-    latency_config(dscodebench_pressure)
     if not str(dscodebench_pressure.get("trace_corpus_path", "")).strip():
         raise ValueError("DSCodeBench pressure trace_replay requires trace_corpus_path")
     dscodebench_pressure_sampling = str(dscodebench_pressure.get("trace_sampling_strategy", ""))
@@ -165,19 +144,6 @@ def load_suite_config(
     if llm_kind not in {"simulator", "real"}:
         raise ValueError("SWE-bench Pro pressure llm_kind must be simulator or real")
     if llm_kind == "simulator":
-        latency_config(swebench_pro_pressure)
-        swebench_pro_pressure_wrong_steps = swebench_pro_pressure.get("simulator_wrong_steps", {})
-        if not (
-            0
-            <= int(swebench_pro_pressure_wrong_steps.get("min", 0))
-            <= float(swebench_pro_pressure_wrong_steps.get("mean", 0))
-            <= int(swebench_pro_pressure_wrong_steps.get("max", 0))
-        ):
-            raise ValueError("SWE-bench Pro pressure simulator wrong_steps must satisfy 0 <= min <= mean <= max")
-        if float(swebench_pro_pressure_wrong_steps.get("std", 0)) < 0:
-            raise ValueError("SWE-bench Pro pressure simulator wrong_steps std must be non-negative")
-        if not 0 <= float(swebench_pro_pressure.get("simulator_repair_success_rate", 0)) <= 1:
-            raise ValueError("SWE-bench Pro pressure simulator_repair_success_rate must be in [0, 1]")
         simulator_mode = str(swebench_pro_pressure.get("simulator_mode", "template"))
         if simulator_mode not in {"template", "trace_replay"}:
             raise ValueError("SWE-bench Pro pressure simulator_mode must be template or trace_replay")
@@ -189,6 +155,9 @@ def load_suite_config(
     concurrencies = swebench_pro_pressure.get("concurrencies")
     if not isinstance(concurrencies, list) or not concurrencies or any(int(value) <= 0 for value in concurrencies):
         raise ValueError("SWE-bench Pro pressure concurrencies must be positive integers")
+    agents_per_node = int(swebench_pro_pressure.get("agents_per_node", 1))
+    if agents_per_node <= 0:
+        raise ValueError("SWE-bench Pro pressure agents_per_node must be positive")
     if int(swebench_pro_pressure.get("instance_count", 0)) < 50:
         raise ValueError("SWE-bench Pro pressure coverage requires at least 50 sampled instances")
     for field in ("dataset_catalog", "instance_list"):
@@ -233,7 +202,6 @@ def load_suite_config(
             "every Math rule dataset/mode must submit at least "
             "workers * capacity_per_worker * min_episode_waves episodes"
         )
-    latency_config(math_rule_pressure)
     for task, task_config in math_tasks.items():
         if not isinstance(task_config, dict):
             raise ValueError(f"math_rule_pressure.tasks.{task} must be an object")
@@ -260,7 +228,6 @@ def load_suite_config(
     worker_scale_sampling = str(worker_scale.get("trace_sampling_strategy", ""))
     if worker_scale_sampling != "round_robin_episode":
         raise ValueError("worker_scale requires trace_sampling_strategy=round_robin_episode")
-    latency_config(worker_scale)
     tiers = worker_scale.get("tiers")
     if not isinstance(tiers, list) or not tiers or min(int(value) for value in tiers) < 1024:
         raise ValueError("worker_scale tiers must all be at least 1024")
@@ -348,8 +315,6 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
             "worker": args.worker_port,
             "gateway": collection_gateway_port,
             "model": swebench_pro_pressure_model_port,
-            "agent API": collection_agent_api_port,
-            "agent health": collection_agent_health_port,
         }
         for label, port in exposed_ports.items():
             if port not in ALLOWED_EXPOSED_PORTS:
@@ -365,8 +330,6 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
         "server": args.server_port,
         "model": swebench_pro_pressure_model_port,
         "Math model": math_rule_model_port,
-        "agent API": swebench_pro_pressure_agent_api_port,
-        "agent health": swebench_pro_pressure_agent_health_port,
     }
     if (
         dscodebench_pressure_workers == 1
@@ -401,6 +364,14 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
         + [int(value) for value in worker_scale.get("tiers", [])]
     )
     scale_model_port = int(worker_scale.get("model_port", args.model_port))
+    swebench_agent_api_end = swebench_pro_pressure_agent_api_port + int(swebench_pro_pressure.get("agents_per_node", 1)) - 1
+    swebench_agent_health_end = swebench_pro_pressure_agent_health_port + int(swebench_pro_pressure.get("agents_per_node", 1)) - 1
+    for label, start, end in (
+        ("agent API", swebench_pro_pressure_agent_api_port, swebench_agent_api_end),
+        ("agent health", swebench_pro_pressure_agent_health_port, swebench_agent_health_end),
+    ):
+        if not 1 <= start <= end <= 65535:
+            raise ValueError(f"{label} port range {start}-{end} is outside TCP port range")
     if worker_scale.get("enabled", False):
         if scale_model_port not in ALLOWED_EXPOSED_PORTS:
             raise ValueError(
@@ -426,12 +397,12 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
             raise ValueError(
                 f"Math model port {math_rule_model_port} overlaps the private Worker port range {start}-{end}"
             )
-        for label, port in {
-            "agent API": swebench_pro_pressure_agent_api_port,
-            "agent health": swebench_pro_pressure_agent_health_port,
-        }.items():
-            if start <= port <= end:
-                raise ValueError(f"{label} port {port} overlaps the private Worker port range {start}-{end}")
+        for label, left, right in (
+            ("agent API", swebench_pro_pressure_agent_api_port, swebench_agent_api_end),
+            ("agent health", swebench_pro_pressure_agent_health_port, swebench_agent_health_end),
+        ):
+            if max(start, left) <= min(end, right):
+                raise ValueError(f"{label} port range {left}-{right} overlaps the private Worker port range {start}-{end}")
         if start <= scale_model_port < start + max_scale_workers:
             raise ValueError(
                 f"worker-scale model port {scale_model_port} overlaps the {max_scale_workers}-Worker port range"
@@ -451,21 +422,31 @@ def validate_arguments(args: argparse.Namespace, config: dict[str, Any]) -> None
             "model": swebench_pro_pressure_model_port,
             "Math model": math_rule_model_port,
             "worker-scale model": scale_model_port,
-            "agent API": swebench_pro_pressure_agent_api_port,
-            "agent health": swebench_pro_pressure_agent_health_port,
         }.items():
             if start <= port <= end:
                 raise ValueError(f"{label} port {port} overlaps the private Gateway port range {start}-{end}")
+        for label, left, right in (
+            ("agent API", swebench_pro_pressure_agent_api_port, swebench_agent_api_end),
+            ("agent health", swebench_pro_pressure_agent_health_port, swebench_agent_health_end),
+        ):
+            if max(start, left) <= min(end, right):
+                raise ValueError(f"{label} port range {left}-{right} overlaps the private Gateway port range {start}-{end}")
     obs_start = args.obs_port
     obs_end = args.obs_port + max(int(config["swebench_pro_pressure"].get("registered_workers", 1)), max_scale_workers) - 1
     for label, port in {
         "model": swebench_pro_pressure_model_port,
         "Math model": math_rule_model_port,
-        "agent API": swebench_pro_pressure_agent_api_port,
-        "agent health": swebench_pro_pressure_agent_health_port,
     }.items():
         if obs_start <= port <= obs_end:
             raise ValueError(f"{label} port {port} overlaps the Observability port range {obs_start}-{obs_end}")
+    for label, left, right in (
+        ("agent API", swebench_pro_pressure_agent_api_port, swebench_agent_api_end),
+        ("agent health", swebench_pro_pressure_agent_health_port, swebench_agent_health_end),
+    ):
+        if max(obs_start, left) <= min(obs_end, right):
+            raise ValueError(f"{label} port range {left}-{right} overlaps the Observability port range {obs_start}-{obs_end}")
+    private_ranges.append(("Agent API", swebench_pro_pressure_agent_api_port, swebench_agent_api_end))
+    private_ranges.append(("Agent health", swebench_pro_pressure_agent_health_port, swebench_agent_health_end))
     private_ranges.append(("Observability", obs_start, obs_end))
     for left_index, (left_label, left_start, left_end) in enumerate(private_ranges):
         for right_label, right_start, right_end in private_ranges[left_index + 1:]:
@@ -508,7 +489,6 @@ def common_child_args(
 
 def dscodebench_pressure_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
     gate = config["dscodebench_pressure"]
-    latency = latency_config(gate)
     command = [
         sys.executable,
         "-m",
@@ -530,14 +510,6 @@ def dscodebench_pressure_command(args: argparse.Namespace, config: dict[str, Any
         "--plugin-ready-timeout-seconds", str(gate["plugin_ready_timeout_seconds"]),
         "--worker-register-max-attempts", str(gate["worker_register_max_attempts"]),
         "--worker-register-retry-backoff-ms", str(gate["worker_register_retry_backoff_ms"]),
-        "--simulator-latency-mean-ms", str(latency["mean"]),
-        "--simulator-latency-std-ms", str(latency["std"]),
-        "--simulator-latency-min-ms", str(latency["min"]),
-        "--simulator-latency-max-ms", str(latency["max"]),
-        "--simulator-wrong-steps-mean", str(gate["simulator_wrong_steps"]["mean"]),
-        "--simulator-wrong-steps-std", str(gate["simulator_wrong_steps"]["std"]),
-        "--simulator-wrong-steps-min", str(gate["simulator_wrong_steps"]["min"]),
-        "--simulator-wrong-steps-max", str(gate["simulator_wrong_steps"]["max"]),
         "--simulator-seed", str(gate["simulator_seed"]),
         "--simulator-mode", str(gate.get("simulator_mode", "trace_replay")),
         "--trace-corpus-path", str(gate.get("trace_corpus_path", "")),
@@ -565,7 +537,6 @@ def math_rule_pressure_command(
     artifacts: Path,
 ) -> list[str]:
     gate = config["math_rule_pressure"]
-    latency = latency_config(gate)
     command = [
         sys.executable,
         "-m",
@@ -582,10 +553,6 @@ def math_rule_pressure_command(
         "--worker-register-max-attempts", str(gate["worker_register_max_attempts"]),
         "--worker-register-retry-backoff-ms", str(gate["worker_register_retry_backoff_ms"]),
         "--simulator-seed", str(gate["simulator_seed"]),
-        "--simulator-latency-mean-ms", str(latency["mean"]),
-        "--simulator-latency-std-ms", str(latency["std"]),
-        "--simulator-latency-min-ms", str(latency["min"]),
-        "--simulator-latency-max-ms", str(latency["max"]),
         "--trace-sampling-strategy", str(gate["trace_sampling_strategy"]),
         "--evidence-boundary", str(gate["evidence_boundary"]),
         "--private-worker-port-range", args.private_worker_port_range,
@@ -620,7 +587,6 @@ def worker_scale_command(
         1,
         workers * int(gate["capacity_per_worker"]) // episode_batch_size,
     )
-    latency = latency_config(gate)
     command = [
         sys.executable,
         "-m",
@@ -639,14 +605,6 @@ def worker_scale_command(
         "--concurrent-batches", str(concurrent_batches),
         "--registration-timeout", str(gate["registration_timeout_seconds"]),
         "--batch-timeout", str(gate["batch_timeout_seconds"]),
-        "--simulator-latency-mean-ms", str(latency["mean"]),
-        "--simulator-latency-std-ms", str(latency["std"]),
-        "--simulator-latency-min-ms", str(latency["min"]),
-        "--simulator-latency-max-ms", str(latency["max"]),
-        "--simulator-wrong-steps-mean", str(gate["simulator_wrong_steps"]["mean"]),
-        "--simulator-wrong-steps-std", str(gate["simulator_wrong_steps"]["std"]),
-        "--simulator-wrong-steps-min", str(gate["simulator_wrong_steps"]["min"]),
-        "--simulator-wrong-steps-max", str(gate["simulator_wrong_steps"]["max"]),
         "--simulator-seed", str(gate["simulator_seed"]),
         "--simulator-mode", str(gate.get("simulator_mode", "trace_replay")),
         "--trace-corpus-path", str(gate.get("trace_corpus_path", "")),
@@ -670,7 +628,6 @@ def worker_scale_command(
 
 def swebench_pro_pressure_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
     gate = config["swebench_pro_pressure"]
-    latency = latency_config(gate)
     model_port = int(gate.get("model_port", args.model_port))
     gateway_port = int(gate.get("gateway_port", args.gateway_port))
     agent_api_port = int(gate.get("agent_api_port", args.agent_api_port))
@@ -691,21 +648,11 @@ def swebench_pro_pressure_command(args: argparse.Namespace, config: dict[str, An
         "--worker-capacity", str(gate.get("worker_capacity", 1)),
         "--total-episodes", str(gate.get("total_episodes", 0)),
         "--episode-batch-size", str(gate.get("episode_batch_size", 0)),
+        "--agents-per-node", str(gate.get("agents_per_node", 1)),
         "--min-scale-episode-waves", str(gate.get("min_episode_waves", 10)),
         "--fleet-supervisor-threshold", str(gate.get("fleet_supervisor_threshold", 16)),
         "--registration-timeout", str(gate.get("registration_timeout_seconds", 900)),
         "--batch-timeout", str(gate.get("batch_timeout_seconds", 1800)),
-        "--simulator-latency-ms", str(latency["mean"]),
-        "--simulator-latency-mean-ms", str(latency["mean"]),
-        "--simulator-latency-std-ms", str(latency["std"]),
-        "--simulator-latency-min-ms", str(latency["min"]),
-        "--simulator-latency-max-ms", str(latency["max"]),
-        "--simulator-wrong-steps-mean", str(gate["simulator_wrong_steps"]["mean"]),
-        "--simulator-wrong-steps-std", str(gate["simulator_wrong_steps"]["std"]),
-        "--simulator-wrong-steps-min", str(gate["simulator_wrong_steps"]["min"]),
-        "--simulator-wrong-steps-max", str(gate["simulator_wrong_steps"]["max"]),
-        "--simulator-repair-success-rate", str(gate["simulator_repair_success_rate"]),
-        "--simulator-repair-style", str(gate["simulator_repair_style"]),
         "--simulator-seed", str(gate["simulator_seed"]),
         "--simulator-mode", str(gate.get("simulator_mode", "template")),
         "--trace-corpus-path", str(gate.get("trace_corpus_path", "")),
@@ -732,7 +679,6 @@ def swebench_pro_pressure_command(args: argparse.Namespace, config: dict[str, An
 def swebench_pro_trace_collection_command(args: argparse.Namespace, config: dict[str, Any], artifacts: Path) -> list[str]:
     gate = config["swebench_pro_pressure"]
     collection = config["trace_collection"]["swebench_pro"]
-    latency = latency_config(gate)
     concurrency = int(collection["collection_concurrency"])
     trace_corpus_path = str(collection["trace_corpus_path"])
     source_model = str(collection.get("source_model", "doubao"))
@@ -762,17 +708,6 @@ def swebench_pro_trace_collection_command(args: argparse.Namespace, config: dict
         "--fleet-supervisor-threshold", str(gate.get("fleet_supervisor_threshold", 16)),
         "--registration-timeout", str(gate.get("registration_timeout_seconds", 900)),
         "--batch-timeout", str(gate.get("batch_timeout_seconds", 1800)),
-        "--simulator-latency-ms", str(latency["mean"]),
-        "--simulator-latency-mean-ms", str(latency["mean"]),
-        "--simulator-latency-std-ms", str(latency["std"]),
-        "--simulator-latency-min-ms", str(latency["min"]),
-        "--simulator-latency-max-ms", str(latency["max"]),
-        "--simulator-wrong-steps-mean", str(gate["simulator_wrong_steps"]["mean"]),
-        "--simulator-wrong-steps-std", str(gate["simulator_wrong_steps"]["std"]),
-        "--simulator-wrong-steps-min", str(gate["simulator_wrong_steps"]["min"]),
-        "--simulator-wrong-steps-max", str(gate["simulator_wrong_steps"]["max"]),
-        "--simulator-repair-success-rate", str(gate["simulator_repair_success_rate"]),
-        "--simulator-repair-style", str(gate["simulator_repair_style"]),
         "--simulator-seed", str(gate["simulator_seed"]),
         "--simulator-mode", "template",
         "--trace-source-model", source_model,
@@ -1150,8 +1085,8 @@ def parse_args(
     parser.add_argument("--model-port", type=int, default=8888)
     parser.add_argument("--obs-port", type=int, default=18002)
     parser.add_argument("--gateway-port", type=int, default=8777)
-    parser.add_argument("--agent-api-port", type=int, default=8077)
-    parser.add_argument("--agent-health-port", type=int, default=8088)
+    parser.add_argument("--agent-api-port", type=int, default=24000)
+    parser.add_argument("--agent-health-port", type=int, default=24100)
     args = parser.parse_args(argv)
     inventory = load_runtime_inventory(args.runtime_config)
     args.server_host = args.server_host or inventory.server.ssh_host

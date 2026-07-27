@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 """分布式压测公共运行时工具。
 
-这个文件只放“跨机器编排”会反复用到的基础能力：
+这个文件实现跨机器压测会反复用到的基础能力：解析 worker 节点清单，建立 SSH 连接，把 worker 分配到不同主机，检查端口是否空闲，采集源码和二进制清单，读取远端进程信息，并保护已经在线的正式 adapter-core 不被本次压测误停或误替换。
 
-1. 连接 8.130.75.157 和新 worker 主机。
-2. 检查 SSH 主机指纹，避免连错机器。
-3. 检查端口是否空闲，避免占用已有服务。
-4. 保护已经在运行的正式 adapter-core，不允许误停或误替换。
-5. 启动和停止本次压测自己创建的进程。
-
-这里不构造 episode，也不决定压测规模。Gate3/Gate4 负责业务流程，
-本文件只负责安全地在远端机器执行命令和管理进程。
-"""
+实现逻辑是：命令行入口通过 add_runtime_arguments 注入统一参数，再由 configure_from_args 建立 server 与 worker 主机连接；启动前用 protected_snapshot 记录正式进程和端口状态，用 assert_port_free/assert_ports_free 避免占用已有服务；压测期间 start_owned 只启动带有本次 run_id 标识的进程，stop_owned 只停止这些自有进程；压测结束后 assert_protected_unchanged 再次比对正式进程，确认隔离运行没有影响线上服务。"""
 
 from __future__ import annotations
 
@@ -30,11 +22,13 @@ import paramiko
 # 75.157 作为隔离 server 机器；65.20/51.129 作为真实 worker / OpenHands 容器机器。
 SERVER_HOST = "8.130.75.157"
 WORKER_HOST = "8.130.65.20"
+SECONDARY_WORKER_HOST = "8.145.51.129"
 
 # 两台机器在内网互通时使用的地址。worker 注册给 server 时要使用内网地址，
 # 不能使用 127.0.0.1，否则另一台机器访问不到。
 SERVER_PRIVATE_IP = "192.168.0.136"
 WORKER_PRIVATE_IP = "192.168.0.139"
+SECONDARY_WORKER_PRIVATE_IP = "192.168.0.138"
 
 # 分布式压测使用的固定隔离端口。它们必须提前确认空闲。
 SERVER_PORT = 8099
@@ -73,9 +67,12 @@ class WorkerNode:
 
 
 # 本次压测可用的 worker 节点列表。configure_from_args 会按 CLI 重建它。
-# 单节点用法（--worker-host/--worker-private-ip）下它始终只含一个节点，
-# 保持改造前“全局单一 worker 机”的行为。
-WORKER_NODES: list[WorkerNode] = [WorkerNode(WORKER_HOST, WORKER_PRIVATE_IP)]
+# 默认使用两台 worker 机器；如果显式传 --worker-node，则完全以命令行为准。
+DEFAULT_WORKER_NODES: tuple[WorkerNode, ...] = (
+    WorkerNode(WORKER_HOST, WORKER_PRIVATE_IP),
+    WorkerNode(SECONDARY_WORKER_HOST, SECONDARY_WORKER_PRIVATE_IP),
+)
+WORKER_NODES: list[WorkerNode] = list(DEFAULT_WORKER_NODES)
 
 
 def parse_worker_nodes(values: list[str] | None) -> list[WorkerNode]:
@@ -194,7 +191,8 @@ def configure_from_args(args: argparse.Namespace) -> None:
     SERVER_HOST = args.server_host
     SERVER_PRIVATE_IP = args.server_private_ip
     # --worker-node 可重复传入多台的 host:private_ip，传入时以它为准；
-    # 未传入时退回 --worker-host/--worker-private-ip 组成的单节点。
+    # 未传入且使用默认 worker-host/private-ip 时，使用两台默认 worker。
+    # 如果显式改了 --worker-host/--worker-private-ip，则保留单节点兼容行为。
     # WORKER_HOST/WORKER_PRIVATE_IP 仍指向第一个节点，保证只读兼容层的旧代码
     # （包括 suite preflight 和既有测试）行为不变。
     explicit_nodes = parse_worker_nodes(getattr(args, "worker_node", None))
@@ -202,6 +200,13 @@ def configure_from_args(args: argparse.Namespace) -> None:
         WORKER_NODES = explicit_nodes
         WORKER_HOST = explicit_nodes[0].host
         WORKER_PRIVATE_IP = explicit_nodes[0].private_ip
+    elif (
+        args.worker_host == DEFAULT_WORKER_NODES[0].host
+        and args.worker_private_ip == DEFAULT_WORKER_NODES[0].private_ip
+    ):
+        WORKER_NODES = list(DEFAULT_WORKER_NODES)
+        WORKER_HOST = DEFAULT_WORKER_NODES[0].host
+        WORKER_PRIVATE_IP = DEFAULT_WORKER_NODES[0].private_ip
     else:
         WORKER_HOST = args.worker_host
         WORKER_PRIVATE_IP = args.worker_private_ip

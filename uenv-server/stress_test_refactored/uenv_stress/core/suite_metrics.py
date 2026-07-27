@@ -1,9 +1,8 @@
-"""Unified aggregate metrics for scale pressure and formal stability.
+"""规模压测与稳定性验收的统一指标聚合。
 
-EpisodeObservation is the row-level fact table.  SuiteMetrics is the
-mentor-facing aggregation contract built from those rows plus authoritative
-Server logs, replay counters, resource samples, and cleanup probes.
-"""
+这个文件把底层 EpisodeObservation、Server 日志、replay 记录、worker 资源采样和清理探测结果转换成评审可读的聚合指标。它负责计算成功率、吞吐、时延分布、数据集覆盖、worker 覆盖、资源峰值、清理状态和稳定性阶段指标。
+
+实现逻辑是：先用 percentile、distribution、metric_block 等函数计算通用统计；build_scale_suite_metrics 从规模压测 summary 中提取各场景 Episode、replay、worker、资源和清理记录；parse_worker_load_log 解析 worker 负载日志；build_stability_suite_metrics 从 SQLite ledger、CSV 和资源采样中生成正式验收指标。"""
 
 from __future__ import annotations
 

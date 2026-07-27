@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Shared primitives for the 100-GPU-equivalent UEnv stability suite.
+"""正式稳定性套件的公共计算与校验工具。
 
-This module intentionally has no grpc dependency so its deterministic scheduling,
-admission, ledger and acceptance calculations can be unit-tested in isolation.
-"""
+这个文件实现稳定性验收中可独立测试的基础逻辑，包括配置校验、阶段到达率计算、计划时间生成、轨迹文件校验、轨迹延迟估计、Episode ledger、容量需求估算、CSV 写入和可用性区间分类。它不依赖 gRPC，因此这些规则可以脱离真实 Server 做单元测试。
+
+实现逻辑是：load_config/validate_config 先确认验收配置完整；phase_rate、phase_duration、scheduled_offsets 和 iter_planned_times 按阶段生成投放计划；validate_trace_file 与 verify_manifest 校验冻结轨迹和清单；EpisodeLedger 负责把 Episode 的计划、启动、完成、失败和结果路径写成可恢复记录；required_capacity 根据到达率和 P95 时延估算所需容量；classify_availability 根据健康采样判断服务不可用和恢复区间。"""
 
 from __future__ import annotations
 
@@ -42,11 +42,7 @@ TRACE_ID_KEYS = (
     "question_id",
     "id",
 )
-LATENCY_SOURCE_RECORDED = "recorded"
-LATENCY_SOURCE_EPISODE_PROXY = "observed_episode_elapsed_proxy"
-LATENCY_SOURCE_MEDIAN = "dataset_median_imputed"
-
-
+LATENCY_REPLAY_STRATEGY = "frozen_replay_wait_ms"
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -120,18 +116,15 @@ def validate_config(document: dict[str, Any]) -> None:
     replay = document.get("latency_replay")
     if not isinstance(replay, dict):
         raise ValueError("latency_replay must be configured")
-    if replay.get("strategy") != LATENCY_SOURCE_EPISODE_PROXY:
+    if replay.get("strategy") != LATENCY_REPLAY_STRATEGY:
         raise ValueError(
-            f"latency_replay.strategy must be {LATENCY_SOURCE_EPISODE_PROXY}"
+            f"latency_replay.strategy must be {LATENCY_REPLAY_STRATEGY}"
         )
-    if replay.get("missing_policy") != "dataset_model_median":
-        raise ValueError("latency_replay.missing_policy must be dataset_model_median")
-    missing_ratio = float(replay.get("max_missing_ratio", -1))
-    if not 0 <= missing_ratio <= 0.05:
-        raise ValueError("latency_replay.max_missing_ratio must be between 0 and 0.05")
-    if replay.get("multi_turn_allocation") != "completion_token_share":
+    if replay.get("missing_policy") != "fail_closed":
+        raise ValueError("latency_replay.missing_policy must be fail_closed")
+    if replay.get("multi_turn_allocation") != "pre_frozen_per_turn":
         raise ValueError(
-            "latency_replay.multi_turn_allocation must be completion_token_share"
+            "latency_replay.multi_turn_allocation must be pre_frozen_per_turn"
         )
     phases = document.get("phases", {})
     if not math.isclose(
@@ -143,9 +136,9 @@ def validate_config(document: dict[str, Any]) -> None:
         raise ValueError("phases.pressure_multiplier must be 10.0")
     if document.get("load", {}).get("rate_basis") != "100xa100_throughput_estimate":
         raise ValueError("load.rate_basis must be 100xa100_throughput_estimate")
-    if replay.get("latency_basis") != LATENCY_SOURCE_EPISODE_PROXY:
+    if replay.get("latency_basis") != LATENCY_REPLAY_STRATEGY:
         raise ValueError(
-            f"latency_replay.latency_basis must be {LATENCY_SOURCE_EPISODE_PROXY}"
+            f"latency_replay.latency_basis must be {LATENCY_REPLAY_STRATEGY}"
         )
     for name, task in tasks.items():
         expected_policy = (
@@ -269,94 +262,14 @@ def _positive_number(value: Any) -> float:
     return number if number > 0 else 0.0
 
 
-def observed_trace_latency_ms(trace: dict[str, Any]) -> tuple[float, str]:
-    """Return the recorded latency or the explicitly labelled end-to-end proxy."""
-    source_api_ms = _positive_number(trace.get("source_api_latency_ms"))
-    if source_api_ms:
-        return source_api_ms, LATENCY_SOURCE_RECORDED
-    episode_ms = _positive_number(trace.get("episode_total_ms"))
-    if not episode_ms:
-        episode_ms = sum(
-            _positive_number(turn.get("env_latency_ms"))
-            for turn in trace.get("turns", [])
-            if isinstance(turn, dict)
-        )
-    if episode_ms:
-        return episode_ms, LATENCY_SOURCE_EPISODE_PROXY
-    return 0.0, ""
-
-
-def latency_imputation_medians(
-    traces: Iterable[dict[str, Any]],
-    *,
-    max_missing_ratio: float,
-) -> dict[tuple[str, str], float]:
-    """Build per-dataset, per-source-model medians and fail closed on excess gaps."""
-    grouped: dict[tuple[str, str], list[float]] = {}
-    totals: dict[tuple[str, str], int] = {}
-    for trace in traces:
-        key = (str(trace["dataset"]), str(trace["source_model"]))
-        totals[key] = totals.get(key, 0) + 1
-        value, _source = observed_trace_latency_ms(trace)
-        if value > 0:
-            grouped.setdefault(key, []).append(value)
-    medians: dict[tuple[str, str], float] = {}
-    for key, total in totals.items():
-        values = grouped.get(key, [])
-        missing = total - len(values)
-        ratio = missing / total
-        if ratio > max_missing_ratio:
-            raise ValueError(
-                f"{key[0]}/{key[1]} latency missing ratio {ratio:.2%} "
-                f"exceeds {max_missing_ratio:.2%}"
-            )
-        if missing and not values:
-            raise ValueError(f"{key[0]}/{key[1]} has no non-zero latency proxy")
-        if values:
-            medians[key] = percentile(values, 0.50)
-    return medians
-
-
-def trace_turn_waits(
-    trace: dict[str, Any],
-    *,
-    imputation_medians: dict[tuple[str, str], float],
-) -> dict[str, Any]:
-    """Resolve one Episode proxy and distribute it across turns without token floors."""
-    total_ms, latency_source = observed_trace_latency_ms(trace)
-    if total_ms <= 0:
-        key = (str(trace["dataset"]), str(trace["source_model"]))
-        if key not in imputation_medians:
-            raise ValueError(f"no latency median available for {key[0]}/{key[1]}")
-        total_ms = imputation_medians[key]
-        latency_source = LATENCY_SOURCE_MEDIAN
-    turns = trace.get("turns")
-    if not isinstance(turns, list) or not turns:
-        raise ValueError(f"trace {trace.get('trace_id')} has no turns")
-    if len(turns) == 1:
-        waits = [total_ms / 1000.0]
-    else:
-        tokens = [
-            _positive_number(
-                turn.get("target_qwen3_tokens")
-                or turn.get("source_completion_tokens")
-            )
-            for turn in turns
-        ]
-        token_total = sum(tokens)
-        if token_total <= 0:
-            raise ValueError(
-                f"multi-turn trace {trace.get('trace_id')} has no positive completion tokens"
-            )
-        total_seconds = total_ms / 1000.0
-        waits = [total_seconds * value / token_total for value in tokens]
-        # Assign floating-point residue to the final turn so the sum is exact.
-        waits[-1] = total_seconds - sum(waits[:-1])
-    return {
-        "episode_elapsed_proxy_ms": total_ms,
-        "latency_source": latency_source,
-        "turn_proxy_wait_seconds": waits,
-    }
+def frozen_replay_wait_ms(turn: dict[str, Any]) -> tuple[float, str, float]:
+    """Read the already-frozen per-turn replay wait from a trace corpus row."""
+    wait_ms = _positive_number(turn.get("replay_wait_ms"))
+    latency_source = str(turn.get("latency_source", "")).strip()
+    episode_elapsed_proxy_ms = _positive_number(turn.get("episode_elapsed_proxy_ms"))
+    if wait_ms <= 0 or not latency_source:
+        raise ValueError("trace turn requires positive replay_wait_ms and latency_source")
+    return wait_ms, latency_source, episode_elapsed_proxy_ms
 
 
 def validate_paired_trace_order(
@@ -587,8 +500,8 @@ def validate_trace_file(
     turn_counts: list[int] = []
     latency_proxy_ms: list[float] = []
     latency_sources: dict[str, int] = {}
+    effective_replay_seconds: list[float] = []
     model_stats: dict[str, dict[str, Any]] = {}
-    traces: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as source:
         for line_number, line in enumerate(source, 1):
             if not line.strip():
@@ -608,15 +521,19 @@ def validate_trace_file(
             episode_tokens = 0
             episode_request_bytes = 0
             episode_response_bytes = 0
+            episode_replay_wait_ms = 0.0
+            episode_elapsed_proxy_ms = 0.0
             for turn_index, turn in enumerate(turns):
                 for field_name in (
                     "turn_index", "assistant_output", "source_completion_tokens",
                     "target_qwen3_tokens", "request_bytes", "response_bytes", "env_latency_ms",
+                    "replay_wait_ms", "latency_source",
                 ):
                     if field_name not in turn:
                         raise ValueError(f"{path}:{line_number} turn {turn_index} missing {field_name}")
                 if not str(turn["assistant_output"]):
                     raise ValueError(f"{path}:{line_number} turn {turn_index} has empty output")
+                replay_wait_ms, latency_source, turn_episode_proxy_ms = frozen_replay_wait_ms(turn)
                 tokens = int(turn["target_qwen3_tokens"])
                 request_bytes = int(turn["request_bytes"])
                 response_bytes = int(turn["response_bytes"])
@@ -628,12 +545,11 @@ def validate_trace_file(
                 episode_tokens += tokens
                 episode_request_bytes += request_bytes
                 episode_response_bytes += response_bytes
-            proxy_ms, latency_source = observed_trace_latency_ms(item)
-            if proxy_ms > 0:
-                latency_proxy_ms.append(proxy_ms)
+                episode_replay_wait_ms += replay_wait_ms
+                episode_elapsed_proxy_ms = max(episode_elapsed_proxy_ms, turn_episode_proxy_ms)
                 latency_sources[latency_source] = latency_sources.get(latency_source, 0) + 1
-            else:
-                latency_sources["missing"] = latency_sources.get("missing", 0) + 1
+            latency_proxy_ms.append(episode_elapsed_proxy_ms or episode_replay_wait_ms)
+            effective_replay_seconds.append(episode_replay_wait_ms / 1000.0)
             model = str(item["source_model"])
             family = source_model_family(model)
             model_record = model_stats.setdefault(
@@ -654,36 +570,18 @@ def validate_trace_file(
             model_record["episode_tokens"].append(episode_tokens)
             model_record["request_bytes"].append(episode_request_bytes)
             model_record["response_bytes"].append(episode_response_bytes)
-            if proxy_ms > 0:
-                model_record["latency_proxy_ms"].append(proxy_ms)
-            else:
-                model_record["latency_missing"] += 1
+            model_record["latency_proxy_ms"].append(
+                episode_elapsed_proxy_ms or episode_replay_wait_ms
+            )
             episode_token_counts.append(episode_tokens)
             request_byte_counts.append(episode_request_bytes)
             response_byte_counts.append(episode_response_bytes)
             turn_counts.append(len(turns))
-            traces.append(item)
             trace_ids.add(trace_id)
             valid += 1
     if valid < minimum:
         raise ValueError(f"{path} has {valid} valid traces; requires {minimum}")
-    effective_replay_seconds: list[float] = []
-    effective_latency_sources: dict[str, int] = {}
-    if max_latency_missing_ratio is not None:
-        medians = latency_imputation_medians(
-            traces, max_missing_ratio=max_latency_missing_ratio
-        )
-        for trace in traces:
-            profile = trace_turn_waits(
-                trace, imputation_medians=medians
-            )
-            effective_replay_seconds.append(
-                sum(profile["turn_proxy_wait_seconds"])
-            )
-            source = str(profile["latency_source"])
-            effective_latency_sources[source] = (
-                effective_latency_sources.get(source, 0) + 1
-            )
+    effective_latency_sources = dict(latency_sources)
     summarized_models: dict[str, Any] = {}
     for model, values in sorted(model_stats.items()):
         episodes = int(values["episodes"])

@@ -16,11 +16,10 @@
   },
   "load": {
     "mode": "mixed",
-    "arrival_mode": "constant",
-    "batch_size": 1,
+    "arrival_mode": "batch",
+    "batch_size": 64,
     "formal_arrival_segments": [
-      {"mode": "constant", "fraction": 0.9, "batch_size": 1},
-      {"mode": "batch", "fraction": 0.1, "batch_size": 64}
+      {"mode": "batch", "fraction": 1.0, "batch_size": 64}
     ],
     "allocation_share_sum": 1.0,
     "scheduler_lag_abort_seconds": 5.0,
@@ -45,11 +44,10 @@
     "UENV_MAX_STREAM_SAMPLES": 512
   },
   "latency_replay": {
-    "strategy": "observed_episode_elapsed_proxy",
-    "latency_basis": "observed_episode_elapsed_proxy",
-    "missing_policy": "dataset_model_median",
-    "max_missing_ratio": 0.05,
-    "multi_turn_allocation": "completion_token_share"
+    "strategy": "frozen_replay_wait_ms",
+    "latency_basis": "frozen_replay_wait_ms",
+    "missing_policy": "fail_closed",
+    "multi_turn_allocation": "pre_frozen_per_turn"
   },
   "phases": {
     "selfcheck_seconds": 600,

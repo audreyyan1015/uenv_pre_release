@@ -1,4 +1,8 @@
-"""Validated, secret-free host inventory for isolated stress execution."""
+"""无密钥运行主机配置解析器。
+
+这个文件读取 runtime_hosts.json，把 server 主机、worker 主机、用户名、端口和工作目录解析成类型明确的对象。它只接受不包含密码和密钥的配置，避免把敏感凭据固化到压测代码或产物中。
+
+实现逻辑是：Host dataclass 表示单台机器的连接信息，RuntimeInventory 表示完整运行清单；load_runtime_inventory 读取 JSON 后校验必需字段和类型，给缺省端口、用户名、角色和 work_dir 赋默认值，并返回后续分布式运行代码可以直接使用的结构。"""
 
 from __future__ import annotations
 

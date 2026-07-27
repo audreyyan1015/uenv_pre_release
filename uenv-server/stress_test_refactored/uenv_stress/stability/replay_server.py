@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""OpenAI-compatible, per-Episode real-trace replay with target-model delays."""
+"""OpenAI 兼容的真实轨迹 replay 服务。
+
+这个文件把已冻结的真实模型/UEnv 轨迹转换为本地可控的 LLM 服务，用于稳定性验收阶段重复播放相同请求响应，并按目标模型时延注入等待时间。它使验收可以考察调度和系统稳定性，而不是受到实时外部模型波动影响。
+
+实现逻辑是：ReplayService 加载 trace corpus，按 Episode、dataset、pair_id 或顺序索引选择轨迹；handle_client 读取 OpenAI 兼容 HTTP 请求，匹配对应 turn，等待 trace turn 中冻结的 replay_wait_ms，然后返回真实响应内容和 token 元数据；服务同时维护请求数、命中数、缺失数、时延等计数，供健康检查和验收报告使用。"""
 
 from __future__ import annotations
 
@@ -15,13 +19,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from uenv_stress.core.stability_test_common import (
-    LATENCY_SOURCE_MEDIAN,
-    latency_imputation_medians,
+    frozen_replay_wait_ms,
     percentile,
     select_trace_for_sequence,
     source_model_family,
     trace_pair_id,
-    trace_turn_waits,
     validate_paired_trace_order,
 )
 
@@ -30,7 +32,6 @@ class ReplayService:
     def __init__(self, config: dict[str, Any], *, run_seed: int, log_path: Path) -> None:
         self.run_seed = run_seed
         self.task_config = config["tasks"]
-        self.max_missing_ratio = float(config["latency_replay"]["max_missing_ratio"])
         self.traces: dict[str, list[dict[str, Any]]] = {}
         self.trace_by_id: dict[str, dict[str, dict[str, Any]]] = {}
         self.waits_by_id: dict[str, dict[str, dict[str, Any]]] = {}
@@ -54,14 +55,21 @@ class ReplayService:
                     for trace in self.traces[task]
                 ):
                     raise ValueError(f"{task} must contain Doubao traces only")
-            medians = latency_imputation_medians(
-                self.traces[task],
-                max_missing_ratio=self.max_missing_ratio,
-            )
             self.waits_by_id[task] = {
-                str(trace["trace_id"]): trace_turn_waits(
-                    trace, imputation_medians=medians
-                )
+                str(trace["trace_id"]): {
+                    "turn_proxy_wait_seconds": [
+                        frozen_replay_wait_ms(turn)[0] / 1000.0
+                        for turn in trace["turns"]
+                    ],
+                    "latency_sources": [
+                        frozen_replay_wait_ms(turn)[1]
+                        for turn in trace["turns"]
+                    ],
+                    "episode_elapsed_proxy_ms": [
+                        frozen_replay_wait_ms(turn)[2]
+                        for turn in trace["turns"]
+                    ],
+                }
                 for trace in self.traces[task]
             }
         self.trace_cursors = {task: 0 for task in self.traces}
@@ -214,7 +222,11 @@ class ReplayService:
         wait_seconds = float(
             wait_profile["turn_proxy_wait_seconds"][turn_index]
         )
-        self.latency_source_usage[task][str(wait_profile["latency_source"])] += 1
+        latency_source = str(wait_profile["latency_sources"][turn_index])
+        episode_elapsed_proxy_ms = float(
+            wait_profile["episode_elapsed_proxy_ms"][turn_index]
+        )
+        self.latency_source_usage[task][latency_source] += 1
         self.wait_samples[task].append(wait_seconds)
         self.token_samples[task].append(token_count)
         source_model = str(trace["source_model"])
@@ -245,8 +257,8 @@ class ReplayService:
                 trace_slot, len(self.traces[task]),
                 self.task_config[task]["sampling_policy"],
                 sequence, trace["source_model"], trace_pair_id(trace),
-                wait_profile["latency_source"],
-                f"{float(wait_profile['episode_elapsed_proxy_ms']):.6f}",
+                latency_source,
+                f"{episode_elapsed_proxy_ms:.6f}",
                 f"{wait_seconds:.9f}",
                 token_count,
                 len(body), response_bytes, f"{wait_seconds:.9f}",
@@ -305,11 +317,6 @@ class ReplayService:
                         }
                         for model in sorted(self.model_token_samples[task])
                     },
-                    "imputed_turns": int(
-                        self.latency_source_usage[task].get(
-                            LATENCY_SOURCE_MEDIAN, 0
-                        )
-                    ),
                 }
                 for task in sorted(self.traces)
             }

@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""分布式 SWE-bench Pro pressure：真实 SWE/OpenHands 容器压测。
+"""分布式 SWE-bench Pro/OpenHands 容器压测。
 
-运行位置说明：
-- 隔离 server 启动在 8.130.75.157:8099。
-- SWE worker、OpenHands agent 和 Docker 容器启动在 worker 节点（默认单台；
-  可用 --worker-node 指定多台，worker 按索引 round-robin 分摊到各节点）。
-- 默认顺序跑 1 个容器并发、2 个容器并发。
-- 不复用正式 server，也不停止正式 server。
-"""
+这个文件实现真实 SWE worker、OpenHands agent 和 Docker 容器参与的 SWE-bench Pro 压力测试。它用于验证 UEnv 在复杂容器型任务下的调度、容器并发、镜像准备、轨迹采集/冻结、worker 覆盖、资源占用和清理能力。
+
+实现逻辑是：先检查 SWE-bench Pro 轨迹语料、实例列表、Docker 镜像和 worker 主机端口；把 server/worker 配置与公共代码打包发送到各 worker；按容器并发和 worker 数启动隔离 server、SWE worker、OpenHands agent 和必要容器；run_one 为指定实例构造 Episode 并调用 UEnv；采集阶段会把真实 OpenHands/LLM 交互整理为可 replay 的 trace corpus，压测阶段则验证这些轨迹；脚本统计完成 worker 覆盖、容器清理、镜像存在性、资源峰值和 Episode 结果，结束时只清理本次 run_id 创建的进程和容器。"""
 
 from __future__ import annotations
 
@@ -32,8 +28,8 @@ from uenv_stress.core import distributed_runtime as base
 GATEWAY_PORT = 8777
 
 # OpenHands runner 自己的 API 和健康检查端口，只监听 worker 本机。
-AGENT_API_PORT = 18004
-AGENT_HEALTH_PORT = 18005
+AGENT_API_PORT = 24000
+AGENT_HEALTH_PORT = 24100
 
 DEFAULT_INSTANCE_ID = "astropy__astropy-7166"
 DEFAULT_KNOWN_IMAGE = "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest"
@@ -166,22 +162,11 @@ from urllib.parse import parse_qs, urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
-parser.add_argument("--latency-ms", type=float, default=250)
-parser.add_argument("--latency-mean-ms", type=float, default=250)
-parser.add_argument("--latency-std-ms", type=float, default=75)
-parser.add_argument("--latency-min-ms", type=float, default=0)
-parser.add_argument("--latency-max-ms", type=float, default=2000)
 parser.add_argument("--zero-latency", action="store_true")
 parser.add_argument("--model", default="openai/uenv-swe-simulator")
 parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
 parser.add_argument("--trace-corpus-path", default="")
 parser.add_argument("--trace-sampling-strategy", choices=("round_robin_episode",), default="round_robin_episode")
-parser.add_argument("--wrong-steps-mean", type=float, default=2)
-parser.add_argument("--wrong-steps-std", type=float, default=1)
-parser.add_argument("--wrong-steps-min", type=int, default=0)
-parser.add_argument("--wrong-steps-max", type=int, default=5)
-parser.add_argument("--repair-success-rate", type=float, default=0.35)
-parser.add_argument("--repair-style", choices=("plausible_patch", "noisy_patch", "noop"), default="plausible_patch")
 parser.add_argument("--seed", type=int, default=20260720)
 args = parser.parse_args()
 calls = 0
@@ -285,24 +270,7 @@ def request_fingerprint(document, episode_id=""):
 
 
 def profile_for(task_key, instance_id):
-    rng = deterministic_rng(task_key)
-    wrong = int(round(rng.normalvariate(args.wrong_steps_mean, args.wrong_steps_std)))
-    wrong = clamp(wrong, args.wrong_steps_min, args.wrong_steps_max)
-    success = rng.random() < args.repair_success_rate
-    return {
-        "instance_id": instance_id,
-        "wrong_steps": wrong,
-        "repair_success": success,
-        "repair_style": args.repair_style,
-    }
-
-
-def sample_latency(label):
-    if args.zero_latency:
-        return 0.0
-    rng = deterministic_rng(f"{label}:latency")
-    latency = rng.normalvariate(args.latency_mean_ms, args.latency_std_ms)
-    return float(clamp(latency, args.latency_min_ms, args.latency_max_ms))
+    return {"instance_id": instance_id}
 
 
 def trace_identity(episode, slot):
@@ -371,7 +339,6 @@ class Handler(BaseHTTPRequestHandler):
                 replay_cursor = trace_cursor
                 replay_selection_counts = dict(trace_selection_counts)
                 exhausted_turn_reuses = trace_exhausted_turn_reuses
-            wrong_steps = [int(profile["wrong_steps"]) for profile in profiles.values()]
             latencies = list(observed_latencies_ms)
             self.send_json(200, {
                 "calls": calls,
@@ -379,10 +346,9 @@ class Handler(BaseHTTPRequestHandler):
                 "trace_replay_hits": trace_replay_hits,
                 "trace_replay_misses": trace_replay_misses,
                 "model": args.model,
-                "latency_ms": args.latency_ms,
-                "observed_latency_ms": numeric_stats(latencies),
+                "observed_replay_wait_ms": numeric_stats(latencies),
                 "simulator": {
-                    "kind": "swebench-trace-replay" if args.simulator_mode == "trace_replay" else "swebench-wrong-steps-repair-quality",
+                    "kind": "swebench-trace-replay" if args.simulator_mode == "trace_replay" else "swebench-template-compatibility",
                     "mode": args.simulator_mode,
                     "seed": args.seed,
                     "trace_corpus_path": args.trace_corpus_path,
@@ -399,21 +365,6 @@ class Handler(BaseHTTPRequestHandler):
                     "exhausted_turn_reuses": exhausted_turn_reuses,
                     "episode_binding": "one assigned trajectory for the Episode lifetime",
                     "zero_latency": args.zero_latency,
-                    "latency_distribution_ms": {
-                        "mean": args.latency_mean_ms,
-                        "std": args.latency_std_ms,
-                        "min": args.latency_min_ms,
-                        "max": args.latency_max_ms,
-                    },
-                    "wrong_steps": {
-                        "mean": args.wrong_steps_mean,
-                        "std": args.wrong_steps_std,
-                        "min": args.wrong_steps_min,
-                        "max": args.wrong_steps_max,
-                        "sampled": numeric_stats(wrong_steps),
-                    },
-                    "repair_success_rate": args.repair_success_rate,
-                    "repair_style": args.repair_style,
                 },
                 "profiles": profiles,
                 "attempts": attempts,
@@ -498,43 +449,24 @@ class Handler(BaseHTTPRequestHandler):
         else:
             if args.simulator_mode == "trace_replay":
                 trace_replay_misses += 1
-            response_ids = []
-            logprobs = []
-            sleep_ms = sample_latency(f"{task_key}:{attempt}:miss")
+                self.send_json(503, {
+                    "error": {
+                        "message": "SWE-bench Pro trace replay miss: no real LLM output available",
+                        "instance_id": instance_id,
+                        "attempt": attempt,
+                    }
+                })
+                return
+            response_ids = [1000 + calls]
+            logprobs = [-0.1]
+            sleep_ms = 0.0
             trace_source = {}
-            if attempt <= int(profile["wrong_steps"]):
-                content = (
-                    "I will first inspect the repository and reproduce the failure before "
-                    "editing. Do not guess a patch yet; gather the relevant files, tests, "
-                    "and stack traces, then continue."
-                )
-                phase = "wrong_step"
-                simulated_reward = 0.0
-            elif profile["repair_success"] and args.repair_style != "noop":
-                content = (
-                    "Apply the smallest repository-local fix for this SWE-bench instance. "
-                    "Focus on the failing behavior described in the issue, update only the "
-                    "minimal source file, run the most relevant regression test, and finish "
-                    "with the exact files changed and test result."
-                )
-                phase = "repair_success"
-                simulated_reward = 1.0
-            elif args.repair_style == "noisy_patch":
-                content = (
-                    "Make a plausible but conservative change near the suspected failure "
-                    "site, then run the relevant test. If the test still fails, summarize "
-                    "the remaining gap instead of broadening the patch."
-                )
-                phase = "repair_low_quality"
-                simulated_reward = 0.25
-            else:
-                content = (
-                    "The current bounded simulator iteration cannot produce a confident "
-                    "repair. Leave the repository unchanged after inspection and report "
-                    "the unresolved failure mode."
-                )
-                phase = "repair_failure"
-                simulated_reward = 0.0
+            content = (
+                "Trace replay is required for scale evidence; template mode is "
+                "kept only for local compatibility."
+            )
+            phase = "template_compatibility"
+            simulated_reward = 0.0
         with lock:
             observed_latencies_ms.append(float(sleep_ms))
         time.sleep(sleep_ms / 1000)
@@ -566,9 +498,7 @@ class Handler(BaseHTTPRequestHandler):
                 "task_key": task_key,
                 "instance_id": instance_id,
                 "attempt": attempt,
-                "wrong_steps": profile["wrong_steps"],
                 "phase": phase,
-                "repair_success": profile["repair_success"],
                 "simulated_reward": simulated_reward,
                 "simulator_mode": args.simulator_mode,
                 "trace_source": trace_source,
@@ -1720,18 +1650,8 @@ class RunArgs:
         instance_list: str,
         instance_count: int,
         instance_seed: int,
-        simulator_latency_ms: float,
-        simulator_latency_mean_ms: float,
-        simulator_latency_std_ms: float,
-        simulator_latency_min_ms: float,
-        simulator_latency_max_ms: float,
         simulator_zero_latency: bool,
-        simulator_wrong_steps_mean: float,
-        simulator_wrong_steps_std: float,
-        simulator_wrong_steps_min: int,
-        simulator_wrong_steps_max: int,
-        simulator_repair_success_rate: float,
-        simulator_repair_style: str,
+        agents_per_node: int,
         simulator_seed: int,
         simulator_mode: str,
         trace_corpus_path: str,
@@ -1764,18 +1684,8 @@ class RunArgs:
         self.instance_list = instance_list
         self.instance_count = instance_count
         self.instance_seed = instance_seed
-        self.simulator_latency_ms = simulator_latency_ms
-        self.simulator_latency_mean_ms = simulator_latency_mean_ms
-        self.simulator_latency_std_ms = simulator_latency_std_ms
-        self.simulator_latency_min_ms = simulator_latency_min_ms
-        self.simulator_latency_max_ms = simulator_latency_max_ms
         self.simulator_zero_latency = simulator_zero_latency
-        self.simulator_wrong_steps_mean = simulator_wrong_steps_mean
-        self.simulator_wrong_steps_std = simulator_wrong_steps_std
-        self.simulator_wrong_steps_min = simulator_wrong_steps_min
-        self.simulator_wrong_steps_max = simulator_wrong_steps_max
-        self.simulator_repair_success_rate = simulator_repair_success_rate
-        self.simulator_repair_style = simulator_repair_style
+        self.agents_per_node = agents_per_node
         self.simulator_seed = simulator_seed
         self.simulator_mode = simulator_mode
         self.trace_corpus_path = trace_corpus_path
@@ -1810,18 +1720,8 @@ def run_one(
     instance_list: str,
     instance_count: int,
     instance_seed: int,
-    simulator_latency_ms: float,
-    simulator_latency_mean_ms: float,
-    simulator_latency_std_ms: float,
-    simulator_latency_min_ms: float,
-    simulator_latency_max_ms: float,
     simulator_zero_latency: bool,
-    simulator_wrong_steps_mean: float,
-    simulator_wrong_steps_std: float,
-    simulator_wrong_steps_min: int,
-    simulator_wrong_steps_max: int,
-    simulator_repair_success_rate: float,
-    simulator_repair_style: str,
+    agents_per_node: int,
     simulator_seed: int,
     simulator_mode: str,
     trace_corpus_path: str,
@@ -1871,18 +1771,8 @@ def run_one(
         instance_list=instance_list,
         instance_count=instance_count,
         instance_seed=instance_seed,
-        simulator_latency_ms=simulator_latency_ms,
-        simulator_latency_mean_ms=simulator_latency_mean_ms,
-        simulator_latency_std_ms=simulator_latency_std_ms,
-        simulator_latency_min_ms=simulator_latency_min_ms,
-        simulator_latency_max_ms=simulator_latency_max_ms,
         simulator_zero_latency=simulator_zero_latency,
-        simulator_wrong_steps_mean=simulator_wrong_steps_mean,
-        simulator_wrong_steps_std=simulator_wrong_steps_std,
-        simulator_wrong_steps_min=simulator_wrong_steps_min,
-        simulator_wrong_steps_max=simulator_wrong_steps_max,
-        simulator_repair_success_rate=simulator_repair_success_rate,
-        simulator_repair_style=simulator_repair_style,
+        agents_per_node=agents_per_node,
         simulator_seed=simulator_seed,
         simulator_mode=simulator_mode,
         trace_corpus_path=trace_corpus_path,
@@ -1907,7 +1797,7 @@ def run_one(
     if not password:
         raise SystemExit("UENV_PASS is required")
 
-    run_id = f"swebench-pro-pressure-{args.parallel_mode}-c{args.concurrency}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    run_id = f"swebench-pro-pressure-{args.parallel_mode}-a{args.agents_per_node}-c{args.concurrency}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     server_run = f"/tmp/uenv-{run_id}"
     worker_run = f"/opt/uenv-stress/runs/{run_id}"
     worker_prefix = f"stress-{run_id}-worker-"
@@ -1921,9 +1811,27 @@ def run_one(
     # 没有分到 worker 的节点不启动 worker 侧服务（agent 没有本机 gateway 可用）。
     # worker 0 固定落在 nodes[0]，所以 nodes[0] 一定是 active。
     active_nodes = [node for node in nodes if node_worker_indexes[node.host]]
-    # 每个节点的 OpenHands runner 需要唯一 agent_id；单节点时保持 agent-0000。
-    agent_ids = {node.host: f"stress-{run_id}-agent-{position:04d}" for position, node in enumerate(nodes)}
-    agent_id = agent_ids[nodes[0].host]
+    # 每个节点可启动多个 OpenHands runner。agent_id、API/health 端口、日志和
+    # runs 目录都按节点和 agent index 展开，避免多个 agent 抢同一本机资源。
+    agent_slots_by_node = {
+        node.host: [
+            {
+                "agent_index": agent_index,
+                "agent_id": f"stress-{run_id}-agent-{node_position:04d}-{agent_index:02d}",
+                "api_port": AGENT_API_PORT + agent_index,
+                "health_port": AGENT_HEALTH_PORT + agent_index,
+                "runs_dir": f"{worker_run}/openhands/agent-{agent_index:02d}",
+                "log_path": f"{worker_run}/agent-{agent_index:02d}.log",
+            }
+            for agent_index in range(args.agents_per_node)
+        ]
+        for node_position, node in enumerate(nodes)
+    }
+    agent_ids = {
+        node.host: [slot["agent_id"] for slot in agent_slots_by_node[node.host]]
+        for node in nodes
+    }
+    agent_id = agent_ids[nodes[0].host][0]
     worker_ports = parse_private_port_range(
         args.private_worker_port_range,
         args.registered_workers,
@@ -1937,12 +1845,16 @@ def run_one(
         label="private-gateway-port-range",
     )
     obs_ports = [base.OBS_PORT + index for index in range(args.registered_workers)]
-    fixed_worker_ports = [AGENT_API_PORT, AGENT_HEALTH_PORT, base.MODEL_PORT]
+    agent_api_ports = [AGENT_API_PORT + index for index in range(args.agents_per_node)]
+    agent_health_ports = [AGENT_HEALTH_PORT + index for index in range(args.agents_per_node)]
+    fixed_worker_ports = [*agent_api_ports, *agent_health_ports, base.MODEL_PORT]
     port_groups = {
         "worker": set(worker_ports),
         "gateway": set(gateway_ports),
         "observability": set(obs_ports),
-        "agent/model": set(fixed_worker_ports),
+        "agent API": set(agent_api_ports),
+        "agent health": set(agent_health_ports),
+        "agent/model": {base.MODEL_PORT},
     }
     overlaps: list[dict[str, object]] = []
     group_items = list(port_groups.items())
@@ -1959,6 +1871,13 @@ def run_one(
     resolved_episode_batch_size = args.episode_batch_size or args.concurrency
     if resolved_episode_batch_size <= 0:
         raise ValueError("episode batch size must resolve to a positive value")
+    total_agent_count = len(active_nodes) * args.agents_per_node
+    total_agent_container_concurrency = total_agent_count * args.concurrency
+    expected_container_concurrency = min(
+        total_agent_container_concurrency,
+        resolved_episode_batch_size,
+        target_episodes,
+    )
     args.artifacts.mkdir(parents=True, exist_ok=True)
     local_run = args.artifacts / run_id
     local_run.mkdir()
@@ -1968,6 +1887,9 @@ def run_one(
         f"server={base.SERVER_HOST}:{base.SERVER_PORT} "
         f"worker_nodes={json.dumps({node.host: node_worker_indexes[node.host] for node in nodes})} "
         f"registered_workers={args.registered_workers} "
+        f"agents_per_node={args.agents_per_node} "
+        f"agent_max_concurrent={args.concurrency} "
+        f"total_agent_container_concurrency={total_agent_container_concurrency} "
         f"worker_ports={worker_ports[0]}-{worker_ports[-1]} "
         f"gateway_ports={gateway_ports[0]}-{gateway_ports[-1]} "
         f"obs_ports={obs_ports[0]}-{obs_ports[-1]}",
@@ -1979,7 +1901,7 @@ def run_one(
     server_pid = None
     # PID 和容器集合是每台机器各自的资源，必须按节点记录（键为节点 host）；
     # 路径类字符串在各节点相同，保持标量以兼容单节点时的 manifest 结构。
-    agent_pids: dict[str, int | None] = {node.host: None for node in nodes}
+    agent_pids: dict[str, list[int]] = {node.host: [] for node in nodes}
     monitor_pids: dict[str, int | None] = {node.host: None for node in nodes}
     llm_simulator_pids: dict[str, int | None] = {node.host: None for node in nodes}
     fleet_supervisor_pids: dict[str, int | None] = {node.host: None for node in nodes}
@@ -2142,18 +2064,7 @@ def run_one(
                     " ".join([
                         "python3", "-B", f"{worker_run}/llm_simulator.py",
                         "--port", str(base.MODEL_PORT),
-                        "--latency-ms", str(args.simulator_latency_ms),
-                        "--latency-mean-ms", str(args.simulator_latency_mean_ms),
-                        "--latency-std-ms", str(args.simulator_latency_std_ms),
-                        "--latency-min-ms", str(args.simulator_latency_min_ms),
-                        "--latency-max-ms", str(args.simulator_latency_max_ms),
                         *(["--zero-latency"] if args.simulator_zero_latency else []),
-                        "--wrong-steps-mean", str(args.simulator_wrong_steps_mean),
-                        "--wrong-steps-std", str(args.simulator_wrong_steps_std),
-                        "--wrong-steps-min", str(args.simulator_wrong_steps_min),
-                        "--wrong-steps-max", str(args.simulator_wrong_steps_max),
-                        "--repair-success-rate", str(args.simulator_repair_success_rate),
-                        "--repair-style", args.simulator_repair_style,
                         "--seed", str(args.simulator_seed),
                         "--simulator-mode", args.simulator_mode,
                         "--trace-corpus-path", base.q(effective_trace_corpus_path),
@@ -2457,7 +2368,6 @@ def run_one(
             "PYTHONPATH": agent_pythonpath,
             "UENV_SERVER_ENDPOINT": f"{base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}",
             "OPENHANDS_AGENT_POLL": "1",
-            "OPENHANDS_AGENT_ID": agent_id,
             "OPENHANDS_AGENT_POOL_ID": "openhands-distributed-smoke",
             "OPENHANDS_AGENT_BRIDGE_ID": "uenv-agent-openhands",
             "OPENHANDS_AGENT_BRIDGE_VERSION": "1.0.0",
@@ -2465,9 +2375,6 @@ def run_one(
             "OPENHANDS_POLL_INTERVAL_SEC": "0.2",
             "OPENHANDS_HEARTBEAT_INTERVAL_SEC": "2",
             "OPENHANDS_RUN_SCRIPT": f"{worker_run}/bundle/uenv-server/stress_test/run_openhands_stress.sh",
-            "OPENHANDS_RUNS_DIR": f"{worker_run}/openhands",
-            "OPENHANDS_RUNNER_API_BIND": f"127.0.0.1:{AGENT_API_PORT}",
-            "OPENHANDS_RUNNER_HEALTH_BIND": f"127.0.0.1:{AGENT_HEALTH_PORT}",
             "OPENHANDS_SDK_DIR": "/opt/openhands/benchmarks/vendor/software-agent-sdk",
             "OPENHANDS_BENCHMARKS_DIR": "/opt/openhands/benchmarks",
             "OPENHANDS_PYTHON": "/opt/openhands/benchmarks/.venv/bin/python",
@@ -2484,19 +2391,27 @@ def run_one(
         }
         if args.mode == "llm":
             agent_env["OPENHANDS_LLM_CONFIG"] = effective_llm_config
-        # 每个 active 节点各跑一个 OpenHands runner：只绑定本机 127.0.0.1 的
-        # API/health 端口（不同机器间端口不冲突），使用各自唯一的 agent_id。
+        # 每个 active 节点各跑 agents_per_node 个 OpenHands runner：每个 runner
+        # 只绑定本机 127.0.0.1 的独立 API/health 端口，并使用唯一 agent_id。
         for node in active_nodes:
             client = worker_clients[node.host]
-            node_agent_env = {**agent_env, "OPENHANDS_AGENT_ID": agent_ids[node.host]}
-            agent_command = "env " + " ".join(
-                f"{key}={base.q(value)}" for key, value in node_agent_env.items()
-            ) + f" /opt/openhands/benchmarks/.venv/bin/python -B {base.q(worker_run)}/bundle/scripts/openhands/openhands_runner.py"
-            agent_pids[node.host] = base.start_owned(
-                client, agent_command, f"{worker_run}/agent.log", OPENHANDS_PYTHON,
-                f"{worker_run}/bundle/scripts/openhands/openhands_runner.py",
-            )
-            wait_for_log(client, f"{worker_run}/agent.log", "registered agent_id=", 120)
+            for slot in agent_slots_by_node[node.host]:
+                node_agent_env = {
+                    **agent_env,
+                    "OPENHANDS_AGENT_ID": str(slot["agent_id"]),
+                    "OPENHANDS_RUNS_DIR": str(slot["runs_dir"]),
+                    "OPENHANDS_RUNNER_API_BIND": f"127.0.0.1:{slot['api_port']}",
+                    "OPENHANDS_RUNNER_HEALTH_BIND": f"127.0.0.1:{slot['health_port']}",
+                }
+                agent_command = "env " + " ".join(
+                    f"{key}={base.q(value)}" for key, value in node_agent_env.items()
+                ) + f" /opt/openhands/benchmarks/.venv/bin/python -B {base.q(worker_run)}/bundle/scripts/openhands/openhands_runner.py"
+                pid = base.start_owned(
+                    client, agent_command, str(slot["log_path"]), OPENHANDS_PYTHON,
+                    f"{worker_run}/bundle/scripts/openhands/openhands_runner.py",
+                )
+                agent_pids[node.host].append(pid)
+                wait_for_log(client, str(slot["log_path"]), "registered agent_id=", 120)
         base.assert_protected_unchanged(server, before_protected)
 
         # 资源监控在提交 episode 前启动，确保能观测到容器并发峰值。
@@ -2521,7 +2436,8 @@ def run_one(
                 "worker": (worker_pids_by_node[node.host][0][0] if worker_pids_by_node[node.host] else None),
                 "workers": [pid for pid, _ in worker_pids_by_node[node.host]],
                 "fleet_supervisor": fleet_supervisor_pids[node.host],
-                "agent": agent_pids[node.host],
+                "agent": (agent_pids[node.host][0] if agent_pids[node.host] else None),
+                "agents": agent_pids[node.host],
                 "monitor": monitor_pids[node.host],
                 "llm_simulator": llm_simulator_pids[node.host],
             }
@@ -2547,7 +2463,13 @@ def run_one(
             "parallel_mode": args.parallel_mode,
             "gate": 4,
             "scale_purpose": scale_purpose,
-            "container_concurrency": args.concurrency,
+            "container_concurrency": total_agent_container_concurrency,
+            "expected_container_concurrency": expected_container_concurrency,
+            "agent_count_per_node": args.agents_per_node,
+            "agent_count_total": total_agent_count,
+            "agent_max_concurrent": args.concurrency,
+            "agent_api_ports": agent_api_ports,
+            "agent_health_ports": agent_health_ports,
             "registered_workers": args.registered_workers,
             "worker_capacity": args.worker_capacity,
             "worker_slots": args.registered_workers * args.worker_capacity,
@@ -2574,9 +2496,13 @@ def run_one(
             "obs_ports": obs_ports,
             "agent_id": (
                 agent_id
-                if single_node
+                if single_node and args.agents_per_node == 1
                 else {node.host: agent_ids[node.host] for node in active_nodes}
             ),
+            "agent_slots": {
+                node.host: agent_slots_by_node[node.host]
+                for node in active_nodes
+            },
             "dataset": {
                 "name": "SWE-bench Pro",
                 "sampling": instance_sampling,
@@ -2591,23 +2517,11 @@ def run_one(
             "execution_boundary": "real OpenHands runner + real UEnv AgentControl/runtime gateway/container path; only the LLM endpoint is simulated when llm_kind=simulator",
             "llm_simulator": {
                 "enabled": args.llm_kind == "simulator",
-                "latency_ms": {
-                    "legacy": args.simulator_latency_ms,
-                    "mean": args.simulator_latency_mean_ms,
-                    "std": args.simulator_latency_std_ms,
-                    "min": args.simulator_latency_min_ms,
-                    "max": args.simulator_latency_max_ms,
+                "replay_wait_ms": {
+                    "source": "frozen trace turn replay_wait_ms",
                     "zero_latency": args.simulator_zero_latency,
-                    "miss_policy": "normal_distribution_when_trace_replay_misses",
+                    "miss_policy": "trace replay miss fails the run",
                 },
-                "wrong_steps": {
-                    "mean": args.simulator_wrong_steps_mean,
-                    "std": args.simulator_wrong_steps_std,
-                    "min": args.simulator_wrong_steps_min,
-                    "max": args.simulator_wrong_steps_max,
-                },
-                "repair_success_rate": args.simulator_repair_success_rate,
-                "repair_style": args.simulator_repair_style,
                 "seed": args.simulator_seed,
                 "mode": args.simulator_mode,
                 "trace_corpus_path": args.trace_corpus_path,
@@ -2648,7 +2562,7 @@ def run_one(
             "--driver", f"{worker_run}/bundle/integrations/openhands/run_swebenchpro_official.py",
             "--catalog", f"{worker_run}/bundle/config/swe/pro.json",
             "--output", f"{server_run}/result.json",
-            "--concurrency", str(args.concurrency),
+            "--concurrency", str(total_agent_container_concurrency),
             "--mode", args.mode,
             "--parallel-mode", args.parallel_mode,
             "--max-steps", str(args.max_steps),
@@ -2874,9 +2788,9 @@ def run_one(
             for host, summary in resource_summaries_by_node.items()
         }
         peak_containers = sum(peak_containers_by_node.values())
-        if peak_containers < args.concurrency:
+        if peak_containers < expected_container_concurrency:
             raise RuntimeError(
-                f"did not observe requested real container concurrency: requested={args.concurrency} "
+                f"did not observe requested real container concurrency: requested={expected_container_concurrency} "
                 f"peak={peak_containers} per_node={peak_containers_by_node}"
             )
         resource_summary = resource_summaries_by_node[nodes[0].host]
@@ -2911,9 +2825,13 @@ def run_one(
         resource_observations = {
             "observation_only": True,
             "container_concurrency": {
-                "requested": args.concurrency,
+                "requested": expected_container_concurrency,
+                "agent_capacity": total_agent_container_concurrency,
+                "agent_count_total": total_agent_count,
+                "agent_count_per_node": args.agents_per_node,
+                "agent_max_concurrent": args.concurrency,
                 "peak_running_containers": peak_containers,
-                "observed_requested_concurrency": peak_containers >= args.concurrency,
+                "observed_requested_concurrency": peak_containers >= expected_container_concurrency,
             },
             "worker_host": (
                 resource_summary
@@ -3044,11 +2962,20 @@ def run_one(
                         cleanup_errors.append(str(exc))
             for pid, exe, fragment in (
                 (monitor_pids[node.host], "/usr/bin/python3.12", f"{worker_run}/resource_monitor.py"),
-                (agent_pids[node.host], OPENHANDS_PYTHON, f"{worker_run}/bundle/scripts/openhands/openhands_runner.py"),
                 (llm_simulator_pids[node.host], "/usr/bin/python3.12", f"{worker_run}/llm_simulator.py"),
             ):
                 try:
                     base.stop_owned(client, pid, exe, fragment)
+                except Exception as exc:
+                    cleanup_errors.append(str(exc))
+            for pid in reversed(agent_pids[node.host]):
+                try:
+                    base.stop_owned(
+                        client,
+                        pid,
+                        OPENHANDS_PYTHON,
+                        f"{worker_run}/bundle/scripts/openhands/openhands_runner.py",
+                    )
                 except Exception as exc:
                     cleanup_errors.append(str(exc))
             try:
@@ -3141,22 +3068,8 @@ def main() -> int:
     parser.add_argument("--instance-seed", type=int, default=20260720)
     parser.add_argument("--dataset-catalog", required=True)
     parser.add_argument("--instance-list", required=True)
-    parser.add_argument("--simulator-latency-ms", type=float, default=250)
-    parser.add_argument("--simulator-latency-mean-ms", type=float, default=250)
-    parser.add_argument("--simulator-latency-std-ms", type=float, default=75)
-    parser.add_argument("--simulator-latency-min-ms", type=float, default=0)
-    parser.add_argument("--simulator-latency-max-ms", type=float, default=2000)
     parser.add_argument("--simulator-zero-latency", action="store_true")
-    parser.add_argument("--simulator-wrong-steps-mean", type=float, default=2)
-    parser.add_argument("--simulator-wrong-steps-std", type=float, default=1)
-    parser.add_argument("--simulator-wrong-steps-min", type=int, default=0)
-    parser.add_argument("--simulator-wrong-steps-max", type=int, default=5)
-    parser.add_argument("--simulator-repair-success-rate", type=float, default=0.35)
-    parser.add_argument(
-        "--simulator-repair-style",
-        choices=("plausible_patch", "noisy_patch", "noop"),
-        default="plausible_patch",
-    )
+    parser.add_argument("--agents-per-node", type=int, default=1)
     parser.add_argument("--simulator-seed", type=int, default=20260720)
     parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
     parser.add_argument("--trace-corpus-path", default="")
@@ -3171,8 +3084,8 @@ def main() -> int:
         help="Path on the worker host to a real OpenHands LLM config. Required when --mode llm.",
     )
     parser.add_argument("--gateway-port", type=int, default=8777)
-    parser.add_argument("--agent-api-port", type=int, default=8077)
-    parser.add_argument("--agent-health-port", type=int, default=8088)
+    parser.add_argument("--agent-api-port", type=int, default=24000)
+    parser.add_argument("--agent-health-port", type=int, default=24100)
     parser.add_argument("--registered-workers", type=int, default=1)
     parser.add_argument("--worker-capacity", type=int, default=0)
     parser.add_argument("--total-episodes", type=int, default=0)
@@ -3194,8 +3107,6 @@ def main() -> int:
     exposed = {
         "isolated server": base.SERVER_PORT,
         "LLM simulator": base.MODEL_PORT,
-        "agent API": AGENT_API_PORT,
-        "agent health": AGENT_HEALTH_PORT,
     }
     if args.registered_workers == 1:
         exposed["SWE worker"] = base.WORKER_PORT
@@ -3203,6 +3114,8 @@ def main() -> int:
     for label, port in exposed.items():
         if port not in allowed_exposed_ports:
             raise SystemExit(f"{label} port {port} is outside the explicitly allowed cloud ports")
+    if not 1 <= AGENT_API_PORT <= 65535 or not 1 <= AGENT_HEALTH_PORT <= 65535:
+        raise SystemExit("--agent-api-port and --agent-health-port must be valid TCP ports")
     if base.SERVER_PORT in base.PROTECTED_PORTS:
         raise SystemExit("isolated server port must not overlap a protected production port")
     if args.max_steps <= 0:
@@ -3223,6 +3136,12 @@ def main() -> int:
         args.worker_capacity = args.concurrency[0] if args.registered_workers == 1 and args.concurrency else 1
     if args.worker_capacity <= 0:
         raise SystemExit("--worker-capacity must resolve to a positive value")
+    if args.agents_per_node <= 0:
+        raise SystemExit("--agents-per-node must be positive")
+    if AGENT_API_PORT + args.agents_per_node - 1 > 65535:
+        raise SystemExit("--agent-api-port range exceeds TCP port range")
+    if AGENT_HEALTH_PORT + args.agents_per_node - 1 > 65535:
+        raise SystemExit("--agent-health-port range exceeds TCP port range")
     if args.registered_workers > 1:
         if args.registered_workers < 1024:
             raise SystemExit("SWE-bench Pro pressure scale mode requires at least 1024 registered Workers")
@@ -3239,36 +3158,6 @@ def main() -> int:
         raise SystemExit("--fleet-supervisor-threshold must be at least 2")
     if args.registration_timeout <= 0 or args.batch_timeout <= 0:
         raise SystemExit("--registration-timeout and --batch-timeout must be positive")
-    if args.simulator_latency_ms < 0:
-        raise SystemExit("--simulator-latency-ms must be non-negative")
-    if not (
-        0
-        <= args.simulator_latency_min_ms
-        <= args.simulator_latency_mean_ms
-        <= args.simulator_latency_max_ms
-    ):
-        raise SystemExit("simulator latency must satisfy 0 <= min <= mean <= max")
-    if args.simulator_latency_std_ms < 0:
-        raise SystemExit("simulator latency std must be non-negative")
-    if args.simulator_zero_latency:
-        args.simulator_latency_ms = 0.0
-        args.simulator_latency_mean_ms = 0.0
-        args.simulator_latency_std_ms = 0.0
-        args.simulator_latency_min_ms = 0.0
-        args.simulator_latency_max_ms = 0.0
-    if args.simulator_wrong_steps_std < 0:
-        raise SystemExit("--simulator-wrong-steps-std must be non-negative")
-    if not (
-        0
-        <= args.simulator_wrong_steps_min
-        <= args.simulator_wrong_steps_mean
-        <= args.simulator_wrong_steps_max
-    ):
-        raise SystemExit("simulator wrong_steps must satisfy 0 <= min <= mean <= max")
-    if args.simulator_wrong_steps_max >= args.max_steps:
-        raise SystemExit("--simulator-wrong-steps-max must be smaller than --max-steps")
-    if not 0 <= args.simulator_repair_success_rate <= 1:
-        raise SystemExit("--simulator-repair-success-rate must be in [0, 1]")
     if args.llm_kind == "simulator" and args.simulator_mode == "trace_replay" and not args.trace_corpus_path:
         raise SystemExit("--simulator-mode trace_replay requires --trace-corpus-path")
     args.artifacts.mkdir(parents=True, exist_ok=True)
@@ -3294,18 +3183,8 @@ def main() -> int:
                 args.instance_list,
                 args.instance_count,
                 args.instance_seed,
-                args.simulator_latency_ms,
-                args.simulator_latency_mean_ms,
-                args.simulator_latency_std_ms,
-                args.simulator_latency_min_ms,
-                args.simulator_latency_max_ms,
                 args.simulator_zero_latency,
-                args.simulator_wrong_steps_mean,
-                args.simulator_wrong_steps_std,
-                args.simulator_wrong_steps_min,
-                args.simulator_wrong_steps_max,
-                args.simulator_repair_success_rate,
-                args.simulator_repair_style,
+                args.agents_per_node,
                 args.simulator_seed,
                 args.simulator_mode,
                 args.trace_corpus_path,
@@ -3328,7 +3207,14 @@ def main() -> int:
             )
             item = {
                 "parallel_mode": parallel_mode,
-                "container_concurrency": concurrency,
+                "agent_count_per_node": args.agents_per_node,
+                "agent_count_total": sum(
+                    1 for group in base.worker_assignments(args.registered_workers) if group
+                ) * args.agents_per_node,
+                "agent_max_concurrent": concurrency,
+                "container_concurrency": sum(
+                    1 for group in base.worker_assignments(args.registered_workers) if group
+                ) * args.agents_per_node * concurrency,
                 "registered_workers": args.registered_workers,
                 "worker_capacity": args.worker_capacity,
                 "total_episodes": args.total_episodes

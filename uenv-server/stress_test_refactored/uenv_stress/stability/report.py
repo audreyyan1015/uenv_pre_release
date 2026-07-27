@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Generate the five-metric UEnv stability acceptance report from suite CSVs."""
+"""稳定性验收报告生成器。
+
+这个文件从验收运行目录中的 CSV、SQLite ledger、资源采样、故障记录和统一 metrics summary 生成评审可读的稳定性报告。报告关注 Episode 成功率、吞吐与时延、资源增长、故障恢复、数据集覆盖和证据完整性。
+
+实现逻辑是：read_csv 和 episode_metrics/episode_metrics_sqlite 读取行级 Episode 事实；resource_evidence、resource_p95 和 resource_growth 计算 CPU、内存、FD、进程数等资源指标；build_report 同时比较 reference、stability 和 fault 阶段并整理验收结论；markdown 把结构化 JSON 报告转换为 Markdown，便于直接提交或审阅。"""
 
 from __future__ import annotations
 

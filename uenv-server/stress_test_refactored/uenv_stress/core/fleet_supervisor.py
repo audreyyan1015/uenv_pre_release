@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Own a large fleet of real uenv-worker child processes as one test process group."""
+"""大规模本机 worker 进程监督器。
+
+这个文件实现把大量真实 uenv-worker 子进程作为同一个测试进程组管理的能力，用于压测时在一台主机上启动、监控和停止 worker fleet。它关注进程生命周期和资源记录，不负责决定业务样本或验收标准。
+
+实现逻辑是：启动后读取 worker 配置和输出目录，按计划启动多个 worker 子进程；通过信号处理 request_stop 捕获停止请求；周期性用 process_group_metrics 采集进程组 CPU、内存和子进程数量，append_resource_row 写入 CSV；write_json_atomic 用临时文件加替换的方式写 fleet 状态，避免中途写坏状态文件；退出时按同一进程组清理本次启动的 worker。"""
 
 from __future__ import annotations
 

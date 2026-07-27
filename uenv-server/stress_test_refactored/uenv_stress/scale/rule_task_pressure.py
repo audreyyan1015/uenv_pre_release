@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Isolated 1024+ Worker pressure for OlymMATH, SciTab, and PubMedQA.
+"""OlymMATH、SciTab 和 PubMedQA 规则任务规模压测。
 
-One real Math Worker/plugin fleet is reused across the three datasets.  Each
-dataset independently runs all three UEnv parallel modes and a configured
-number of capacity waves.  The LLM endpoint is a local replay server backed by
-frozen real-UEnv traces; therefore this runner measures protocol, scheduler,
-Worker, and plugin scale, not new model quality.
-"""
+这个文件实现面向规则类任务的 1024+ Worker 压力场景。它复用一组真实 Math/Science worker，在三个数据集和多个 parallel mode 下重复投放 Episode，用于验证调度容量、规则 reward/plugin 路径、数据集覆盖和 replay LLM 负载。
+
+实现逻辑是：生成 worker 配置并启动隔离 fleet；为每个数据集读取冻结样本，构造对应 env/reward payload；按配置的 parallel mode、capacity wave、到达率和目标 Episode 数投放任务；LLM 端使用冻结真实轨迹的 replay 服务而不是重新调用模型；运行期间采集 simulator/replay 统计、EpisodeObservation、worker 负载和资源指标；最终生成每个数据集和每种模式的 summary 并清理自有进程。"""
 
 from __future__ import annotations
 
@@ -39,6 +36,11 @@ COMMON_SOURCE = (PACKAGE_DIR / "core" / "stress_test_common.py").read_text(
 )
 RULE_TASK_SOURCE = (PACKAGE_DIR / "workloads" / "rule_tasks.py").read_text(
     encoding="utf-8"
+).replace(
+    # rule_tasks.py 会作为扁平文件上传到运行目录（同目录只有 stress_test_common.py），
+    # 包路径 import 在那里必然失败，下发前改写为扁平 import。
+    "from uenv_stress.core.stress_test_common import rule_reward_config",
+    "from stress_test_common import rule_reward_config",
 )
 
 
@@ -54,10 +56,6 @@ from urllib.parse import parse_qs, urlparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
 parser.add_argument("--seed", type=int, required=True)
-parser.add_argument("--latency-mean-ms", type=float, required=True)
-parser.add_argument("--latency-std-ms", type=float, required=True)
-parser.add_argument("--latency-min-ms", type=float, required=True)
-parser.add_argument("--latency-max-ms", type=float, required=True)
 parser.add_argument("--trace-sampling-strategy", choices=("round_robin_episode",), required=True)
 for task in ("olymmath", "scitab", "pubmedqa"):
     parser.add_argument(f"--{task}-trace", required=True)
@@ -143,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
                         "hits": value["hits"],
                         "misses": value["misses"],
                         "calls": value["calls"],
-                        "latency_ms": {
+                        "replay_wait_ms": {
                             "p50": percentile(value["latencies_ms"], 0.50),
                             "p95": percentile(value["latencies_ms"], 0.95),
                             "p99": percentile(value["latencies_ms"], 0.99),
@@ -716,16 +714,11 @@ def run_scale(args: argparse.Namespace) -> dict:
             server, server_cmd, f"{server_run}/server.log",
             base.SERVER_BIN, base.SERVER_BIN,
         )
-        latency = args.latency
         model_command = " ".join([
             "python3", "-B", f"{worker_run}/trace_replay_server.py",
             "--port", str(base.MODEL_PORT),
             "--seed", str(args.simulator_seed),
             "--trace-sampling-strategy", args.trace_sampling_strategy,
-            "--latency-mean-ms", str(latency["mean"]),
-            "--latency-std-ms", str(latency["std"]),
-            "--latency-min-ms", str(latency["min"]),
-            "--latency-max-ms", str(latency["max"]),
             *sum(
                 (
                     [f"--{task}-trace", args.task_config[task]["trace_corpus_path"]]
@@ -1013,10 +1006,6 @@ def main() -> int:
     parser.add_argument("--worker-register-max-attempts", type=int, required=True)
     parser.add_argument("--worker-register-retry-backoff-ms", type=int, required=True)
     parser.add_argument("--simulator-seed", type=int, required=True)
-    parser.add_argument("--simulator-latency-mean-ms", type=float, required=True)
-    parser.add_argument("--simulator-latency-std-ms", type=float, required=True)
-    parser.add_argument("--simulator-latency-min-ms", type=float, required=True)
-    parser.add_argument("--simulator-latency-max-ms", type=float, required=True)
     parser.add_argument(
         "--trace-sampling-strategy",
         choices=("round_robin_episode",),
@@ -1039,12 +1028,6 @@ def main() -> int:
     args.plugin_ready_timeout = args.plugin_ready_timeout_seconds
     args.register_attempts = args.worker_register_max_attempts
     args.register_backoff_ms = args.worker_register_retry_backoff_ms
-    args.latency = {
-        "mean": args.simulator_latency_mean_ms,
-        "std": args.simulator_latency_std_ms,
-        "min": args.simulator_latency_min_ms,
-        "max": args.simulator_latency_max_ms,
-    }
     args.task_config = {
         task: {
             "dataset_path": getattr(args, f"{task}_dataset"),
@@ -1064,14 +1047,6 @@ def main() -> int:
         parser.error(
             "--concurrent-batches must be >= --exact-batches for backlog submission"
         )
-    if not (
-        0 <= args.simulator_latency_min_ms
-        <= args.simulator_latency_mean_ms
-        <= args.simulator_latency_max_ms
-    ):
-        parser.error("simulator latency must satisfy min <= mean <= max")
-    if args.simulator_latency_std_ms < 0:
-        parser.error("simulator latency std must be non-negative")
     args.artifacts.mkdir(parents=True, exist_ok=True)
     summary = run_scale(args)
     summary_path = (

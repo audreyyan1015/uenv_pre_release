@@ -1,12 +1,9 @@
 ﻿#!/usr/bin/env python3
-"""压测样本和结果格式的公共工具。
+"""压测样本、Episode payload 和结果文档的公共工具。
 
-这个文件解决一个问题：不同压测脚本不要各自手写 episode payload。
-如果 Code 任务、SWE/OpenHands 任务或结果 JSON 字段以后要改，只需要改这里。
+这个文件解决不同压测脚本重复构造 Episode、环境参数、reward 配置和结果 JSON 的问题。DSCodeBench、SWE/OpenHands、规则任务以及压测汇总都通过这里生成统一的数据结构，保证报告中看到的结果字段来自同一套定义。
 
-本文件故意不依赖 paramiko、grpc 等运行时库。分布式压测会把它复制到
-/tmp/uenv-<run_id>/，让临时生成的 load_client.py / smoke_client.py 也能导入。
-"""
+实现逻辑是：先定义 EpisodeObservation schema 和字段校验；new_episode_observation、episode_observation_from_envelope、finalize_episode_observation、observe_episode_batch 负责把 UEnv 请求、响应和错误归一化为行级事实记录；code_env_payload、dscodebench_env_payload、swe_openhands_env_payload 和 rule_reward_config 等函数构造不同 workload 的 env/reward payload；最后 dscodebench_pressure_result_document、swebench_pro_pressure_result_document 和 stress_result_document 生成场景 summary，统一包含吞吐、时延、成功率、错误分布和样本信息。"""
 
 from __future__ import annotations
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run isolated selfcheck/reference/stability/capacity/burst/fault phases."""
+"""正式稳定性验收套件入口。
+
+这个文件实现 UEnv 稳定性验收的完整执行流程，覆盖自检、基线、长稳、容量、突发和故障阶段。它面向评审关心的验收问题：压测输入是否冻结、调度是否可恢复、资源是否稳定、Episode 是否有可追溯记录、故障注入后是否能恢复到一致状态。
+
+实现逻辑是：先绑定 replay 服务地址并校验轨迹、清单、磁盘预算和 fleet 配置；然后用 PersistentLedger 记录每个 Episode 的计划时间、启动状态、完成状态和结果文件；Workloads 根据 DSCodeBench、规则任务和 SWE-bench Pro 生成 Episode；异步 producer 按阶段到达率投放任务，execute 通过 gRPC 调用 UEnv Server；资源采样、健康探测和故障探测同时写入证据文件；最后清理本次创建的进程并生成可审计的验收产物。"""
 
 from __future__ import annotations
 
@@ -492,14 +496,12 @@ def verify_formal_inputs(config: dict[str, Any], development_only: bool) -> dict
         raise ValueError(f"SWE-bench Pro replay config is missing: {openhands_config}")
     trace_stats = {}
     dataset_names = {"swebench_pro": "swe-bench-pro", "dscodebench": "dscodebench", "olymmath": "olymmath", "scitab": "scitab", "pubmedqa": "pubmedqa"}
-    max_missing_ratio = float(config["latency_replay"]["max_missing_ratio"])
     for task, task_config in config["tasks"].items():
         path = Path(task_config["trace_file"])
         trace_stats[task] = stability.validate_trace_file(
             path,
             dataset=dataset_names[task],
             minimum=int(task_config["min_valid_traces"]),
-            max_latency_missing_ratio=max_missing_ratio,
         )
         traces = [
             json.loads(line)
