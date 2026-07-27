@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Safe live preflight for the loopback Gate3 Ark proxy."""
+"""Ark 回环代理的安全预检脚本。
+
+这个文件用于在正式采集前确认本机 Ark proxy 可用，并验证它不会暴露到非预期地址。它通过一次最小请求检查代理能否完成 OpenAI 兼容调用，同时避免把 prompt、响应正文或凭据写到日志中。
+
+实现逻辑是：解析代理地址、超时和重试参数后，循环向代理发送健康或最小 chat 请求；若连接失败、HTTP 错误或返回结构不符合预期，就按明确退出码失败；成功时只输出不含敏感内容的状态和计时信息。"""
 
 from __future__ import annotations
 

@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-"""Convert SWE-bench Pro rollout-schema trace corpus to the stability-suite schema.
+"""SWE-bench Pro 轨迹 schema 转换工具。
 
-Input : /home/uenv-stress/trace-corpora/swebench_pro/trace-corpus.jsonl
-        (OpenHands rollout schema produced by the Doubao collection run)
-Output: stability-suite curated schema accepted by
-        stability_test_common.validate_trace_file(minimum=50) and
-        prepare_stability_trace_manifest.validate_swe.
+这个文件把 OpenHands 采集得到的 rollout schema 轨迹转换为稳定性套件接受的 trace-corpus schema。它保留真实指令、响应、实例 ID、token 和校验信息，并明确标记采集阶段没有记录而只能派生或填充的字段。
 
-Derivation notes (fields not recorded by the collector):
-- request_bytes: no per-turn request size was recorded; set to 0 and marked
-  in `conversion.derived_fields` (honest placeholder, not fabricated data).
-- env_latency_ms: per-turn env time was not recorded; episode elapsed time is
-  split uniformly across turns and marked in `conversion.derived_fields`.
-- prompt_hash: sha256 of the job instruction text fetched from the worker
-  job directory referenced by each row's `source_path`.
-"""
+实现逻辑是：读取输入 JSONL 后，为每条 SWE-bench Pro 记录提取 instance_id、turn、模型响应和元数据；fetch_instruction_texts 从数据集或补充文件中取回 instruction；canonical_checksum 为标准化内容生成哈希；main 写出转换后的 JSONL、转换摘要和派生字段说明，并让后续 validate_trace_file/manifest 校验接管准入。"""
 
 from __future__ import annotations
 
@@ -87,10 +76,16 @@ def main() -> int:
         turns = []
         for turn in turns_in:
             output = str(turn.get("assistant_output") or "")
+            # response_ids/logprobs 是 replay 与训练证据的必需字段，必须随转换保留，
+            # 否则下游校验会以 “no replayable real trace turns” 拒绝整条语料。
+            response_ids = list(turn.get("response_ids") or [])
+            logprobs = list(turn.get("logprobs") or [])
             turns.append({
                 "turn_index": int(turn.get("turn_index", len(turns))),
                 "assistant_output": output,
-                "source_completion_tokens": len(turn.get("logprobs") or turn.get("response_ids") or []),
+                "response_ids": response_ids,
+                "logprobs": logprobs,
+                "source_completion_tokens": len(logprobs or response_ids),
                 "target_qwen3_tokens": len(tokenizer.encode(output, add_special_tokens=False)),
                 "request_bytes": 0,
                 "response_bytes": len(output.encode("utf-8")),

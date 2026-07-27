@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate all five frozen real-trace corpora and write one admission manifest."""
+"""稳定性轨迹准入 manifest 生成工具。
+
+这个文件校验五类冻结真实轨迹语料，并写出正式稳定性验收使用的统一 admission manifest。它保证验收运行前能明确知道每个数据集的轨迹路径、样本数量、哈希和校验结果。
+
+实现逻辑是：validate_swe 对 SWE-bench Pro 额外检查冻结实例 ID；main 读取各语料路径，调用 validate_trace_file 检查 schema、样本数、turn、token、时延和 checksum，计算每个文件的 sha256，最后写出包含全部数据集条目的 manifest JSON；任一语料不满足准入条件时直接失败。"""
 
 from __future__ import annotations
 
@@ -60,7 +64,6 @@ def main() -> int:
     files = []
     source_models: dict[str, list[str]] = {}
     pairing: dict[str, Any] = {}
-    max_missing_ratio = float(config["latency_replay"]["max_missing_ratio"])
     for task, task_config in config["tasks"].items():
         path = Path(task_config["trace_file"]).resolve()
         try:
@@ -71,7 +74,6 @@ def main() -> int:
             path,
             dataset=DATASET_NAMES[task],
             minimum=int(task_config["min_valid_traces"]),
-            max_latency_missing_ratio=max_missing_ratio,
         )
         models: set[str] = set()
         traces = [

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Inject only manifest-owned stability faults and always remove nftables rules."""
+"""稳定性验收故障注入脚本。
+
+这个文件实现只作用于本次验收 manifest 所属对象的故障注入，避免影响未授权进程或端口。它用于验证网络中断、进程停止或其他可配置故障发生后，UEnv 是否能恢复健康、保持 Episode 记录一致，并且不会出现状态回退。
+
+实现逻辑是：读取 fleet manifest 和故障配置后，先校验 run_id 与目标对象是否匹配；render_argv 把配置模板渲染成实际命令；network_fault 用 nftables 添加带 run_id 注释的临时规则并按时移除；wait_recovery 持续执行健康探测直到达到恢复条件；affected_consistency 和 state_regression_count 检查受影响 Episode 与日志状态；append_fault 把注入、恢复和一致性结果写入 CSV。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+# OpenHands 单任务运行脚本。
+#
+# 这个脚本在 worker 侧执行一个 SWE/OpenHands 任务，支持 gold 和 llm 两种模式。
+# 它负责检查调用方传入的环境变量，创建输出目录，组装 OpenHands SDK 的运行参数，
+# 并把 agent 轨迹、日志、退出码和产物路径写到指定目录。它不启动 UEnv Server，
+# 也不管理 worker fleet，只处理单个 OpenHands 任务的实际执行。
+#
+# 实现逻辑是：先解析第一个参数作为运行模式并校验必需环境变量；然后根据模式选择
+# gold patch 或 LLM 配置，设置 OpenHands 工作目录和输出路径；最后调用 SDK/runner
+# 执行任务，把 stdout、stderr 和状态文件留给上层 SWE-bench Pro 压测脚本收集。
+
 set -euo pipefail
 
 mode="${1:-gold}"

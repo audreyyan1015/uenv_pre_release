@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Freeze prior real-model/real-UEnv evaluator logs into stability trace JSONL."""
+"""已有 evaluator 日志冻结工具。
+
+这个文件把历史真实模型和真实 UEnv evaluator 日志整理成稳定性 replay 可用的 JSONL 轨迹。它用于复用已经完成的真实运行结果，而不是重新调用模型或重新跑所有任务。
+
+实现逻辑是：逐行读取已有 JSONL，抽取任务 ID、dataset、prompt、response、token、耗时和结果字段；checksum 为关键内容生成稳定哈希；main 根据输入参数过滤、补齐元数据、写出冻结语料和摘要，最后给后续 manifest 准入校验使用。"""
 
 from __future__ import annotations
 

@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Build versioned, auditable Doubao/Qwen stability replay corpora."""
+"""Doubao/Qwen 混合稳定性 replay 语料构建工具。
+
+这个文件把来自不同模型或不同采集批次的真实轨迹按数据集和样本 ID 对齐，生成可审计的混合 replay 语料。它用于在稳定性验收中覆盖多个模型来源，同时保持样本配对关系和输入输出可追溯。
+
+实现逻辑是：read_jsonl 读取各源语料；index_by_dataset_id 按 dataset_id 建索引；paired_rows 选择两侧都存在或满足策略要求的样本；attach_replay_waits 根据观测时延补充 replay 等待时间；write_jsonl 写出新语料；main 复制必要输入、写 manifest 和摘要，记录源文件、样本数、配对数量和 checksum。"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import shutil
+import statistics
 import time
 from pathlib import Path
 from typing import Any
 
 from uenv_stress.core.stability_test_common import (
     PAIRED_TASK_NAMES,
-    latency_imputation_medians,
     sha256_file,
     source_model_family,
     trace_dataset_id,
-    trace_turn_waits,
     validate_paired_trace_order,
 )
 
@@ -118,35 +121,119 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             )
 
 
-def attach_replay_waits(
-    rows: list[dict[str, Any]], *, max_missing_ratio: float = 0.05
-) -> list[dict[str, Any]]:
-    """Freeze the shared formal/scale per-turn waiting plan into each trace."""
-    medians = latency_imputation_medians(
-        rows, max_missing_ratio=max_missing_ratio
-    )
+def positive_number(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
+
+def freeze_wait_profile(row: dict[str, Any]) -> dict[str, Any]:
+    total_ms = positive_number(row.get("source_api_latency_ms"))
+    latency_source = "recorded" if total_ms else ""
+    if not total_ms:
+        total_ms = positive_number(row.get("episode_total_ms"))
+        latency_source = "observed_episode_elapsed_proxy" if total_ms else ""
+    turns = [
+        turn
+        for turn in row.get("turns", [])
+        if isinstance(turn, dict)
+    ]
+    if not total_ms:
+        total_ms = sum(positive_number(turn.get("env_latency_ms")) for turn in turns)
+        latency_source = "observed_episode_elapsed_proxy" if total_ms else ""
+    if total_ms <= 0 or not latency_source:
+        raise ValueError(
+            f"{trace_dataset_id(row)} has no positive latency to freeze into replay_wait_ms"
+        )
+    if not turns:
+        raise ValueError(f"{trace_dataset_id(row)} has no turns")
+    if len(turns) == 1:
+        waits_ms = [total_ms]
+    else:
+        tokens = [
+            positive_number(
+                turn.get("target_qwen3_tokens")
+                or turn.get("source_completion_tokens")
+            )
+            for turn in turns
+        ]
+        token_total = sum(tokens)
+        if token_total <= 0:
+            raise ValueError(
+                f"{trace_dataset_id(row)} has no positive completion tokens"
+            )
+        waits_ms = [total_ms * value / token_total for value in tokens]
+        waits_ms[-1] = total_ms - sum(waits_ms[:-1])
+    return {
+        "episode_elapsed_proxy_ms": total_ms,
+        "latency_source": latency_source,
+        "replay_wait_ms": waits_ms,
+    }
+
+
+def latency_proxy_ms(row: dict[str, Any]) -> float:
+    """与 freeze_wait_profile 相同的优先级取 Episode 级时延代理。"""
+    total_ms = positive_number(row.get("source_api_latency_ms"))
+    if not total_ms:
+        total_ms = positive_number(row.get("episode_total_ms"))
+    if not total_ms:
+        total_ms = sum(
+            positive_number(turn.get("env_latency_ms"))
+            for turn in row.get("turns", [])
+            if isinstance(turn, dict)
+        )
+    return total_ms
+
+
+def attach_replay_waits(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Freeze the shared formal/scale per-turn waiting plan into each trace.
+
+    缺失时延代理的轨迹允许用同文件（同数据集/同模型）中位数填充，
+    但缺失比例超过 5% 时 fail closed（与 README 的 Mixed replay 语义一致）。
+    """
+    proxies = [latency_proxy_ms(row) for row in rows]
+    missing = [index for index, proxy in enumerate(proxies) if proxy <= 0]
+    median_ms = 0.0
+    if missing:
+        share = len(missing) / max(len(rows), 1)
+        if share > 0.05:
+            raise ValueError(
+                f"{len(missing)}/{len(rows)} traces miss latency proxies; "
+                "above the 5% median-imputation limit"
+            )
+        present = [proxy for proxy in proxies if proxy > 0]
+        median_ms = statistics.median(present)
     output: list[dict[str, Any]] = []
-    for original in rows:
+    for index, original in enumerate(rows):
         row = dict(original)
+        imputed = proxies[index] <= 0
+        if imputed:
+            row["episode_total_ms"] = median_ms
         turns = [
             dict(turn)
             for turn in row.get("turns", [])
             if isinstance(turn, dict)
         ]
-        wait_profile = trace_turn_waits(row, imputation_medians=medians)
-        waits = wait_profile["turn_proxy_wait_seconds"]
+        wait_profile = freeze_wait_profile(row)
+        if imputed:
+            wait_profile["latency_source"] = "dataset_median_imputed"
+        waits = wait_profile["replay_wait_ms"]
         if len(turns) != len(waits):
             raise ValueError(
                 f"{trace_dataset_id(row)} has inconsistent turn/wait counts"
             )
-        for turn, wait_seconds in zip(turns, waits, strict=True):
-            turn["replay_wait_ms"] = float(wait_seconds) * 1000.0
+        for turn, wait_ms in zip(turns, waits, strict=True):
+            turn["replay_wait_ms"] = float(wait_ms)
             turn["latency_source"] = str(wait_profile["latency_source"])
             turn["episode_elapsed_proxy_ms"] = float(
                 wait_profile["episode_elapsed_proxy_ms"]
             )
         row["turns"] = turns
-        row["latency_basis"] = "observed_episode_elapsed_proxy"
+        row["latency_basis"] = "frozen_replay_wait_ms"
         output.append(row)
     return output
 

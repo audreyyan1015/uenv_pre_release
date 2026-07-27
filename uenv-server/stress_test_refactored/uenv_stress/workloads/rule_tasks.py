@@ -1,9 +1,8 @@
-"""Shared workload adapters for OlymMATH, SciTab, and PubMedQA.
+"""规则类任务 workload 适配器。
 
-The scale and stability suites intentionally share these pure data adapters.
-Infrastructure orchestration remains separate: scale tests create a large
-isolated Worker fleet, while stability tests use the formal acceptance fleet.
-"""
+这个文件为 OlymMATH、SciTab 和 PubMedQA 构造 UEnv Episode 所需的数据字段。它把不同数据集的原始记录统一成任务 ID、prompt/问题内容、候选答案或标签、数据集名称和 reward 配置所需字段。
+
+实现逻辑是：_read_jsonl 和 load_task_rows 读取冻结 JSONL 并支持 limit/offset；item_id 从不同数据集字段中选择稳定样本 ID；build_env_payload 根据 dataset 类型生成 env payload，包含问题、选项、标准答案、来源 ID 和用于 replay/统计的元数据；scale 和 stability 套件都复用这些纯数据适配函数。"""
 
 from __future__ import annotations
 

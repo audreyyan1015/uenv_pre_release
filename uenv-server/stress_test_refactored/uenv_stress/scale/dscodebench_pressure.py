@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
-"""分布式 DSCodeBench pressure：真实 Code worker 多轮与扩容压测。
+"""分布式 DSCodeBench Code worker 压测。
 
-运行位置说明：
-- 这个脚本从 8.130.75.157 的 stress_test 目录启动。
-- 隔离 server 启动在 8.130.75.157:8099。
-- 真实 Code worker 按索引 round-robin 分摊到 --worker-node 指定的各 worker
-  节点（未指定时使用 --worker-host 单节点），每台节点跑本机的模型模拟器。
-- 已经在线的正式 adapter-core 只做保护检查，不复用、不停止。
+这个文件实现真实 Code worker 的多轮与扩容压力测试。它用于验证 UEnv Server 调度、Code worker 执行、模型模拟器/replay、Episode 结果记录、worker 覆盖和资源采样在 DSCodeBench 代码任务下是否稳定。
 
-默认只启动一个 Worker，使用明确获准的 8099/8000/8888 端口完成多轮 smoke。
-多 Worker 必须通过 --private-worker-port-range 显式提供已开放的私网端口范围。
-"""
+实现逻辑是：先把 server 配置、worker 配置和必要的公共代码打包发送到各 worker 主机；在 server 主机启动隔离 server，在 worker 主机按 round-robin 启动 Code worker 和本地模型模拟服务；run_scale 根据目标 worker 数、容量波次、任务样本和并发参数投放 Episode；模型模拟器按任务 ID 生成确定性延迟、token 和结果；脚本持续解析日志、统计每个 worker 的完成覆盖、模型 step 时延、资源采样和错误分布；结束时写 summary、EpisodeObservation、worker coverage、资源和清理证据，并只停止本次 run_id 拥有的进程。"""
 
 from __future__ import annotations
 
@@ -76,8 +69,8 @@ def put_worker_config_archive(worker, worker_run: str, documents: dict[str, tupl
 
 MODEL_SIMULATOR = r'''#!/usr/bin/env python3
 # 这个脚本会临时写到 worker 机器上运行。
-# 它提供一个最小 OpenAI-compatible HTTP 接口，默认前几轮返回错误代码，
-# 后续返回正确代码。这样 DSCodeBench pressure 可以真实经过多 step，而不是第一步就结束。
+# 它提供一个最小 OpenAI-compatible HTTP 接口。trace_replay 模式下回复和等待
+# 时间都必须来自冻结真实轨迹；如果轨迹缺失则直接返回错误，不再走模拟兜底。
 import argparse
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -93,15 +86,7 @@ from urllib.parse import parse_qs, urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", type=int, required=True)
-parser.add_argument("--latency-mean-ms", type=float, default=1000)
-parser.add_argument("--latency-std-ms", type=float, default=250)
-parser.add_argument("--latency-min-ms", type=float, default=100)
-parser.add_argument("--latency-max-ms", type=float, default=5000)
 parser.add_argument("--zero-latency", action="store_true")
-parser.add_argument("--wrong-steps-mean", type=float, default=2)
-parser.add_argument("--wrong-steps-std", type=float, default=1)
-parser.add_argument("--wrong-steps-min", type=int, default=0)
-parser.add_argument("--wrong-steps-max", type=int, default=5)
 parser.add_argument("--seed", type=int, default=20260720)
 parser.add_argument("--dataset-jsonl", default="")
 parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
@@ -113,7 +98,6 @@ parser.add_argument(
 )
 args = parser.parse_args()
 attempts_by_task = {}
-profiles_by_task = {}
 attempts_lock = threading.Lock()
 dataset_oracle = {}
 trace_records = []
@@ -248,7 +232,7 @@ def normalize_trace_record(raw, episode=None):
         "assistant_output": output,
         "response_ids": response_ids,
         "logprobs": logprobs,
-        "latency_ms": float(raw.get("replay_wait_ms", 0) or 0),
+        "replay_wait_ms": float(raw.get("replay_wait_ms", 0) or 0),
         "latency_source": str(raw.get("latency_source", "")),
         "provider_response_id": str(raw.get("provider_response_id", "")),
         "source": str(raw.get("source", "")),
@@ -276,27 +260,12 @@ for trace_id, turns in trace_episodes_by_id.items():
 if args.simulator_mode == "trace_replay" and not trace_records:
     raise SystemExit("--simulator-mode trace_replay requires a non-empty DSCodeBench trace corpus")
 if args.simulator_mode == "trace_replay" and any(
-    record["latency_ms"] <= 0 or not record["latency_source"]
+    record["replay_wait_ms"] <= 0 or not record["latency_source"]
     for record in trace_records
 ):
     raise SystemExit(
         "trace_replay requires positive replay_wait_ms and latency_source on every turn"
     )
-
-def clamp(value, lower, upper):
-    return max(lower, min(upper, value))
-
-def deterministic_rng(task_id):
-    digest = hashlib.sha256(f"{args.seed}:{task_id}".encode("utf-8")).hexdigest()
-    return random.Random(int(digest[:16], 16))
-
-def sample_profile(task_id):
-    rng = deterministic_rng(task_id)
-    wrong = int(round(rng.normalvariate(args.wrong_steps_mean, args.wrong_steps_std)))
-    wrong = clamp(wrong, args.wrong_steps_min, args.wrong_steps_max)
-    latency = 0.0 if args.zero_latency else rng.normalvariate(args.latency_mean_ms, args.latency_std_ms)
-    latency = 0.0 if args.zero_latency else clamp(latency, args.latency_min_ms, args.latency_max_ms)
-    return {"wrong_steps": wrong, "latency_ms": latency}
 
 def replay_record(task_id, attempt):
     """Round-robin whole collected trajectories, then advance turns in-place."""
@@ -357,11 +326,6 @@ class Handler(BaseHTTPRequestHandler):
                 for task_id, count in attempts_by_task.items()
                 if task_id_matches_prefix(task_id, prefix)
             }
-            profiles = {
-                task_id: profile
-                for task_id, profile in profiles_by_task.items()
-                if task_id_matches_prefix(task_id, prefix)
-            }
             replay_hits = sum(
                 count for task_id, count in trace_hits_by_task.items()
                 if task_id_matches_prefix(task_id, prefix)
@@ -375,8 +339,6 @@ class Handler(BaseHTTPRequestHandler):
             replay_selection_counts = dict(trace_selection_counts)
             exhausted_turn_reuses = trace_exhausted_turn_reuses
         ordered = sorted(counts.values())
-        wrong_steps = [int(profile["wrong_steps"]) for profile in profiles.values()]
-        latencies = [float(profile["latency_ms"]) for profile in profiles.values()]
         body = json.dumps({
             "prefix": prefix,
             "task_count": len(ordered),
@@ -388,24 +350,11 @@ class Handler(BaseHTTPRequestHandler):
                 "kind": (
                     "trace-replay-dscodebench-real-llm-corpus"
                     if args.simulator_mode == "trace_replay"
-                    else "template-dscodebench-oracle-after-wrong-steps"
+                    else "template-dscodebench-oracle-compatibility-mode"
                 ),
                 "mode": args.simulator_mode,
                 "seed": args.seed,
-                "wrong_steps": {
-                    "mean": args.wrong_steps_mean,
-                    "std": args.wrong_steps_std,
-                    "min": args.wrong_steps_min,
-                    "max": args.wrong_steps_max,
-                    "sampled": numeric_stats(wrong_steps),
-                    "histogram": histogram(wrong_steps),
-                },
-                "latency_ms": {
-                    "mean": args.latency_mean_ms,
-                    "std": args.latency_std_ms,
-                    "min": args.latency_min_ms,
-                    "max": args.latency_max_ms,
-                    "sampled": numeric_stats(latencies),
+                "replay_wait_ms": {
                     "observed": numeric_stats(observed_latencies),
                     "zero_latency": args.zero_latency,
                 },
@@ -429,12 +378,11 @@ class Handler(BaseHTTPRequestHandler):
                     "contract": {
                         "selection_keys": ["dataset", "episode_arrival_ordinal", "turn_index"],
                         "episode_binding": "one assigned trajectory for the Episode lifetime",
-                        "output_fields": ["assistant_output", "response_ids", "logprobs", "latency_ms"],
+                        "output_fields": ["assistant_output", "response_ids", "logprobs", "replay_wait_ms"],
                     },
                 },
             },
             "examples": dict(list(sorted(counts.items()))[:20]),
-            "profile_examples": dict(list(sorted(profiles.items()))[:20]),
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -464,7 +412,6 @@ class Handler(BaseHTTPRequestHandler):
         with attempts_lock:
             attempt = attempts_by_task.get(task_id, 0) + 1
             attempts_by_task[task_id] = attempt
-            profile = profiles_by_task.setdefault(task_id, sample_profile(task_id))
             trace_episode, trace_record = (
                 replay_record(task_id, attempt)
                 if args.simulator_mode == "trace_replay"
@@ -475,10 +422,10 @@ class Handler(BaseHTTPRequestHandler):
             sleep_ms = (
                 0.0
                 if args.zero_latency
-                else float(trace_record["latency_ms"])
+                else float(trace_record["replay_wait_ms"])
             )
         else:
-            sleep_ms = float(profile["latency_ms"])
+            sleep_ms = 0.0
         with attempts_lock:
             observed_latencies_ms.append(sleep_ms)
         time.sleep(sleep_ms / 1000)
@@ -503,15 +450,19 @@ class Handler(BaseHTTPRequestHandler):
             with attempts_lock:
                 trace_misses += 1
                 trace_misses_by_task[task_id] = trace_misses_by_task.get(task_id, 0) + 1
-            content = "raise RuntimeError('DSCodeBench trace replay miss: no real LLM output available')"
-            response_ids = [0]
-            logprobs = [{"token": content, "token_id": 0, "logprob": -9.0}]
-            trace_source = {"miss": True, "dataset_problem_id": dataset_problem_id, "turn_index": attempt}
-        elif attempt <= int(profile["wrong_steps"]):
-            content = "raise NotImplementedError('deterministic scale warmup')"
-            response_ids = [42]
-            logprobs = [{"token": content, "token_id": 42, "logprob": -0.1}]
-            trace_source = {}
+            body = json.dumps({
+                "error": {
+                    "message": "DSCodeBench trace replay miss: no real LLM output available",
+                    "dataset_problem_id": dataset_problem_id,
+                    "turn_index": attempt,
+                }
+            }).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         elif dataset_problem_id in dataset_oracle:
             content = dataset_oracle[dataset_problem_id]
             response_ids = [42]
@@ -578,10 +529,6 @@ parser.add_argument("--output", required=True)
 parser.add_argument("--max-steps", type=int, required=True)
 parser.add_argument("--code-wrong-steps", type=int, required=True)
 parser.add_argument("--min-steps", type=int, required=True)
-parser.add_argument("--simulator-wrong-steps-mean", type=float, default=2)
-parser.add_argument("--simulator-wrong-steps-std", type=float, default=1)
-parser.add_argument("--simulator-wrong-steps-min", type=int, default=0)
-parser.add_argument("--simulator-wrong-steps-max", type=int, default=5)
 parser.add_argument("--model-name", required=True)
 parser.add_argument("--model-mode", choices=("real", "simulator"), required=True)
 parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
@@ -837,14 +784,6 @@ async def main():
     )
     document["max_steps"] = args.max_steps
     document["code_wrong_steps"] = args.code_wrong_steps
-    document["simulator_wrong_steps_distribution"] = {
-        "mean": args.simulator_wrong_steps_mean,
-        "std": args.simulator_wrong_steps_std,
-        "min": args.simulator_wrong_steps_min,
-        "max": args.simulator_wrong_steps_max,
-        "sampling_unit": "episode/task_id",
-        "note": "The model simulator samples wrong_steps once per task_id from a deterministic truncated normal distribution.",
-    }
     document["min_steps"] = args.min_steps
     document["model_mode"] = args.model_mode
     document["simulator_mode"] = args.simulator_mode
@@ -860,7 +799,7 @@ async def main():
                 "assistant_output",
                 "response_ids",
                 "logprobs",
-                "latency_ms",
+                "replay_wait_ms",
             ],
         },
     }
@@ -1086,16 +1025,6 @@ def _model_step_stats(worker_clients: dict, prefix: str) -> dict:
     first_simulator = simulators[0] if simulators else {}
     merged_simulator = dict(first_simulator)
     if simulators:
-        merged_simulator["wrong_steps"] = {
-            **{key: first_simulator.get("wrong_steps", {}).get(key) for key in ("mean", "std", "min", "max")},
-            "sampled": _merge_numeric_stats([item.get("wrong_steps", {}).get("sampled", {}) for item in simulators]),
-            "histogram": _merge_histograms([item.get("wrong_steps", {}).get("histogram", {}) for item in simulators]),
-        }
-        merged_simulator["latency_ms"] = {
-            **{key: first_simulator.get("latency_ms", {}).get(key) for key in ("mean", "std", "min", "max", "zero_latency")},
-            "sampled": _merge_numeric_stats([item.get("latency_ms", {}).get("sampled", {}) for item in simulators]),
-            "observed": _merge_numeric_stats([item.get("latency_ms", {}).get("observed", {}) for item in simulators]),
-        }
         merged_simulator["oracle_rows"] = first_simulator.get("oracle_rows", 0)
         merged_replay = dict(first_simulator.get("trace_replay", {}))
         merged_replay["hits"] = sum(int(item.get("trace_replay", {}).get("hits", 0)) for item in simulators)
@@ -1121,10 +1050,8 @@ def _model_step_stats(worker_clients: dict, prefix: str) -> dict:
         merged_replay["trace_selection_counts"] = selection_counts
         merged_simulator["trace_replay"] = merged_replay
     examples: dict = {}
-    profile_examples: dict = {}
     for item in node_stats:
         examples.update(item.get("examples", {}))
-        profile_examples.update(item.get("profile_examples", {}))
     return {
         "prefix": prefix,
         "task_count": sum(int(item.get("task_count", 0)) for item in node_stats),
@@ -1134,7 +1061,6 @@ def _model_step_stats(worker_clients: dict, prefix: str) -> dict:
         "step_histogram": _merge_histograms([item.get("step_histogram", {}) for item in node_stats]),
         "simulator": merged_simulator,
         "examples": dict(list(sorted(examples.items()))[:20]),
-        "profile_examples": dict(list(sorted(profile_examples.items()))[:20]),
         "per_node": per_node,
     }
 
@@ -1294,15 +1220,6 @@ def run_scale(
     registration_timeout: int,
     batch_timeout: int,
     fleet_supervisor_threshold: int,
-    simulator_latency_mean_ms: float,
-    simulator_latency_std_ms: float,
-    simulator_latency_min_ms: float,
-    simulator_latency_max_ms: float,
-    simulator_zero_latency: bool,
-    simulator_wrong_steps_mean: float,
-    simulator_wrong_steps_std: float,
-    simulator_wrong_steps_min: int,
-    simulator_wrong_steps_max: int,
     simulator_seed: int,
     simulator_mode: str,
     trace_corpus_path: str,
@@ -1516,15 +1433,6 @@ def run_scale(
             model_script = "model_simulator.py"
             model_command = (
                 f"python3 -B {worker_run}/model_simulator.py --port {base.MODEL_PORT} "
-                f"--latency-mean-ms {simulator_latency_mean_ms} "
-                f"--latency-std-ms {simulator_latency_std_ms} "
-                f"--latency-min-ms {simulator_latency_min_ms} "
-                f"--latency-max-ms {simulator_latency_max_ms} "
-                f"{'--zero-latency ' if simulator_zero_latency else ''}"
-                f"--wrong-steps-mean {simulator_wrong_steps_mean} "
-                f"--wrong-steps-std {simulator_wrong_steps_std} "
-                f"--wrong-steps-min {simulator_wrong_steps_min} "
-                f"--wrong-steps-max {simulator_wrong_steps_max} "
                 f"--seed {simulator_seed} "
                 f"--dataset-jsonl {base.q(worker_dataset)} "
                 f"--simulator-mode {base.q(simulator_mode)} "
@@ -1685,23 +1593,6 @@ def run_scale(
             "worker_nodes": [{"host": node.host, "private_ip": node.private_ip} for node in nodes],
             "node_worker_indexes": {node.host: node_worker_indexes[node.host] for node in nodes},
             "code_python": code_python or "python3",
-            "simulator_distribution": {
-                "wrong_steps": {
-                    "mean": simulator_wrong_steps_mean,
-                    "std": simulator_wrong_steps_std,
-                    "min": simulator_wrong_steps_min,
-                    "max": simulator_wrong_steps_max,
-                    "sampling_unit": "episode/task_id",
-                },
-                "latency_ms": {
-                    "mean": simulator_latency_mean_ms,
-                    "std": simulator_latency_std_ms,
-                    "min": simulator_latency_min_ms,
-                    "max": simulator_latency_max_ms,
-                    "zero_latency": simulator_zero_latency,
-                },
-                "seed": simulator_seed,
-            },
             "plugin_ready_timeout_seconds": plugin_ready_timeout_seconds,
             "worker_registration_retry": {
                 "max_attempts": worker_register_max_attempts,
@@ -1731,7 +1622,7 @@ def run_scale(
                     "assistant_output",
                     "response_ids",
                     "logprobs",
-                    "latency_ms",
+                    "replay_wait_ms",
                 ],
                 "note": (
                     "Real LLM capture writes DSCodeBench turns; trace_replay scale tests replay "
@@ -1781,10 +1672,6 @@ def run_scale(
                 "--min-steps", str(min_steps), "--model-mode", model_mode,
                 "--simulator-mode", simulator_mode,
                 "--trace-sampling-strategy", trace_sampling_strategy,
-                "--simulator-wrong-steps-mean", str(simulator_wrong_steps_mean),
-                "--simulator-wrong-steps-std", str(simulator_wrong_steps_std),
-                "--simulator-wrong-steps-min", str(simulator_wrong_steps_min),
-                "--simulator-wrong-steps-max", str(simulator_wrong_steps_max),
                 "--dataset-jsonl", dataset_jsonl,
                 "--dataset-limit", str(dataset_limit),
                 "--dataset-offset", str(dataset_offset),
@@ -1852,13 +1739,6 @@ def run_scale(
                     step_stats["task_count"] == result["completed"]
                     and step_stats["min_steps"] >= expected_min_steps
                     and step_stats["max_steps"] <= max_steps
-                    and (
-                        model_mode == "real"
-                        or step_stats.get("simulator", {})
-                        .get("wrong_steps", {})
-                        .get("sampled", {})
-                        .get("max", 0) <= simulator_wrong_steps_max
-                    )
                     and result["trace_replay"]["passed"]
                     and result["actual_step_stats"]["task_count"] == result["completed"]
                     and result["actual_step_stats"]["min_steps"] >= expected_min_steps
@@ -2078,16 +1958,6 @@ def main() -> int:
     parser.add_argument("--registration-timeout", type=int, default=180)
     parser.add_argument("--batch-timeout", type=int, default=180)
     parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
-    parser.add_argument("--simulator-latency-ms", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--simulator-latency-mean-ms", type=float, default=500)
-    parser.add_argument("--simulator-latency-std-ms", type=float, default=150)
-    parser.add_argument("--simulator-latency-min-ms", type=float, default=50)
-    parser.add_argument("--simulator-latency-max-ms", type=float, default=2000)
-    parser.add_argument("--simulator-zero-latency", action="store_true")
-    parser.add_argument("--simulator-wrong-steps-mean", type=float, default=2)
-    parser.add_argument("--simulator-wrong-steps-std", type=float, default=1)
-    parser.add_argument("--simulator-wrong-steps-min", type=int, default=0)
-    parser.add_argument("--simulator-wrong-steps-max", type=int, default=5)
     parser.add_argument("--simulator-seed", type=int, default=20260720)
     parser.add_argument("--simulator-mode", choices=("template", "trace_replay"), default="template")
     parser.add_argument("--trace-corpus-path", default="")
@@ -2144,21 +2014,6 @@ def main() -> int:
         raise SystemExit("batch and timeout arguments must be non-negative/positive")
     if args.fleet_supervisor_threshold < 2:
         raise SystemExit("invalid fleet supervisor threshold")
-    if not (0 <= args.simulator_latency_min_ms <= args.simulator_latency_mean_ms <= args.simulator_latency_max_ms):
-        raise SystemExit("simulator latency must satisfy min <= mean <= max")
-    if args.simulator_latency_std_ms < 0:
-        raise SystemExit("simulator latency std must be non-negative")
-    if args.simulator_zero_latency:
-        args.simulator_latency_mean_ms = 0.0
-        args.simulator_latency_std_ms = 0.0
-        args.simulator_latency_min_ms = 0.0
-        args.simulator_latency_max_ms = 0.0
-    if not (0 <= args.simulator_wrong_steps_min <= args.simulator_wrong_steps_mean <= args.simulator_wrong_steps_max):
-        raise SystemExit("simulator wrong_steps must satisfy min <= mean <= max")
-    if args.simulator_wrong_steps_std < 0:
-        raise SystemExit("simulator wrong_steps std must be non-negative")
-    if args.simulator_wrong_steps_max >= args.max_steps:
-        raise SystemExit("--simulator-wrong-steps-max must be smaller than --max-steps")
     if args.model_mode == "simulator" and args.simulator_mode == "trace_replay" and not args.trace_corpus_path.strip():
         raise SystemExit("--simulator-mode trace_replay requires --trace-corpus-path")
     if args.model_mode == "real" and args.trace_corpus_path.strip():
@@ -2229,15 +2084,6 @@ def main() -> int:
         args.registration_timeout,
         args.batch_timeout,
         args.fleet_supervisor_threshold,
-        args.simulator_latency_mean_ms,
-        args.simulator_latency_std_ms,
-        args.simulator_latency_min_ms,
-        args.simulator_latency_max_ms,
-        args.simulator_zero_latency,
-        args.simulator_wrong_steps_mean,
-        args.simulator_wrong_steps_std,
-        args.simulator_wrong_steps_min,
-        args.simulator_wrong_steps_max,
         args.simulator_seed,
         args.simulator_mode,
         args.trace_corpus_path,

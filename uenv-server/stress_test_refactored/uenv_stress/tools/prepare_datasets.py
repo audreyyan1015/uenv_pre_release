@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Freeze and validate official datasets used by the UEnv stability suite."""
+"""官方数据集冻结与校验工具。
+
+这个文件负责准备稳定性和规模压测使用的官方数据集，包括 SWE-bench Pro、OlymMATH、SciTab、PubMedQA 和 DSCodeBench。它的目标是把外部数据源变成固定版本、固定样本、固定哈希的本地输入。
+
+实现逻辑是：根据配置选择在线获取或本地导入；clone_official/acquire_online 获取官方源，import_sources 复制或整理到目标目录；各 prepare_* 函数分别校验必需字段、规范标签、抽样实例和写出冻结文件；sha256_tree/sha256_file 计算文件与目录哈希；build_manifest 汇总版本、样本数、路径和 checksum，main 统一执行并在缺字段或样本不足时失败。"""
 
 from __future__ import annotations
 

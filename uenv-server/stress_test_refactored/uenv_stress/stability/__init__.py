@@ -1,1 +1,5 @@
-"""Formal stability scheduling, replay, faults, and reporting."""
+"""正式稳定性验收功能包。
+
+这个目录包含稳定性验收中使用的 replay 服务、故障注入和报告生成代码。它与规模压测场景分开，目的是让长期运行、故障恢复和验收报告有独立清晰的实现边界。
+
+实现逻辑是：replay_server 提供可控 LLM 响应和延迟；faults 只对 manifest 声明的目标注入网络或进程故障，并记录恢复情况；report 从 CSV、SQLite、资源采样和故障记录中汇总五类验收指标。"""

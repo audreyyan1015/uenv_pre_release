@@ -20,25 +20,12 @@
       "fully_async"
     ],
     "model_mode": "simulator",
-    "simulator_wrong_steps": {
-      "mean": 2.0,
-      "std": 1.0,
-      "min": 0,
-      "max": 5
-    },
-    "simulator_latency_ms": {
-      "mean": 500.0,
-      "std": 150.0,
-      "min": 50.0,
-      "max": 2000.0
-    },
     "simulator_zero_latency": false,
     "simulator_seed": 20260720,
     "simulator_mode": "trace_replay",
     "trace_corpus_path": "/home/uenv-stress/trace-corpora-mixed-20260726/dscodebench/dscodebench.jsonl",
     "trace_sampling_strategy": "round_robin_episode",
     "trace_latency_basis": "observed_episode_elapsed_proxy",
-    "simulator_latency_role": "template_mode_only",
     "code_python": "/opt/uenv-stress/venvs/dscodebench/bin/python",
     "registration_timeout_seconds": 900,
     "batch_timeout_seconds": 1800,
@@ -56,16 +43,19 @@
       "one_step_off_policy",
       "fully_async"
     ],
-    "concurrencies": [32],
+    "concurrencies": [
+      4
+    ],
     "registered_workers": 1024,
     "worker_capacity": 1,
     "total_episodes": 10240,
-    "episode_batch_size": 32,
+    "episode_batch_size": 128,
+    "agents_per_node": 16,
     "min_episode_waves": 10,
     "fleet_supervisor_threshold": 16,
     "gateway_port": 22000,
-    "agent_api_port": 8077,
-    "agent_health_port": 8088,
+    "agent_api_port": 24000,
+    "agent_health_port": 24100,
     "model_port": 8888,
     "registration_timeout_seconds": 900,
     "batch_timeout_seconds": 1800,
@@ -73,30 +63,15 @@
     "instance_seed": 20260720,
     "dataset_catalog": "/opt/uenv-stress/datasets/swebench_pro/catalog.json",
     "instance_list": "/opt/uenv-stress/datasets/swebench_pro/swebench_pro_instances.json",
-    "simulator_latency_ms": {
-      "mean": 250.0,
-      "std": 75.0,
-      "min": 0.0,
-      "max": 2000.0
-    },
     "simulator_zero_latency": false,
-    "simulator_wrong_steps": {
-      "mean": 2.0,
-      "std": 1.0,
-      "min": 0,
-      "max": 5
-    },
-    "simulator_repair_success_rate": 0.35,
-    "simulator_repair_style": "plausible_patch",
     "simulator_seed": 20260720,
     "simulator_mode": "trace_replay",
     "trace_corpus_path": "/home/uenv-stress/trace-corpora-mixed-20260726/swebench_pro/swebench_pro.jsonl",
     "trace_sampling_strategy": "round_robin_episode",
     "trace_latency_basis": "observed_episode_elapsed_proxy",
-    "simulator_latency_role": "template_mode_only",
     "max_steps": 10,
     "openhands_max_iterations": 10,
-    "evidence_boundary": "1024 real UEnv SWE Worker processes, real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local trace_replay simulator using 50 task-matched real SWE-bench Pro LLM traces. container_concurrency is intentionally separate from registered_workers."
+    "evidence_boundary": "1024 real UEnv SWE Worker processes, 16 OpenHands agents per worker node, 4 concurrent OpenHands tasks per agent, real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local trace_replay simulator using 50 task-matched real SWE-bench Pro LLM traces. container_concurrency is intentionally separate from registered_workers."
   },
   "math_rule_pressure": {
     "enabled": true,
@@ -114,7 +89,6 @@
     "model_mode": "trace_replay_simulator",
     "trace_sampling_strategy": "round_robin_episode",
     "trace_latency_basis": "observed_episode_elapsed_proxy",
-    "simulator_latency_role": "template_mode_only",
     "model_port": 8888,
     "registration_timeout_seconds": 900,
     "batch_timeout_seconds": 1800,
@@ -123,12 +97,6 @@
     "worker_register_retry_backoff_ms": 100,
     "fleet_supervisor_threshold": 16,
     "simulator_seed": 20260720,
-    "simulator_latency_ms": {
-      "mean": 250.0,
-      "std": 75.0,
-      "min": 0.0,
-      "max": 2000.0
-    },
     "tasks": {
       "olymmath": {
         "dataset_path": "/opt/uenv-stress/datasets/olymmath",
@@ -150,7 +118,9 @@
   },
   "worker_scale": {
     "enabled": false,
-    "tiers": [1024],
+    "tiers": [
+      1024
+    ],
     "capacity_per_worker": 1,
     "dataset_jsonl": "/home/uenv-scale-bench-merge/uenv-bridge/data/benchmarks/dscodebench/DSCodeBench.json",
     "dataset_limit": 100,
@@ -165,18 +135,6 @@
       "one_step_off_policy",
       "fully_async"
     ],
-    "simulator_wrong_steps": {
-      "mean": 2.0,
-      "std": 1.0,
-      "min": 0,
-      "max": 5
-    },
-    "simulator_latency_ms": {
-      "mean": 500.0,
-      "std": 150.0,
-      "min": 50.0,
-      "max": 2000.0
-    },
     "simulator_zero_latency": false,
     "simulator_seed": 20260720,
     "code_python": "/opt/uenv-stress/venvs/dscodebench/bin/python",
@@ -193,7 +151,6 @@
     "trace_corpus_path": "/home/uenv-stress/trace-corpora-mixed-20260726/dscodebench/dscodebench.jsonl",
     "trace_sampling_strategy": "round_robin_episode",
     "trace_latency_basis": "observed_episode_elapsed_proxy",
-    "simulator_latency_role": "template_mode_only",
     "evidence_boundary": "optional additional scale tier; DSCodeBench real Worker/plugin path with simulator LLM assigning a 100-trajectory real-LLM corpus round-robin to Episodes"
   }
 }

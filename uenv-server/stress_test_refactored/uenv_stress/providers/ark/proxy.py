@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Loopback-only Ark proxy for real-LLM Gate3 runs.
+"""本机回环 Ark 代理。
 
-The proxy reads the API key from a mode-0600 OpenHands LLM JSON file, forwards
-OpenAI-compatible chat requests to Ark, and enriches the real provider response
-with token IDs from Ark's tokenization API. It never logs prompts, responses, or
-credentials.
-"""
+这个文件实现一个只绑定 loopback 的 OpenAI 兼容代理，用于真实 LLM 轨迹采集。它从 mode 0600 的 OpenHands LLM JSON 配置中读取 Ark API key，把 chat/completions 请求转发到 Ark，并额外调用 tokenization 接口补充真实 token 元数据。
+
+实现逻辑是：ThreadingHTTPServer 接收本机请求；Handler 校验路径和方法，读取 JSON body；request_json 负责向 Ark 后端发送请求；task_id_from_request 从请求中提取任务标识，add_real_token_metadata 把供应商响应中的 token 信息整理进返回 JSON；日志只记录状态、路径和错误摘要，不记录提示词、模型输出或凭据。"""
 
 from __future__ import annotations
 
