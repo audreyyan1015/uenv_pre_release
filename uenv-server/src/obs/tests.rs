@@ -188,3 +188,90 @@ fn terminal_events_close_run_and_step_tree_nodes() {
         Some("DONE")
     );
 }
+
+/// 读取某 workflow 阶段节点的 payload_summary.count（缺省 0）。
+fn stage_count(state: &ChainState, stage: &str) -> i64 {
+    state
+        .workflow
+        .nodes
+        .iter()
+        .find(|n| n.node_id == stage)
+        .and_then(|n| n.payload_summary.get("count"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+}
+
+#[test]
+fn workflow_stage_counts_track_distinct_episodes() {
+    let mut engine = MergeEngine::default();
+    let run = "run-stage-count";
+    let ts = now_ms();
+    let base = ObservabilityEvent {
+        event_id: "e0".into(),
+        schema_version: "1".into(),
+        correlation_id: "c-count".into(),
+        training_run_id: Some(run.into()),
+        adapter_run_id: None,
+        batch_id: Some("b-count".into()),
+        episode_id: None,
+        attempt_id: Some(1),
+        worker_id: Some("w-count".into()),
+        env_instance_id: None,
+        step_index: Some(0),
+        dispatch_lease_id: None,
+        scheduler_epoch: None,
+        env_type: Some("qa".into()),
+        source_id: "test-count".into(),
+        module: "server".into(),
+        entity_type: "episode".into(),
+        entity_id: String::new(),
+        event_type: "RUN_STARTED".into(),
+        seq: 0,
+        source_ts: ts,
+        payload: None,
+    };
+    let mut seq = 0u64;
+    let mut feed = |engine: &mut MergeEngine, event_type: &str, ep: &str| {
+        seq += 1;
+        let ev = ObservabilityEvent {
+            event_id: format!("e{seq}"),
+            event_type: event_type.into(),
+            episode_id: if ep.is_empty() { None } else { Some(ep.into()) },
+            entity_id: ep.into(),
+            seq,
+            ..base.clone()
+        };
+        assert!(matches!(
+            engine.apply(&ev, ts + seq as i64).disposition,
+            event::Disposition::Accepted
+        ));
+    };
+
+    // ep-1 完整生命周期（含多个 step 事件与 ATTEMPT_STARTED）。
+    feed(&mut engine, "RUN_STARTED", "");
+    feed(&mut engine, "EPISODE_SUBMITTED", "ep-1");
+    feed(&mut engine, "EPISODE_DISPATCHED", "ep-1");
+    feed(&mut engine, "ATTEMPT_STARTED", "ep-1");
+    feed(&mut engine, "STEP_STARTED", "ep-1");
+    feed(&mut engine, "STEP_COMPLETE", "ep-1");
+    feed(&mut engine, "EPISODE_COMPLETED", "ep-1");
+    feed(&mut engine, "EPISODE_CLOSED", "ep-1");
+
+    let state = engine.get(run).expect("run state");
+    for stage in ["submit", "dispatch", "execute", "report", "done"] {
+        assert_eq!(stage_count(state, stage), 1, "stage {stage} after ep-1");
+    }
+
+    // ep-2 走 FAILED 终态，同样有多个 step 事件。
+    feed(&mut engine, "EPISODE_SUBMITTED", "ep-2");
+    feed(&mut engine, "EPISODE_DISPATCHED", "ep-2");
+    feed(&mut engine, "STEP_STARTED", "ep-2");
+    feed(&mut engine, "STEP_STARTED", "ep-2");
+    feed(&mut engine, "EPISODE_FAILED", "ep-2");
+    feed(&mut engine, "EPISODE_CLOSED", "ep-2");
+
+    let state = engine.get(run).expect("run state");
+    for stage in ["submit", "dispatch", "execute", "report", "done"] {
+        assert_eq!(stage_count(state, stage), 2, "stage {stage} after ep-2");
+    }
+}
