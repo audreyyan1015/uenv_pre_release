@@ -33,6 +33,14 @@ from uenv.bridge.clients import RustCoreClientConfig, RustCoreEpisodeClient
 from uenv.bridge.protocol import EpisodeRequest, EpisodeResult, MODE_MULTI
 
 from evaluate_pubmedqa import LABELS, build_prompt, compute_metrics, load_pubmedqa, parse_label
+from obs_run import (
+    add_obs_args,
+    attach_training_run_id,
+    emit_run_closed,
+    emit_run_started,
+    emit_episode_result,
+    resolve_run_id,
+)
 
 
 DEFAULT_DATA = ROOT / "data/benchmarks/pubmedqa/ori_pqal.json"
@@ -74,6 +82,7 @@ def build_request(
     thinking_token_budget: int | None,
     timeout_seconds: int,
     seed: int,
+    training_run_id: str,
 ) -> EpisodeRequest:
     request_id = f"pubmedqa-{qid}-{uuid.uuid4().hex[:8]}"
     generation_config: dict[str, Any] = {
@@ -133,6 +142,7 @@ def build_request(
         },
         "timeout_seconds": timeout_seconds,
     }
+    attach_training_run_id(payload, training_run_id)
     return EpisodeRequest(
         request_id=request_id,
         env_type="qa",
@@ -269,6 +279,7 @@ def main() -> int:
     parser.add_argument("--connect-timeout-seconds", type=float, default=20.0)
     parser.add_argument("--requests-log", type=Path, default=None)
     parser.add_argument("--results-log", type=Path, default=None)
+    add_obs_args(parser)
     args = parser.parse_args()
 
     if not args.model_endpoint:
@@ -279,6 +290,20 @@ def main() -> int:
     wait_for_tcp(args.endpoint, args.connect_timeout_seconds)
     examples = load_pubmedqa(args.data, limit=args.limit)
     batch_id = f"pubmedqa-uenv-{time.strftime('%Y%m%d_%H%M%S')}"
+    training_run_id = resolve_run_id(args.run_id, batch_id)
+    print(
+        json.dumps(
+            {
+                "benchmark": "pubmedqa",
+                "training_run_id": training_run_id,
+                "obs_url": args.obs_url,
+                "batch_id": batch_id,
+                "total_examples": len(examples),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     requests = [
         build_request(
             qid=example.qid,
@@ -296,6 +321,7 @@ def main() -> int:
             thinking_token_budget=args.thinking_token_budget,
             timeout_seconds=args.timeout_seconds,
             seed=args.seed + idx,
+            training_run_id=training_run_id,
         )
         for idx, example in enumerate(examples)
     ]
@@ -306,6 +332,16 @@ def main() -> int:
     result_log.unlink(missing_ok=True)
 
     rows: list[dict[str, Any]] = []
+    emit_run_started(
+        obs_url=args.obs_url,
+        obs_token=args.obs_token,
+        training_run_id=training_run_id,
+        benchmark="pubmedqa",
+        batch_id=batch_id,
+        output_dir=args.output_dir,
+        total_examples=len(examples),
+        payload={"limit": args.limit},
+    )
     client = RustCoreEpisodeClient(
         RustCoreClientConfig(
             endpoint=args.endpoint,
@@ -314,6 +350,7 @@ def main() -> int:
         )
     )
     try:
+        request_payload_by_id = {request.request_id: payload_json(request) for request in requests}
         example_by_request_id = {request.request_id: example for request, example in zip(requests, examples, strict=True)}
         for batch in tqdm(list(batched(requests, args.batch_size)), desc="UEnv PubMedQA"):
             started = time.time()
@@ -334,6 +371,22 @@ def main() -> int:
                 row = result_to_row(example, result, elapsed_ms)
                 rows.append(row)
                 append_jsonl(result_log, row)
+                request_payload = request_payload_by_id.get(result.request_id, {})
+                emit_episode_result(
+                    obs_url=args.obs_url,
+                    obs_token=args.obs_token,
+                    training_run_id=training_run_id,
+                    benchmark="pubmedqa",
+                    batch_id=batch_id,
+                    request_id=result.request_id,
+                    status=result.status,
+                    reward=float(result.summary.total_reward or 0.0),
+                    correlation_id=str(request_payload.get("correlation_id") or ""),
+                    env_type="qa",
+                    trajectory_id=result.trajectory_id,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                )
     finally:
         client.close()
 
@@ -345,6 +398,8 @@ def main() -> int:
             "adapter_core_endpoint": args.endpoint,
             "model_endpoint": args.model_endpoint,
             "model_name": args.model_name,
+            "training_run_id": training_run_id,
+            "obs_url": args.obs_url,
             "batch_id": batch_id,
             "batch_size": args.batch_size,
             "prompt_style": args.prompt_style,
@@ -353,6 +408,20 @@ def main() -> int:
             "preserve_thinking": args.preserve_thinking,
             "thinking_token_budget": args.thinking_token_budget,
             "max_tokens": args.max_tokens,
+        },
+    )
+    emit_run_closed(
+        obs_url=args.obs_url,
+        obs_token=args.obs_token,
+        training_run_id=training_run_id,
+        benchmark="pubmedqa",
+        batch_id=batch_id,
+        output_dir=args.output_dir,
+        ok=all(row["uenv_status"] == "completed" for row in rows),
+        result_count=len(rows),
+        payload={
+            "completed_count": sum(1 for row in rows if row["uenv_status"] == "completed"),
+            "failed_count": sum(1 for row in rows if row["uenv_status"] != "completed"),
         },
     )
     metrics = json.loads((args.output_dir / "metrics.json").read_text(encoding="utf-8"))
