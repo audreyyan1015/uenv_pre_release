@@ -394,21 +394,36 @@ fn sample_to_worker_payload(
         }
     }
     // CodeEnv / DSCodeBench: forward execution fields from env_config.
+    // 含 Agent 编排字段（execution_mode=agent → Server 走 CodeAgentBackend）。
     if sample.env_type == "code" {
         if let Some(obj) = worker_payload.as_object_mut() {
             for key in [
                 "task_id",
+                "problem_id",
                 "library",
+                "code_problem",
+                "prompt",
+                "prompt_style",
                 "test_code",
+                "test_script",
                 "test_script_path",
                 "ground_truth_path",
                 "ground_truth_code",
                 "entry_point",
                 "num_tests",
                 "random_seed",
+                "seed",
                 "timeout_secs",
                 "benchmark_root",
                 "response_text",
+                "evaluation_mode",
+                "execution_mode",
+                "mode",
+                "agent_bridge_id",
+                "agent_bridge_version",
+                "agent_pool_id",
+                "max_iterations",
+                "pool_selector",
             ] {
                 if let Some(v) = env_cfg.get(key) {
                     obj.insert(key.to_string(), v.clone());

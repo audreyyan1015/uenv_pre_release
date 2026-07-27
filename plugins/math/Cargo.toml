@@ -6,3 +6,12 @@ description = "MathEnv (L2) — dataset backends and scoring logic for uenv-math
 
 [lib]
 path = "src/lib.rs"
+
+# 金标对齐用：examples/score_corpus.rs 直接调用生产判分入口 score_action，
+# 把语料打分结果导出成 JSONL 供公开 verifiers Rubric 对照。
+[dev-dependencies]
+serde_json = "1"
+
+[[example]]
+name = "score_corpus"
+path = "examples/score_corpus.rs"

@@ -144,7 +144,7 @@ class UEnvAgentLoopConfig:
     binary: str | None = None
     fake_reward: float = 1.0
     fake_response_text: str = ""
-    default_env_type: str = "math"
+    default_env_type: str = "qa"
     default_model_endpoint: str = "https://openrouter.ai/api/v1"
     default_model_name: str = "qwen/qwen-2.5-7b-instruct"
     default_max_steps: int = 10
@@ -187,7 +187,7 @@ class UEnvAgentLoop(AgentLoopBase):
         binary: str | None = None,
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
-        default_env_type: str = "math",
+        default_env_type: str = "qa",
         default_model_endpoint: str = "https://openrouter.ai/api/v1",
         default_model_name: str = "qwen/qwen-2.5-7b-instruct",
         default_max_steps: int = 10,
@@ -704,7 +704,7 @@ class UEnvAgentLoop(AgentLoopBase):
                 "stop_conditions": ["done", "max_steps", "timeout"],
             },
             "reward_config": {
-                "reward_type": "rubric" if env_type == "math" else "external",
+                "reward_type": "rubric" if env_type in ("qa", "math") else "external",
                 "rubric_config": self._jsonable(reward_model),
             },
             "metadata": metadata,
@@ -901,6 +901,7 @@ class UEnvAgentLoop(AgentLoopBase):
         if any(
             token in lowered
             for token in (
+                "qa",
                 "gsm8k",
                 "math",
                 "pubmedqa",
@@ -908,7 +909,8 @@ class UEnvAgentLoop(AgentLoopBase):
                 "olymmath",
             )
         ):
-            return "math"
+            # 单轮问答/分类验证环境；历史名 math 归一到 qa（Worker 双注册兼容）。
+            return "qa"
         if "humaneval" in lowered or "mbpp" in lowered or "code" in lowered:
             return "code"
         if "agent" in lowered:

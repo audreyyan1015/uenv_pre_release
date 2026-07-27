@@ -85,6 +85,82 @@ impl SweAgentSpec {
     }
 }
 
+/// 非 SWE 的 Agent 任务（当前是 `code` + ToolEnv）从 payload 解析出的编排参数。
+///
+/// 与 [`SweAgentSpec`] 的区别：这里**不需要 worker gateway session**。ToolEnv Agent
+/// 在自己机器上的沙箱里迭代代码，不需要访问 Worker 侧的运行时；判分仍由官方 harness
+/// 完成（Agent 定稿后再走一次 code env 判分），所以 Server 只负责把任务路由到 Agent 池
+/// 并收口结果。
+#[derive(Clone)]
+pub(crate) struct CodeAgentSpec {
+    /// 题目 id（DSCodeBench 的 `problem_id`），用于日志与去重。
+    pub(crate) task_id: String,
+    /// agent bridge 标识与版本，用于 pool 解析和结果记录。
+    pub(crate) agent_bridge_id: String,
+    pub(crate) agent_bridge_version: String,
+    /// 指定 agent pool；为空时由 registry 按 bridge 信息解析。
+    pub(crate) agent_pool_id: String,
+    /// "llm" | "mock"，透传给 Agent 决定策略。
+    pub(crate) mode: String,
+    /// Agent 侧多轮上限（ToolEnv 的 max_turns）；0 表示用 Agent 默认值。
+    pub(crate) max_iterations: i32,
+    /// 额外的 pool 选择条件。
+    pub(crate) pool_selector: std::collections::HashMap<String, String>,
+    /// 完整任务描述（题面、判分参数等）原样透传给 Agent。
+    pub(crate) task_payload_json: String,
+}
+
+impl CodeAgentSpec {
+    pub(crate) fn from_payload(req: &EpisodeRequest) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_slice(&req.payload).ok()?;
+        if v.get("execution_mode").and_then(|x| x.as_str()).unwrap_or("") != "agent" {
+            return None;
+        }
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        // task_id 缺失说明这不是一个可执行的 code agent 任务，退回 native 路径。
+        let task_id = {
+            let direct = s("task_id");
+            if direct.is_empty() {
+                v.get("env_config")
+                    .and_then(|c| c.get("task_id"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                direct
+            }
+        };
+        if task_id.is_empty() {
+            return None;
+        }
+        Some(CodeAgentSpec {
+            task_id,
+            agent_bridge_id: s("agent_bridge_id"),
+            agent_bridge_version: s("agent_bridge_version"),
+            agent_pool_id: s("agent_pool_id"),
+            mode: {
+                let m = s("mode");
+                if m.is_empty() { "llm".to_string() } else { m }
+            },
+            max_iterations: v
+                .get("max_iterations")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0) as i32,
+            pool_selector: v
+                .get("pool_selector")
+                .and_then(|x| x.as_object())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            // 整个 payload 原样转给 Agent：Server 不理解题面语义，也不该解释它。
+            task_payload_json: String::from_utf8_lossy(&req.payload).to_string(),
+        })
+    }
+}
+
 pub(crate) struct ForEpisodeSession {
     /// worker gateway 创建的 session id，用于后续关闭 session 和结果追踪。
     pub(crate) session_id: String,

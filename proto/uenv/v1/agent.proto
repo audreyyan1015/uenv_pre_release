@@ -29,6 +29,10 @@ message AgentJob {
     string parallel_mode = 19;
     optional double enqueue_ts = 20;
     map<string, string> metadata = 21;
+    // 非 SWE 的 Agent 任务描述（JSON）。SWE 用 instance_id + gateway_url 就够，
+    // code/ToolEnv 需要携带题面与判分参数（problem_id / prompt / num_tests / seed …），
+    // 这些字段无法塞进上面的固定槽位，因此统一走一个 JSON 载荷。
+    string task_payload_json = 22;
 }
 
 // ─── Agent pool registration (symmetric with RegisterWorker; design 260701 §2.0.6) ─
