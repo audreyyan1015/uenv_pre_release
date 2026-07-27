@@ -161,6 +161,10 @@ pub struct ChainState {
     pub episodes: HashMap<String, EpisodeView>,
     pub workers: HashMap<String, WorkerView>,
     pub cursor: EventCursor,
+    /// 各 workflow 阶段已计数的 distinct episode 集合（payload_summary.count 去重用，
+    /// 见 Docs/adapter/20260727 口径文档 §2.5）。不随状态序列化：重启重放时按事件流自然重建。
+    #[serde(skip)]
+    pub stage_seen_episodes: HashMap<String, std::collections::HashSet<String>>,
 }
 
 impl ChainState {
@@ -193,6 +197,7 @@ impl ChainState {
                 last_seq: 0,
                 last_ingest_ts: now,
             },
+            stage_seen_episodes: HashMap::new(),
         }
     }
 }
