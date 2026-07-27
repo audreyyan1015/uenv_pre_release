@@ -479,6 +479,7 @@ mod tests {
                 uenv_worker_min: "0.1.0".into(),
                 uenv_server_min: None,
                 features: vec![],
+                consumers: vec![],
             },
             worker_overlay: serde_json::Value::Null,
             agent_defaults: serde_json::Value::Null,

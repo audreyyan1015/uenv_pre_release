@@ -18,6 +18,7 @@
 
 use crate::domain::manifest;
 use crate::domain::openenv::{self, Kind};
+use crate::domain::rubric;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use uenv_hub_types::{PublishVersionRequest, Severity};
@@ -75,8 +76,9 @@ pub struct ConformanceReport {
     pub warned: usize,
 }
 
-/// Gate revision, recorded in every report.
-pub const GATE_VERSION: &str = "uenv-conformance/1";
+/// Gate revision, recorded in every report. Bumped to `/2` when C12 (rubric
+/// contract) joined, so older reports stay distinguishable from newer ones.
+pub const GATE_VERSION: &str = "uenv-conformance/2";
 
 /// Evidence that the offline (air-gapped) preparation actually happened.
 /// Supplied by the CLI after inspecting the project directory; `None` fields
@@ -110,6 +112,9 @@ pub struct GateOptions<'a> {
     /// "reject known public registries" to "reject everything not listed", which
     /// is the only decidable form of the zero-egress rule.
     pub intranet_registries: Vec<String>,
+    /// Thresholds for C12. Defaults match the aligner's own defaults so the gate
+    /// does not re-judge a corpus run that already passed locally.
+    pub rubric_gate: rubric::GateOptions,
 }
 
 fn schema_property_names(schema: Option<&serde_json::Value>) -> BTreeSet<String> {
@@ -493,6 +498,9 @@ pub fn run(env_type: &str, req: &PublishVersionRequest, opts: &GateOptions<'_>) 
     // ---- C11: offline precompilation evidence ----
     checks.push(offline_check(&opts.offline, req));
 
+    // ---- C12: rubric contract & gold-standard alignment ----
+    checks.push(rubric_check(req, &opts.rubric_gate));
+
     let failed = checks.iter().filter(|c| c.status == CheckStatus::Fail).count();
     let warned = checks.iter().filter(|c| c.status == CheckStatus::Warn).count();
     ConformanceReport {
@@ -571,6 +579,99 @@ fn offline_check(ev: &OfflineEvidence, req: &PublishVersionRequest) -> Check {
     }
 }
 
+/// C12 — the rubric contract, for environments that reward by rule.
+///
+/// Skipped when no rubric is declared: an environment that rewards by executing
+/// tests (`code`, `swe`) has no rule to align, and forcing a rubric on it would
+/// only produce a meaningless one.
+///
+/// When a rubric *is* declared, over-credit is a `Fail` rather than a `Warn`.
+/// Over-credit means the shipped scorer pays out where the reference scorer does
+/// not, which is precisely the surface a policy learns to exploit; packaging such
+/// a version as the default would train against a reward the benchmark does not
+/// endorse.
+const C12_TITLE: &str = "rubric contract & gold-standard alignment";
+
+fn rubric_check(req: &PublishVersionRequest, gate: &rubric::GateOptions) -> Check {
+    let Some(spec) = &req.rubric else {
+        return Check::new(
+            "C12",
+            C12_TITLE,
+            CheckStatus::Skip,
+            "no [rubric] declared; applies to rule-scored environments (e.g. qa) only",
+        );
+    };
+
+    // Structural coherence first, cross-checked against the dataset routing.
+    let dataset_keys = req
+        .config_schema
+        .as_ref()
+        .and_then(rubric::dataset_keys_from_config_schema);
+    let mut report = uenv_hub_types::ValidationReport::ok();
+    rubric::validate(spec, dataset_keys.as_deref(), &mut report);
+    let errors: Vec<String> = report
+        .issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .map(|i| format!("{}: {}", i.location, i.message))
+        .collect();
+    if !errors.is_empty() {
+        return Check::new(
+            "C12",
+            C12_TITLE,
+            CheckStatus::Fail,
+            format!("invalid rubric contract: {}", errors.join("; ")),
+        );
+    }
+
+    let outcome = rubric::gate(Some(spec), gate);
+    if !outcome.eligible {
+        return Check::new(
+            "C12",
+            C12_TITLE,
+            CheckStatus::Fail,
+            format!(
+                "gold-standard alignment insufficient: {}. Re-run \
+                 verify_qa_rubric_alignment.py and fix the scorer before packaging.",
+                outcome.notes.join("; ")
+            ),
+        );
+    }
+
+    let alignment = spec.alignment.as_ref();
+    let metrics = alignment.and_then(|a| a.metrics.as_ref());
+    let mut detail = match metrics {
+        Some(m) => format!(
+            "agreement={:.4}, over_credit={}, under_credit={}",
+            m.agreement_rate, m.over_credit_count, m.under_credit_count
+        ),
+        None => "no metrics".to_string(),
+    };
+    if let Some(scorer) = &spec.production_scorer {
+        detail.push_str(&format!(", scorer={scorer}"));
+    }
+
+    // Traceability: metrics without the corpus/report digests cannot be re-derived
+    // later, so the claim is unverifiable even though it is not wrong.
+    let missing_evidence = alignment
+        .map(|a| a.corpus_digest.is_none() || a.report_digest.is_none())
+        .unwrap_or(true);
+    if missing_evidence {
+        return Check::new(
+            "C12",
+            C12_TITLE,
+            CheckStatus::Warn,
+            format!(
+                "{detail}; corpus/report digest missing — the alignment claim is not \
+                 reproducible. Attach evidence with `uenv env rubric import --metrics … \
+                 --corpus …`."
+            ),
+        );
+    }
+
+    Check::new("C12", C12_TITLE, CheckStatus::Pass, detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,6 +721,7 @@ class CodeState(State):
             }],
             dependencies: None,
             min_uenv_version: None,
+            rubric: None,
         }
     }
 
@@ -636,6 +738,7 @@ class CodeState(State):
         let opts = GateOptions {
             models_src: Some(MODELS),
             intranet_registries: Vec::new(),
+            rubric_gate: Default::default(),
             offline: OfflineEvidence {
                 wheel_count: Some(3),
                 pyc_count: Some(12),
@@ -767,6 +870,7 @@ class CodeState(State):
         let opts = GateOptions {
             models_src: Some(MODELS),
             intranet_registries: Vec::new(),
+            rubric_gate: Default::default(),
             offline: OfflineEvidence {
                 wheel_count: Some(0),
                 pyc_count: Some(5),
@@ -789,6 +893,7 @@ class CodeState(State):
         let opts = GateOptions {
             models_src: Some(MODELS),
             intranet_registries: Vec::new(),
+            rubric_gate: Default::default(),
             offline: OfflineEvidence {
                 wheel_count: Some(4),
                 pyc_count: Some(3),
@@ -828,5 +933,93 @@ class CodeState(State):
         assert!(json.contains("\"C06\""));
         let back: ConformanceReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back.env_type, "coding-env");
+    }
+
+    fn rubric_spec(over: i64, rate: f64, with_digests: bool) -> uenv_hub_types::RubricSpec {
+        let d = |c: char| format!("sha256:{}", String::from(c).repeat(64));
+        uenv_hub_types::RubricSpec {
+            schema_version: "1".into(),
+            backend: Some("verifiers+math_verify".into()),
+            production_scorer: Some("uenv-math-plugin/score_action".into()),
+            alignment: Some(uenv_hub_types::RubricAlignment {
+                corpus_id: Some("qa_rubric_corpus@2026-07-25".into()),
+                corpus_digest: with_digests.then(|| d('a')),
+                report_digest: with_digests.then(|| d('b')),
+                package_ref: None,
+                metrics: Some(uenv_hub_types::RubricMetrics {
+                    total: None,
+                    agreed: None,
+                    agreement_rate: rate,
+                    over_credit_count: over,
+                    under_credit_count: 2,
+                    verifiers_version: None,
+                    math_verify_version: None,
+                }),
+            }),
+            datasets: Default::default(),
+            known_gaps: vec![],
+        }
+    }
+
+    /// An execution-scored environment has no rule to align, so C12 must not
+    /// invent a requirement for it.
+    #[test]
+    fn c12_is_skipped_without_a_rubric() {
+        let req = req_from_models();
+        let r = run("coding-env", &req, &GateOptions::default());
+        assert_eq!(status_of(&r, "C12").status, CheckStatus::Skip);
+        assert!(r.passed);
+    }
+
+    #[test]
+    fn c12_passes_for_an_aligned_rubric_with_evidence() {
+        let mut req = req_from_models();
+        req.rubric = Some(rubric_spec(0, 0.9655, true));
+        let r = run("qa", &req, &GateOptions::default());
+        let c12 = status_of(&r, "C12");
+        assert_eq!(c12.status, CheckStatus::Pass, "{}", c12.detail);
+        assert!(c12.detail.contains("over_credit=0"), "{}", c12.detail);
+    }
+
+    /// Metrics without digests are a traceability gap, not a scoring defect:
+    /// packaging may proceed, `--strict` refuses.
+    #[test]
+    fn c12_warns_when_alignment_evidence_is_not_reproducible() {
+        let mut req = req_from_models();
+        req.rubric = Some(rubric_spec(0, 0.9655, false));
+        let r = run("qa", &req, &GateOptions::default());
+        assert_eq!(status_of(&r, "C12").status, CheckStatus::Warn);
+        assert!(r.passed);
+        assert!(!r.strict_passed);
+    }
+
+    /// Over-credit blocks packaging outright — it is the direction a policy can
+    /// exploit for reward it did not earn.
+    #[test]
+    fn c12_fails_on_over_credit() {
+        let mut req = req_from_models();
+        req.rubric = Some(rubric_spec(1, 0.9655, true));
+        let r = run("qa", &req, &GateOptions::default());
+        let c12 = status_of(&r, "C12");
+        assert_eq!(c12.status, CheckStatus::Fail, "{}", c12.detail);
+        assert!(!r.passed);
+    }
+
+    #[test]
+    fn c12_fails_on_low_agreement_and_on_a_malformed_contract() {
+        let mut req = req_from_models();
+        req.rubric = Some(rubric_spec(0, 0.42, true));
+        assert_eq!(
+            status_of(&run("qa", &req, &GateOptions::default()), "C12").status,
+            CheckStatus::Fail
+        );
+
+        let mut malformed = rubric_spec(0, 0.9655, true);
+        malformed.schema_version = "99".into();
+        req.rubric = Some(malformed);
+        let report = run("qa", &req, &GateOptions::default());
+        let c12 = status_of(&report, "C12");
+        assert_eq!(c12.status, CheckStatus::Fail);
+        assert!(c12.detail.contains("invalid rubric contract"), "{}", c12.detail);
     }
 }

@@ -31,6 +31,7 @@ fn manifest(version: &str) -> NewManifest {
         default_config: None,
         resources: ResourceSpec::default(),
         published_by: None,
+        rubric: None,
     }
 }
 
@@ -44,6 +45,9 @@ fn new_env(env_type: &str) -> NewEnv {
         repository: None,
         license: None,
         tags: vec!["x".into()],
+        lifecycle: uenv_hub_types::EnvLifecycle::Active,
+        superseded_by: None,
+        compat_aliases: vec![],
     }
 }
 
@@ -200,6 +204,7 @@ async fn env_package_publish_get_list_artifacts() {
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["runtime_gateway".into()],
+            consumers: vec![],
         },
         worker_overlay: serde_json::json!({"swe": {"benchmark_variant": "verified"}}),
         agent_defaults: serde_json::json!({"workspace_dir": "/app"}),
@@ -256,7 +261,7 @@ async fn env_package_publish_get_list_artifacts() {
         publisher: None,
         description: None,
         changelog: None,
-        platform: PackagePlatform { uenv_worker_min: "0.1.0".into(), uenv_server_min: None, features: vec![] },
+        platform: PackagePlatform { uenv_worker_min: "0.1.0".into(), uenv_server_min: None, features: vec![], consumers: vec![] },
         worker_overlay: serde_json::Value::Null,
         agent_defaults: serde_json::Value::Null,
         contracts: PackageContracts::default(),

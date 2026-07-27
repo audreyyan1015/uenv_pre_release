@@ -31,6 +31,9 @@ pub fn env_summary(env: &EnvRow, tags: Vec<String>) -> dto::EnvSummary {
         tags,
         created_at: env.created_at,
         updated_at: env.updated_at,
+        lifecycle: env.lifecycle(),
+        superseded_by: env.superseded_by.clone(),
+        compat_aliases: json_array(&env.compat_aliases),
     }
 }
 
@@ -96,6 +99,10 @@ pub fn full_manifest(m: &ModelManifest) -> dto::FullManifest {
         .dependencies
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
+    let rubric: Option<dto::RubricSpec> = v
+        .rubric_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
 
     dto::FullManifest {
         env_type: m.env_type.clone(),
@@ -113,8 +120,12 @@ pub fn full_manifest(m: &ModelManifest) -> dto::FullManifest {
         resources: m.config.as_ref().map(resources).unwrap_or_default(),
         interface,
         examples,
+        rubric,
         is_yanked: v.is_yanked != 0,
         yank_reason: v.yank_reason.clone(),
+        latest_eligible: v.latest_eligible != 0,
+        gate_notes: json_array(&v.gate_notes),
+        deprecation: m.deprecation.clone(),
         published_at: v.published_at,
     }
 }

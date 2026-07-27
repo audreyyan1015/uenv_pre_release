@@ -78,7 +78,7 @@ enum EnvCommand {
     ImportOpenenv {
         /// Directory of the OpenEnv project (contains `openenv.yaml`).
         src: PathBuf,
-        /// Where to write `manifest.toml` (defaults to `src`).
+        /// Destination directory, or the `.toml` file itself (defaults to `src`).
         #[arg(long)]
         out: Option<PathBuf>,
         /// Intranet registry prefix, e.g. `registry.uenv.internal/openenv`.
@@ -127,7 +127,7 @@ enum EnvCommand {
         /// JSON file with `{"action":…,"observation":…,"state":…}` schemas.
         #[arg(long)]
         interface: Option<PathBuf>,
-        /// Where to write `manifest.toml` (defaults to `src` when it is a dir).
+        /// Destination directory, or the `.toml` file itself (defaults next to `src`).
         #[arg(long)]
         out: Option<PathBuf>,
         /// Intranet registry prefix, e.g. `registry.uenv.internal/envs`.
@@ -236,6 +236,12 @@ enum EnvCommand {
         /// Container engine used for `--docker-load` (docker|podman).
         #[arg(long, default_value = "docker")]
         engine: String,
+        /// This node's role, checked against `platform.consumers`. Use
+        /// `toolenv-agent` on an Agent host so it provably syncs the *same*
+        /// package version — hence the same artifact digests — as the Worker
+        /// that will score the result.
+        #[arg(long, default_value = "worker")]
+        consumer: String,
     },
     /// Publish image tarball(s) already staged on the Hub host as a package
     /// version, so Workers `docker load` them from the Hub (no third-party pull).
@@ -256,11 +262,84 @@ enum EnvCommand {
         worker_min: String,
         #[arg(long)]
         publisher: Option<String>,
+        /// Node roles allowed to sync this bundle (repeatable). Add
+        /// `toolenv-agent` / `openhands-agent` when an Agent host must load the
+        /// same images as the Worker that scores the result.
+        #[arg(long = "consumer", value_name = "ROLE", default_values_t = [uenv_hub_types::CONSUMER_WORKER.to_string()])]
+        consumers: Vec<String>,
+    },
+    /// Manage the rubric (gold-standard scoring) contract of an environment.
+    Rubric {
+        #[command(subcommand)]
+        command: RubricCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RubricCommand {
+    /// Derive a `[rubric]` block from a real alignment run and write it into
+    /// `manifest.toml`.
+    ///
+    /// Reads the aligner's `metrics.json` (`verify_qa_rubric_alignment.py`),
+    /// digests the corpus and the report, and emits the TOML. Deriving it rather
+    /// than hand-writing it is the point: the agreement rate and the over/under
+    /// credit counts then cannot disagree with the evidence they claim.
+    Import {
+        /// `metrics.json` produced by the aligner.
+        #[arg(long)]
+        metrics: PathBuf,
+        /// Alignment corpus (`qa_rubric_corpus.jsonl`), digested for pinning.
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long, default_value = "manifest.toml")]
+        manifest: PathBuf,
+        /// Corpus identity; defaults to `<corpus stem>@<today>`.
+        #[arg(long)]
+        corpus_id: Option<String>,
+        /// The scorer that produces rewards at runtime.
+        #[arg(long, default_value = "uenv-math-plugin/score_action")]
+        production_scorer: String,
+        /// Reference implementation the production scorer is compared against.
+        #[arg(long, default_value = "verifiers+math_verify")]
+        backend: String,
+        /// `package_id@version` of the EnvPackage that carries the evidence bytes.
+        #[arg(long)]
+        package_ref: Option<String>,
+        /// Print the derived TOML instead of writing the manifest.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the rubric contract a Hub serves for an environment version, so a
+    /// training run can record which gold standard it trained against.
+    Show {
+        env: String,
+        #[arg(long, default_value = "latest")]
+        version: String,
+    },
+    /// Publish the alignment corpus + report as a Hub-hosted EnvPackage, so the
+    /// evidence behind a rubric can be downloaded and not merely described.
+    Publish {
+        /// Package id, e.g. `qa-rubric-align`.
+        package: String,
+        #[arg(long, default_value = "0.1.0")]
+        version: String,
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        metrics: PathBuf,
+        #[arg(long)]
+        publisher: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 enum AgentBridgeCommand {
+    /// List the Agent-bridge catalog (package_id / version / bundle_digest).
+    ///
+    /// The columns are the fields an Agent reports in
+    /// `RegisterAgent.synced_agent_bridges`, so an operator can compare what a
+    /// node claims to have synced against what the Hub published.
+    List,
     /// Sync a published AgentBridgePackage to a local directory (digest-verified).
     Sync {
         /// Package id, e.g. `uenv-agent-openhands`.
@@ -271,6 +350,12 @@ enum AgentBridgeCommand {
         target_dir: PathBuf,
         #[arg(long)]
         dry_run: bool,
+        /// Optional role check against `platform.consumers`, e.g.
+        /// `toolenv-agent`. Left unset by default: bridge packages published
+        /// before `consumers` existed declare none, and refusing those would
+        /// break Agent hosts that are already running.
+        #[arg(long)]
+        consumer: Option<String>,
     },
 }
 
@@ -547,6 +632,7 @@ async fn run_env(
             worker_version,
             docker_load,
             engine,
+            consumer,
         } => {
             run_env_sync(
                 &client,
@@ -557,6 +643,7 @@ async fn run_env(
                 worker_version,
                 docker_load,
                 &engine,
+                &consumer,
             )
             .await?;
         }
@@ -566,10 +653,304 @@ async fn run_env(
             tars,
             worker_min,
             publisher,
+            consumers,
         } => {
-            run_publish_image(&client, &package, &version, &tars, &worker_min, publisher).await?;
+            run_publish_image(
+                &client, &package, &version, &tars, &worker_min, publisher, &consumers,
+            )
+            .await?;
+        }
+        EnvCommand::Rubric { command } => run_rubric(&client, command).await?,
+    }
+    Ok(())
+}
+
+/// sha256 of a file, in the `sha256:<hex>` form used across the Hub.
+fn file_digest(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+}
+
+async fn run_rubric(
+    client: &HttpClient,
+    command: RubricCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        RubricCommand::Import {
+            metrics,
+            corpus,
+            manifest,
+            corpus_id,
+            production_scorer,
+            backend,
+            package_ref,
+            dry_run,
+        } => run_rubric_import(
+            &metrics,
+            &corpus,
+            &manifest,
+            corpus_id,
+            &production_scorer,
+            &backend,
+            package_ref,
+            dry_run,
+        ),
+        RubricCommand::Show { env, version } => {
+            let manifest = client.get_version(&env, &version).await?;
+            match manifest.rubric {
+                Some(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r)?);
+                    if !manifest.latest_eligible {
+                        println!(
+                            "note: {}@{} is barred from `latest` — {}",
+                            manifest.env_type,
+                            manifest.version,
+                            manifest.gate_notes.join("; ")
+                        );
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "{env}@{} declares no rubric contract",
+                        manifest.version
+                    )
+                    .into())
+                }
+            }
+            Ok(())
+        }
+        RubricCommand::Publish {
+            package,
+            version,
+            corpus,
+            metrics,
+            publisher,
+        } => run_publish_rubric(client, &package, &version, &corpus, &metrics, publisher).await,
+    }
+}
+
+/// `uenv env rubric import` — derive the `[rubric]` block from a real alignment
+/// run and splice it into `manifest.toml`.
+///
+/// The aligner writes `agreement_rate` / `over_credit_count` /
+/// `under_credit_count`; the original design draft called them `agreement` /
+/// `too_lenient` / `too_strict`. Both spellings deserialize (see
+/// `RubricMetrics`), so an operator can feed either file without editing it.
+#[allow(clippy::too_many_arguments)]
+fn run_rubric_import(
+    metrics_path: &Path,
+    corpus_path: &Path,
+    manifest_path: &Path,
+    corpus_id: Option<String>,
+    production_scorer: &str,
+    backend: &str,
+    package_ref: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(metrics_path)
+        .map_err(|e| format!("reading {}: {e}", metrics_path.display()))?;
+    let report: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("{} is not valid JSON: {e}", metrics_path.display()))?;
+    let metrics: uenv_hub_types::RubricMetrics = serde_json::from_value(report.clone())
+        .map_err(|e| format!("{} is not an alignment metrics report: {e}", metrics_path.display()))?;
+
+    let corpus_digest = file_digest(corpus_path)?;
+    let report_digest = file_digest(metrics_path)?;
+    let corpus_id = corpus_id.unwrap_or_else(|| {
+        let stem = corpus_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("corpus");
+        format!("{stem}@{}", today_utc())
+    });
+
+    // Per-dataset routing is taken from the report's own `by_dataset` block, so
+    // the declared scorers are exactly the ones that were measured.
+    let mut datasets = std::collections::BTreeMap::new();
+    if let Some(by) = report.get("by_dataset").and_then(|v| v.as_object()) {
+        for (name, stats) in by {
+            let notes = match (
+                stats.get("agreed").and_then(|v| v.as_i64()),
+                stats.get("total").and_then(|v| v.as_i64()),
+            ) {
+                (Some(a), Some(t)) => Some(format!("aligned {a}/{t}")),
+                _ => None,
+            };
+            datasets.insert(
+                name.clone(),
+                uenv_hub_types::RubricDataset {
+                    scorer: Some(name.clone()),
+                    notes,
+                },
+            );
         }
     }
+
+    let spec = uenv_hub_types::RubricSpec {
+        schema_version: uenv_hub_types::RUBRIC_SCHEMA_VERSION.to_string(),
+        backend: Some(backend.to_string()),
+        production_scorer: Some(production_scorer.to_string()),
+        alignment: Some(uenv_hub_types::RubricAlignment {
+            corpus_id: Some(corpus_id),
+            corpus_digest: Some(corpus_digest),
+            report_digest: Some(report_digest),
+            package_ref,
+            metrics: Some(metrics.clone()),
+        }),
+        datasets,
+        known_gaps: vec![],
+    };
+
+    // Validate before writing so a bad report never lands in a manifest.
+    let mut validation = uenv_hub_types::ValidationReport::ok();
+    uenv_hub_core::domain::rubric::validate(&spec, None, &mut validation);
+    print_report(&validation);
+    if !validation.valid {
+        return Err("derived rubric contract is invalid".into());
+    }
+
+    let toml_text = render_rubric_toml(&spec)?;
+    let outcome = uenv_hub_core::domain::rubric::gate(
+        Some(&spec),
+        &uenv_hub_core::domain::rubric::GateOptions::default(),
+    );
+    println!(
+        "alignment: agreement={:.4} over_credit={} under_credit={}",
+        metrics.agreement_rate, metrics.over_credit_count, metrics.under_credit_count
+    );
+    if outcome.eligible {
+        println!("promotion gate: OK (this version may become `latest`)");
+    } else {
+        println!("promotion gate: BLOCKED");
+        for note in &outcome.notes {
+            println!("  - {note}");
+        }
+    }
+
+    if dry_run {
+        println!("---\n{toml_text}");
+        return Ok(());
+    }
+    splice_rubric_into_manifest(manifest_path, &toml_text)?;
+    println!("wrote [rubric] into {}", manifest_path.display());
+    Ok(())
+}
+
+/// Render a `RubricSpec` as the `[rubric]` section of a manifest.
+fn render_rubric_toml(
+    spec: &uenv_hub_types::RubricSpec,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // Serialize through a single-key table so the emitted keys are exactly the
+    // ones the manifest parser reads back.
+    let mut root = toml::map::Map::new();
+    root.insert("rubric".to_string(), toml::Value::try_from(spec)?);
+    Ok(toml::to_string_pretty(&toml::Value::Table(root))?)
+}
+
+/// Replace (or append) the `[rubric]` section of a manifest file, leaving every
+/// other section byte-identical.
+fn splice_rubric_into_manifest(
+    path: &Path,
+    rubric_toml: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut kept = String::with_capacity(existing.len());
+    let mut skipping = false;
+    for line in existing.lines() {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            // Any `[rubric]` / `[rubric.x]` / `[[rubric.y]]` header starts a
+            // block we are replacing; any other header ends it.
+            let name = t.trim_start_matches('[').trim_start_matches('[');
+            skipping = name.starts_with("rubric.")
+                || name.starts_with("rubric]")
+                || name.starts_with("rubric ");
+        }
+        if !skipping {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    while kept.ends_with("\n\n") {
+        kept.pop();
+    }
+    let merged = format!("{kept}\n{rubric_toml}");
+    // Parse the result before overwriting, so a splice bug cannot corrupt a
+    // manifest on disk.
+    let parsed: toml::Value = toml::from_str(&merged)
+        .map_err(|e| format!("spliced manifest would be invalid TOML: {e}"))?;
+    if parsed.get("rubric").is_none() {
+        return Err("spliced manifest lost its [rubric] section".into());
+    }
+    std::fs::write(path, merged)?;
+    Ok(())
+}
+
+/// `uenv env rubric publish` — host the alignment corpus + report on the Hub.
+async fn run_publish_rubric(
+    client: &HttpClient,
+    package: &str,
+    version: &str,
+    corpus: &Path,
+    metrics: &Path,
+    publisher: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut artifacts = Vec::new();
+    for (path, kind, rel) in [
+        (corpus, "rubric_corpus", "rubric/corpus.jsonl"),
+        (metrics, "rubric_report", "rubric/metrics.json"),
+    ] {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        artifacts.push(uenv_hub_types::InlineArtifact {
+            name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+            kind: kind.to_string(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some(rel.to_string()),
+            content: Some(content),
+            content_b64: None,
+        });
+    }
+
+    let req = uenv_hub_types::PublishPackageRequest {
+        version: version.to_string(),
+        publisher,
+        description: Some("QA rubric alignment evidence (corpus + metrics report)".into()),
+        changelog: Some(format!(
+            "publish alignment corpus {} and report {}",
+            corpus.display(),
+            metrics.display()
+        )),
+        platform: uenv_hub_types::PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec![],
+            // Evidence is consumed by whoever needs to re-derive the reward, so
+            // both the Worker and Agent hosts may sync it.
+            consumers: vec![
+                uenv_hub_types::CONSUMER_WORKER.into(),
+                uenv_hub_types::CONSUMER_TOOLENV_AGENT.into(),
+            ],
+        },
+        worker_overlay: serde_json::Value::Null,
+        agent_defaults: serde_json::Value::Null,
+        contracts: uenv_hub_types::PackageContracts::default(),
+        interface: uenv_hub_types::InterfaceSchema::default(),
+        artifacts,
+        file_artifacts: vec![],
+    };
+    let resp = client.publish_package(package, &req).await?;
+    println!(
+        "published rubric evidence {}@{} -> {}",
+        resp.package_id, resp.version, resp.manifest_url
+    );
+    println!(
+        "reference it from manifest.toml: uenv env rubric import --package-ref {}@{} …",
+        resp.package_id, resp.version
+    );
     Ok(())
 }
 
@@ -592,6 +973,23 @@ fn find_models_py(root: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Resolve where an import command writes its manifest.
+///
+/// `--out` may be either the destination directory or the file itself; a `.toml`
+/// path is taken literally so that `--out env/manifest.toml` does not silently
+/// become `env/manifest.toml/manifest.toml`.
+fn manifest_dest(out: Option<&Path>, default_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dest = match out {
+        Some(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("toml")) => p.to_path_buf(),
+        Some(p) => p.join("manifest.toml"),
+        None => default_dir.join("manifest.toml"),
+    };
+    if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(dest)
 }
 
 /// `uenv env import-openenv` — OpenEnv project → standardized `manifest.toml`.
@@ -668,9 +1066,7 @@ fn run_import_openenv(
     }
     print_report(&converted.report);
 
-    let dest_dir = out.unwrap_or(src);
-    std::fs::create_dir_all(dest_dir)?;
-    let dest = dest_dir.join("manifest.toml");
+    let dest = manifest_dest(out, src)?;
     if dest.exists() && !force {
         return Err(format!(
             "{} already exists; pass --force to overwrite",
@@ -907,12 +1303,12 @@ fn run_import_docker(args: ImportDockerArgs<'_>) -> Result<(), Box<dyn std::erro
     }
     print_report(&converted.report);
 
-    let dest_dir = args
-        .out
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| if src_is_dir { src.to_path_buf() } else { PathBuf::from(".") });
-    std::fs::create_dir_all(&dest_dir)?;
-    let dest = dest_dir.join("manifest.toml");
+    let default_dir = if src_is_dir {
+        src.to_path_buf()
+    } else {
+        src.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
+    };
+    let dest = manifest_dest(args.out, &default_dir)?;
     if dest.exists() && !args.force {
         return Err(format!(
             "{} already exists; pass --force to overwrite",
@@ -1131,6 +1527,7 @@ fn run_conformance_gate(
             models_src: models_src.as_deref(),
             offline,
             intranet_registries,
+            rubric_gate: Default::default(),
         },
     );
 
@@ -1183,6 +1580,7 @@ async fn run_publish_image(
     tars: &[PathBuf],
     worker_min: &str,
     publisher: Option<String>,
+    consumers: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut file_artifacts = Vec::with_capacity(tars.len());
     for tar in tars {
@@ -1209,6 +1607,7 @@ async fn run_publish_image(
             uenv_worker_min: worker_min.to_string(),
             uenv_server_min: None,
             features: vec![],
+            consumers: consumers.to_vec(),
         },
         worker_overlay: serde_json::json!({ "swe": { "image_pull_policy": "local_only" } }),
         agent_defaults: serde_json::Value::Null,
@@ -1259,6 +1658,7 @@ async fn run_package_sync(
     worker_version: Option<String>,
     docker_load: bool,
     engine: &str,
+    consumer: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let manifest = client.get_package_manifest(package, version).await?;
     let resolved = manifest.version.clone();
@@ -1268,6 +1668,24 @@ async fn run_package_sync(
         if !min.is_empty() && version_lt(wv, min) {
             return Err(format!(
                 "worker version {wv} is below package requirement uenv_worker_min={min}"
+            )
+            .into());
+        }
+    }
+
+    // Refuse a node role the package was not published for. Silently syncing a
+    // Worker-only package onto an Agent host is how the two ends drift apart.
+    if let Some(role) = consumer {
+        if !manifest.platform.allows_consumer(role) {
+            let declared = if manifest.platform.consumers.is_empty() {
+                "worker (implicit)".to_string()
+            } else {
+                manifest.platform.consumers.join(", ")
+            };
+            return Err(format!(
+                "package {package}@{resolved} is not published for consumer '{role}' \
+                 (declared consumers: {declared}); republish with that consumer declared \
+                 so both ends consume one digest"
             )
             .into());
         }
@@ -1342,14 +1760,48 @@ async fn run_agent_bridge(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (client, _cfg) = make_client(endpoint);
     match command {
+        AgentBridgeCommand::List => {
+            let items = client.list_agent_bridges().await?;
+            if items.is_empty() {
+                println!("no agent bridges published");
+                return Ok(());
+            }
+            println!("{} agent bridge(s):", items.len());
+            for b in items {
+                println!(
+                    "  {:<24} {:<8} kind={:<10} envs={:<12} {}",
+                    b.package_id,
+                    b.version,
+                    b.agent_kind.unwrap_or_else(|| "-".into()),
+                    if b.required_env_types.is_empty() {
+                        "-".to_string()
+                    } else {
+                        b.required_env_types.join(",")
+                    },
+                    b.bundle_digest
+                );
+            }
+            Ok(())
+        }
         AgentBridgeCommand::Sync {
             package,
             version,
             target_dir,
             dry_run,
+            consumer,
         } => {
-            run_package_sync(&client, &package, &version, &target_dir, dry_run, None, false, "docker")
-                .await?;
+            run_package_sync(
+                &client,
+                &package,
+                &version,
+                &target_dir,
+                dry_run,
+                None,
+                false,
+                "docker",
+                consumer.as_deref(),
+            )
+            .await?;
             let dest = target_dir.join(&package).join(
                 client
                     .get_package_manifest(&package, &version)
@@ -1374,6 +1826,7 @@ async fn run_env_sync(
     worker_version: Option<String>,
     docker_load: bool,
     engine: &str,
+    consumer: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_package_sync(
         client,
@@ -1384,6 +1837,7 @@ async fn run_env_sync(
         worker_version,
         docker_load,
         engine,
+        Some(consumer),
     )
     .await?;
     let manifest = client.get_package_manifest(package, version).await?;
@@ -1403,6 +1857,27 @@ fn chrono_now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Today's UTC date as `YYYY-MM-DD`, used to stamp a corpus identity.
+fn today_utc() -> String {
+    let days = chrono_now_secs().div_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 -> (y, m, d).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 async fn publish_manifest(
     client: &HttpClient,
     manifest_path: &str,
@@ -1416,10 +1891,37 @@ async fn publish_manifest(
         return Err("manifest validation failed".into());
     }
 
-    // Ensure the environment exists (create it on first publish).
-    if client.get_env(&mf.env_type).await.is_err() {
-        client.create_env(&mf.to_create_request()).await?;
-        println!("created environment '{}'", mf.env_type);
+    // Ensure the environment exists (create it on first publish), and reconcile
+    // its registry identity when the manifest disagrees with the Hub. Without the
+    // reconcile step a rename would land as a new version under the old identity,
+    // and `math` would keep advertising itself as the canonical name.
+    match client.get_env(&mf.env_type).await {
+        Err(_) => {
+            client.create_env(&mf.to_create_request()).await?;
+            println!("created environment '{}'", mf.env_type);
+        }
+        Ok(detail) => {
+            let mut patch = uenv_hub_types::EnvPatchRequest::default();
+            if detail.summary.lifecycle != mf.lifecycle {
+                patch.lifecycle = Some(mf.lifecycle);
+            }
+            if detail.summary.superseded_by != mf.superseded_by {
+                patch.superseded_by = mf.superseded_by.clone();
+            }
+            if detail.summary.compat_aliases != mf.compat_aliases {
+                patch.compat_aliases = Some(mf.compat_aliases.clone());
+            }
+            if patch.lifecycle.is_some()
+                || patch.superseded_by.is_some()
+                || patch.compat_aliases.is_some()
+            {
+                client.patch_env(&mf.env_type, &patch).await?;
+                println!(
+                    "reconciled identity of '{}': lifecycle={:?} superseded_by={:?} compat_aliases={:?}",
+                    mf.env_type, mf.lifecycle, mf.superseded_by, mf.compat_aliases
+                );
+            }
+        }
     }
 
     let mut req = mf.to_publish_request();
@@ -1552,4 +2054,212 @@ async fn run_hub(
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--out` is accepted both as a directory and as the manifest file itself;
+    /// the latter must not be turned into `…/manifest.toml/manifest.toml`.
+    #[test]
+    fn out_may_name_either_a_directory_or_the_toml_file() {
+        let root = std::env::temp_dir().join(format!("uenv-out-{}", std::process::id()));
+        let src = root.join("env");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let as_dir = manifest_dest(Some(&root.join("dest")), &src).unwrap();
+        assert_eq!(as_dir, root.join("dest").join("manifest.toml"));
+
+        let as_file = manifest_dest(Some(&root.join("dest/manifest.toml")), &src).unwrap();
+        assert_eq!(as_file, root.join("dest").join("manifest.toml"));
+
+        let defaulted = manifest_dest(None, &src).unwrap();
+        assert_eq!(defaulted, src.join("manifest.toml"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    const MANIFEST: &str = r#"env_type = "qa"
+description = "single-turn verification"
+tags = ["qa"]
+
+[version]
+version = "0.4.0"
+entrypoint = "./run.sh"
+supported_backends = ["process"]
+
+[resources]
+cpu = 1.0
+"#;
+
+    /// The aligner's own key names (`agreement_rate` / `over_credit_count` /
+    /// `under_credit_count`) must be accepted as-is, so an operator can feed
+    /// `metrics.json` straight from `verify_qa_rubric_alignment.py`.
+    fn metrics_json() -> &'static str {
+        r#"{
+          "total": 58,
+          "agreed": 56,
+          "agreement_rate": 0.9655172413793104,
+          "over_credit_count": 0,
+          "under_credit_count": 2,
+          "verifiers_version": "0.1.3",
+          "math_verify_version": "0.8.0",
+          "by_dataset": {
+            "gsm8k": {"total": 20, "agreed": 20},
+            "olymmath": {"total": 18, "agreed": 16}
+          }
+        }"#
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn rubric_import_derives_digests_and_round_trips_through_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let metrics = write(tmp.path(), "metrics.json", metrics_json());
+        let corpus = write(tmp.path(), "qa_rubric_corpus.jsonl", "{\"case_id\":\"c1\"}\n");
+        let manifest = write(tmp.path(), "manifest.toml", MANIFEST);
+
+        run_rubric_import(
+            &metrics,
+            &corpus,
+            &manifest,
+            Some("qa_rubric_corpus@2026-07-27".into()),
+            "uenv-math-plugin/score_action",
+            "verifiers+math_verify",
+            Some("qa-rubric-align@0.1.0".into()),
+            false,
+        )
+        .unwrap();
+
+        // Read back through the real manifest parser: what the CLI writes is what
+        // `uenv env publish` will send.
+        let parsed = ManifestFile::from_path(manifest.to_str().unwrap()).unwrap();
+        assert_eq!(parsed.env_type, "qa");
+        assert_eq!(parsed.version.version, "0.4.0");
+        let rubric = parsed.rubric.expect("rubric section");
+        assert_eq!(rubric.schema_version, "1");
+        assert_eq!(
+            rubric.production_scorer.as_deref(),
+            Some("uenv-math-plugin/score_action")
+        );
+        let alignment = rubric.alignment.expect("alignment");
+        assert_eq!(alignment.package_ref.as_deref(), Some("qa-rubric-align@0.1.0"));
+        assert_eq!(
+            alignment.corpus_digest.as_deref(),
+            Some(file_digest(&corpus).unwrap().as_str())
+        );
+        assert_eq!(
+            alignment.report_digest.as_deref(),
+            Some(file_digest(&metrics).unwrap().as_str())
+        );
+        let m = alignment.metrics.expect("metrics");
+        assert_eq!(m.total, Some(58));
+        assert_eq!(m.over_credit_count, 0);
+        assert_eq!(m.under_credit_count, 2);
+        assert!((m.agreement_rate - 0.9655172413793104).abs() < 1e-12);
+        // Dataset routing comes from the report's own by_dataset block.
+        assert_eq!(rubric.datasets.len(), 2);
+        assert_eq!(rubric.datasets["olymmath"].notes.as_deref(), Some("aligned 16/18"));
+    }
+
+    /// Re-importing replaces the previous `[rubric]` block instead of appending a
+    /// duplicate key (which TOML rejects), and leaves other sections intact.
+    #[test]
+    fn rubric_import_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let metrics = write(tmp.path(), "metrics.json", metrics_json());
+        let corpus = write(tmp.path(), "corpus.jsonl", "{}\n");
+        let manifest = write(tmp.path(), "manifest.toml", MANIFEST);
+
+        for _ in 0..2 {
+            run_rubric_import(
+                &metrics,
+                &corpus,
+                &manifest,
+                None,
+                "uenv-math-plugin/score_action",
+                "verifiers+math_verify",
+                None,
+                false,
+            )
+            .unwrap();
+        }
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        assert_eq!(text.matches("[rubric]").count(), 1);
+        let parsed = ManifestFile::from_path(manifest.to_str().unwrap()).unwrap();
+        assert_eq!(parsed.version.entrypoint.as_deref(), Some("./run.sh"));
+        assert!(parsed.rubric.is_some());
+    }
+
+    /// An over-credit alignment still writes the contract — auditability matters
+    /// more than a clean manifest — but the operator is told the gate will block
+    /// promotion to `latest`.
+    #[test]
+    fn rubric_import_reports_a_blocked_promotion_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let metrics = write(
+            tmp.path(),
+            "metrics.json",
+            r#"{"total": 10, "agreed": 8, "agreement_rate": 0.8, "over_credit_count": 2, "under_credit_count": 0}"#,
+        );
+        let corpus = write(tmp.path(), "corpus.jsonl", "{}\n");
+        let manifest = write(tmp.path(), "manifest.toml", MANIFEST);
+
+        run_rubric_import(
+            &metrics,
+            &corpus,
+            &manifest,
+            None,
+            "uenv-math-plugin/score_action",
+            "verifiers+math_verify",
+            None,
+            false,
+        )
+        .unwrap();
+        let parsed = ManifestFile::from_path(manifest.to_str().unwrap()).unwrap();
+        let spec = parsed.rubric.unwrap();
+        let outcome = uenv_hub_core::domain::rubric::gate(
+            Some(&spec),
+            &uenv_hub_core::domain::rubric::GateOptions::default(),
+        );
+        assert!(!outcome.eligible);
+        assert!(outcome.notes.iter().any(|n| n.contains("over-credit")));
+    }
+
+    #[test]
+    fn a_non_metrics_json_file_is_rejected_before_touching_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let metrics = write(tmp.path(), "metrics.json", r#"{"hello": "world"}"#);
+        let corpus = write(tmp.path(), "corpus.jsonl", "{}\n");
+        let manifest = write(tmp.path(), "manifest.toml", MANIFEST);
+
+        let err = run_rubric_import(
+            &metrics,
+            &corpus,
+            &manifest,
+            None,
+            "s",
+            "b",
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("alignment metrics report"));
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), MANIFEST);
+    }
+
+    #[test]
+    fn today_utc_formats_a_calendar_date() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_000), (2022, 1, 8));
+        let today = today_utc();
+        assert_eq!(today.len(), 10);
+        assert!(today.starts_with("20"));
+    }
 }

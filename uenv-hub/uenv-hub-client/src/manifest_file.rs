@@ -7,7 +7,8 @@
 use crate::error::{ClientError, Result};
 use serde::Deserialize;
 use uenv_hub_types::{
-    CreateEnvRequest, Dependencies, ImageSpec, InterfaceSchema, PublishVersionRequest, ResourceSpec,
+    CreateEnvRequest, Dependencies, EnvLifecycle, ImageSpec, InterfaceSchema,
+    PublishVersionRequest, ResourceSpec, RubricSpec,
 };
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +28,13 @@ pub struct ManifestFile {
     pub license: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Registry identity of this capability class.
+    #[serde(default)]
+    pub lifecycle: EnvLifecycle,
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+    #[serde(default)]
+    pub compat_aliases: Vec<String>,
 
     pub version: VersionSection,
     #[serde(default)]
@@ -41,6 +49,11 @@ pub struct ManifestFile {
     pub config_schema: Option<toml::Value>,
     #[serde(default)]
     pub default_config: Option<toml::Value>,
+    /// Scoring contract for verification-type environments. Deserialized straight
+    /// into the wire DTO so the TOML file and the published manifest cannot drift
+    /// apart in field naming.
+    #[serde(default)]
+    pub rubric: Option<RubricSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +143,9 @@ impl ManifestFile {
             repository: self.repository.clone(),
             license: self.license.clone(),
             tags: self.tags.clone(),
+            lifecycle: self.lifecycle,
+            superseded_by: self.superseded_by.clone(),
+            compat_aliases: self.compat_aliases.clone(),
         }
     }
 
@@ -170,6 +186,7 @@ impl ManifestFile {
                 requires: d.requires.clone(),
             }),
             min_uenv_version: self.version.min_uenv_version.clone(),
+            rubric: self.rubric.clone(),
         }
     }
 }
