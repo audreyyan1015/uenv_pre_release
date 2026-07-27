@@ -2,6 +2,8 @@
 
 > 日期：2026-07-22  
 > 范围：UEnv `env_type=math` 性质确认、公开验证环境改造选型、狭义/广义概念划分、DSCodeBench Agent 评测建议  
+> 实施规划：[验证型环境改造与DSCode-Agent评测-实施规划](./验证型环境改造与DSCode-Agent评测-实施规划.md)（`math`→`qa` 改造 + ToolEnv 分轨）  
+> 跨模块清单：[跨模块调整清单-qa改造与ToolEnv-Agent](./跨模块调整清单-qa改造与ToolEnv-Agent.md)  
 > 关联文档：[五类 Benchmark Worker 支持现状](../260709/五类Benchmark-Worker支持现状与跨层调整.md)、[Hub 环境标准化指南](../../hub/uenv-hub环境标准化指南.md)、[DSCodeBench 基线评测](../../../uenv-bridge/docs/任务测评/DSCodeBench代码生成基线评测.md)
 
 ---

@@ -24,12 +24,23 @@ pub fn answers_match(action: &str, target: &str) -> bool {
         return true;
     }
     let extracted = extract_solution(action);
+    if extracted.trim().is_empty() {
+        return false;
+    }
     if extracted == target {
         return true;
     }
+    // 数值书写差异（`#### 072` vs `72`、`#### 8` vs `8.0`、`1/2` vs `0.5`）用原始串判等价；
+    // 非数值答案仍要求归一化后字符串相等。
+    if let Some(equal) = crate::backends::common::numeric_equivalent(extracted.trim(), target) {
+        return equal;
+    }
     let norm_action = normalize_answer(&extracted);
     let norm_target = normalize_answer(target);
-    !norm_target.is_empty() && norm_action == norm_target
+    if norm_target.is_empty() || norm_action.is_empty() {
+        return false;
+    }
+    norm_action == norm_target
 }
 
 #[cfg(test)]
@@ -48,5 +59,20 @@ mod tests {
         assert!(answers_match(&correct, "20"));
         let wrong = format!("{} 19", "####");
         assert!(!answers_match(&wrong, "20"));
+    }
+
+    #[test]
+    fn accepts_numeric_writing_variants() {
+        assert!(answers_match("#### 072", "72"));
+        assert!(answers_match("#### 8", "8.0"));
+        assert!(answers_match("#### 1/2", "0.5"));
+        assert!(answers_match("#### 1,200", "1200"));
+        assert!(!answers_match("#### 6", "16"));
+    }
+
+    #[test]
+    fn rejects_empty_answer() {
+        assert!(!answers_match("", "72"));
+        assert!(!answers_match("#### ", "72"));
     }
 }

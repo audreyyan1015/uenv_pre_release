@@ -46,11 +46,23 @@ pub async fn seed_templates(store: &SqliteStore) -> Result<()> {
 /// After publishing `0.2.0`, any non-yanked legacy `1.0.0` placeholder is yanked
 /// so `/versions/latest` resolves to the standardized schema (semver: 1.0.0 > 0.2.0).
 pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
+    // `qa` 是单轮问答/分类验证环境的正式名（原 `math` 更名而来）。两者共用同一份
+    // dataset 路由与判分实现，`math` 保留为兼容别名，训练侧全部切到 `qa` 后可下线。
+    ensure_env(
+        store,
+        "qa",
+        "QaEnv — 单轮问答/分类验证环境 (gsm8k/pubmedqa/scitab/olymmath)",
+        &["qa", "reasoning", "validation", "single-turn"],
+    )
+    .await?;
+    ensure_env_version(store, "qa", qa_manifest()).await?;
+    yank_legacy_placeholder(store, "qa", "1.0.0", "0.2.0").await?;
+
     ensure_env(
         store,
         "math",
-        "MathEnv — 通用校验/计算环境 (gsm8k/pubmedqa/scitab/olymmath)",
-        &["math", "reasoning", "qa", "validation"],
+        "MathEnv — 兼容别名，已更名为 qa（单轮问答/分类验证环境）；新接入请用 qa",
+        &["math", "reasoning", "qa", "validation", "deprecated"],
     )
     .await?;
     ensure_env_version(store, "math", math_manifest()).await?;
@@ -868,7 +880,24 @@ const MATH_DATASETS: &[&str] =
 /// Supported code datasets — kept in lock-step with `plugins/code/manifest.yaml`.
 const CODE_DATASETS: &[&str] = &["dscodebench"];
 
+/// The standardized `qa` env registry manifest (v0.2.0).
+///
+/// Same contract as [`math_manifest`] (identical dataset routing and scoring —
+/// `plugins/qa/run.sh` reuses the math plugin binary); only naming and changelog
+/// differ. Keeping them as two registry entries lets Workers register both during
+/// the compatibility window without a Hub-side alias mechanism.
+fn qa_manifest() -> NewManifest {
+    NewManifest {
+        changelog: Some(
+            "v0.2.0: 由 math 更名而来的单轮问答/分类验证环境 (gsm8k/pubmedqa/scitab/olymmath[-easy|-hard]); 判分按 dataset 路由，对齐 plugins/qa/manifest.yaml".into(),
+        ),
+        ..math_manifest()
+    }
+}
+
 /// The standardized `math` env registry manifest (v0.2.0).
+///
+/// **Deprecated naming**: kept as a compatibility alias of [`qa_manifest`].
 ///
 /// A process (proto-uds) plugin — no container image. The supported benchmark
 /// datasets are declared as the `dataset` config enum, which is the

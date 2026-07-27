@@ -61,6 +61,29 @@ OpenHands release that still ships the classic `Runtime` + `benchmarks/swe_bench
 then add a thin subclass shim that delegates to `UEnvGatewayClient` — the gateway
 contract here is unchanged.
 
+## Agent 池控制面（与 ToolEnv 同机隔离）
+
+OpenHands runner 通过 `uenv_runtime.agent_client.AgentControlClient` 连 Server
+`AgentControlService`（Register / Poll / Complete / Heartbeat）。
+
+| | OpenHands (SWE) | ToolEnv (code) |
+|--|-----------------|----------------|
+| systemd | `uenv-agent-poller` | `uenv-toolenv-poller` |
+| pool_id | `openhands-default` | `toolenv-default` |
+| bridge_id | `uenv-agent-openhands` | `uenv-agent-toolenv` |
+| 端口 | API `:8888` / health `:8777` | shim `:8099` |
+| AgentJob | `gateway_*` + `instance_id` | `task_payload_json`（gateway 可空） |
+
+`agent_bridge_version` 两侧独立演进。重生 stub：
+
+```bash
+make proto-agent-python
+# 校验 AgentJob.task_payload_json 存在
+```
+
+ToolEnv bootstrap 会把同一套 stub **合并**进 `uenv-bridge/src/uenv/v1/`，
+避免 `PYTHONPATH` 同时含 `…/gen` 与 `uenv.bridge` 时抢顶层 `uenv` 包。
+
 ## Quick start
 
 Start a Worker with the gateway enabled (see `config/uenv-worker.swe-local.yaml`),
