@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useRunStream } from "@/hooks/use-run-stream";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import type { ConnectionState, ViewMode } from "@/lib/store/chain-store";
 import type {
   ChainState,
@@ -323,7 +324,7 @@ export function TrainingConsole() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-background text-foreground">
+    <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-background text-foreground">
       <TopBar
         chainState={chainState}
         connection={connection}
@@ -340,39 +341,56 @@ export function TrainingConsole() {
         episodeStats={episodeStats}
         workerStats={workerStats}
       />
-      <div className="grid flex-1 min-h-0 grid-cols-[1fr_420px] gap-px bg-border">
-        <WorkflowPanel
-          nodes={workflowNodes}
-          failedEpisodes={failedEpisodes}
-          selectedId={resolvedStageId}
-          onSelect={setSelectedStageId}
-        />
-        <div className="flex min-h-0 flex-col bg-background">
-          <TreePanel
-            node={uiTree}
-            expanded={expanded}
-            setExpanded={setExpanded}
-            selectedId={resolvedTreeId}
-            onSelect={setSelectedTreeId}
-          />
-          <DetailPanel
-            stage={selectedStage}
-            chainState={chainState}
+      <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
+        <ResizablePanel defaultSize={42} minSize={28}>
+          <ResizablePanelGroup orientation="horizontal" className="min-h-0 min-w-0 bg-border">
+            <ResizablePanel defaultSize={68} minSize={45} className="min-w-0">
+              <WorkflowPanel
+                nodes={workflowNodes}
+                failedEpisodes={failedEpisodes}
+                selectedId={resolvedStageId}
+                onSelect={setSelectedStageId}
+              />
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={32} minSize={24} className="min-w-0">
+              <ResizablePanelGroup orientation="vertical" className="min-h-0 min-w-0 bg-background">
+                <ResizablePanel defaultSize={46} minSize={24}>
+                  <TreePanel
+                    node={uiTree}
+                    expanded={expanded}
+                    setExpanded={setExpanded}
+                    selectedId={resolvedTreeId}
+                    onSelect={setSelectedTreeId}
+                  />
+                </ResizablePanel>
+                <ResizableHandle withHandle />
+                <ResizablePanel defaultSize={54} minSize={24}>
+                  <DetailPanel
+                    stage={selectedStage}
+                    chainState={chainState}
+                    recentEntries={recentEntries}
+                    episodeStats={episodeStats}
+                    workerStats={workerStats}
+                  />
+                </ResizablePanel>
+              </ResizablePanelGroup>
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </ResizablePanel>
+        <ResizableHandle withHandle />
+        <ResizablePanel defaultSize={58} minSize={18}>
+          <BottomDock
+            tab={bottomTab}
+            setTab={setBottomTab}
             recentEntries={recentEntries}
-            episodeStats={episodeStats}
-            workerStats={workerStats}
+            snapshots={snapshots}
+            selectedSnapshotId={selectedSnapshotId}
+            onLoadSnapshot={selectSnapshot}
+            onRemoveSnapshot={removeSnapshot}
           />
-        </div>
-      </div>
-      <BottomDock
-        tab={bottomTab}
-        setTab={setBottomTab}
-        recentEntries={recentEntries}
-        snapshots={snapshots}
-        selectedSnapshotId={selectedSnapshotId}
-        onLoadSnapshot={selectSnapshot}
-        onRemoveSnapshot={removeSnapshot}
-      />
+        </ResizablePanel>
+      </ResizablePanelGroup>
     </div>
   );
 }
@@ -597,80 +615,141 @@ function WorkflowPanel({
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const nodeRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [zoom, setZoom] = useState(1);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === sectionRef.current);
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  const zoomBy = (delta: number) => {
+    setZoom((current) => Math.min(1.6, Math.max(0.6, Number((current + delta).toFixed(2)))));
+  };
+
+  const centerSelectedNode = () => {
+    const target = selectedId ? nodeRefs.current[selectedId] : null;
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+      return;
+    }
+
+    viewportRef.current?.scrollTo({ left: 0, top: 0, behavior: "smooth" });
+  };
+
+  const toggleFullscreen = async () => {
+    const target = sectionRef.current;
+    if (!target) return;
+
+    if (document.fullscreenElement === target) {
+      await document.exitFullscreen();
+      return;
+    }
+
+    await target.requestFullscreen();
+    requestAnimationFrame(centerSelectedNode);
+  };
+
   return (
-    <section className="flex min-h-0 flex-col bg-background">
+    <section ref={sectionRef} className="flex h-full min-h-0 min-w-0 flex-col bg-background">
       <PanelHeader
         title="工作流视图"
         subtitle="接入 → 调度 → Worker → 环境 → 奖励聚合"
         right={
           <div className="flex items-center gap-1">
-            <ToolBtn icon={Search} label="定位" />
-            <ToolBtn icon={Crosshair} label="居中当前节点" />
-            <ToolBtn icon={Maximize2} label="适配窗口" />
+            <ToolBtn icon={Search} label="定位" onClick={centerSelectedNode} />
+            <ToolBtn icon={Crosshair} label="居中当前节点" onClick={centerSelectedNode} />
+            <ToolBtn
+              icon={Maximize2}
+              label={isFullscreen ? "退出全屏" : "全屏显示"}
+              onClick={toggleFullscreen}
+            />
             <div className="mx-1 h-5 w-px bg-border" />
-            <ToolBtn icon={ZoomOut} label="缩小" />
-            <span className="px-1 font-mono text-[11px] text-muted-foreground">100%</span>
-            <ToolBtn icon={ZoomIn} label="放大" />
+            <ToolBtn icon={ZoomOut} label="缩小" onClick={() => zoomBy(-0.1)} />
+            <button
+              className="px-1 font-mono text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={() => setZoom(1)}
+              title="重置缩放"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <ToolBtn icon={ZoomIn} label="放大" onClick={() => zoomBy(0.1)} />
           </div>
         }
       />
 
       <div
-        className="relative flex-1 overflow-auto p-8"
+        ref={viewportRef}
+        className="relative flex-1 overflow-auto"
         style={{
           backgroundImage:
             "radial-gradient(circle at 1px 1px, var(--color-grid-line) 1px, transparent 0)",
           backgroundSize: "24px 24px",
         }}
       >
-        {nodes.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            暂无工作流节点，等待 Server Obs 推送首个事件…
-          </div>
-        ) : (
-          <>
-            {/* Main horizontal path */}
-            <div className="relative inline-flex min-w-full items-start gap-3 pb-12">
-              {nodes.map((stage, idx) => (
-                <div key={stage.node_id} className="relative flex items-start">
-                  <StageCard
-                    stage={stage}
-                    selected={stage.node_id === selectedId}
-                    onClick={() => onSelect(stage.node_id)}
-                  />
-                  {idx < nodes.length - 1 && (
-                    <Connector active={stage.status === "DONE" || stage.status === "ACTIVE"} />
-                  )}
-                </div>
-              ))}
+        <div className="flex min-h-full flex-col px-5 py-4" style={{ zoom }}>
+          {nodes.length === 0 ? (
+            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+              暂无工作流节点，等待 Server Obs 推送首个事件…
             </div>
-
-            {/* Branches: 失败 episode 视为重试/异常分支 */}
-            {failedEpisodes.length > 0 && (
-              <div className="mt-2 space-y-3 pl-12">
-                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-muted-foreground">
-                  分支与重试
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  {failedEpisodes.map((ep) => (
-                    <BranchCard key={ep.episode_id} episode={ep} />
-                  ))}
-                </div>
+          ) : (
+            <>
+              {/* Main horizontal path */}
+              <div className="relative inline-flex min-w-full items-start gap-3 pb-4">
+                {nodes.map((stage, idx) => (
+                  <div
+                    key={stage.node_id}
+                    ref={(element) => {
+                      nodeRefs.current[stage.node_id] = element;
+                    }}
+                    className="relative flex items-start"
+                  >
+                    <StageCard
+                      stage={stage}
+                      selected={stage.node_id === selectedId}
+                      onClick={() => onSelect(stage.node_id)}
+                    />
+                    {idx < nodes.length - 1 && (
+                      <Connector active={stage.status === "DONE" || stage.status === "ACTIVE"} />
+                    )}
+                  </div>
+                ))}
               </div>
-            )}
-          </>
-        )}
 
-        {/* Legend */}
-        <div className="mt-8 flex items-center gap-4 border-t border-border pt-4 text-[11px] text-muted-foreground">
-          {(["ACTIVE", "DONE", "PENDING", "FAILED", "SKIPPED", "CLOSED"] as NodeStatus[]).map(
-            (s) => (
-              <div key={s} className="flex items-center gap-1.5">
-                <span className={cn("h-2 w-2 rounded-full", statusStyles[s].dot)} />
-                <span className="tracking-wider">{statusStyles[s].label}</span>
-              </div>
-            ),
+              {/* Branches: 失败 episode 视为重试/异常分支 */}
+              {failedEpisodes.length > 0 && (
+                <div className="mt-2 space-y-3 pl-12">
+                  <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-muted-foreground">
+                    分支与重试
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    {failedEpisodes.map((ep) => (
+                      <BranchCard key={ep.episode_id} episode={ep} />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
+
+          {/* Legend */}
+          <div className="mt-auto flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-3 text-[11px] text-muted-foreground">
+            {(["ACTIVE", "DONE", "PENDING", "FAILED", "SKIPPED", "CLOSED"] as NodeStatus[]).map(
+              (s) => (
+                <div key={s} className="flex items-center gap-1.5">
+                  <span className={cn("h-2 w-2 rounded-full", statusStyles[s].dot)} />
+                  <span className="tracking-wider">{statusStyles[s].label}</span>
+                </div>
+              ),
+            )}
+          </div>
         </div>
       </div>
     </section>
@@ -797,7 +876,7 @@ function TreePanel({
   onSelect: (id: string) => void;
 }) {
   return (
-    <section className="flex min-h-0 flex-col border-b border-border" style={{ flex: "0 0 46%" }}>
+    <section className="flex h-full min-h-0 flex-col border-b border-border">
       <PanelHeader
         title="对象层级树"
         subtitle="训练运行 → Worker → 环境 → Episode → Step"
@@ -928,7 +1007,7 @@ function DetailPanel({
 }) {
   if (!stage) {
     return (
-      <section className="flex min-h-0 flex-1 flex-col">
+      <section className="flex h-full min-h-0 flex-col">
         <PanelHeader title="节点详情" subtitle="未选中节点" />
         <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
           请选择左侧工作流中的一个节点查看详情
@@ -940,7 +1019,7 @@ function DetailPanel({
   const payloadEntries = Object.entries(stage.payload_summary ?? {});
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col">
+    <section className="flex h-full min-h-0 flex-col">
       <PanelHeader
         title="节点详情"
         subtitle={stage.label}
@@ -1094,7 +1173,7 @@ function BottomDock({
   ];
 
   return (
-    <section className="flex h-[320px] flex-col border-t border-border bg-card">
+    <section className="flex h-full min-h-0 flex-col border-t border-border bg-card">
       <div className="flex items-center gap-1 border-b border-border px-3">
         {tabs.map((t) => (
           <button
@@ -1314,13 +1393,19 @@ function PanelHeader({
 function ToolBtn({
   icon: Icon,
   label,
+  onClick,
+  disabled,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
+  onClick?: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
-      className="rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
       aria-label={label}
       title={label}
     >
