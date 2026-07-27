@@ -117,9 +117,9 @@ SWE-bench-Pro 和其他四类 benchmark 的启动流程保持一致：先启动 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-podman rm -f uenv-swebenchpro-vllm-18081 2>/dev/null || true
+podman rm -f uenv-benchmark-vllm-18081 2>/dev/null || true
 
-podman run -d --name uenv-swebenchpro-vllm-18081 \
+podman run -d --name uenv-benchmark-vllm-18081 \
   --entrypoint python3 \
   --network host \
   --pids-limit=-1 \
@@ -155,8 +155,8 @@ curl --noproxy '*' http://127.0.0.1:18081/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_131k_iter60_budget4096_20260722_214724
-mkdir -p "$BASE"
+GATEWAY_LOG_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/gateway-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$GATEWAY_LOG_DIR"
 
 PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --upstream http://127.0.0.1:18081/v1 \
@@ -167,13 +167,20 @@ PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --enable-thinking \
   --thinking-token-budget 4096 \
   --strip-reasoning \
-  --log-path "$BASE/model-gateway-18094-swe-budget4096.jsonl"
+  --log-path "$GATEWAY_LOG_DIR/model-gateway-18094-swe-budget4096.jsonl"
 ```
 
-可用下面命令确认 gateway 已就绪：
+可用下面命令确认 Adapter 侧 gateway 已就绪：
 
 ```bash
 curl --noproxy '*' http://127.0.0.1:18094/v1/models
+curl --noproxy '*' http://10.10.20.142:18094/v1/models
+```
+
+SWE-bench-Pro 还需要确认 OpenHands Agent 侧的 `LLM_CONFIG_PATH` 能通过本地隧道访问同一个 gateway。下面命令需要在 Worker/Agent 运行环境侧执行：
+
+```bash
+curl --noproxy '*' http://127.0.0.1:18194/v1/models
 ```
 
 通过 UEnv 跑 SWE-bench-Pro 全量任务：
@@ -181,13 +188,16 @@ curl --noproxy '*' http://127.0.0.1:18094/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_131k_iter60_budget4096_20260722_214724
+RUN_ID=swebenchpro-full-$(date +%Y%m%d-%H%M%S)
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/${RUN_ID}
 mkdir -p "$OUT"
 
 nohup env \
 REPO_DIR=/data/ronghao/uenv/uenv-bridge \
 DATA_PATH=/data/ronghao/uenv/uenv-bridge/data/benchmarks/swebenchpro/test.jsonl \
 OUTPUT_DIR="$OUT" \
+RUN_ID="$RUN_ID" \
+UENV_OBS_URL=http://8.130.75.157:8888/obs \
 UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
 UENV_ROLLOUT_MODEL_ENDPOINT=http://127.0.0.1:18194/v1 \
 UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
@@ -215,29 +225,51 @@ RESUME=0 \
 > "$OUT/full-run.log" 2>&1 &
 
 echo $! > "$OUT/full-run.pid"
+echo "$OUT"
 ```
 
 查看运行进度：
 
 ```bash
-tail -f /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_131k_iter60_budget4096_20260722_214724/full-run.log
+tail -f "$OUT/full-run.log"
 ```
 
 汇总当前结果：
 
 ```bash
-python3 - <<'PY'
+OUT=$(ls -td /data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/swebenchpro-full-* | head -n 1)
+OUT="$OUT" python3 - <<'PY'
 from pathlib import Path
 import collections
 import json
+import os
 
-out = Path("/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/qwen3_6_35b_a3b_uenv_full_131k_iter60_budget4096_20260722_214724")
+out = Path(os.environ["OUT"])
 rows = [json.loads(line) for line in (out / "uenv_results.jsonl").open(encoding="utf-8") if line.strip()]
 
 print("results", len(rows))
 print("status", dict(collections.Counter(row.get("uenv_status") for row in rows)))
 print("resolved", dict(collections.Counter(str(row.get("resolved")) for row in rows)))
 PY
+```
+
+关闭本轮 vLLM 和 gateway：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+podman rm -f uenv-benchmark-vllm-18081
+
+pgrep -af 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+pkill -f 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+
+ss -ltnp | grep -E ':18081|:18094' || echo "Adapter vLLM/gateway ports are closed"
+```
+
+SWE-bench-Pro 里的 `18194` 是 Worker/OpenHands 侧访问 gateway 的本地隧道端口，不在 Adapter 侧由上述命令关闭。若需要关闭该隧道，应在 Worker/Agent 运行环境侧检查并停止对应 SSH 隧道：
+
+```bash
+pgrep -af 'ssh.*18194|18194.*18094'
 ```
 
 ## 6. 当前结果
