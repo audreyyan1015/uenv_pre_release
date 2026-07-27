@@ -28,3 +28,5 @@ flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Round-trip proof for the hand-written manifest.toml emitter (domain::openenv).
+toml.workspace = true

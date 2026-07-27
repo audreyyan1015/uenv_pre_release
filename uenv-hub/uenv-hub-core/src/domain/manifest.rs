@@ -48,6 +48,20 @@ const PUBLIC_REGISTRIES: &[&str] = &[
     "mcr.microsoft.com",
     "nvcr.io",
     "docker.elastic.co",
+    // Public Docker Hub *mirrors*. These are as external as the upstream they
+    // proxy, and they show up in practice: the SWE-bench eval images on the
+    // 8.130.86.71 build host carry both `swebench/...` and
+    // `dockerproxy.net/swebench/...` / `docker.m.daocloud.io/library/...` tags.
+    "dockerproxy.net",
+    "docker.m.daocloud.io",
+    "dockerproxy.com",
+    "registry.docker-cn.com",
+    "docker.mirrors.ustc.edu.cn",
+    "hub-mirror.c.163.com",
+    "mirror.ccs.tencentyun.com",
+    "docker.nju.edu.cn",
+    "dockerhub.azk8s.cn",
+    "docker.1panel.live",
 ];
 
 /// If `image_ref`'s registry host is a known public registry, return it. Only
@@ -60,6 +74,47 @@ pub fn public_registry_of(image_ref: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|reg| host.eq_ignore_ascii_case(reg))
+}
+
+/// True when a reference carries **no registry host** and therefore resolves to
+/// Docker Hub under the container-engine reference grammar (`python:3.11-slim`
+/// → `docker.io/library/python:3.11-slim`; `swebench/sweb.eval...` →
+/// `docker.io/swebench/...`).
+///
+/// This is deliberately *not* folded into [`public_registry_of`]: the same bare
+/// string means different things in different slots. In `[image].url` a bare
+/// name is the *local* daemon's image, which is exactly what a `docker load`
+/// from Hub produces and must stay legal. In a Dockerfile `FROM` or a
+/// `base_image` it is a build-time pull from Docker Hub, which does not.
+pub fn resolves_to_docker_hub(image_ref: &str) -> bool {
+    let r = image_ref.trim();
+    if r.is_empty() {
+        return false;
+    }
+    // The engines split on the *first* `/`. With no `/` at all the whole string
+    // is a repository name, so `python:3.11-slim` is Docker Hub even though its
+    // tag contains dots — the dots are only meaningful in the first segment.
+    let Some((first, _)) = r.split_once('/') else {
+        return true;
+    };
+    let looks_like_host =
+        first.contains('.') || first.contains(':') || first.eq_ignore_ascii_case("localhost");
+    !looks_like_host
+}
+
+/// How a container engine would spell a hostless reference. `library/` is added
+/// only for single-segment names: `python:3.11` → `docker.io/library/python:3.11`,
+/// while `swebench/x:latest` → `docker.io/swebench/x:latest`.
+///
+/// Used in diagnostics, so the message shows the reference the engine will
+/// actually request rather than an invented one.
+pub fn docker_hub_expansion(image_ref: &str) -> String {
+    let r = image_ref.trim();
+    if r.contains('/') {
+        format!("docker.io/{r}")
+    } else {
+        format!("docker.io/library/{r}")
+    }
 }
 
 /// Full structural validation of a publish request. Does not touch the DB.
@@ -243,6 +298,40 @@ mod tests {
     use super::*;
     use serde_json::json;
     use uenv_hub_types::{ImageSpec, InterfaceSchema};
+
+    #[test]
+    fn public_registry_detection_covers_hub_mirrors() {
+        assert_eq!(public_registry_of("ghcr.io/meta-pytorch/base:1"), Some("ghcr.io"));
+        // A public Docker Hub mirror is not an intranet registry. These tags are
+        // what the build host actually reports for its SWE-bench images.
+        assert_eq!(
+            public_registry_of("dockerproxy.net/swebench/sweb.eval.x86_64.sympy-20916:latest"),
+            Some("dockerproxy.net")
+        );
+        assert_eq!(
+            public_registry_of("docker.m.daocloud.io/library/hello-world:latest"),
+            Some("docker.m.daocloud.io")
+        );
+        // Intranet hosts and locally loaded images stay clean.
+        assert_eq!(public_registry_of("registry.uenv.internal/envs/math:1.0.0"), None);
+        assert_eq!(public_registry_of("192.168.0.133:5000/envs/math:1.0.0"), None);
+        assert_eq!(public_registry_of("uenv-base:latest"), None);
+    }
+
+    #[test]
+    fn docker_hub_resolution_follows_the_reference_grammar() {
+        // No slash at all → docker.io/library/<name>, tag dots notwithstanding.
+        assert!(resolves_to_docker_hub("python:3.11-slim"));
+        assert!(resolves_to_docker_hub("uenv-base:latest"));
+        // One slash, first segment has no dot/port → docker.io/<user>/<name>.
+        assert!(resolves_to_docker_hub("swebench/sweb.eval.x86_64.sympy-20916:latest"));
+        // A real host component → not Docker Hub.
+        assert!(!resolves_to_docker_hub("registry.uenv.internal/envs/math:1.0.0"));
+        assert!(!resolves_to_docker_hub("192.168.0.133:5000/envs/math:1.0.0"));
+        assert!(!resolves_to_docker_hub("localhost/envs/math:1.0.0"));
+        assert!(!resolves_to_docker_hub("localhost:5000/envs/math:1.0.0"));
+        assert!(!resolves_to_docker_hub(""));
+    }
 
     fn base_req() -> PublishVersionRequest {
         PublishVersionRequest {
