@@ -2397,23 +2397,15 @@ async fn publish_manifest(
     // Ensure the environment exists (create it on first publish), and reconcile
     // its registry identity when the manifest disagrees with the Hub. Without the
     // reconcile step a rename would land as a new version under the old identity,
-    // and `math` would keep advertising itself as the canonical name.
+    // and `math` would keep advertising itself as the canonical name. Only the
+    // fields the manifest actually declares take part; see `identity_patch`.
     match client.get_env(&mf.env_type).await {
         Err(_) => {
             client.create_env(&mf.to_create_request()).await?;
             println!("created environment '{}'", mf.env_type);
         }
         Ok(detail) => {
-            let mut patch = uenv_hub_types::EnvPatchRequest::default();
-            if detail.summary.lifecycle != mf.lifecycle {
-                patch.lifecycle = Some(mf.lifecycle);
-            }
-            if detail.summary.superseded_by != mf.superseded_by {
-                patch.superseded_by = mf.superseded_by.clone();
-            }
-            if detail.summary.compat_aliases != mf.compat_aliases {
-                patch.compat_aliases = Some(mf.compat_aliases.clone());
-            }
+            let patch = identity_patch(&detail, &mf);
             if patch.lifecycle.is_some()
                 || patch.superseded_by.is_some()
                 || patch.compat_aliases.is_some()
@@ -2421,7 +2413,7 @@ async fn publish_manifest(
                 client.patch_env(&mf.env_type, &patch).await?;
                 println!(
                     "reconciled identity of '{}': lifecycle={:?} superseded_by={:?} compat_aliases={:?}",
-                    mf.env_type, mf.lifecycle, mf.superseded_by, mf.compat_aliases
+                    mf.env_type, patch.lifecycle, patch.superseded_by, patch.compat_aliases
                 );
             }
         }
@@ -2437,6 +2429,33 @@ async fn publish_manifest(
         resp.env_type, resp.version, resp.manifest_url
     );
     Ok(())
+}
+
+/// Identity fields to patch so the Hub matches the manifest.
+///
+/// A field the manifest omits is left untouched: `import-docker` and
+/// `import-openenv` emit no identity block, so treating "absent" as "Active with
+/// no aliases" would silently demote a `canonical` environment and drop its
+/// `compat_aliases` on the next version publish.
+fn identity_patch(
+    detail: &uenv_hub_types::EnvDetail,
+    mf: &ManifestFile,
+) -> uenv_hub_types::EnvPatchRequest {
+    let mut patch = uenv_hub_types::EnvPatchRequest::default();
+    if let Some(lifecycle) = mf.lifecycle {
+        if detail.summary.lifecycle != lifecycle {
+            patch.lifecycle = Some(lifecycle);
+        }
+    }
+    if mf.superseded_by.is_some() && detail.summary.superseded_by != mf.superseded_by {
+        patch.superseded_by = mf.superseded_by.clone();
+    }
+    if let Some(aliases) = &mf.compat_aliases {
+        if &detail.summary.compat_aliases != aliases {
+            patch.compat_aliases = Some(aliases.clone());
+        }
+    }
+    patch
 }
 
 fn load_examples(manifest_path: &str) -> Vec<Example> {
@@ -2595,6 +2614,87 @@ supported_backends = ["process"]
 [resources]
 cpu = 1.0
 "#;
+
+    fn detail_of(
+        lifecycle: uenv_hub_types::EnvLifecycle,
+        aliases: &[&str],
+    ) -> uenv_hub_types::EnvDetail {
+        let summary = uenv_hub_types::EnvSummary {
+            env_type: "swe".into(),
+            namespace: "default".into(),
+            description: None,
+            author: None,
+            latest_version: Some("0.1.0".into()),
+            tags: vec![],
+            created_at: 0,
+            updated_at: 0,
+            lifecycle,
+            superseded_by: None,
+            compat_aliases: aliases.iter().map(|s| s.to_string()).collect(),
+        };
+        uenv_hub_types::EnvDetail {
+            summary,
+            homepage: None,
+            repository: None,
+            license: None,
+            latest_manifest: None,
+        }
+    }
+
+    fn manifest_of(body: &str) -> ManifestFile {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write(tmp.path(), "manifest.toml", body);
+        ManifestFile::from_path(&p.to_string_lossy()).unwrap()
+    }
+
+    /// A generated manifest (`import-docker` / `import-openenv`) declares no
+    /// identity, and publishing a version from it must leave the registry
+    /// identity alone — otherwise `swe`, published as `canonical` with the alias
+    /// `swebench`, silently becomes `active` with no aliases.
+    #[test]
+    fn an_undeclared_identity_is_left_alone_on_publish() {
+        let mf = manifest_of(
+            r#"env_type = "swe"
+
+[version]
+version = "0.2.0"
+entrypoint = "/bin/bash"
+"#,
+        );
+        let detail = detail_of(uenv_hub_types::EnvLifecycle::Canonical, &["swebench"]);
+
+        let patch = identity_patch(&detail, &mf);
+
+        assert!(patch.lifecycle.is_none(), "lifecycle must not be reset");
+        assert!(patch.compat_aliases.is_none(), "aliases must not be dropped");
+        assert!(patch.superseded_by.is_none());
+    }
+
+    /// A declared identity still reconciles: that is what makes a rename land.
+    #[test]
+    fn a_declared_identity_still_reconciles_on_publish() {
+        let mf = manifest_of(
+            r#"env_type = "swe"
+lifecycle = "deprecated"
+superseded_by = "swe-v2"
+compat_aliases = ["swebench", "swe-bench"]
+
+[version]
+version = "0.2.0"
+entrypoint = "/bin/bash"
+"#,
+        );
+        let detail = detail_of(uenv_hub_types::EnvLifecycle::Canonical, &["swebench"]);
+
+        let patch = identity_patch(&detail, &mf);
+
+        assert_eq!(patch.lifecycle, Some(uenv_hub_types::EnvLifecycle::Deprecated));
+        assert_eq!(patch.superseded_by.as_deref(), Some("swe-v2"));
+        assert_eq!(
+            patch.compat_aliases,
+            Some(vec!["swebench".to_string(), "swe-bench".to_string()])
+        );
+    }
 
     /// The aligner's own key names (`agreement_rate` / `over_credit_count` /
     /// `under_credit_count`) must be accepted as-is, so an operator can feed
