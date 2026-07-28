@@ -56,6 +56,13 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Agent-bridge catalog: which Agent scaffolds this Hub publishes.
         .route("/agent-bridges", get(list_agent_bridges))
+        // Episode Stacks: the registered composition of Task Environment +
+        // Agent scaffold + Runtime Gateway, and its resolved launch plan.
+        .route("/episode-stacks", get(list_stacks))
+        .route("/episode-stacks/:stack_id/versions", get(list_stack_versions).post(publish_stack))
+        .route("/episode-stacks/:stack_id/versions/:version", get(get_stack))
+        .route("/episode-stacks/:stack_id/versions/:version/yank", post(yank_stack))
+        .route("/episode-stacks/:stack_id/versions/:version/resolve", get(resolve_stack))
         // templates
         .route("/templates", get(list_templates))
         .route("/templates/:name/archive", get(template_archive))
@@ -505,6 +512,107 @@ async fn get_package_artifact(
     builder
         .body(body)
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, dto::ErrorCode::InternalError, format!("stream artifact: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// episode stacks
+// ---------------------------------------------------------------------------
+
+/// `GET /episode-stacks` — paginated stack list (latest version of each).
+async fn list_stacks(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Response> {
+    let page = state.store.list_stacks(q.page, q.per_page).await?;
+    Ok(json_with_etag(&headers, &page))
+}
+
+/// `GET /episode-stacks/{stack_id}/versions` — every version, newest first.
+async fn list_stack_versions(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path(stack_id): Path<String>,
+) -> ApiResult<Response> {
+    let items = state.store.list_stack_versions(&stack_id).await?;
+    Ok(json_with_etag(&headers, &items))
+}
+
+/// `POST /episode-stacks/{stack_id}/versions` — publish a stack version.
+async fn publish_stack(
+    State(state): State<AppState>,
+    Principal(principal): Principal,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    Path(stack_id): Path<String>,
+    Json(req): Json<dto::PublishStackRequest>,
+) -> ApiResult<(StatusCode, Json<dto::PublishStackResponse>)> {
+    ensure_role(&principal, Role::Publisher)?;
+    let (manifest, notes) = service::publish_stack(
+        &state.store,
+        &principal,
+        client_ip(&connect_info),
+        &stack_id,
+        req,
+    )
+    .await?;
+    let resp = dto::PublishStackResponse {
+        stack_id: manifest.stack_id.clone(),
+        version: manifest.version.clone(),
+        published_at: manifest.published_at,
+        manifest_url: format!(
+            "/api/v1/episode-stacks/{}/versions/{}",
+            manifest.stack_id, manifest.version
+        ),
+        notes,
+    };
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// `GET /episode-stacks/{stack_id}/versions/{version}` — the stored declaration
+/// (`latest` ok). Component references stay in their declared form here; use
+/// `/resolve` for the pinned launch plan.
+async fn get_stack(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((stack_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let manifest = state.store.get_stack_manifest(&stack_id, &version).await?;
+    Ok(json_with_etag(&headers, &manifest))
+}
+
+/// `GET /episode-stacks/{stack_id}/versions/{version}/resolve` — the launch plan.
+///
+/// One request returns every component pinned to a concrete version, the sync
+/// plans for the required EnvPackages, and a `stack_digest` a training run can
+/// record. Deliberately not cached by ETag alone on the client side: a stack
+/// pinning `latest` resolves differently as new versions are published, and the
+/// digest in the body is what tells two runs apart.
+async fn resolve_stack(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((stack_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let resolved = state.store.resolve_stack(&stack_id, &version).await?;
+    Ok(json_with_etag(&headers, &resolved))
+}
+
+/// `POST /episode-stacks/{stack_id}/versions/{version}/yank` — withdraw a version.
+async fn yank_stack(
+    State(state): State<AppState>,
+    Principal(principal): Principal,
+    Path((stack_id, version)): Path<(String, String)>,
+    Json(req): Json<dto::YankRequest>,
+) -> ApiResult<StatusCode> {
+    ensure_role(&principal, Role::Publisher)?;
+    state
+        .store
+        .yank_stack(&stack_id, &version, &req.reason)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------

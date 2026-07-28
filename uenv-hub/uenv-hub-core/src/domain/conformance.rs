@@ -76,9 +76,11 @@ pub struct ConformanceReport {
     pub warned: usize,
 }
 
-/// Gate revision, recorded in every report. Bumped to `/2` when C12 (rubric
-/// contract) joined, so older reports stay distinguishable from newer ones.
-pub const GATE_VERSION: &str = "uenv-conformance/2";
+/// Gate revision, recorded in every report, so a stored report can be read
+/// against the rule set that produced it. `/2` added C12 (rubric contract); `/3`
+/// added C13 (the gold-standard rule package is distributable, not just named).
+/// C01–C11 semantics are unchanged across both bumps.
+pub const GATE_VERSION: &str = "uenv-conformance/3";
 
 /// Evidence that the offline (air-gapped) preparation actually happened.
 /// Supplied by the CLI after inspecting the project directory; `None` fields
@@ -501,6 +503,9 @@ pub fn run(env_type: &str, req: &PublishVersionRequest, opts: &GateOptions<'_>) 
     // ---- C12: rubric contract & gold-standard alignment ----
     checks.push(rubric_check(req, &opts.rubric_gate));
 
+    // ---- C13: the gold-standard rule package itself is distributable ----
+    checks.push(rubric_scorer_check(req));
+
     let failed = checks.iter().filter(|c| c.status == CheckStatus::Fail).count();
     let warned = checks.iter().filter(|c| c.status == CheckStatus::Warn).count();
     ConformanceReport {
@@ -670,6 +675,115 @@ fn rubric_check(req: &PublishVersionRequest, gate: &rubric::GateOptions) -> Chec
     }
 
     Check::new("C12", C12_TITLE, CheckStatus::Pass, detail)
+}
+
+/// C13 — is the gold standard itself distributable, or only described?
+///
+/// C12 checks the *measurement*: how closely production agreed with a reference,
+/// on which corpus. It cannot check the *reference*, because `backend:
+/// "verifiers+math_verify"` names a library rather than a rule package, and for a
+/// verification environment the rules are what determine the score. Swapping
+/// GSM8K's `####` extraction for a boxed-only parser leaves the backend string
+/// untouched and turns every GSM8K case from correct to zero.
+///
+/// So this check asks a separate question: can a consumer obtain the exact rules
+/// the recorded agreement was measured with? A declared-but-unfetchable gold
+/// standard is a `Warn` rather than a `Fail` — the alignment number is still real,
+/// it just cannot be independently re-derived — while a malformed coordinate is a
+/// `Fail`, because a digest that cannot be parsed will never verify.
+const C13_TITLE: &str = "rubric gold-standard rule package is Hub-distributable";
+
+fn rubric_scorer_check(req: &PublishVersionRequest) -> Check {
+    let Some(spec) = &req.rubric else {
+        return Check::new(
+            "C13",
+            C13_TITLE,
+            CheckStatus::Skip,
+            "no [rubric] declared; applies to rule-scored environments (e.g. qa) only",
+        );
+    };
+
+    let Some(scorer) = &spec.reference_scorer else {
+        return Check::new(
+            "C13",
+            C13_TITLE,
+            CheckStatus::Warn,
+            "no [rubric.reference_scorer] declared: the gold standard is named by library \
+             only, so a consumer cannot fetch the extraction rules the agreement was \
+             measured against. Publish them with `uenv env rubric publish <pkg> --scorer \
+             qa_rubric.py` and reference them via `uenv env rubric import --scorer-ref`.",
+        );
+    };
+
+    let mut faults: Vec<String> = Vec::new();
+    if !scorer.package_ref.contains('@') {
+        faults.push(format!(
+            "package_ref '{}' is not 'package_id@version'",
+            scorer.package_ref
+        ));
+    }
+    if scorer.artifact.trim().is_empty() {
+        faults.push("artifact name is empty".to_string());
+    }
+    if !is_sha256_digest(&scorer.digest) {
+        faults.push(format!(
+            "digest '{}' is not a 'sha256:<hex>' value, so the bytes can never be verified",
+            scorer.digest
+        ));
+    }
+    if !faults.is_empty() {
+        return Check::new(
+            "C13",
+            C13_TITLE,
+            CheckStatus::Fail,
+            format!("unusable reference_scorer coordinate: {}", faults.join("; ")),
+        );
+    }
+
+    let mut detail = format!(
+        "{} :: {} pinned by {}",
+        scorer.package_ref, scorer.artifact, scorer.digest
+    );
+    if let Some(ep) = &scorer.entrypoint {
+        detail.push_str(&format!(", entrypoint={ep}"));
+    }
+    if !scorer.rubric_classes.is_empty() {
+        detail.push_str(&format!(
+            ", verifiers classes=[{}]",
+            scorer.rubric_classes.join(", ")
+        ));
+    }
+
+    // Executable, not just downloadable: without an entrypoint the consumer has
+    // the bytes and still has to guess how to invoke them.
+    if scorer.entrypoint.is_none() {
+        return Check::new(
+            "C13",
+            C13_TITLE,
+            CheckStatus::Warn,
+            format!("{detail}; no entrypoint declared, so the rules can be read but not run"),
+        );
+    }
+    if scorer.requires.is_empty() {
+        return Check::new(
+            "C13",
+            C13_TITLE,
+            CheckStatus::Warn,
+            format!(
+                "{detail}; no `requires` declared, so an air-gapped consumer cannot tell \
+                 which wheels it must have vendored to execute the rules"
+            ),
+        );
+    }
+
+    Check::new("C13", C13_TITLE, CheckStatus::Pass, detail)
+}
+
+fn is_sha256_digest(digest: &str) -> bool {
+    digest
+        .strip_prefix("sha256:")
+        .map(|hex| hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -941,6 +1055,14 @@ class CodeState(State):
             schema_version: "1".into(),
             backend: Some("verifiers+math_verify".into()),
             production_scorer: Some("uenv-math-plugin/score_action".into()),
+            reference_scorer: with_digests.then(|| uenv_hub_types::RubricScorerRef {
+                package_ref: "qa-rubric-scorer@0.1.0".into(),
+                artifact: "qa_rubric.py".into(),
+                digest: d('c'),
+                entrypoint: Some("qa_rubric:score".into()),
+                rubric_classes: vec!["Rubric".into(), "MathRubric".into()],
+                requires: vec!["verifiers".into(), "math-verify".into()],
+            }),
             alignment: Some(uenv_hub_types::RubricAlignment {
                 corpus_id: Some("qa_rubric_corpus@2026-07-25".into()),
                 corpus_digest: with_digests.then(|| d('a')),
@@ -1021,5 +1143,79 @@ class CodeState(State):
         let c12 = status_of(&report, "C12");
         assert_eq!(c12.status, CheckStatus::Fail);
         assert!(c12.detail.contains("invalid rubric contract"), "{}", c12.detail);
+    }
+
+    #[test]
+    fn c13_is_skipped_without_a_rubric() {
+        let req = req_from_models();
+        let r = run("coding-env", &req, &GateOptions::default());
+        assert_eq!(status_of(&r, "C13").status, CheckStatus::Skip);
+    }
+
+    /// The case C13 exists for: a perfectly aligned rubric whose rules are named
+    /// by library and therefore cannot be fetched.
+    #[test]
+    fn c13_warns_when_the_gold_standard_is_only_named() {
+        let mut req = req_from_models();
+        req.rubric = Some(rubric_spec(0, 0.9655, false));
+        let r = run("qa", &req, &GateOptions::default());
+        assert_eq!(status_of(&r, "C12").status, CheckStatus::Warn);
+        let c13 = status_of(&r, "C13");
+        assert_eq!(c13.status, CheckStatus::Warn);
+        assert!(c13.detail.contains("library"), "{}", c13.detail);
+        assert!(r.passed, "an undistributable gold standard must not block packaging");
+        assert!(!r.strict_passed);
+    }
+
+    #[test]
+    fn c13_passes_for_a_pinned_runnable_rule_package() {
+        let mut req = req_from_models();
+        req.rubric = Some(rubric_spec(0, 0.9655, true));
+        let r = run("qa", &req, &GateOptions::default());
+        let c13 = status_of(&r, "C13");
+        assert_eq!(c13.status, CheckStatus::Pass, "{}", c13.detail);
+        assert!(c13.detail.contains("qa_rubric.py"), "{}", c13.detail);
+        assert!(c13.detail.contains("entrypoint="), "{}", c13.detail);
+    }
+
+    /// Downloadable is not the same as runnable: bytes without an entrypoint can
+    /// be read but not executed, so the agreement still cannot be re-derived.
+    #[test]
+    fn c13_warns_when_the_rules_cannot_be_invoked_or_installed() {
+        let mut req = req_from_models();
+        let mut spec = rubric_spec(0, 0.9655, true);
+        spec.reference_scorer.as_mut().unwrap().entrypoint = None;
+        req.rubric = Some(spec);
+        let no_entrypoint = run("qa", &req, &GateOptions::default());
+        let c13 = status_of(&no_entrypoint, "C13");
+        assert_eq!(c13.status, CheckStatus::Warn);
+        assert!(c13.detail.contains("not run"), "{}", c13.detail);
+
+        let mut spec = rubric_spec(0, 0.9655, true);
+        spec.reference_scorer.as_mut().unwrap().requires.clear();
+        req.rubric = Some(spec);
+        let no_requires = run("qa", &req, &GateOptions::default());
+        let c13 = status_of(&no_requires, "C13");
+        assert_eq!(c13.status, CheckStatus::Warn);
+        assert!(c13.detail.contains("vendored"), "{}", c13.detail);
+    }
+
+    /// A digest that cannot be parsed will never verify, so the coordinate is
+    /// unusable rather than merely incomplete.
+    #[test]
+    fn c13_fails_on_an_unverifiable_coordinate() {
+        let mut req = req_from_models();
+        let mut spec = rubric_spec(0, 0.9655, true);
+        {
+            let s = spec.reference_scorer.as_mut().unwrap();
+            s.digest = "deadbeef".into();
+            s.package_ref = "qa-rubric-scorer".into();
+        }
+        req.rubric = Some(spec);
+        let r = run("qa", &req, &GateOptions::default());
+        let c13 = status_of(&r, "C13");
+        assert_eq!(c13.status, CheckStatus::Fail, "{}", c13.detail);
+        assert!(c13.detail.contains("never be verified"), "{}", c13.detail);
+        assert!(!r.passed);
     }
 }

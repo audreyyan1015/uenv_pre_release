@@ -6,4 +6,5 @@ pub mod interface;
 pub mod manifest;
 pub mod openenv;
 pub mod rubric;
+pub mod stack;
 pub mod version;

@@ -13,6 +13,8 @@ __pycache__/
 *.swo
 .DS_Store
 Thumbs.db
+# Worker 本地跑测时生成的观测库（含 -shm/-wal），属运行时数据
+/uenv-worker/obs-data/
 /uenv-server/target
 secrets/*
 !secrets/README.md

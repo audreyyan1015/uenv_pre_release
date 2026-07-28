@@ -352,6 +352,40 @@ pub struct RubricGap {
     pub notes: Option<String>,
 }
 
+/// Where the **gold-standard scoring rules themselves** live.
+///
+/// [`RubricAlignment`] answers "how well did production agree with a reference,
+/// on which corpus". It does not answer "what *is* the reference" — a name like
+/// `verifiers+math_verify` identifies a library, not the rule package written on
+/// top of it. Two hosts can therefore both claim to run "the verifiers rubric"
+/// while executing different extraction rules, and the divergence is invisible
+/// until rewards disagree.
+///
+/// This reference makes the rule package a Hub-hosted, digest-pinned artifact:
+/// the same bytes the aligner measured are the bytes a consumer downloads. Its
+/// fields are deliberately the same shape as an artifact coordinate
+/// (`package_ref` + `artifact` + `digest`) so verification is a byte comparison,
+/// not a version-string comparison.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RubricScorerRef {
+    /// `package_id@version` of the EnvPackage carrying the scorer bytes.
+    pub package_ref: String,
+    /// Artifact name inside that package, e.g. `qa_rubric.py`.
+    pub artifact: String,
+    /// `sha256:<hex>` of the scorer source, so a consumer can prove it holds the
+    /// same rules the recorded agreement was measured with.
+    pub digest: String,
+    /// Callable that builds the rubric, e.g. `qa_rubric:score`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    /// `verifiers` classes the rules are built on, e.g. `["Rubric", "MathRubric"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rubric_classes: Vec<String>,
+    /// Python requirements needed to execute it, e.g. `["verifiers", "math-verify"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
+}
+
 /// The scoring contract of a verification-type environment version.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RubricSpec {
@@ -365,6 +399,10 @@ pub struct RubricSpec {
     /// e.g. `uenv-math-plugin/score_action`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_scorer: Option<String>,
+    /// The gold-standard rule package this version is aligned against, as a
+    /// downloadable artifact rather than a library name. See [`RubricScorerRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_scorer: Option<RubricScorerRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<RubricAlignment>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -777,6 +815,11 @@ pub const CONSUMER_WORKER: &str = "worker";
 pub const CONSUMER_TOOLENV_AGENT: &str = "toolenv-agent";
 /// Consumer role: an Agent host running the OpenHands scaffold.
 pub const CONSUMER_OPENHANDS_AGENT: &str = "openhands-agent";
+/// Consumer role: whoever re-derives a rubric alignment report — a reviewer on a
+/// laptop, or CI. Kept distinct from `worker` because the Worker scores with the
+/// production Rust scorer and never needs the Python gold-standard wheels; only
+/// the party checking production *against* the gold standard does.
+pub const CONSUMER_RUBRIC_AUDITOR: &str = "rubric-auditor";
 
 impl PackagePlatform {
     /// Whether `consumer` may sync this package. An unset list means Worker-only.
@@ -996,4 +1039,237 @@ pub struct SyncPlan {
     pub files: Vec<SyncFile>,
     /// Combined digest over the (name, digest) pairs — the `.synced` marker value.
     pub bundle_digest: String,
+}
+
+// ---------------------------------------------------------------------------
+// Episode Stack — the runtime composition around a Task Environment
+// ---------------------------------------------------------------------------
+//
+// The registry entries above describe **Task Environments** in the narrow sense:
+// what one `reset/step` pair means, and how a reward is computed. That is
+// deliberately not the whole thing that runs an episode. Executing one episode
+// also involves an Agent scaffold (which decides *how* an answer gets written)
+// and, on the SWE path, a Runtime Gateway session (which routes the scaffold's
+// terminal commands into the Worker-side container). Those three together are
+// the Episode Stack.
+//
+// Keeping the composition out of the Hub has a specific cost: nothing can be
+// checked. "Run DSCodeBench in agent mode" currently means a human pairing
+// `code@0.2.0` with `uenv-agent-toolenv@1.0.0` in a config file, and pairing it
+// with a scaffold that drives `swe` instead fails at dispatch time with a
+// runtime error rather than at publish time with a validation error. Registering
+// the composition turns those pairings into declarations the Hub can reject, and
+// gives a training run one identifier to record instead of three.
+
+/// How an episode's actions are produced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionMode {
+    /// Worker calls the model directly and hands the completion to the plugin —
+    /// the single-turn verification path (`Reset → Infer → Step → reward`).
+    #[default]
+    #[serde(rename = "native")]
+    Native,
+    /// An external Agent scaffold drives the episode over multiple turns.
+    #[serde(rename = "agent")]
+    Agent,
+}
+
+impl ExecutionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecutionMode::Native => "native",
+            ExecutionMode::Agent => "agent",
+        }
+    }
+
+    /// Parse, falling back to `native` (the historical default) on unknown input.
+    pub fn parse_or_native(raw: &str) -> Self {
+        match raw {
+            "agent" => ExecutionMode::Agent,
+            _ => ExecutionMode::Native,
+        }
+    }
+}
+
+/// The Task Environment at the invariant core of a stack.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskEnvRef {
+    /// Registry `env_type`, e.g. `qa` | `code` | `swe`.
+    pub env_type: String,
+    /// Semver constraint resolved at `resolve` time, e.g. `latest` | `^0.4`.
+    #[serde(default = "latest_constraint")]
+    pub version: String,
+    /// Dataset routing key the stack pins, e.g. `dscodebench`, `gsm8k`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+}
+
+fn latest_constraint() -> String {
+    "latest".to_string()
+}
+
+/// The Agent scaffold layered on top, when the stack runs in agent mode.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentScaffoldRef {
+    /// AgentBridge `package_id`, e.g. `uenv-agent-toolenv`.
+    pub package_id: String,
+    #[serde(default = "latest_constraint")]
+    pub version: String,
+    /// Expected scaffold family, cross-checked against the published package's
+    /// `agent_defaults.agent_kind` at publish time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+    /// Consumer role the Agent host syncs with, e.g. `toolenv-agent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<String>,
+}
+
+/// Whether the stack needs a Worker-side Runtime Gateway session.
+///
+/// This is the piece that makes the SWE path different in kind rather than in
+/// degree: the scaffold runs on a different host from the environment, so its
+/// terminal commands have to be routed rather than executed locally. A stack that
+/// needs it and does not say so is the exact shape of the SWE-bench defect this
+/// round fixed — commands ran on the Agent host and no task could pass.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeGatewayReq {
+    pub required: bool,
+    /// Gateway contract version, e.g. `runtime/v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    /// Whether the Worker enforces `X-API-Key` on gateway calls.
+    #[serde(default)]
+    pub api_key_required: bool,
+}
+
+/// One Episode Stack version: a named, resolvable runtime composition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeStackManifest {
+    pub stack_id: String,
+    pub version: String,
+    pub published_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changelog: Option<String>,
+    pub execution_mode: ExecutionMode,
+    pub task_env: TaskEnvRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_scaffold: Option<AgentScaffoldRef>,
+    #[serde(default)]
+    pub runtime_gateway: RuntimeGatewayReq,
+    /// EnvPackages that must be synced before the stack can start (data, images,
+    /// eval scripts). Entries are `package_id@version`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_packages: Vec<String>,
+    /// Worker platform features the whole stack depends on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_worker_features: Vec<String>,
+    pub is_yanked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yank_reason: Option<String>,
+}
+
+/// Request body for `POST /api/v1/episode-stacks/{stack_id}/versions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishStackRequest {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changelog: Option<String>,
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
+    pub task_env: TaskEnvRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_scaffold: Option<AgentScaffoldRef>,
+    #[serde(default)]
+    pub runtime_gateway: RuntimeGatewayReq,
+    #[serde(default)]
+    pub env_packages: Vec<String>,
+    #[serde(default)]
+    pub required_worker_features: Vec<String>,
+}
+
+/// Response for a successful stack publish (`201 Created`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishStackResponse {
+    pub stack_id: String,
+    pub version: String,
+    pub published_at: i64,
+    pub manifest_url: String,
+    /// Cross-reference findings that did not block the publish.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+/// Lightweight stack listing entry (`GET /api/v1/episode-stacks`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackSummary {
+    pub stack_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    pub execution_mode: ExecutionMode,
+    pub task_env_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_package_id: Option<String>,
+    pub gateway_required: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// A component of a resolved stack, with the concrete version it resolved to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedComponent {
+    /// `task_env` | `agent_scaffold` | `env_package`.
+    pub role: String,
+    /// `env_type` or `package_id`.
+    pub id: String,
+    /// The constraint as declared by the stack.
+    pub requested: String,
+    /// The version it resolved to.
+    pub resolved: String,
+    /// `bundle_digest` for packages; absent for registry env versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// Where to fetch or read it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// The fully-resolved launch plan for one Episode Stack version.
+///
+/// One request returns everything a control plane needs to start the stack, with
+/// every floating constraint already pinned. The point of resolving server-side
+/// is that the pinning and the consistency checks happen in the same place: a
+/// consumer cannot resolve `latest` to a version whose rubric gate blocked it,
+/// because `latest` on the Hub already excludes those.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedEpisodeStack {
+    pub stack_id: String,
+    pub version: String,
+    pub execution_mode: ExecutionMode,
+    pub task_env: TaskEnvRef,
+    /// The resolved registry manifest of the Task Environment.
+    pub task_env_manifest: FullManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_scaffold: Option<AgentBridgeSummary>,
+    pub runtime_gateway: RuntimeGatewayReq,
+    /// Sync plans for every EnvPackage the stack requires, in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_plans: Vec<SyncPlan>,
+    pub components: Vec<ResolvedComponent>,
+    /// Combined digest over the resolved component coordinates — one value a
+    /// training run can record to identify the whole stack it ran against.
+    pub stack_digest: String,
+    /// Non-blocking findings, e.g. a Task Environment whose rubric gate blocked
+    /// promotion, or a scaffold that declares no `agent_kind`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
