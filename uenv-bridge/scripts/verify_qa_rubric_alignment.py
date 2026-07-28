@@ -4,18 +4,14 @@
 要证明的事：`plugins/qa`（复用 `plugins/math` 的 Rust `score_action`）给出的 reward，
 与公开可复现的判分口径一致；不一致的地方必须能逐条解释。
 
-参照口径（按 benchmark 官方约定选择抽取器，等价性判定统一交给公开库）：
+**参照口径本体在 `qa_rubric.py`**，本脚本只负责「拿它去量」并出报告。二者分开的
+原因是分发：Hub 把 `qa_rubric.py` 作为 `rubric_scorer` 制品托管、用 sha256 钉住
+（`RubricSpec.reference_scorer`），因此「报告里那个对齐率是用哪套规则量出来的」
+可以被字节校验。如果规则内嵌在本脚本里，Hub 能托管的就只有报告，而报告本身
+无法证明它依据的规则是什么。同理，本脚本必须 import 规则包而不是复制一份，
+否则两处会各自演化，报告声明的口径与 Hub 分发的口径就会悄悄分叉。
 
-| dataset | 抽取（benchmark 官方约定） | 等价判定（公开库） |
-|---|---|---|
-| gsm8k | 最后一个 `####` 之后的内容，无标记则取全文 | `math_verify.verify`（`verifiers.MathRubric` 内核） |
-| olymmath[-easy/-hard] | `verifiers` 的 `extract_boxed_answer`，无 boxed 回退 `####` | 同上 |
-| pubmedqa | 官方三分类标签 yes/no/maybe，取最后出现的整词 | `verifiers.Rubric` 上的 label_match reward func |
-| scitab | 官方三分类 supports/refutes/not enough info，取最后出现的整词 | 同上 |
-
-抽取必须按各 benchmark 官方约定，而不是照搬 `MathRubric` 的默认 boxed-only parser：
-GSM8K 的官方答案标记是 `####`，用 boxed-only parser 会把所有 GSM8K 样本判 0，
-那样的“对齐率”没有意义。等价性判定则完全交给公开库，不自研。
+判分口径见 `qa_rubric.py` 模块文档（抽取按 benchmark 官方约定，等价性判定交给公开库）。
 
 用法（在装有 verifiers/math-verify 的机器上，如 7143 的 /opt/uenv-gold-venv）：
     # 1) 用生产 Rust 判分给语料打分
@@ -25,14 +21,17 @@ GSM8K 的官方答案标记是 `####`，用 boxed-only parser 会把所有 GSM8K
     /opt/uenv-gold-venv/bin/python uenv-bridge/scripts/verify_qa_rubric_alignment.py \\
         --uenv-scores /tmp/uenv_scores.jsonl \\
         --output-dir temp/alignment/qa_rubric
+
+规则包若从 Hub 同步到别处，用 `--rubric-dir` 指向它所在目录：
+    uenv env rubric fetch-scorer qa --version latest --target-dir /opt/uenv/rubric
+    … verify_qa_rubric_alignment.py --rubric-dir /opt/uenv/rubric …
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
+import hashlib
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -40,116 +39,30 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 
-PUBMEDQA_LABELS = ("yes", "no", "maybe")
-SCITAB_LABELS = ("supports", "refutes", "not enough info")
-# 官方标签的常见同义写法；归一到官方标签后再比较。
-SCITAB_ALIASES = {
-    "not enough information": "not enough info",
-    "notenoughinfo": "not enough info",
-    "support": "supports",
-    "refute": "refutes",
-}
+#: 金标规则包文件名。同步自 Hub (`uenv env rubric fetch-scorer`) 时目录不同，文件名不变。
+RUBRIC_MODULE_FILE = "qa_rubric.py"
 
 
-# ---------------------------------------------------------------------------
-# 抽取器（benchmark 官方约定）
-# ---------------------------------------------------------------------------
-def extract_gsm8k(text: str) -> str:
-    """GSM8K 官方约定：`#### <answer>`；无标记时退回全文。"""
-    if "####" in text:
-        return text.rsplit("####", 1)[1].strip()
-    return text.strip()
+def load_rubric_module(rubric_dir: Path):
+    """加载金标规则包，并返回 (module, 源码 sha256)。
 
-
-def extract_olymmath(text: str) -> str:
-    """OlymMATH 约定：最后一个 `\\boxed{...}`；无 boxed 时回退 `####`，再回退全文。
-
-    boxed 抽取直接用 `verifiers` 的公开实现，避免自研 parser。
+    返回 digest 而不只是 module：报告里要写明「这次是用哪份规则字节量出来的」，
+    否则对齐率无法与 Hub 上 `RubricSpec.reference_scorer.digest` 对上。
     """
-    from verifiers import extract_boxed_answer
-
-    boxed = extract_boxed_answer(text, strict=False)
-    if boxed:
-        return boxed.strip()
-    return extract_gsm8k(text)
-
-
-def _last_label(text: str, labels: tuple[str, ...]) -> str | None:
-    """取最后出现的整词标签（多词标签允许内部空白）。"""
-    lowered = text.lower()
-    best: tuple[int, str] | None = None
-    for label in labels:
-        pattern = r"\b" + r"\s+".join(re.escape(part) for part in label.split()) + r"\b"
-        for match in re.finditer(pattern, lowered):
-            if best is None or match.start() > best[0]:
-                best = (match.start(), label)
-    return best[1] if best else None
-
-
-def extract_pubmedqa(text: str) -> str | None:
-    return _last_label(text, PUBMEDQA_LABELS)
-
-
-def extract_scitab(text: str) -> str | None:
-    candidates = SCITAB_LABELS + tuple(SCITAB_ALIASES)
-    label = _last_label(text, candidates)
-    if label is None:
-        return None
-    return SCITAB_ALIASES.get(label, label)
-
-
-# ---------------------------------------------------------------------------
-# 参照判分：数学走 verifiers.MathRubric，分类走 verifiers.Rubric 上的 label_match
-# ---------------------------------------------------------------------------
-class ReferenceScorer:
-    def __init__(self) -> None:
-        from verifiers import Rubric
-        from verifiers.rubrics.math_rubric import MathRubric
-
-        self.math_rubric = MathRubric()
-        # 分类任务：verifiers 没有内置三分类 Rubric，这里在公开 Rubric 上挂
-        # 官方标签匹配 reward func，保持“判分函数注册在公开框架里”的形态。
-        self.label_rubric = Rubric()
-        self.label_rubric.add_reward_func(self._label_match)
-        self._label_ctx: dict[str, Any] = {}
-
-    async def _label_match(self, completion: Any, answer: str, **_kwargs: Any) -> float:
-        dataset = self._label_ctx.get("dataset", "")
-        text = self._label_ctx.get("text", "")
-        extract = extract_pubmedqa if dataset == "pubmedqa" else extract_scitab
-        predicted = extract(text)
-        expected = extract(answer) or answer.strip().lower()
-        return 1.0 if predicted is not None and predicted == expected else 0.0
-
-    def score_math(self, action: str, target: str, dataset: str) -> float:
-        extract = extract_gsm8k if dataset == "gsm8k" else extract_olymmath
-        extracted = extract(action)
-        if not extracted:
-            return 0.0
-        # 把抽取结果包成 boxed，交给 MathRubric 默认 parser + math_verify 判等价，
-        # 这样等价性判定完全由公开库负责，我们只负责按官方约定抽取。
-        completion = [{"role": "assistant", "content": f"\\boxed{{{extracted}}}"}]
-        return float(
-            asyncio.run(
-                self.math_rubric.correct_answer(
-                    parser=self.math_rubric.parser,
-                    completion=completion,
-                    answer=target,
-                )
-            )
+    path = rubric_dir / RUBRIC_MODULE_FILE
+    if not path.is_file():
+        raise SystemExit(
+            f"gold-standard rubric package not found: {path}\n"
+            f"  fetch it from the Hub: uenv env rubric fetch-scorer qa --version latest "
+            f"--target-dir <dir>, then pass --rubric-dir <dir>"
         )
+    digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    if str(rubric_dir) not in sys.path:
+        sys.path.insert(0, str(rubric_dir))
+    import importlib
 
-    def score_label(self, action: str, target: str, dataset: str) -> float:
-        self._label_ctx = {"dataset": dataset, "text": action}
-        completion = [{"role": "assistant", "content": action}]
-        return float(asyncio.run(self._label_match(completion=completion, answer=target)))
-
-    def score(self, dataset: str, action: str, target: str) -> float:
-        if dataset in ("gsm8k",) or dataset.startswith("olymmath"):
-            return self.score_math(action, target, "gsm8k" if dataset == "gsm8k" else "olymmath")
-        if dataset in ("pubmedqa", "scitab"):
-            return self.score_label(action, target, dataset)
-        raise ValueError(f"unsupported dataset for reference scoring: {dataset}")
+    module = importlib.import_module(RUBRIC_MODULE_FILE[: -len(".py")])
+    return module, digest
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +76,9 @@ def render_report(metrics: dict[str, Any]) -> str:
     lines.append(f"> 语料：`{metrics['corpus']}`（{metrics['total']} 例）  ")
     lines.append(
         f"> 参照实现：`verifiers {metrics['verifiers_version']}` + `math-verify {metrics['math_verify_version']}`  "
+    )
+    lines.append(
+        f"> 金标规则包：`{RUBRIC_MODULE_FILE}` `{metrics['rubric_module_digest']}`  "
     )
     lines.append("> UEnv 侧：`plugins/math` 的 `score_action`（`plugins/qa` 通过 run.sh 复用同一二进制）")
     lines.append("")
@@ -238,6 +154,12 @@ def main() -> int:
         help="cargo example score_corpus 的输出 JSONL（含 uenv_reward）",
     )
     p.add_argument("--output-dir", default=str(ROOT / "temp/alignment/qa_rubric"))
+    p.add_argument(
+        "--rubric-dir",
+        default=str(Path(__file__).resolve().parent),
+        help=f"金标规则包 {RUBRIC_MODULE_FILE} 所在目录（默认与本脚本同目录；"
+        f"从 Hub 同步后指向 <target-dir>/rubric）",
+    )
     p.add_argument("--min-agreement", type=float, default=0.95, help="低于该对齐率则返回非 0")
     p.add_argument(
         "--max-over-credit",
@@ -248,6 +170,9 @@ def main() -> int:
     args = p.parse_args()
 
     import importlib.metadata as md
+
+    rubric_module, rubric_digest = load_rubric_module(Path(args.rubric_dir))
+    print(f"gold-standard rubric package: {args.rubric_dir}/{RUBRIC_MODULE_FILE} {rubric_digest}")
 
     corpus = {}
     for line in Path(args.corpus).read_text(encoding="utf-8").splitlines():
@@ -262,7 +187,7 @@ def main() -> int:
     if len(scored) != len(corpus):
         print(f"WARN: uenv scores {len(scored)} != corpus {len(corpus)}", file=sys.stderr)
 
-    scorer = ReferenceScorer()
+    scorer = rubric_module.ReferenceScorer()
     rows: list[dict[str, Any]] = []
     for row in scored:
         case_id = row["case_id"]
@@ -308,6 +233,12 @@ def main() -> int:
         "corpus": args.corpus,
         "verifiers_version": md.version("verifiers"),
         "math_verify_version": md.version("math-verify"),
+        # 报告自带规则包 digest：`uenv env rubric import` 会把它写进
+        # `RubricSpec.reference_scorer.digest`，于是「声明的规则」与「量出这个
+        # 对齐率的规则」不可能互相打架。
+        "rubric_module": RUBRIC_MODULE_FILE,
+        "rubric_module_digest": rubric_digest,
+        "rubric_entrypoint": f"{RUBRIC_MODULE_FILE[: -len('.py')]}:score",
         "total": len(rows),
         "agreed": agreed,
         "agreement_rate": agreed / len(rows) if rows else 0.0,

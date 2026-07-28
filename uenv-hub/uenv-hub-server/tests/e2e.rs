@@ -336,6 +336,7 @@ async fn over_credit_rubric_is_published_but_barred_from_latest() {
         }),
         datasets: Default::default(),
         known_gaps: vec![],
+        reference_scorer: None,
     };
 
     // A clean baseline, then a higher version that is over-credit.
@@ -807,4 +808,224 @@ async fn patching_an_existing_env_moves_its_identity() {
         body.deprecation.and_then(|d| d.superseded_by).as_deref(),
         Some("qa")
     );
+}
+
+/// Publish a scaffold package for the stack tests: an OpenHands-family bridge that
+/// declares it drives `swe` and is consumed by an Agent host.
+async fn publish_stack_scaffold(client: &HttpClient, package_id: &str, drives: &str) {
+    use uenv_hub_types::{
+        InlineArtifact, InterfaceSchema, PackageContracts, PackagePlatform, PublishPackageRequest,
+        CONSUMER_OPENHANDS_AGENT,
+    };
+    let req = PublishPackageRequest {
+        version: "1.0.0".into(),
+        publisher: Some("tester".into()),
+        description: None,
+        changelog: None,
+        platform: PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["runtime_gateway".into()],
+            consumers: vec![CONSUMER_OPENHANDS_AGENT.into()],
+        },
+        worker_overlay: serde_json::json!({}),
+        agent_defaults: serde_json::json!({
+            "agent_kind": "openhands",
+            "required_env_types": [drives],
+        }),
+        contracts: PackageContracts::default(),
+        interface: InterfaceSchema::default(),
+        artifacts: vec![InlineArtifact {
+            name: "run.py".into(),
+            kind: "other".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("text/x-python".into()),
+            target_rel_path: Some("drivers/run.py".into()),
+            content: Some("print('drive')\n".into()),
+            content_b64: None,
+        }],
+        file_artifacts: vec![],
+    };
+    client.publish_package(package_id, &req).await.unwrap();
+}
+
+fn stack_req(scaffold: Option<&str>, gateway: bool) -> uenv_hub_types::PublishStackRequest {
+    use uenv_hub_types::{
+        AgentScaffoldRef, ExecutionMode, PublishStackRequest, RuntimeGatewayReq, TaskEnvRef,
+        CONSUMER_OPENHANDS_AGENT,
+    };
+    PublishStackRequest {
+        version: "1.0.0".into(),
+        publisher: Some("tester".into()),
+        description: Some("e2e stack".into()),
+        changelog: None,
+        execution_mode: if scaffold.is_some() {
+            ExecutionMode::Agent
+        } else {
+            ExecutionMode::Native
+        },
+        task_env: TaskEnvRef {
+            env_type: "swe".into(),
+            version: "latest".into(),
+            dataset: Some("swe-bench-verified".into()),
+        },
+        agent_scaffold: scaffold.map(|package_id| AgentScaffoldRef {
+            package_id: package_id.into(),
+            version: "latest".into(),
+            agent_kind: Some("openhands".into()),
+            consumer: Some(CONSUMER_OPENHANDS_AGENT.into()),
+        }),
+        runtime_gateway: RuntimeGatewayReq {
+            required: gateway,
+            api: Some("runtime/v1".into()),
+            api_key_required: true,
+        },
+        env_packages: vec![],
+        required_worker_features: vec!["runtime_gateway".into()],
+    }
+}
+
+/// An Episode Stack survives the round trip publish → list → resolve, and the
+/// resolved plan pins every floating constraint.
+///
+/// `latest` is what a stack declares and a concrete version is what a run needs,
+/// so the interesting assertion is that `/resolve` turns one into the other and
+/// reports a digest over the result: two runs of the same stack declaration are
+/// the same experiment only when that digest matches.
+#[tokio::test]
+async fn an_episode_stack_publishes_and_resolves_to_pinned_components() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+    publish_stack_scaffold(&client, "e2e-openhands", "swe").await;
+
+    let resp = client
+        .publish_stack("e2e-swe-openhands", &stack_req(Some("e2e-openhands"), true))
+        .await
+        .unwrap();
+    assert_eq!(resp.version, "1.0.0");
+
+    let listed = client.list_stacks(1, 20).await.unwrap();
+    let entry = listed
+        .items
+        .iter()
+        .find(|s| s.stack_id == "e2e-swe-openhands")
+        .expect("stack in listing");
+    assert_eq!(entry.task_env_type, "swe");
+    assert!(entry.gateway_required);
+    assert_eq!(entry.agent_package_id.as_deref(), Some("e2e-openhands"));
+
+    let resolved = client
+        .resolve_stack("e2e-swe-openhands", "latest")
+        .await
+        .unwrap();
+    // The declaration said `latest`; the plan must say which version that was.
+    let env = resolved
+        .components
+        .iter()
+        .find(|c| c.role == "task_env")
+        .expect("task_env component");
+    assert_eq!(env.requested, "latest");
+    assert_eq!(env.resolved, resolved.task_env_manifest.version);
+    assert_ne!(env.resolved, "latest");
+
+    let scaffold = resolved
+        .components
+        .iter()
+        .find(|c| c.role == "agent_scaffold")
+        .expect("scaffold component");
+    assert_eq!(scaffold.resolved, "1.0.0");
+    // The scaffold digest is the same value an Agent host reports for its synced
+    // bundle, which is what makes the two comparable.
+    let pkg = client
+        .get_package_manifest("e2e-openhands", "1.0.0")
+        .await
+        .unwrap();
+    assert_eq!(
+        scaffold.digest.as_deref(),
+        Some(uenv_hub_core::package::bundle_digest(&pkg.artifacts).as_str())
+    );
+
+    assert!(resolved.stack_digest.starts_with("sha256:"));
+    assert!(resolved.runtime_gateway.required);
+    assert_eq!(resolved.runtime_gateway.api.as_deref(), Some("runtime/v1"));
+}
+
+/// The compositions the Hub must refuse. Each of these previously published
+/// cleanly and failed at dispatch time instead.
+#[tokio::test]
+async fn incoherent_stacks_are_rejected_at_publish_time() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+    publish_stack_scaffold(&client, "e2e-openhands", "swe").await;
+    publish_stack_scaffold(&client, "e2e-drives-code", "code").await;
+
+    // Agent mode on a gateway-bound environment without a gateway: the scaffold's
+    // commands would run on the Agent host and every task would fail.
+    let no_gateway = client
+        .publish_stack("e2e-no-gateway", &stack_req(Some("e2e-openhands"), false))
+        .await;
+    assert!(no_gateway.is_err(), "gateway-bound env must require the gateway");
+
+    // A scaffold that drives another environment.
+    let wrong_env = client
+        .publish_stack("e2e-wrong-scaffold", &stack_req(Some("e2e-drives-code"), true))
+        .await;
+    assert!(wrong_env.is_err(), "scaffold/env mismatch must be rejected");
+
+    // A dataset the environment's config_schema does not accept.
+    let mut bad_dataset = stack_req(Some("e2e-openhands"), true);
+    bad_dataset.task_env.dataset = Some("gsm8k".into());
+    assert!(
+        client.publish_stack("e2e-bad-dataset", &bad_dataset).await.is_err(),
+        "a dataset the env cannot run must be rejected"
+    );
+
+    // Native mode with a scaffold declared: nothing would ever run it.
+    let mut native_with_scaffold = stack_req(Some("e2e-openhands"), false);
+    native_with_scaffold.execution_mode = uenv_hub_types::ExecutionMode::Native;
+    assert!(
+        client
+            .publish_stack("e2e-native-scaffold", &native_with_scaffold)
+            .await
+            .is_err(),
+        "native mode must not declare a scaffold"
+    );
+
+    // An EnvPackage the Hub does not publish.
+    let mut unknown_pkg = stack_req(Some("e2e-openhands"), true);
+    unknown_pkg.env_packages = vec!["nope@1.0.0".into()];
+    assert!(
+        client.publish_stack("e2e-unknown-pkg", &unknown_pkg).await.is_err(),
+        "an unpublished EnvPackage must be rejected"
+    );
+
+    // None of the rejected stacks may have been stored.
+    let listed = client.list_stacks(1, 50).await.unwrap();
+    assert!(listed.items.is_empty(), "{:?}", listed.items);
+}
+
+/// `swe` is now a registry Task Environment, not only an EnvPackage. Without it
+/// the most-used environment on this Hub was the one thing a stack could not name,
+/// and the OpenHands scaffold's `required_env_types: ["swe"]` pointed at nothing.
+#[tokio::test]
+async fn swe_is_a_registered_task_environment() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let swe = client.get_version("swe", "latest").await.unwrap();
+    assert_eq!(swe.version, "0.1.0");
+    assert_eq!(swe.supported_backends, vec!["container".to_string()]);
+    let datasets = swe
+        .config_schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.get("dataset"))
+        .and_then(|d| d.get("enum"))
+        .and_then(|e| e.as_array())
+        .expect("swe declares its benchmark variants");
+    assert!(datasets.iter().any(|v| v == "swe-bench-verified"));
+    // The Action contract has to cover a container shell, or the scaffold's
+    // commands have no declared shape to travel in.
+    let action = swe.interface.action.as_ref().expect("swe action schema");
+    assert!(action.to_string().contains("exec"));
 }

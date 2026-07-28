@@ -22,6 +22,8 @@
 //! publish without a rubric at all, which is strictly worse for auditability.
 
 use uenv_hub_types::{RubricSpec, ValidationReport, RUBRIC_SCHEMA_VERSION};
+#[cfg(test)]
+use uenv_hub_types::RubricScorerRef;
 
 /// Accepted `known_gaps[].severity` values.
 const GAP_SEVERITIES: &[&str] = &["too_strict", "too_lenient", "intentional"];
@@ -103,6 +105,8 @@ pub fn validate(
              'uenv-math-plugin/score_action') so a trajectory can be traced to it",
         );
     }
+
+    validate_reference_scorer(rubric, report);
 
     match &rubric.alignment {
         None => report.push_warning(
@@ -236,6 +240,79 @@ pub fn validate(
                 );
             }
         }
+    }
+}
+
+/// Validate the reference-scorer coordinate.
+///
+/// `backend: "verifiers+math_verify"` names a library, not a rule package. Which
+/// answer a rubric accepts depends on the extraction rules written on top of that
+/// library — GSM8K's `####` marker versus a boxed-only parser change every score
+/// in the corpus — so two hosts can agree on the backend string and still reward
+/// differently. Requiring an artifact coordinate makes the claim byte-checkable.
+fn validate_reference_scorer(rubric: &RubricSpec, report: &mut ValidationReport) {
+    let Some(scorer) = &rubric.reference_scorer else {
+        // Only a warning: environments published before this field existed remain
+        // valid, and blocking them would make the field's introduction a breaking
+        // change for a claim that is stricter than what the gate already enforces.
+        if rubric.alignment.is_some() {
+            report.push_warning(
+                "rubric.reference_scorer",
+                "alignment evidence is declared but the gold-standard rule package is \
+                 not; a consumer can read the agreement number without being able to \
+                 fetch the rules it was measured against",
+            );
+        }
+        return;
+    };
+
+    if !scorer.package_ref.contains('@') {
+        report.push_error(
+            "rubric.reference_scorer.package_ref",
+            "must be of the form 'package_id@version'",
+        );
+    }
+    if scorer.artifact.trim().is_empty() {
+        report.push_error(
+            "rubric.reference_scorer.artifact",
+            "name the artifact inside the package that holds the rules \
+             (e.g. 'qa_rubric.py')",
+        );
+    }
+    if !is_sha256(&scorer.digest) {
+        report.push_error(
+            "rubric.reference_scorer.digest",
+            "must be a 'sha256:<hex>' digest of the scorer source",
+        );
+    }
+    // An entrypoint is what turns "these bytes exist" into "this is how you run
+    // them"; without it a consumer has to guess a callable name.
+    if scorer
+        .entrypoint
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        report.push_warning(
+            "rubric.reference_scorer.entrypoint",
+            "no callable declared; give 'module:function' so a consumer can execute \
+             the rules rather than only read them",
+        );
+    } else if let Some(ep) = &scorer.entrypoint {
+        if !ep.contains(':') {
+            report.push_error(
+                "rubric.reference_scorer.entrypoint",
+                "must be of the form 'module:callable'",
+            );
+        }
+    }
+    if scorer.requires.is_empty() {
+        report.push_warning(
+            "rubric.reference_scorer.requires",
+            "no Python requirements declared; an air-gapped consumer cannot tell what \
+             it must have vendored to execute the rules",
+        );
     }
 }
 
@@ -378,6 +455,14 @@ mod tests {
             schema_version: "1".into(),
             backend: Some("verifiers+math_verify".into()),
             production_scorer: Some("uenv-math-plugin/score_action".into()),
+            reference_scorer: Some(RubricScorerRef {
+                package_ref: "qa-rubric-scorer@0.1.0".into(),
+                artifact: "qa_rubric.py".into(),
+                digest: digest('c'),
+                entrypoint: Some("qa_rubric:score".into()),
+                rubric_classes: vec!["Rubric".into(), "MathRubric".into()],
+                requires: vec!["verifiers".into(), "math-verify".into()],
+            }),
             alignment: Some(RubricAlignment {
                 corpus_id: Some("qa_rubric_corpus@2026-07-25".into()),
                 corpus_digest: Some(digest('a')),

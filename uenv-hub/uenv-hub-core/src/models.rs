@@ -445,3 +445,60 @@ pub struct NewPackageVersion {
     pub published_by: Option<i64>,
     pub artifacts: Vec<NewPackageArtifact>,
 }
+
+// ---------------------------------------------------------------------------
+// Episode stacks
+// ---------------------------------------------------------------------------
+
+/// Row of the `episode_stacks` table.
+#[derive(Debug, Clone, FromRow)]
+pub struct EpisodeStackRow {
+    pub id: i64,
+    pub stack_id: String,
+    pub description: Option<String>,
+    pub latest_version: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_deleted: i64,
+}
+
+/// Row of the `episode_stack_versions` table.
+///
+/// Component references stay in their declared form (`latest`, `^0.4`); the
+/// resolution step reads them and pins them, so a stack picks up newly published
+/// gate-eligible environment versions without a republish.
+#[derive(Debug, Clone, FromRow)]
+pub struct EpisodeStackVersionRow {
+    pub id: i64,
+    pub stack_db_id: i64,
+    pub version: String,
+    pub version_normalized: String,
+    pub publisher: Option<String>,
+    pub changelog: Option<String>,
+    pub execution_mode: String,
+    pub task_env_json: String,
+    pub agent_scaffold_json: Option<String>,
+    pub runtime_gateway_json: String,
+    pub env_packages_json: String,
+    pub worker_features_json: String,
+    pub is_yanked: i64,
+    pub yank_reason: Option<String>,
+    pub published_by: Option<i64>,
+    pub published_at: i64,
+}
+
+/// Parameters to publish a new Episode Stack version.
+#[derive(Debug, Clone)]
+pub struct NewEpisodeStackVersion {
+    pub version: String,
+    pub description: Option<String>,
+    pub publisher: Option<String>,
+    pub changelog: Option<String>,
+    pub execution_mode: String,
+    pub task_env_json: String,
+    pub agent_scaffold_json: Option<String>,
+    pub runtime_gateway_json: String,
+    pub env_packages_json: String,
+    pub worker_features_json: String,
+    pub published_by: Option<i64>,
+}

@@ -3,9 +3,10 @@
 //! Centralizing these keeps JSON-column decoding in one place so the
 //! repository methods stay readable.
 
+use crate::error::{HubError, Result};
 use crate::models::{
-    AuditRow, ConfigRow, EnvPackageRow, EnvRow, FullManifest as ModelManifest, ImageRow,
-    TemplateRow, TokenRow, VersionRow,
+    AuditRow, ConfigRow, EnvPackageRow, EnvRow, EpisodeStackRow, EpisodeStackVersionRow,
+    FullManifest as ModelManifest, ImageRow, TemplateRow, TokenRow, VersionRow,
 };
 use serde_json::Value;
 use uenv_hub_types as dto;
@@ -164,6 +165,60 @@ pub fn template_summary(row: &TemplateRow) -> dto::TemplateSummary {
         archive_sha256: row.archive_sha256.clone(),
         updated_at: row.updated_at,
     }
+}
+
+/// Build a public [`dto::EpisodeStackManifest`] from its two rows.
+///
+/// Unlike the package path, the component references are stored as separate JSON
+/// columns rather than one pre-rendered manifest blob, because they are queried
+/// (list by execution mode, by task env) and re-resolved on every launch. A
+/// malformed column is an error rather than a silent default: a stack whose
+/// `task_env` cannot be read has nothing left to launch, and reporting it as an
+/// empty environment reference would turn a storage fault into a confusing
+/// validation failure much further downstream.
+pub fn stack_manifest(
+    stack: &EpisodeStackRow,
+    row: &EpisodeStackVersionRow,
+) -> Result<dto::EpisodeStackManifest> {
+    let decode = |label: &str, raw: &str| -> Result<serde_json::Value> {
+        serde_json::from_str(raw).map_err(|e| {
+            HubError::Internal(format!(
+                "episode stack '{}@{}' has unreadable {label}: {e}",
+                stack.stack_id, row.version
+            ))
+        })
+    };
+    let task_env: dto::TaskEnvRef =
+        serde_json::from_value(decode("task_env", &row.task_env_json)?).map_err(|e| {
+            HubError::Internal(format!(
+                "episode stack '{}@{}' task_env is not a TaskEnvRef: {e}",
+                stack.stack_id, row.version
+            ))
+        })?;
+    let agent_scaffold: Option<dto::AgentScaffoldRef> = match &row.agent_scaffold_json {
+        Some(raw) => serde_json::from_str(raw).ok(),
+        None => None,
+    };
+    let runtime_gateway: dto::RuntimeGatewayReq =
+        serde_json::from_str(&row.runtime_gateway_json).unwrap_or_default();
+
+    Ok(dto::EpisodeStackManifest {
+        stack_id: stack.stack_id.clone(),
+        version: row.version.clone(),
+        published_at: row.published_at,
+        publisher: row.publisher.clone(),
+        description: stack.description.clone(),
+        changelog: row.changelog.clone(),
+        execution_mode: dto::ExecutionMode::parse_or_native(&row.execution_mode),
+        task_env,
+        agent_scaffold,
+        runtime_gateway,
+        env_packages: serde_json::from_str(&row.env_packages_json).unwrap_or_default(),
+        required_worker_features: serde_json::from_str(&row.worker_features_json)
+            .unwrap_or_default(),
+        is_yanked: row.is_yanked != 0,
+        yank_reason: row.yank_reason.clone(),
+    })
 }
 
 /// Build a public [`dto::PackageSummary`] from an `env_packages` row.
