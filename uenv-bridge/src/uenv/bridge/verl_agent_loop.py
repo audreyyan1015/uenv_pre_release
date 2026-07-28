@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import time
 import uuid
@@ -103,6 +104,9 @@ except Exception:
 
     def rollout_trace_op(func):
         return func
+
+
+logger = logging.getLogger(__name__)
 
 
 def _optional_string(value: Any) -> str | None:
@@ -255,6 +259,8 @@ class UEnvAgentLoop(AgentLoopBase):
             startup_timeout_seconds=self.config_for_uenv.startup_timeout_seconds,
             auto_start=self.config_for_uenv.auto_start,
             binary=self.config_for_uenv.binary,
+            transport_retry_attempts=self.config_for_uenv.batch_retry_attempts,
+            transport_retry_delay_seconds=self.config_for_uenv.batch_retry_delay_seconds,
             fake_reward=self.config_for_uenv.fake_reward,
             fake_response_text=self.config_for_uenv.fake_response_text,
         )
@@ -915,7 +921,15 @@ class UEnvAgentLoop(AgentLoopBase):
             return "code"
         if "agent" in lowered:
             return "agent"
-        return self.config_for_uenv.default_env_type
+        env_type = self.config_for_uenv.default_env_type
+        logger.warning(
+            "_env_type fallback to default_env_type=%s; unmatched sample kwargs: task_name=%r ability=%r data_source=%r",
+            env_type,
+            sample_kwargs.get("task_name"),
+            sample_kwargs.get("ability"),
+            sample_kwargs.get("data_source"),
+        )
+        return env_type
 
     def _task_name(self, sample_kwargs: dict[str, Any], env_type: str) -> str:
         for key in ("task_name", "ability", "data_source"):

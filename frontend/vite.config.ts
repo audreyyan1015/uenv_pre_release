@@ -7,6 +7,19 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  vite: {
+    server: {
+      // 远端联调：浏览器同源访问 /obs/*，由 Vite 反代到本机 Obs :50053
+      // （公网未放行 50053 时，前端用 VITE_AGGREGATION_BASE_URL=/obs）
+      proxy: {
+        "/obs": {
+          target: "http://127.0.0.1:50053",
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/obs/, ""),
+        },
+      },
+    },
+  },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this

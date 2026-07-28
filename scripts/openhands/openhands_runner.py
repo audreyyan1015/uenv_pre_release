@@ -27,6 +27,9 @@ RUN_SCRIPT = os.environ.get(
     "OPENHANDS_RUN_SCRIPT", "/root/UEnv/scripts/run-openhands-pro-20877.sh"
 )
 RUNS_DIR = Path(os.environ.get("OPENHANDS_RUNS_DIR", "/var/log/uenv/openhands-runs"))
+COMPLETION_SPOOL_DIR = Path(
+    os.environ.get("OPENHANDS_COMPLETION_SPOOL_DIR", str(RUNS_DIR / "completion-spool"))
+)
 
 # ── Server 编排（Agent 池 poll）模式配置 ────────────────────────────────────
 AGENT_POLL_ENABLED = os.environ.get("OPENHANDS_AGENT_POLL", "0") == "1"
@@ -61,6 +64,56 @@ _stop = threading.Event()
 _active_jobs = 0  # 当前在跑的 AgentJob 数（心跳上报用）
 _active_lock = threading.Lock()
 _registration_lock = threading.Lock()
+
+
+def _sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _spool_completion(record: dict[str, Any]) -> Path:
+    COMPLETION_SPOOL_DIR.mkdir(parents=True, exist_ok=True)
+    target = COMPLETION_SPOOL_DIR / f"{record['job_id']}.json"
+    temporary = COMPLETION_SPOOL_DIR / f".{record['job_id']}.{uuid.uuid4().hex}.tmp"
+    payload = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    with temporary.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+    _sync_directory(COMPLETION_SPOOL_DIR)
+    return target
+
+
+def _remove_spooled_completion(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _sync_directory(COMPLETION_SPOOL_DIR)
+
+
+def _submit_spooled_completion(client: Any, path: Path) -> bool:
+    record = json.loads(path.read_text(encoding="utf-8"))
+    acked = client.complete_agent_job(**record)
+    if acked:
+        _remove_spooled_completion(path)
+    return bool(acked)
+
+
+def _drain_completion_spool(client: Any) -> None:
+    if not COMPLETION_SPOOL_DIR.is_dir():
+        return
+    for path in sorted(COMPLETION_SPOOL_DIR.glob("*.json")):
+        try:
+            if _submit_spooled_completion(client, path):
+                print(f"[agent-poll] replayed completion spool={path.name}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent-poll] completion replay deferred spool={path.name}: {exc}", flush=True)
+            return
 
 
 
@@ -199,9 +252,12 @@ def _import_agent_client():
     gen_dir = os.path.join(BRIDGE_DIR, "uenv_runtime", "gen")
     if os.path.isdir(gen_dir) and gen_dir not in sys.path:
         sys.path.insert(0, gen_dir)
-    from uenv_runtime.agent_client import AgentControlClient  # noqa: PLC0415
+    from uenv_runtime.agent_client import (  # noqa: PLC0415
+        AgentControlClient,
+        AgentRegistrationLost,
+    )
 
-    return AgentControlClient
+    return AgentControlClient, AgentRegistrationLost
 
 
 def _int_list(value: Any) -> list[int]:
@@ -447,46 +503,48 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
         # setup（mkdir/write）或其他意外失败也回填 failed，不吞掉。
         status, err = "failed", f"{type(exc).__name__}: {exc}"[-2000:]
     finally:
+        completion_record = {
+            "job_id": job.job_id,
+            "run_id": job.run_id,
+            "status": status,
+            "reward": reward,
+            "trajectory_id": trajectory_id,
+            "error_message": err,
+            "agent_id": agent_id,
+            "metadata": {
+                k: str(v)
+                for k, v in rollout_fields.items()
+                if k
+                in (
+                    "tests_passed",
+                    "tests_total",
+                    "resolved",
+                    "git_diff_bytes",
+                    "git_diff_nonempty",
+                )
+                and v not in (None, "")
+            },
+            **{
+                key: rollout_fields[key]
+                for key in (
+                    "parallel_mode",
+                    "rollout_param_version",
+                    "rollout_policy_version",
+                    "rollout_log_probs",
+                    "worker_start_ts",
+                    "worker_finish_ts",
+                    "result_ready_ts",
+                    "worker_latency_ms",
+                    "model_latency_ms",
+                    "response_ids",
+                    "response_mask",
+                )
+                if key in rollout_fields
+            },
+        }
+        spool_path = _spool_completion(completion_record)
         try:
-            acked = client.complete_agent_job(
-                job_id=job.job_id,
-                run_id=job.run_id,
-                status=status,
-                reward=reward,
-                trajectory_id=trajectory_id,
-                error_message=err,
-                agent_id=agent_id,
-                metadata={
-                    k: str(v)
-                    for k, v in rollout_fields.items()
-                    if k
-                    in (
-                        "tests_passed",
-                        "tests_total",
-                        "resolved",
-                        "git_diff_bytes",
-                        "git_diff_nonempty",
-                    )
-                    and v not in (None, "")
-                },
-                **{
-                    key: rollout_fields[key]
-                    for key in (
-                        "parallel_mode",
-                        "rollout_param_version",
-                        "rollout_policy_version",
-                        "rollout_log_probs",
-                        "worker_start_ts",
-                        "worker_finish_ts",
-                        "result_ready_ts",
-                        "worker_latency_ms",
-                        "model_latency_ms",
-                        "response_ids",
-                        "response_mask",
-                    )
-                    if key in rollout_fields
-                },
-            )
+            acked = _submit_spooled_completion(client, spool_path)
             response_ids = rollout_fields.get("response_ids") or []
             print(
                 f"[agent-poll] completed job={job.job_id} status={status} "
@@ -539,7 +597,7 @@ def _register_agent_once(
     return True
 
 
-def _heartbeat_loop(client: Any, agent_state: dict[str, Any]) -> None:
+def _heartbeat_loop(client: Any, agent_state: dict[str, Any], registration_lost_exc: Any) -> None:
     while not _stop.is_set():
         with _registration_lock:
             agent_id = str(agent_state.get("agent_id") or "")
@@ -551,6 +609,12 @@ def _heartbeat_loop(client: Any, agent_state: dict[str, Any]) -> None:
             with _active_lock:
                 active = _active_jobs
             client.agent_heartbeat(agent_id, active, int(time.time() * 1000))
+        except registration_lost_exc:
+            print(
+                "[agent-poll] server lost registration (NOT_FOUND), re-registering",
+                flush=True,
+            )
+            _mark_agent_unregistered(agent_state, "registration_lost")
         except Exception as exc:  # noqa: BLE001
             print(f"[agent-poll] heartbeat failed: {exc}", flush=True)
             _mark_agent_unregistered(agent_state, "heartbeat_failed")
@@ -563,7 +627,7 @@ def _poll_loop() -> None:
         print("[agent-poll] UENV_SERVER_ENDPOINT unset; poll mode disabled", flush=True)
         return
     try:
-        AgentControlClient = _import_agent_client()
+        AgentControlClient, AgentRegistrationLost = _import_agent_client()
         # __init__ ???? grpc + stub??? grpcio / ??? stub ??????
         # ?? catch????? poll ?????? HTTP ???
         client = AgentControlClient(SERVER_ENDPOINT)
@@ -584,7 +648,11 @@ def _poll_loop() -> None:
     if _stop.is_set():
         return
 
-    threading.Thread(target=_heartbeat_loop, args=(client, agent_state), daemon=True).start()
+    threading.Thread(
+        target=_heartbeat_loop,
+        args=(client, agent_state, AgentRegistrationLost),
+        daemon=True,
+    ).start()
 
     while not _stop.is_set():
         with _registration_lock:
@@ -595,6 +663,8 @@ def _poll_loop() -> None:
                 _stop.wait(POLL_INTERVAL_SEC)
             continue
 
+        _drain_completion_spool(client)
+
         # ?????????? poll?? Server try_reserve ????????
         with _active_lock:
             busy = _active_jobs >= AGENT_MAX_CONCURRENT
@@ -603,6 +673,14 @@ def _poll_loop() -> None:
             continue
         try:
             job = client.poll_agent_job(AGENT_POOL_ID, agent_id)
+        except AgentRegistrationLost:
+            print(
+                "[agent-poll] server lost registration (NOT_FOUND), re-registering",
+                flush=True,
+            )
+            _mark_agent_unregistered(agent_state, "registration_lost")
+            _stop.wait(POLL_INTERVAL_SEC)
+            continue
         except Exception as exc:  # noqa: BLE001
             print(f"[agent-poll] PollAgentJob failed: {exc}", flush=True)
             _mark_agent_unregistered(agent_state, "poll_failed")
@@ -625,6 +703,7 @@ def _poll_loop() -> None:
 
 def main() -> None:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    COMPLETION_SPOOL_DIR.mkdir(parents=True, exist_ok=True)
     threading.Thread(
         target=_serve, args=("health", HEALTH_BIND, HealthHandler), daemon=True
     ).start()

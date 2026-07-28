@@ -5,6 +5,7 @@
 > - [跨模块调整清单](./跨模块调整清单-qa改造与ToolEnv-Agent.md)
 > - [实施规划](./验证型环境改造与DSCode-Agent评测-实施规划.md)
 > - **[Hub 待调整事宜（单独成文）](./Hub待调整事宜-qa制品与Rubric注册.md)**
+> - **[前端观测面与系统能力差距（单独成文）](./前端观测面与系统能力差距-待补齐.md)**
 
 ---
 
@@ -18,6 +19,7 @@
 | A | verifiers Rubric 金标 | ✅ | 对齐率 **96.55%（56/58）**，**过宽=0**；修复 olympmath 子串判满分洞 |
 | B3 | Server 编排 code/ToolEnv + 联调 | ✅ | `CodeAgentBackend`；poller `toolenv-default`；`numpy_1` mock **reward=1.0（20/20）** |
 | GPU | 关 7142 临时 vLLM | ✅ | `:18088`/`:18099` 已释放；GPU 4/5 显存回到 0 MiB |
+| FE | 可视化前端部署 + Obs 冒烟 | ⚠️ 半完成 | Server `8.130.75.157:8888` 可访问；Obs `:50053` + `/obs` 代理 REST/SSE **seed 通**；**尚未**用真实 Bridge/训练链路驱动 UI（见 §4.2、差距专文） |
 
 ---
 
@@ -117,7 +119,8 @@ Client (submit_code_agent_episode)
 
 Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubric注册.md)。本节只列 **Server / Bridge / Worker / Agent 机 / OpenHands / 文档与 CI / 评测口径** 上仍未收口、但本轮联调已暴露的事项。
 
-> **进度（2026-07-25 续）**：§4.3–§4.5 已落地并验收；§4.1 / §4.6 / §4.7 与 Bridge 训练侧清查仍开放。
+> **进度（2026-07-25 续 / 07-26 FE）**：§4.3–§4.5 已落地并验收；§4.1 / §4.6 / §4.7 与 Bridge 训练侧清查仍开放。  
+> **前端**：Obs 部署 + seed 冒烟已做；**§4.2 Bridge 真实 UI 联调仍开放（P0）**；能力差距见 [前端观测面与系统能力差距-待补齐](./前端观测面与系统能力差距-待补齐.md)。
 
 ### 4.1 Server（控制面 / Adapter Core）
 
@@ -135,14 +138,31 @@ Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubr
 
 ### 4.2 Bridge（训练入口 / `uenv-bridge` + `core.rs`）
 
-**现状**：`default_env_type` 已改为 `qa`；`core.rs` 含 `test_script` / `execution_mode` 透传；**adapter-core 已于 2026-07-25 续部署到 Server**（`bak-b3b-*`），B3 mock 非零 reward 已通。
+**现状**：`default_env_type` 已改为 `qa`；`core.rs` 含 `test_script` / `execution_mode` 透传；**adapter-core 已于 2026-07-25 续部署到 Server**（后含 Obs 的滚动见 2026-07-25 晚），B3 mock 非零 reward 已通。  
+**前端（2026-07-25/26）**：Server 上 Vite 前端 `http://8.130.75.157:8888`、Obs `127.0.0.1:50053`、同源 `/obs` 代理已冒烟（seed `_orphan` + state/stream）。**这不等于 FE-2 真实链路联调**——UI 仍未由 Bridge `SubmitEpisode` / VeRL AgentLoop 真实事件驱动。
 
 | 待办 | 说明 | 状态 |
 |------|------|------|
 | 再发布一次 adapter-core（含 `test_script`） | 7142 重建 → Server 滚动；样例 `numpy_1` → `reward=1.0` | ✅ 已完成 |
 | 训练侧全量确认走 `qa` | 除 `verl_agent_loop` 默认值外，检查历史 yaml / 作业脚本 / 数据集 loader 是否仍写死 `env_type=math` | ⬜ 仍开放（P0） |
+| **基于当前前端做真实链路联调（Bridge 负责）** | 用现有 UI（`?run=<training_run_id>`）验收 Obs 事件来自真实训练/评测，而非 seed/fixture。见下方验收清单与 [差距专文](./前端观测面与系统能力差距-待补齐.md) | ⬜ **P0（Bridge）** |
 | Sample → payload 契约文档 | 必填：`execution_mode`、`task_id`、`agent_pool_id`、`agent_bridge_*`、`ground_truth_code` / `test_script` | ⬜ P1 |
 | 轻量 Agent 机依赖面 | bootstrap 已固化 agent stubs 合并进 `uenv/v1/`（见 §4.4） | ✅ 部分完成 |
+
+#### Bridge 前端真实联调验收清单（待办细则）
+
+> 责任人：**Bridge**。前置：Server Obs 已启、前端 `:8888` 可访问（已具备）。差距与补齐项见专文。
+
+| # | 步骤 | 期望 |
+|---|------|------|
+| 1 | 7142 / 本地 Bridge 配置 `UENV_OBS_URL=http://8.130.75.157:50053`（若公网未放行 50053，则经 SSH 隧道或 Server 本机发起） | `obs_client` 非 no-op |
+| 2 | 选定并固定 `training_run_id`（与 `UENV_TRAINING_RUN_ID` / VeRL batch metadata 一致）；打开 `http://8.130.75.157:8888/?run=<id>` | 顶栏显示该 id，**非** `_orphan` / Fixture |
+| 3 | 跑最小真实流量：至少 1 条 `qa` native Episode，或 1 条已验证的 B3 `code` agent Episode | Server 日志有 submit/dispatch/complete；Obs 有对应 event |
+| 4 | UI 工作流节点随链路变色（SUBMIT→…→DONE/FAILED）；树出现 worker / episode | FE-2.1 / FE-2.2 |
+| 5 | Bridge 发 `RUN_STARTED` / `RUN_CLOSED` 时顶栏 `run_state` 与 Obs state 一致 | FE-2.3 |
+| 6 | 断线重连后 SSE 仍能看到终态（可接受重推 `full_state`） | FE-1.3 实机确认 |
+
+**明确未纳入本待办（记入差距专文）**：前端「开始/终止训练」按钮、日志/Metrics Tab、历史回放——系统侧亦无对应 Obs 控制 API，属 P1 补齐，不阻塞本轮「观测面真实联调」。
 
 ### 4.3 Worker / Plugin — ✅ 已完成
 
@@ -207,8 +227,10 @@ Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubr
 |--------|------|--------|------|
 | P0 | Bridge | 带 `test_script` 的 adapter-core 再发布到 Server | ✅ |
 | P0 | Bridge | 训练/作业侧清掉残留 `env_type=math` | ⬜ |
+| **P0** | **Bridge** | **基于当前前端 UI 做真实链路观测联调（非 seed/fixture）** | **⬜** |
 | P0 | 208.77 | bootstrap 固化 stubs + mock 非零 reward | ✅ |
 | P0 | 208.77 | 填入稳定 LLM 端点后切 `POLICY=llm` | ⬜（模板已就绪） |
+| P1 | Server / FE | 观测与控制能力补齐（日志/Metrics/start-stop 等，见差距专文） | ⬜ |
 | P1 | Server | pickup 超时与 CodeAgent 落盘/观测对齐 | ⬜ |
 | P1 | Worker / Plugin | 全模板去掉 math；Rubric 绑定；过严决策 | ✅ |
 | P1 | OpenHands | regeneratestubs + 字段/双 bridge 文档 | ✅ |
@@ -221,10 +243,11 @@ Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubr
 
 | 组件 | 回滚 |
 |------|------|
-| Server 二进制 | `/usr/local/bin/uenv-adapter-core.bak-b3-*` / `bak-b3b-*` |
+| Server 二进制 | `/usr/local/bin/uenv-adapter-core.bak-b3-*` / `bak-b3b-*` / `bak-obs-*` |
 | Worker types | 临时加回 `math`（不推荐） |
 | olympmath 判分 | **不要**回退子串修复（属正确性修复） |
 | ToolEnv poller | `systemctl disable --now uenv-toolenv-poller` |
+| Obs DB | 重放阻塞时可轮转 `/home/uenv/obs-data/obs.db`（曾有 `obs.db.bak-heavy-*`） |
 
 ---
 
@@ -234,4 +257,5 @@ Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubr
 2. Hub 侧按专文更新制品与注册契约（吸收 `plugins/qa/RUBRIC.md`）。  
 3. 为 208.77 配置稳定推理端后切 `POLICY=llm`，跑一小样本 Agent 评测。  
 4. Bridge 训练侧清查残留 `math`；Server 落盘/分池指标；文档状态位回写。  
-5. 主线合入：proto + server + core + poller + qa 收敛 + 金标修复 + OpenHands stubs。
+5. **Bridge：按 §4.2 清单用 `8.130.75.157:8888` 做真实 Episode → Obs → UI 联调**（见 [差距专文](./前端观测面与系统能力差距-待补齐.md)）。  
+6. 主线合入：proto + server + core + poller + qa 收敛 + 金标修复 + OpenHands stubs。

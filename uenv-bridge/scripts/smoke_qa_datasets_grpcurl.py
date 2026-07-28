@@ -7,12 +7,16 @@ env_type=qa（单轮问答/分类验证环境）。Worker 侧 plugins/qa 复用 
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+from urllib import error, request
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -52,7 +56,44 @@ def _b64(obj: dict) -> str:
     return base64.b64encode(json.dumps(obj).encode()).decode()
 
 
-def execute_batch(server: str, case: dict, request_id: str) -> dict:
+def _post_obs_event(obs_url: str, event_type: str, run_id: str, *, payload: dict | None = None) -> None:
+    if not obs_url or not run_id:
+        return
+    token = os.environ.get("UENV_OBS_TOKEN", "").strip()
+    body = json.dumps(
+        {
+            "event_id": str(uuid.uuid4()),
+            "schema_version": "1",
+            "correlation_id": f"smoke:{run_id}",
+            "training_run_id": run_id,
+            "source_id": f"bridge-smoke:{os.getpid()}",
+            "module": "adapter",
+            "entity_type": "training_run",
+            "entity_id": run_id,
+            "event_type": event_type,
+            "seq": int(time.time() * 1000),
+            "source_ts": int(time.time() * 1000),
+            "payload": payload or {},
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Obs-Token"] = token
+    req = request.Request(
+        f"{obs_url.rstrip('/')}/api/v1/events",
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=5.0) as resp:
+            resp.read()
+    except error.URLError as exc:
+        print(f"WARN: obs {event_type} failed: {exc}", file=sys.stderr)
+
+
+def execute_batch(server: str, case: dict, request_id: str, run_id: str = "") -> dict:
     # 与当前 proto (SampleEnvelope) 对齐：env/episode/reward 为独立 bytes 字段 (base64)。
     # 免-LLM 联调：Worker 的 rule_reward 短路仅在 payload 无 question 时触发
     # (model_client.rs W-2)，返回 target 作为 action → plugin 判分 → reward=1.0，
@@ -60,21 +101,31 @@ def execute_batch(server: str, case: dict, request_id: str) -> dict:
     env_config = {
         "dataset": case["dataset"],
     }
+    batch_id = f"batch-{request_id}"
+    sample_context = {
+        "case": case["name"],
+        "benchmark": case["dataset"],
+        "batch_id": batch_id,
+    }
+    if run_id:
+        sample_context["training_run_id"] = run_id
     req = {
         "requestId": request_id,
-        "batchId": f"batch-{request_id}",
+        "batchId": batch_id,
         "samples": [
             {
                 "requestId": request_id,
-                "batchId": f"batch-{request_id}",
+                "batchId": batch_id,
                 "sampleIndex": 0,
                 "framework": "smoke",
                 "envType": "qa",
+                "parallelMode": "sync",
                 "correlationId": request_id,
                 "timeoutSeconds": 120,
                 "envConfigJson": _b64(env_config),
                 "episodeConfigJson": _b64({"max_steps": 1, "seed": 42}),
                 "rewardConfigJson": _b64({"type": "rule_reward", "target": case["ground_truth"]}),
+                "sampleContextJson": _b64(sample_context),
             }
         ],
     }
@@ -101,11 +152,30 @@ def execute_batch(server: str, case: dict, request_id: str) -> dict:
 
 
 def main() -> int:
-    server = sys.argv[1] if len(sys.argv) > 1 else "8.130.75.157:8088"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("server", nargs="?", default="8.130.75.157:8088")
+    parser.add_argument(
+        "--run-id",
+        default=os.environ.get("UENV_TRAINING_RUN_ID", ""),
+        help="training_run_id for Obs/UI validation.",
+    )
+    parser.add_argument(
+        "--obs-url",
+        default=os.environ.get("UENV_OBS_URL", ""),
+        help="Obs base URL, e.g. http://8.130.75.157:8888/obs.",
+    )
+    args = parser.parse_args()
+
+    server = args.server
+    run_id = args.run_id.strip()
+    obs_url = args.obs_url.strip()
     results = []
+    if run_id:
+        _post_obs_event(obs_url, "RUN_STARTED", run_id, payload={"entry": "smoke_qa_datasets_grpcurl"})
+    exit_code = 0
     for case in CASES:
         rid = f"qa-{case['name']}-{int(time.time())}"
-        data = execute_batch(server, case, rid)
+        data = execute_batch(server, case, rid, run_id=run_id)
         first = (data.get("results") or [{}])[0]
         status = first.get("status")
         reward = first.get("reward")
@@ -113,10 +183,19 @@ def main() -> int:
         results.append({"case": case["name"], "status": status, "reward": reward, "ok": ok})
         if not ok:
             print(json.dumps({"failed": first, "case": case["name"]}, indent=2))
-            return 1
-    print(json.dumps({"endpoint": server, "results": results}, indent=2, ensure_ascii=False))
-    print("OK: qa multi-dataset e2e passed")
-    return 0
+            exit_code = 1
+            break
+    if run_id:
+        _post_obs_event(
+            obs_url,
+            "RUN_CLOSED",
+            run_id,
+            payload={"entry": "smoke_qa_datasets_grpcurl", "ok": exit_code == 0},
+        )
+    print(json.dumps({"endpoint": server, "run_id": run_id, "results": results}, indent=2, ensure_ascii=False))
+    if exit_code == 0:
+        print("OK: qa multi-dataset e2e passed")
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -25,6 +25,24 @@ class AgentControlUnavailable(RuntimeError):
     """grpcio 未安装或 agent stub 未生成时抛出。"""
 
 
+class AgentRegistrationLost(RuntimeError):
+    """Server 侧已没有该 agent 的注册（NOT_FOUND 或心跳 ok=false）。
+
+    Server 重启后内存注册表清空，Agent 收到此异常应重新 RegisterAgent。
+    """
+
+
+def _is_not_found(grpc_mod: Any, exc: Exception) -> bool:
+    """判断异常是否为 gRPC NOT_FOUND（Server 表示 agent 未注册）。"""
+    code = getattr(exc, "code", None)
+    if not callable(code):
+        return False
+    try:
+        return code() == grpc_mod.StatusCode.NOT_FOUND
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _load_grpc_modules() -> tuple[Any, Any, Any]:
     """懒加载 grpc + 生成的 agent stub。失败抛 AgentControlUnavailable。"""
     try:
@@ -128,7 +146,14 @@ class AgentControlClient:
             agent_pool_id=agent_pool_id,
             worker_id=agent_id,
         )
-        resp = self._stub.PollAgentJob(req, timeout=self.timeout_sec)
+        try:
+            resp = self._stub.PollAgentJob(req, timeout=self.timeout_sec)
+        except Exception as exc:
+            if _is_not_found(self._grpc, exc):
+                raise AgentRegistrationLost(
+                    f"server lost registration for agent_id={agent_id} (NOT_FOUND)"
+                ) from exc
+            raise
         if not resp.has_job:
             return None
         return _job_from_proto(resp.job)
@@ -211,13 +236,29 @@ class AgentControlClient:
         return bool(resp.ack)
 
     def agent_heartbeat(self, agent_id: str, active_jobs: int, timestamp_ms: int = 0) -> int:
-        """上报心跳，返回 Server 建议的下次间隔（ms）。"""
+        """上报心跳，返回 Server 建议的下次间隔（ms）。
+
+        Server 已不认识该 agent（重启后注册表清空）时抛 AgentRegistrationLost，
+        调用方应重新 RegisterAgent。
+        """
         req = self._pb2.AgentHeartbeatRequest(
             agent_id=agent_id,
             active_jobs=int(active_jobs),
             timestamp_ms=int(timestamp_ms),
         )
-        resp = self._stub.AgentHeartbeat(req, timeout=self.timeout_sec)
+        try:
+            resp = self._stub.AgentHeartbeat(req, timeout=self.timeout_sec)
+        except Exception as exc:
+            if _is_not_found(self._grpc, exc):
+                raise AgentRegistrationLost(
+                    f"server lost registration for agent_id={agent_id} (NOT_FOUND)"
+                ) from exc
+            raise
+        if not bool(resp.ok):
+            # 兼容旧 Server：不显式报错但回 ok=false。
+            raise AgentRegistrationLost(
+                f"AgentHeartbeat rejected unknown agent_id={agent_id}"
+            )
         return int(resp.next_heartbeat_interval_ms)
 
 

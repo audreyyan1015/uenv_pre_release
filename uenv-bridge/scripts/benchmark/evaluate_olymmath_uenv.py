@@ -161,7 +161,7 @@ def build_request(
     }
     return EpisodeRequest(
         request_id=request_id,
-        env_type="math",
+        env_type="qa",
         payload=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         mode=MODE_MULTI,
         max_steps=1,

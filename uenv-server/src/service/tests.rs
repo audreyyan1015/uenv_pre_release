@@ -106,6 +106,43 @@ mod tests {
         assert_eq!(extract_parallel_mode(&req).expect("mode"), "fully_async");
     }
 
+    #[test]
+    fn explicit_env_step_failure_is_non_retryable() {
+        let error = anyhow::anyhow!(
+            "execute_episode_failed: error_code=ERR_ENV_STEP_FAILED: scoring failed"
+        );
+
+        assert_eq!(
+            deterministic_dispatch_error_code(&error),
+            Some(ErrorCode::ErrEnvStepFailed)
+        );
+    }
+
+    #[test]
+    fn legacy_h2_cancelled_step_failure_is_non_retryable() {
+        let status = tonic::Status::internal(
+            "execute_episode_failed: h2 Reset(StreamId(1), CANCEL, Remote)",
+        );
+        let error: anyhow::Error = status.into();
+
+        assert_eq!(
+            deterministic_dispatch_error_code(&error),
+            Some(ErrorCode::ErrEnvStepFailed)
+        );
+    }
+
+    #[test]
+    fn model_and_transport_failures_remain_retryable() {
+        let model_error = anyhow::anyhow!(
+            "execute_episode_failed: ERR_MODEL_CALL_FAILED: gateway timeout"
+        );
+        let transport_error: anyhow::Error =
+            tonic::Status::unavailable("connection refused").into();
+
+        assert_eq!(deterministic_dispatch_error_code(&model_error), None);
+        assert_eq!(deterministic_dispatch_error_code(&transport_error), None);
+    }
+
     #[tokio::test]
     async fn queue_timeout_returns_terminal_timeout_result() {
         let mut cfg = ServerConfig::default();
@@ -141,5 +178,32 @@ mod tests {
             result.metadata.get("terminal_kind").map(String::as_str),
             Some("timeout")
         );
+    }
+
+    #[test]
+    fn code_agent_spec_defaults_to_toolenv_bridge_when_missing() {
+        let req = EpisodeRequest {
+            payload: br#"{"execution_mode":"agent","task_id":"t-1"}"#.to_vec(),
+            ..Default::default()
+        };
+
+        let spec = CodeAgentSpec::from_payload(&req).expect("code agent spec");
+
+        assert_eq!(spec.agent_bridge_id, "uenv-agent-toolenv");
+        assert!(spec.agent_bridge_version.is_empty());
+    }
+
+    #[test]
+    fn code_agent_spec_keeps_explicit_bridge() {
+        let req = EpisodeRequest {
+            payload: br#"{"execution_mode":"agent","task_id":"t-1","agent_bridge_id":"custom-bridge","agent_bridge_version":"1.2.3"}"#
+                .to_vec(),
+            ..Default::default()
+        };
+
+        let spec = CodeAgentSpec::from_payload(&req).expect("code agent spec");
+
+        assert_eq!(spec.agent_bridge_id, "custom-bridge");
+        assert_eq!(spec.agent_bridge_version, "1.2.3");
     }
 }

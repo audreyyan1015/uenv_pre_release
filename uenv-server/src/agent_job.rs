@@ -16,7 +16,7 @@
 //   - in-flight 表用 job_id 关联，complete 时取出 Sender 发送。
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
@@ -35,8 +35,14 @@ struct InFlightJob {
     /// 领取该 Job 的 agent_id。complete 时必须与这里记录的值一致。
     agent_id: String,
     run_id: String,
+    job: AgentJob,
     /// service.rs 正在等待的结果发送端，complete_agent_job 会通过它回传结果。
-    done: oneshot::Sender<AgentJobCompleteRequest>,
+    done: oneshot::Sender<AgentJobCompletion>,
+}
+
+pub struct AgentJobCompletion {
+    pub(crate) complete: AgentJobCompleteRequest,
+    pub(crate) result: crate::proto::v1::EpisodeResult,
 }
 
 /// AgentJob 队列：按 pool 分组的待领队列 + 全局 in-flight 表。
@@ -47,6 +53,7 @@ pub struct AgentJobQueue {
     in_flight: DashMap<String, InFlightJob>,
     /// Agent 注册表引用（poll/complete 时增减负载）。
     registry: Arc<AgentRegistry>,
+    persistence: OnceLock<Arc<crate::persistence::PersistenceStore>>,
 }
 
 impl AgentJobQueue {
@@ -55,16 +62,20 @@ impl AgentJobQueue {
             pending: DashMap::new(),
             in_flight: DashMap::new(),
             registry,
+            persistence: OnceLock::new(),
         }
+    }
+
+    pub fn attach_persistence(
+        &self,
+        store: Arc<crate::persistence::PersistenceStore>,
+    ) -> Result<(), Arc<crate::persistence::PersistenceStore>> {
+        self.persistence.set(store)
     }
 
     /// 入队一个 AgentJob，返回等待其完成的 receiver。
     /// 编排逻辑 await 该 receiver 拿 CompleteAgentJob（配合外层 deadline）。
-    pub fn enqueue(
-        &self,
-        pool_id: &str,
-        job: AgentJob,
-    ) -> oneshot::Receiver<AgentJobCompleteRequest> {
+    pub fn enqueue(&self, pool_id: &str, job: AgentJob) -> oneshot::Receiver<AgentJobCompletion> {
         let (tx, rx) = oneshot::channel();
         let job_id = job.job_id.clone();
         // 先登记 in-flight 的回调（agent_id 在 poll 时才确定，此处留空占位）。
@@ -74,6 +85,7 @@ impl AgentJobQueue {
             InFlightJob {
                 agent_id: String::new(),
                 run_id: job.run_id.clone(),
+                job: job.clone(),
                 done: tx,
             },
         );
@@ -82,6 +94,39 @@ impl AgentJobQueue {
             .or_default()
             .push_back(job);
         tracing::info!(job_id = %job_id, pool_id = %pool_id, "agent_job_enqueued");
+        rx
+    }
+
+    pub(crate) fn restore_persisted(
+        &self,
+        pool_id: &str,
+        job: AgentJob,
+        leased_agent_id: Option<String>,
+    ) -> oneshot::Receiver<AgentJobCompletion> {
+        let (tx, rx) = oneshot::channel();
+        let job_id = job.job_id.clone();
+        let agent_id = leased_agent_id.unwrap_or_default();
+        self.in_flight.insert(
+            job_id.clone(),
+            InFlightJob {
+                agent_id: agent_id.clone(),
+                run_id: job.run_id.clone(),
+                job: job.clone(),
+                done: tx,
+            },
+        );
+        if agent_id.is_empty() {
+            self.pending
+                .entry(pool_id.to_string())
+                .or_default()
+                .push_back(job);
+        }
+        tracing::info!(
+            job_id = %job_id,
+            pool_id,
+            leased_agent_id = %agent_id,
+            "agent_job_recovered"
+        );
         rx
     }
 
@@ -130,6 +175,66 @@ impl AgentJobQueue {
             q.retain(|j| j.job_id != job_id);
         }
         tracing::warn!(job_id = %job_id, pool_id = %pool_id, "agent_job_abandoned");
+    }
+
+    /// 对所有心跳超时（stale）的 Agent 名下 in-flight job 做 server 发起的失败收口。
+    ///
+    /// 通过与 CompleteAgentJob 相同的 oneshot 通知路径唤醒等待的 episode（status=failed，
+    /// error_message 标明 agent 掉线），并回收 Agent 负载、清 in-flight——语义与
+    /// abandon 一致，区别是这里会向 waiter 投递失败结果而不是静默丢弃。
+    /// reaper 移除 in-flight 后，agent 迟到的 complete 会得到 UNKNOWN_JOB（既有行为）。
+    ///
+    /// 只处理已领取（agent_id 非空）的 job；仍 pending 的 job 留给存活 Agent 领取。
+    /// 返回被收口的 job_id 列表。
+    pub fn reap_stale_agent_jobs(&self) -> Vec<String> {
+        let mut reaped = Vec::new();
+        for agent_id in self.registry.stale_agent_ids() {
+            let job_ids: Vec<String> = self
+                .in_flight
+                .iter()
+                .filter(|e| e.value().agent_id == agent_id)
+                .map(|e| e.key().clone())
+                .collect();
+            for job_id in job_ids {
+                let Some((_, inflight)) = self.in_flight.remove(&job_id) else {
+                    continue;
+                };
+                self.registry.decrement_load(&inflight.agent_id);
+                tracing::warn!(
+                    job_id = %job_id,
+                    agent_id = %inflight.agent_id,
+                    run_id = %inflight.run_id,
+                    "agent_job_reaped"
+                );
+                let complete = AgentJobCompleteRequest {
+                    job_id: job_id.clone(),
+                    run_id: inflight.run_id.clone(),
+                    status: "failed".to_string(),
+                    error_message: format!(
+                        "agent {} stale/disconnected: heartbeat timeout",
+                        inflight.agent_id
+                    ),
+                    agent_id: inflight.agent_id.clone(),
+                    metadata: std::collections::HashMap::from([(
+                        "failure_source".to_string(),
+                        "agent_stale_reaper".to_string(),
+                    )]),
+                    ..Default::default()
+                };
+                // 与 complete_agent_job 的非持久化分支一致：complete → EpisodeResult，
+                // 包成 AgentJobCompletion 唤醒 waiter（attempt 0 / session 取 job 记录）。
+                let result = crate::service::agent_complete_to_episode_result(
+                    &complete,
+                    &inflight.job.episode_id,
+                    0,
+                    &inflight.job.session_id,
+                    "failed",
+                );
+                let _ = inflight.done.send(AgentJobCompletion { complete, result });
+                reaped.push(job_id);
+            }
+        }
+        reaped
     }
 }
 
@@ -182,12 +287,21 @@ impl AgentControlService for AgentControlServiceImpl {
     }
 
     /// Agent 心跳：刷新健康时间并校准负载。
+    ///
+    /// 未注册的 agent_id 返回 NOT_FOUND：Server 重启后内存注册表清空，
+    /// Agent 需要这个明确信号触发重新 RegisterAgent，而不是静默心跳落空。
     async fn agent_heartbeat(
         &self,
         request: Request<AgentHeartbeatRequest>,
     ) -> Result<Response<AgentHeartbeatResponse>, Status> {
         let req = request.into_inner();
-        self.registry.heartbeat(&req.agent_id, req.active_jobs);
+        let known = self.registry.heartbeat(&req.agent_id, req.active_jobs);
+        if !known {
+            return Err(Status::not_found(format!(
+                "unknown agent_id={}, re-register required",
+                req.agent_id
+            )));
+        }
         Ok(Response::new(AgentHeartbeatResponse {
             ok: true,
             next_heartbeat_interval_ms: self.heartbeat_interval_ms,
@@ -211,6 +325,14 @@ impl AgentControlService for AgentControlServiceImpl {
                 has_job: false,
                 job: None,
             }));
+        }
+        // 与心跳一致：未注册的 agent poll 返回 NOT_FOUND，触发 Agent 侧重新注册，
+        // 避免 Server 重启后 Agent 永远 poll 空转。
+        if !self.registry.is_registered(&polling_agent_id) {
+            return Err(Status::not_found(format!(
+                "unknown agent_id={}, re-register required",
+                polling_agent_id
+            )));
         }
 
         let Some(job) = (|| {
@@ -242,6 +364,38 @@ impl AgentControlService for AgentControlServiceImpl {
             }));
         };
         let agent_id = polling_agent_id;
+
+        if let Some(store) = self.queue.persistence.get() {
+            match store
+                .lease_agent_job(&job.job_id, &agent_id, &job.run_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.registry.decrement_load(&agent_id);
+                    self.queue
+                        .pending
+                        .entry(req.agent_pool_id.clone())
+                        .or_default()
+                        .push_front(job);
+                    return Ok(Response::new(PollAgentJobResponse {
+                        has_job: false,
+                        job: None,
+                    }));
+                }
+                Err(error) => {
+                    self.registry.decrement_load(&agent_id);
+                    self.queue
+                        .pending
+                        .entry(req.agent_pool_id.clone())
+                        .or_default()
+                        .push_front(job);
+                    return Err(Status::unavailable(format!(
+                        "persist agent job lease failed: {error}"
+                    )));
+                }
+            }
+        }
 
         let in_flight_ok = self
             .queue
@@ -282,6 +436,26 @@ impl AgentControlService for AgentControlServiceImpl {
         let req = request.into_inner();
         let job_id = req.job_id.clone();
         let Some(inflight_ref) = self.queue.in_flight.get(&job_id) else {
+            if let Some(store) = self.queue.persistence.get() {
+                let decision = store
+                    .commit_agent_completion(
+                        req.clone(),
+                        crate::proto::v1::EpisodeResult::default(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        Status::unavailable(format!(
+                            "check persisted agent completion failed: {error}"
+                        ))
+                    })?;
+                if matches!(decision, crate::persistence::IdempotencyDecision::Replay(_)) {
+                    return Ok(Response::new(AgentJobCompleteResponse {
+                        ack: true,
+                        code: "DUPLICATE_ACCEPTED".to_string(),
+                        message: String::new(),
+                    }));
+                }
+            }
             tracing::warn!(job_id = %job_id, "agent_job_complete_unknown");
             return Ok(Response::new(AgentJobCompleteResponse {
                 ack: false,
@@ -312,7 +486,62 @@ impl AgentControlService for AgentControlServiceImpl {
                 message: "agent_id or run_id mismatch".to_string(),
             }));
         }
+        let job = inflight_ref.job.clone();
         drop(inflight_ref);
+
+        let status = if req.status.is_empty() {
+            "completed"
+        } else {
+            req.status.as_str()
+        };
+        let result = if let Some(store) = self.queue.persistence.get() {
+            let episode_request = store
+                .get_episode_request(&job.episode_id)
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!("load persisted episode request failed: {error}"))
+                })?
+                .ok_or_else(|| Status::failed_precondition("persisted episode request missing"))?;
+            let raw = crate::service::agent_complete_to_episode_result(
+                &req,
+                &episode_request.episode_id,
+                episode_request.attempt_id,
+                &job.session_id,
+                status,
+            );
+            let result =
+                crate::result_finalizer::finalize_or_protocol_failed(&episode_request, raw, None);
+            match store
+                .commit_agent_completion(req.clone(), result.clone())
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!("persist agent completion failed: {error}"))
+                })? {
+                crate::persistence::IdempotencyDecision::Replay(_) => result,
+                crate::persistence::IdempotencyDecision::Conflict(_) => {
+                    return Ok(Response::new(AgentJobCompleteResponse {
+                        ack: false,
+                        code: "COMPLETION_CONFLICT".to_string(),
+                        message: "persisted completion identity or checksum conflict".to_string(),
+                    }));
+                }
+                crate::persistence::IdempotencyDecision::Missing => {
+                    return Ok(Response::new(AgentJobCompleteResponse {
+                        ack: false,
+                        code: "UNKNOWN_JOB".to_string(),
+                        message: "persisted job missing".to_string(),
+                    }));
+                }
+            }
+        } else {
+            crate::service::agent_complete_to_episode_result(
+                &req,
+                &job.episode_id,
+                0,
+                &job.session_id,
+                status,
+            )
+        };
 
         match self.queue.in_flight.remove(&job_id) {
             Some((_, inflight)) => {
@@ -324,7 +553,10 @@ impl AgentControlService for AgentControlServiceImpl {
                     reward = req.reward,
                     "agent_job_completed"
                 );
-                let _ = inflight.done.send(req);
+                let _ = inflight.done.send(AgentJobCompletion {
+                    complete: req,
+                    result,
+                });
                 Ok(Response::new(AgentJobCompleteResponse {
                     ack: true,
                     code: "ACCEPTED".to_string(),
@@ -470,5 +702,169 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(ok.ack);
+    }
+
+    /// 把 a2 重新注册为心跳超时的 stale agent（register 幂等替换），
+    /// 模拟 poll 领取 job 之后掉线的场景。
+    fn make_a2_stale(registry: &Arc<AgentRegistry>) {
+        let mut stale = agent("a2", "2.0.0");
+        stale.last_heartbeat_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(120);
+        registry.register(stale);
+    }
+
+    async fn poll_job_to_a2(svc: &AgentControlServiceImpl, queue: &Arc<AgentJobQueue>) {
+        queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
+        let resp = svc
+            .poll_agent_job(Request::new(PollAgentJobRequest {
+                agent_pool_id: "openhands-default".to_string(),
+                worker_id: "a2".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.has_job);
+    }
+
+    #[tokio::test]
+    async fn reaper_fails_in_flight_job_of_stale_agent_and_wakes_waiter() {
+        let (svc, queue, registry) = svc();
+        let rx = {
+            let rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
+            let resp = svc
+                .poll_agent_job(Request::new(PollAgentJobRequest {
+                    agent_pool_id: "openhands-default".to_string(),
+                    worker_id: "a2".to_string(),
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(resp.has_job);
+            rx
+        };
+        make_a2_stale(&registry);
+
+        let reaped = queue.reap_stale_agent_jobs();
+
+        assert_eq!(reaped, vec!["job-1".to_string()]);
+        assert_eq!(queue.in_flight_len(), 0);
+        let completion = rx.await.expect("waiter woken by reaper");
+        let complete = completion.complete;
+        assert_eq!(complete.status, "failed");
+        assert!(complete.error_message.contains("stale"));
+        assert_eq!(completion.result.status, "failed");
+        assert!(completion.result.error_message.contains("stale"));
+        assert_eq!(
+            complete.metadata.get("failure_source").map(String::as_str),
+            Some("agent_stale_reaper")
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_leaves_healthy_agent_jobs_untouched() {
+        let (svc, queue, _registry) = svc();
+        poll_job_to_a2(&svc, &queue).await;
+
+        let reaped = queue.reap_stale_agent_jobs();
+
+        assert!(reaped.is_empty());
+        assert_eq!(
+            queue.in_flight_snapshot(),
+            vec![("job-1".to_string(), "a2".to_string())]
+        );
+        // 健康 agent 的 complete 仍被正常接受。
+        let ok = svc
+            .complete_agent_job(Request::new(AgentJobCompleteRequest {
+                job_id: "job-1".to_string(),
+                run_id: "run-1".to_string(),
+                status: "completed".to_string(),
+                reward: 1.0,
+                trajectory_id: String::new(),
+                error_message: String::new(),
+                agent_id: "a2".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ok.ack);
+    }
+
+    #[tokio::test]
+    async fn late_complete_after_reap_gets_unknown_job() {
+        let (svc, queue, registry) = svc();
+        poll_job_to_a2(&svc, &queue).await;
+        make_a2_stale(&registry);
+        assert_eq!(queue.reap_stale_agent_jobs(), vec!["job-1".to_string()]);
+
+        let late = svc
+            .complete_agent_job(Request::new(AgentJobCompleteRequest {
+                job_id: "job-1".to_string(),
+                run_id: "run-1".to_string(),
+                status: "completed".to_string(),
+                reward: 1.0,
+                trajectory_id: String::new(),
+                error_message: String::new(),
+                agent_id: "a2".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!late.ack);
+        assert_eq!(late.code, "UNKNOWN_JOB");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_unknown_agent_returns_not_found() {
+        let (svc, _queue, _registry) = svc();
+
+        let err = svc
+            .agent_heartbeat(Request::new(AgentHeartbeatRequest {
+                agent_id: "ghost".to_string(),
+                active_jobs: 0,
+                timestamp_ms: 0,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_registered_agent_ok() {
+        let (svc, _queue, _registry) = svc();
+
+        let resp = svc
+            .agent_heartbeat(Request::new(AgentHeartbeatRequest {
+                agent_id: "a1".to_string(),
+                active_jobs: 0,
+                timestamp_ms: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.ok);
+        assert_eq!(resp.next_heartbeat_interval_ms, 5000);
+    }
+
+    #[tokio::test]
+    async fn poll_unknown_agent_returns_not_found() {
+        let (svc, queue, _registry) = svc();
+        let _rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
+
+        let err = svc
+            .poll_agent_job(Request::new(PollAgentJobRequest {
+                agent_pool_id: "openhands-default".to_string(),
+                worker_id: "ghost".to_string(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        // 未注册 agent 的 poll 不得消费队列中的 job。
+        assert!(queue.is_pending("openhands-default", "job-1"));
     }
 }
