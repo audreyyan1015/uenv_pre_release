@@ -18,6 +18,8 @@ class AgentLoopClientConfig:
     auto_start: bool = False
     binary: str | None = None
     streaming: bool = False
+    transport_retry_attempts: int = 3
+    transport_retry_delay_seconds: float = 1.0
     fake_reward: float = 1.0
     fake_response_text: str = ""
 
@@ -32,6 +34,8 @@ class AgentLoopClientConfig:
         auto_start: bool | None = None,
         binary: str | None = None,
         streaming: bool | None = None,
+        transport_retry_attempts: int | None = None,
+        transport_retry_delay_seconds: float | None = None,
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
     ) -> "AgentLoopClientConfig":
@@ -54,6 +58,22 @@ class AgentLoopClientConfig:
                 streaming
                 if streaming is not None
                 else os.getenv("UENV_ADAPTER_CORE_STREAMING", "0") not in {"0", "false", "False"}
+            ),
+            transport_retry_attempts=max(
+                1,
+                int(
+                    transport_retry_attempts
+                    if transport_retry_attempts is not None
+                    else os.getenv("UENV_ADAPTER_CORE_TRANSPORT_RETRY_ATTEMPTS", "3")
+                ),
+            ),
+            transport_retry_delay_seconds=max(
+                0.0,
+                float(
+                    transport_retry_delay_seconds
+                    if transport_retry_delay_seconds is not None
+                    else os.getenv("UENV_ADAPTER_CORE_TRANSPORT_RETRY_DELAY_SECONDS", "1")
+                ),
             ),
             fake_reward=float(fake_reward if fake_reward is not None else os.getenv("UENV_AGENT_LOOP_FAKE_REWARD", "1.0")),
             fake_response_text=fake_response_text
@@ -119,6 +139,8 @@ def build_agent_loop_episode_client(
     auto_start: bool | None = None,
     binary: str | None = None,
     streaming: bool | None = None,
+    transport_retry_attempts: int | None = None,
+    transport_retry_delay_seconds: float | None = None,
     fake_reward: float | None = None,
     fake_response_text: str | None = None,
 ) -> EpisodeClient:
@@ -130,6 +152,8 @@ def build_agent_loop_episode_client(
         auto_start=auto_start,
         binary=binary,
         streaming=streaming,
+        transport_retry_attempts=transport_retry_attempts,
+        transport_retry_delay_seconds=transport_retry_delay_seconds,
         fake_reward=fake_reward,
         fake_response_text=fake_response_text,
     )
@@ -144,6 +168,8 @@ def build_agent_loop_episode_client(
                 auto_start=config.auto_start,
                 binary=config.binary,
                 streaming=config.streaming,
+                transport_retry_attempts=config.transport_retry_attempts,
+                transport_retry_delay_seconds=config.transport_retry_delay_seconds,
             )
         )
     raise ValueError(f"Unsupported UENV_AGENT_LOOP_CLIENT={config.mode!r}; expected fake or rust_core")

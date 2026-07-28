@@ -30,7 +30,7 @@ logging:
   file: "/var/log/uenv/worker.log"  # UENV_LOG_FILE
 
 wal:
-  dir: "/tmp/uenv/wal"          # UENV_WAL_DIR
+  dir: "/var/lib/uenv/wal"      # UENV_WAL_DIR; must survive Worker restarts
 
 observability:
   metrics_listen: "0.0.0.0:19090"  # UENV_METRICS_LISTEN，GET /metrics

@@ -9,26 +9,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
+use prost::Message;
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
+use crate::admin_query::AdminQueryService;
+use crate::admission::AdmissionAcquireError;
+use crate::episode_context::EpisodeContext;
+use crate::execution_backend::select_execution_backend;
 use crate::proto::scheduler::v1::{ListWorkersRequest, ListWorkersResponse, WorkerInfo};
-use crate::proto::v1::{AgentJob, AgentJobCompleteRequest, StepRecord, Trajectory};
 use crate::proto::v1::admin_service_server::AdminService;
+use crate::proto::v1::{AgentJob, AgentJobCompleteRequest, StepRecord, Trajectory};
 use crate::proto::v1::{
     CancelEpisodeRequest, CancelEpisodeResponse, DrainWorkerRequest, DrainWorkerResponse,
     EpisodeRequest, EpisodeResult, ErrorCode, GetServerStatusRequest, ServerStatus,
 };
 use crate::proto::worker::v1::CancelWorkerEpisodeRequest;
-use crate::admission::AdmissionAcquireError;
-use crate::admin_query::AdminQueryService;
-use crate::episode_context::EpisodeContext;
-use crate::execution_backend::select_execution_backend;
 use crate::result_finalizer::{
-    cancelled_result_from_request, complete_episode_result, failed_result_from_request,
-    publish_episode_result, timeout_result_from_request, ResultPersistenceContext, ResultTiming,
+    ResultPersistenceContext, ResultTiming, cancelled_result_from_request, complete_episode_result,
+    failed_result_from_request, publish_episode_result, timeout_result_from_request,
 };
 use crate::scheduler::traits::{ScheduleError, Scheduler, WorkerAssignment};
 use crate::state::{
@@ -96,15 +97,22 @@ struct GatewaySessionGuard {
     gateway_public_url: String,
     gateway_api_key: String,
     session_id: String,
+    persistence: Option<Arc<crate::persistence::PersistenceStore>>,
     disarmed: bool,
 }
 
 impl GatewaySessionGuard {
-    fn new(gateway_public_url: String, gateway_api_key: String, session_id: String) -> Self {
+    fn new(
+        gateway_public_url: String,
+        gateway_api_key: String,
+        session_id: String,
+        persistence: Option<Arc<crate::persistence::PersistenceStore>>,
+    ) -> Self {
         Self {
             gateway_public_url,
             gateway_api_key,
             session_id,
+            persistence,
             disarmed: false,
         }
     }
@@ -117,8 +125,16 @@ impl GatewaySessionGuard {
         let key = self.gateway_api_key.clone();
         let sid = self.session_id.clone();
         self.disarmed = true;
-        let _ =
+        let cleanup =
             tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid)).await;
+        if let Some(store) = &self.persistence {
+            let error = match cleanup {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(_) => Some("gateway destroy timed out".to_string()),
+            };
+            let _ = store.mark_gateway_destroyed(&sid, error).await;
+        }
     }
 }
 
@@ -130,9 +146,19 @@ impl Drop for GatewaySessionGuard {
         let gw = self.gateway_public_url.clone();
         let key = self.gateway_api_key.clone();
         let sid = self.session_id.clone();
+        let persistence = self.persistence.clone();
         tokio::spawn(async move {
-            let _ = tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid))
-                .await;
+            let cleanup =
+                tokio::time::timeout(Duration::from_secs(5), destroy_session(&gw, &key, &sid))
+                    .await;
+            if let Some(store) = persistence {
+                let error = match cleanup {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error.to_string()),
+                    Err(_) => Some("gateway destroy timed out".to_string()),
+                };
+                let _ = store.mark_gateway_destroyed(&sid, error).await;
+            }
         });
     }
 }
@@ -218,7 +244,14 @@ async fn notify_handle_worker_cancel(handle: &Arc<EpisodeHandle>) {
 /// Broadcast the cancelled terminal result and remember the late ReportResult outcome.
 fn broadcast_cancelled_for_request(state: &ServerState, req: &EpisodeRequest) -> EpisodeResult {
     record_cancel_outcome(state, &req.episode_id);
+    crate::obs::try_emit(
+        state,
+        crate::obs::attempt_closed(req, state.epoch(), "cancelled"),
+    );
     let result = cancelled_result_from_request(req, "episode cancelled", None);
+    for ev in crate::obs::episode_terminal(req, &result, state.epoch()) {
+        crate::obs::try_emit(state, ev);
+    }
     let _ = state.episode_broadcast.send(result.clone());
     result
 }
@@ -246,7 +279,14 @@ fn broadcast_timeout_for_request(
     message: impl Into<String>,
     timing: Option<ResultTiming>,
 ) -> EpisodeResult {
+    crate::obs::try_emit(
+        state,
+        crate::obs::attempt_closed(req, state.epoch(), "timeout"),
+    );
     let result = timeout_result_from_request(req, message, timing);
+    for ev in crate::obs::episode_terminal(req, &result, state.epoch()) {
+        crate::obs::try_emit(state, ev);
+    }
     let _ = state.episode_broadcast.send(result.clone());
     result
 }
@@ -340,6 +380,28 @@ fn is_retryable_schedule_error(error: &ScheduleError) -> bool {
         error,
         ScheduleError::NoWorkerAvailable | ScheduleError::AllWorkersAtCapacity
     )
+}
+
+/// 识别 Worker 已经开始执行后返回的确定性环境 step 失败。
+///
+/// 新版 Worker 应在错误文本中带回 `ERR_ENV_STEP_FAILED`。兼容旧版 Worker 时，
+/// 插件 panic 会先表现为 h2 RESET/CANCEL，再被 Worker 包装为
+/// `execute_episode_failed`；只有这两个特征同时出现才按确定性 step 失败处理，
+/// 避免把模型调用失败、连接失败或容量不足误判为不可重试。
+fn deterministic_dispatch_error_code(error: &anyhow::Error) -> Option<ErrorCode> {
+    let normalized = format!("{error:#}").to_ascii_lowercase();
+    if normalized.contains("err_env_step_failed") {
+        return Some(ErrorCode::ErrEnvStepFailed);
+    }
+
+    let worker_execution_failed = normalized.contains("execute_episode_failed");
+    let h2_stream_failed = normalized.contains("h2")
+        && (normalized.contains("cancel") || normalized.contains("reset"));
+    if worker_execution_failed && h2_stream_failed {
+        return Some(ErrorCode::ErrEnvStepFailed);
+    }
+
+    None
 }
 
 fn sweep_completed_async(state: &ServerState) {

@@ -2,11 +2,15 @@
 // 主要功能：封装 worker dispatch、SweAgentSpec::from_payload、AsyncRequestContext、parallel_mode 提取和 gateway session 数据类型。
 // 大致工作流：episode.rs 在进入后端前解析 spec/context，在派发和结果整理时复用这些 helper。
 
-async fn dispatch_to_worker(endpoint: &str, request: EpisodeRequest) -> anyhow::Result<()> {
+async fn dispatch_to_worker(
+    state: &std::sync::Arc<crate::state::ServerState>,
+    endpoint: &str,
+    request: EpisodeRequest,
+    accepted: Option<tokio::sync::oneshot::Sender<()>>,
+) -> anyhow::Result<()> {
     // service 层只关心“派发是否成功”，具体 gRPC 客户端细节放在 ports 模块中。
-    crate::ports::dispatch_to_worker(endpoint, request).await
+    crate::ports::dispatch_to_worker(state, endpoint, request, accepted).await
 }
-
 
 #[derive(Clone)]
 pub(crate) struct SweAgentSpec {
@@ -133,9 +137,20 @@ impl CodeAgentSpec {
         if task_id.is_empty() {
             return None;
         }
+        // agent_bridge_id 缺失/为空时默认 toolenv bridge：registry 对空 bridge_id 一律判
+        // 匹配，不填默认会导致缺字段的 code agent job 被 OpenHands 池领走。空 version 在
+        // registry 匹配规则里表示「bridge 名匹配即可」，所以这里只需兜底 bridge 名。
+        let agent_bridge_id = {
+            let b = s("agent_bridge_id");
+            if b.is_empty() {
+                "uenv-agent-toolenv".to_string()
+            } else {
+                b
+            }
+        };
         Some(CodeAgentSpec {
             task_id,
-            agent_bridge_id: s("agent_bridge_id"),
+            agent_bridge_id,
             agent_bridge_version: s("agent_bridge_version"),
             agent_pool_id: s("agent_pool_id"),
             mode: {
@@ -199,7 +214,6 @@ async fn destroy_session(
     // 关闭 session 失败不应覆盖 episode 已经形成的终态，所以调用方通常只记录日志或忽略错误。
     crate::ports::destroy_session(gateway_public_url, gateway_api_key, session_id).await
 }
-
 
 pub struct AdminServiceImpl {
     /// admin RPC 使用同一份 ServerState，因此能看到实时 worker、episode 和 pending 状态。
