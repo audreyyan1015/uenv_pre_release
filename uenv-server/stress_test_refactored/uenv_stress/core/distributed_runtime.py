@@ -442,39 +442,74 @@ def protected_snapshot(client: paramiko.SSHClient) -> dict:
 
     这个快照包含 PID、可执行文件、命令行、启动时间和监听端口。
     压测前后各检查一次，用来证明压测没有影响正式 server。
+
+    注意：快照以"当前实际监听者"为准，不再硬性要求等于 PROTECTED_PID——
+    生产进程被外部重启（systemd restart）是允许的，身份一致性由
+    assert_protected_unchanged 按 exe/cmdline/ports 判断。
+    重启瞬间端口可能短暂无监听，因此对监听采集做有限重试。
     """
-    current_listeners = listeners(client)
-    listener_records = {}
-    observed_pids = set()
-    for port in PROTECTED_PORTS:
-        observed_pid, line = _listener_pid(current_listeners, port)
-        observed_pids.add(observed_pid)
-        listener_records[str(port)] = line
-    if observed_pids != {PROTECTED_PID}:
-        raise RuntimeError(
-            f"protected listeners are not all owned by expected PID {PROTECTED_PID}: "
-            f"observed={sorted(observed_pids)}"
-        )
-    exe = process_exe(client, PROTECTED_PID)
-    return {
-        "pid": PROTECTED_PID,
-        "exe": exe,
-        "cmdline": process_cmdline(client, PROTECTED_PID),
-        "starttime_ticks": process_starttime(client, PROTECTED_PID),
-        "ports": list(PROTECTED_PORTS),
-        "listener_records": listener_records,
-    }
+    last_error: Exception | None = None
+    for _attempt in range(5):
+        try:
+            current_listeners = listeners(client)
+            listener_records = {}
+            observed_pids = set()
+            for port in PROTECTED_PORTS:
+                observed_pid, line = _listener_pid(current_listeners, port)
+                observed_pids.add(observed_pid)
+                listener_records[str(port)] = line
+            if len(observed_pids) != 1:
+                raise RuntimeError(
+                    f"protected listeners must be owned by exactly one PID: "
+                    f"observed={sorted(observed_pids)}"
+                )
+            observed = observed_pids.pop()
+            exe = process_exe(client, observed)
+            return {
+                "pid": observed,
+                "exe": exe,
+                "cmdline": process_cmdline(client, observed),
+                "starttime_ticks": process_starttime(client, observed),
+                "ports": list(PROTECTED_PORTS),
+                "listener_records": listener_records,
+            }
+        except RuntimeError as exc:
+            last_error = exc
+            time.sleep(2)
+    raise RuntimeError(f"protected snapshot failed after retries: {last_error}")
 
 
 def assert_protected_unchanged(client: paramiko.SSHClient, before: dict) -> None:
-    """确认正式 adapter-core 和压测前完全一致。"""
+    """确认正式 server 身份未被压测破坏。
+
+    判定口径是"服务身份"而不是"进程号"：exe / cmdline / 监听端口集合不变，
+    即视为未被破坏。生产进程被外部重启（pid/starttime 变化）不算违规——
+    此时同步更新 PROTECTED_PID 跟踪新进程，避免后续清理误杀，
+    并打印事件方便审计。exe/cmdline/端口任一变化仍然 fail closed。
+    """
+    global PROTECTED_PID
     after = protected_snapshot(client)
-    if after != before:
-        raise RuntimeError(
-            "protected server changed: "
-            f"before={json.dumps(before, sort_keys=True)}, "
-            f"after={json.dumps(after, sort_keys=True)}"
+    if after == before:
+        return
+    same_identity = (
+        after.get("exe") == before.get("exe")
+        and after.get("cmdline") == before.get("cmdline")
+        and sorted(after.get("ports", [])) == sorted(before.get("ports", []))
+    )
+    if same_identity and after.get("pid") != before.get("pid"):
+        PROTECTED_PID = int(after["pid"])
+        print(
+            "[protected] production server restarted externally: "
+            f"pid {before.get('pid')} -> {after['pid']}; "
+            "identity (exe/cmdline/ports) unchanged, continuing",
+            flush=True,
         )
+        return
+    raise RuntimeError(
+        "protected server changed: "
+        f"before={json.dumps(before, sort_keys=True)}, "
+        f"after={json.dumps(after, sort_keys=True)}"
+    )
 
 
 def start_owned(

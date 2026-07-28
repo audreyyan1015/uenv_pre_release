@@ -16,6 +16,7 @@ Standard library only (``urllib``) so it runs on the offline Worker host.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,6 +31,14 @@ class GatewayError(RuntimeError):
         super().__init__(f"gateway HTTP {status}: {message}")
         self.status = status
         self.message = message
+
+
+# 瞬态网络错误（连接重置/读超时等）的重试次数与退避秒数。
+# 高并发压测下 gateway 偶发 reset 是常态，单次失败不应直接判死整个 job；
+# HTTP 错误（4xx/5xx 业务语义）不在重试范围。重复 submit 会被 gateway
+# 显式拒绝（而非静默写坏），因此 POST 重试风险可接受。
+_TRANSIENT_RETRY_BACKOFF = (2.0, 5.0, 10.0)
+_TRANSIENT_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError, OSError)
 
 
 @dataclass
@@ -89,12 +98,22 @@ class UEnvGatewayClient:
         for key, val in (extra_headers or {}).items():
             if val:
                 req.add_header(key, val)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                raw = resp.read().decode()
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")
-            raise GatewayError(e.code, detail) from None
+        last_error: Optional[BaseException] = None
+        for attempt in range(len(_TRANSIENT_RETRY_BACKOFF) + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    raw = resp.read().decode()
+                break
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode(errors="replace")
+                raise GatewayError(e.code, detail) from None
+            except _TRANSIENT_ERRORS as e:
+                last_error = e
+                if attempt >= len(_TRANSIENT_RETRY_BACKOFF):
+                    raise
+                time.sleep(_TRANSIENT_RETRY_BACKOFF[attempt])
+        else:  # pragma: no cover - 重试耗尽（防御性分支）
+            raise last_error  # type: ignore[misc]
         if not raw.strip():
             return {}
         try:
