@@ -968,8 +968,10 @@ scheduler:
   heartbeat_interval_ms: 5000
   heartbeat_timeout_secs: 30
 episode:
-  default_timeout_secs: 900
-  stale_warning_secs: 450
+  # 2560+ Episode 的 backlog 在几十 slot 下排队可达数小时，
+  # 900s 会让队尾 Episode 全部误判 timeout；放宽到 4 小时。
+  default_timeout_secs: 14400
+  stale_warning_secs: 7200
   max_attempts: 3
   queue_dynamic: true
   queue_max_in_flight: 0
@@ -3168,8 +3170,9 @@ def main() -> int:
     if AGENT_HEALTH_PORT + args.agents_per_node - 1 > 65535:
         raise SystemExit("--agent-health-port range exceeds TCP port range")
     if args.registered_workers > 1:
-        if args.registered_workers < 1024:
-            raise SystemExit("SWE-bench Pro pressure scale mode requires at least 1024 registered Workers")
+        # 与 run_scale_suite 一致：SWE Worker 规模下限可按验收要求下调到 64。
+        if args.registered_workers < 64:
+            raise SystemExit("SWE-bench Pro pressure scale mode requires at least 64 registered Workers")
         if not args.private_worker_port_range or not args.private_gateway_port_range:
             raise SystemExit("SWE-bench Pro pressure multi-Worker scale requires --private-worker-port-range and --private-gateway-port-range")
         if args.llm_kind != "simulator" or args.simulator_mode != "trace_replay":

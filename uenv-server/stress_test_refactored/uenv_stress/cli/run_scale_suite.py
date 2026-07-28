@@ -135,11 +135,13 @@ def load_suite_config(
     if swebench_pro_pressure.get("mode") != "llm":
         raise ValueError("the integrated acceptance suite requires SWE-bench Pro pressure mode=llm")
     swebench_pro_pressure_parallel_modes = swebench_pro_pressure.get("parallel_modes")
+    # 允许只跑子集（例如验收阶段只跑 sync），但必须非空且取值合法。
     if (
         not isinstance(swebench_pro_pressure_parallel_modes, list)
-        or set(swebench_pro_pressure_parallel_modes) != PARALLEL_MODES
+        or not swebench_pro_pressure_parallel_modes
+        or set(swebench_pro_pressure_parallel_modes) - PARALLEL_MODES
     ):
-        raise ValueError("SWE-bench Pro pressure must cover sync, one_step_off_policy and fully_async parallel_modes")
+        raise ValueError(f"invalid SWE-bench Pro pressure parallel_modes: {swebench_pro_pressure_parallel_modes!r}")
     llm_kind = str(swebench_pro_pressure.get("llm_kind", "simulator"))
     if llm_kind not in {"simulator", "real"}:
         raise ValueError("SWE-bench Pro pressure llm_kind must be simulator or real")
@@ -167,8 +169,9 @@ def load_suite_config(
     swebench_pro_pressure_capacity = int(swebench_pro_pressure.get("worker_capacity", 1))
     swebench_pro_pressure_waves = int(swebench_pro_pressure.get("min_episode_waves", 10))
     swebench_pro_pressure_total_episodes = int(swebench_pro_pressure.get("total_episodes", 0))
-    if swebench_pro_pressure_workers < 1024:
-        raise ValueError("SWE-bench Pro pressure scale evidence requires at least 1024 registered Workers")
+    # SWE Worker 下限按验收要求可下调（1024 -> 64）；下限以下的规模不接受。
+    if swebench_pro_pressure_workers < 64:
+        raise ValueError("SWE-bench Pro pressure scale evidence requires at least 64 registered Workers")
     if swebench_pro_pressure_capacity < 1:
         raise ValueError("SWE-bench Pro pressure worker_capacity must be positive")
     if swebench_pro_pressure_total_episodes < swebench_pro_pressure_workers * swebench_pro_pressure_capacity * swebench_pro_pressure_waves:
@@ -180,10 +183,10 @@ def load_suite_config(
         raise ValueError(
             "math_rule_pressure.tasks must contain exactly olymmath, scitab and pubmedqa"
         )
-    if set(math_rule_pressure.get("modes", [])) != PARALLEL_MODES:
-        raise ValueError(
-            "math_rule_pressure must cover sync, one_step_off_policy and fully_async"
-        )
+    # 与 dscodebench 一致：允许只跑子集（例如验收阶段只跑 sync）。
+    math_modes = math_rule_pressure.get("modes", [])
+    if not isinstance(math_modes, list) or not math_modes or set(math_modes) - PARALLEL_MODES:
+        raise ValueError(f"invalid math_rule_pressure modes: {math_modes!r}")
     if math_rule_pressure.get("model_mode") != "trace_replay_simulator":
         raise ValueError("math_rule_pressure requires model_mode=trace_replay_simulator")
     if math_rule_pressure.get("trace_sampling_strategy") != "round_robin_episode":
@@ -1174,6 +1177,16 @@ def main(
         return 0
 
     try:
+        # suite 执行顺序按验收要求固定为 math-rule -> dscodebench -> swebench-pro。
+        if args.scenario in {"suite", "math-rule-pressure"} and config["math_rule_pressure"].get("enabled", True):
+            document["scenarios"].append(run_child(
+                f"math-rule-pressure-{config['math_rule_pressure']['workers']}workers-three-datasets",
+                math_rule_pressure_command(
+                    args, config, suite_root / "math_rule_pressure"
+                ),
+                suite_root / "math_rule_pressure",
+                "math-rule-pressure-summary-*.json",
+            ))
         if args.scenario in {"suite", "dscodebench-pressure"} and config["dscodebench_pressure"].get("enabled", True):
             document["scenarios"].append(run_child(
                 "dscodebench-pressure-1024-simulator",
@@ -1187,15 +1200,6 @@ def main(
                 swebench_pro_pressure_command(args, config, suite_root / "swebench_pro_pressure"),
                 suite_root / "swebench_pro_pressure",
                 "swebench-pro-pressure-summary-*.json",
-            ))
-        if args.scenario in {"suite", "math-rule-pressure"} and config["math_rule_pressure"].get("enabled", True):
-            document["scenarios"].append(run_child(
-                f"math-rule-pressure-{config['math_rule_pressure']['workers']}workers-three-datasets",
-                math_rule_pressure_command(
-                    args, config, suite_root / "math_rule_pressure"
-                ),
-                suite_root / "math_rule_pressure",
-                "math-rule-pressure-summary-*.json",
             ))
         if args.scenario == "swebench-pro-trace-collection":
             document["scenarios"].append(run_child(

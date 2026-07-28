@@ -15,9 +15,7 @@
     "min_steps": 2,
     "max_steps": 8,
     "modes": [
-      "sync",
-      "one_step_off_policy",
-      "fully_async"
+      "sync"
     ],
     "model_mode": "simulator",
     "simulator_zero_latency": false,
@@ -39,18 +37,16 @@
     "mode": "llm",
     "llm_kind": "simulator",
     "parallel_modes": [
-      "sync",
-      "one_step_off_policy",
-      "fully_async"
+      "sync"
     ],
     "concurrencies": [
-      4
+      2
     ],
-    "registered_workers": 1024,
+    "registered_workers": 64,
     "worker_capacity": 1,
-    "total_episodes": 10240,
+    "total_episodes": 2560,
     "episode_batch_size": 128,
-    "agents_per_node": 16,
+    "agents_per_node": 8,
     "min_episode_waves": 10,
     "fleet_supervisor_threshold": 16,
     "gateway_port": 22000,
@@ -58,7 +54,7 @@
     "agent_health_port": 24100,
     "model_port": 8888,
     "registration_timeout_seconds": 900,
-    "batch_timeout_seconds": 10800,
+    "batch_timeout_seconds": 21600,
     "instance_count": 50,
     "instance_seed": 20260720,
     "dataset_catalog": "/opt/uenv-stress/datasets/swebench_pro/catalog.json",
@@ -71,7 +67,7 @@
     "trace_latency_basis": "observed_episode_elapsed_proxy",
     "max_steps": 10,
     "openhands_max_iterations": 10,
-    "evidence_boundary": "1024 real UEnv SWE Worker processes, 16 OpenHands agents per worker node, 4 concurrent OpenHands tasks per agent, real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local trace_replay simulator using 50 task-matched real SWE-bench Pro LLM traces. container_concurrency is intentionally separate from registered_workers."
+    "evidence_boundary": "64 real UEnv SWE Worker processes, 8 OpenHands agents per worker node, 2 concurrent OpenHands tasks per agent, real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local trace_replay simulator using 50 task-matched real SWE-bench Pro LLM traces. container_concurrency is intentionally separate from registered_workers."
   },
   "math_rule_pressure": {
     "enabled": true,
@@ -82,9 +78,7 @@
     "exact_batches_per_dataset_mode": 40,
     "min_episode_waves": 10,
     "modes": [
-      "sync",
-      "one_step_off_policy",
-      "fully_async"
+      "sync"
     ],
     "model_mode": "trace_replay_simulator",
     "trace_sampling_strategy": "round_robin_episode",
