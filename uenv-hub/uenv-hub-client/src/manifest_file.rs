@@ -28,13 +28,16 @@ pub struct ManifestFile {
     pub license: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Registry identity of this capability class.
+    /// Registry identity of this capability class. `None` means the file makes no
+    /// claim, which is not the same as claiming the default: a manifest generated
+    /// by `import-openenv` / `import-docker` carries no identity block, and
+    /// publishing from it must not demote a `canonical` env or drop its aliases.
     #[serde(default)]
-    pub lifecycle: EnvLifecycle,
+    pub lifecycle: Option<EnvLifecycle>,
     #[serde(default)]
     pub superseded_by: Option<String>,
     #[serde(default)]
-    pub compat_aliases: Vec<String>,
+    pub compat_aliases: Option<Vec<String>>,
 
     pub version: VersionSection,
     #[serde(default)]
@@ -143,9 +146,9 @@ impl ManifestFile {
             repository: self.repository.clone(),
             license: self.license.clone(),
             tags: self.tags.clone(),
-            lifecycle: self.lifecycle,
+            lifecycle: self.lifecycle.unwrap_or_default(),
             superseded_by: self.superseded_by.clone(),
-            compat_aliases: self.compat_aliases.clone(),
+            compat_aliases: self.compat_aliases.clone().unwrap_or_default(),
         }
     }
 
