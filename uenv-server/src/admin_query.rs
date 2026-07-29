@@ -78,6 +78,8 @@ pub struct InFlightJobDto {
 pub struct AgentStatusDto {
     pub server_epoch: u64,
     pub agent_count: usize,
+    /// 自本次 server 启动以来从失联 Agent 回收并重入队的 job 数。
+    pub stale_reclaimed_jobs: u64,
     pub outstanding_jobs: usize,
     pub pending_jobs: usize,
     pub running_jobs: usize,
@@ -219,6 +221,7 @@ impl<'a> AdminQueryService<'a> {
         AgentStatusDto {
             server_epoch: self.state.epoch(),
             agent_count: agents.len(),
+            stale_reclaimed_jobs: self.state.agent_job_queue.reclaimed_stale_jobs(),
             outstanding_jobs,
             pending_jobs,
             running_jobs,

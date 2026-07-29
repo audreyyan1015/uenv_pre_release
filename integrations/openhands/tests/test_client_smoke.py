@@ -15,6 +15,7 @@ Run:
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from uenv_runtime import UEnvGatewayClient, UEnvRuntime  # noqa: E402
@@ -79,6 +80,36 @@ class OfflineAdapterTests(unittest.TestCase):
     def test_base_url_normalization(self):
         self.assertEqual(UEnvGatewayClient("127.0.0.1:48999").base_url, "http://127.0.0.1:48999")
         self.assertEqual(UEnvGatewayClient("http://h:1/").base_url, "http://h:1")
+
+    def test_submit_polls_running_gateway_job_until_completed(self):
+        client = UEnvGatewayClient(
+            "127.0.0.1:48999", submit_timeout=1, submit_poll_interval=0
+        )
+        completed = {
+            "status": "completed",
+            "result": {
+                "instance_id": "demo",
+                "resolved": True,
+                "reward": 1.0,
+                "tests_passed": 2,
+                "tests_total": 2,
+            },
+        }
+        with mock.patch.object(
+            client,
+            "_request",
+            side_effect=[{"status": "running", "session_id": "s1"}, completed],
+        ) as request:
+            result = client.submit("s1")
+        self.assertTrue(result.resolved)
+        self.assertEqual(result.tests_passed, 2)
+        self.assertEqual(
+            request.call_args_list,
+            [
+                mock.call("POST", "/runtime/v1/sessions/s1/submit"),
+                mock.call("GET", "/runtime/v1/sessions/s1/submit"),
+            ],
+        )
 
     def test_run_action_dispatch_by_classname(self):
         # No session is created; we only verify dispatch routing via monkeypatch.
