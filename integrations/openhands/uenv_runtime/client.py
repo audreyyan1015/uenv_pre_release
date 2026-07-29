@@ -71,6 +71,8 @@ class UEnvGatewayClient:
         self,
         base_url: str,
         timeout: float = 600.0,
+        submit_timeout: float = 21600.0,
+        submit_poll_interval: float = 2.0,
         api_key: Optional[str] = None,
         run_id: Optional[str] = None,
     ):
@@ -79,6 +81,8 @@ class UEnvGatewayClient:
             base_url = "http://" + base_url
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.submit_timeout = submit_timeout
+        self.submit_poll_interval = submit_poll_interval
         self.api_key = api_key
         self.run_id = (run_id or "").strip() or None
 
@@ -222,6 +226,30 @@ class UEnvGatewayClient:
 
     def submit(self, session_id: str) -> SubmitResult:
         r = self._request("POST", f"/runtime/v1/sessions/{session_id}/submit")
+        # Older gateways return the result synchronously. Keep that contract
+        # usable while new gateways return a short-lived "running" response.
+        if "status" not in r:
+            return self._submit_result(r)
+
+        deadline = time.monotonic() + self.submit_timeout
+        while True:
+            status = str(r.get("status", ""))
+            if status == "completed":
+                return self._submit_result(r.get("result") or {})
+            if status == "failed":
+                raise GatewayError(500, str(r.get("error") or "gateway submit failed"))
+            if status != "running":
+                raise GatewayError(500, f"invalid gateway submit status: {status!r}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"gateway submit did not finish within {self.submit_timeout:.0f}s"
+                )
+            time.sleep(min(self.submit_poll_interval, remaining))
+            r = self._request("GET", f"/runtime/v1/sessions/{session_id}/submit")
+
+    @staticmethod
+    def _submit_result(r: Dict[str, Any]) -> SubmitResult:
         return SubmitResult(
             instance_id=r.get("instance_id", ""),
             resolved=bool(r.get("resolved", False)),
