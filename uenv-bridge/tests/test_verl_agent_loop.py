@@ -24,6 +24,12 @@ class FakeTokenizer:
         return [ord(char) for char in text]
 
 
+class DictInputIdsTokenizer(FakeTokenizer):
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+        self.last_messages = messages
+        return {"input_ids": [[10, 11, 12]]}
+
+
 class RecordingEpisodeClient:
     def __init__(self, result: EpisodeResult) -> None:
         self.result = result
@@ -350,6 +356,23 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.reward_score, 2.0)
         self.assertEqual(output.extra_fields["uenv_status"], "completed")
         self.assertIsNotNone(client.last_request)
+
+    def test_run_accepts_chat_template_input_ids_mapping(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(tokenizer=DictInputIdsTokenizer(), client=client)
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.prompt_ids, [10, 11, 12])
+        payload = json.loads(client.last_request.payload.decode("utf-8"))
+        self.assertEqual(payload["episode_config"]["initial_observation"]["prompt_ids"], [10, 11, 12])
 
     def test_run_batch_submits_one_core_batch(self) -> None:
         client = BatchRecordingEpisodeClient()
