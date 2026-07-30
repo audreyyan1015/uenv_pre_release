@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from functools import wraps
 from typing import Any
 
 
@@ -18,17 +19,22 @@ def apply_verl_vllm_model_version_patch() -> None:
 async def _run_server_with_model_version(self: Any, args: Any, parent_run_server: Any) -> Any:
     print("uenv_model_version_run_server_wrapper", file=sys.stderr, flush=True)
     original_run_globals = parent_run_server.__globals__
-    original_run_uvicorn = original_run_globals["run_uvicorn"]
+    original_build_app = original_run_globals.get("build_app")
 
-    async def run_uvicorn_with_model_version(app, uvicorn_args, server_address):
+    if original_build_app is None:
+        return await parent_run_server(self, args)
+
+    @wraps(original_build_app)
+    def build_app_with_model_version(*build_args, **build_kwargs):
+        app = original_build_app(*build_args, **build_kwargs)
         _install_model_version_middleware(app, self)
-        return await original_run_uvicorn(app, uvicorn_args, server_address)
+        return app
 
-    original_run_globals["run_uvicorn"] = run_uvicorn_with_model_version
+    original_run_globals["build_app"] = build_app_with_model_version
     try:
         return await parent_run_server(self, args)
     finally:
-        original_run_globals["run_uvicorn"] = original_run_uvicorn
+        original_run_globals["build_app"] = original_build_app
 
 
 def _patch_vllm_http_server_class(vllm_async_server: Any) -> Any:
@@ -98,6 +104,9 @@ class _ActorClassWithModelVersionEnv:
 def _install_model_version_middleware(app: Any, server: Any) -> None:
     if getattr(app.state, "_uenv_model_version_middleware_installed", False):
         return
+    _patch_prometheus_route_name_fallback()
+    if getattr(app, "middleware_stack", None) is not None:
+        app.middleware_stack = None
     print("uenv_model_version_middleware_installed", file=sys.stderr, flush=True)
 
     @app.middleware("http")
@@ -108,6 +117,28 @@ def _install_model_version_middleware(app: Any, server: Any) -> None:
         return await _response_with_model_version(response, server)
 
     app.state._uenv_model_version_middleware_installed = True
+
+
+def _patch_prometheus_route_name_fallback() -> None:
+    try:
+        from prometheus_fastapi_instrumentator import routing
+    except Exception:
+        return
+    if getattr(routing, "_uenv_route_name_fallback_patch_applied", False):
+        return
+
+    original_get_route_name = routing.get_route_name
+
+    def get_route_name(request):
+        try:
+            return original_get_route_name(request)
+        except AttributeError as exc:
+            if "object has no attribute 'path'" not in str(exc):
+                raise
+            return request.scope.get("path")
+
+    routing.get_route_name = get_route_name
+    routing._uenv_route_name_fallback_patch_applied = True
 
 
 async def _response_with_model_version(response: Any, server: Any) -> Any:
