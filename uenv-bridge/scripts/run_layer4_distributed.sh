@@ -34,6 +34,7 @@ Common environment overrides:
   PPO_MINI_BATCH_SIZE           Default: 64
   ROLLOUT_N                     Default: 5
   ROLLOUT_TP                    Default: 1
+  ROLLOUT_CALCULATE_LOG_PROBS   Ask rollout engine to return token logprobs. Default: False for sync.
   DATA_MAX_RESPONSE_LENGTH      Default: 1024
   UENV_AGENT_LOOP_BATCH         Batch episodes before Python -> Rust core RPC. Default: 1
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
@@ -132,6 +133,7 @@ REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-$
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 ROLLOUT_N=${ROLLOUT_N:-5}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
+ROLLOUT_CALCULATE_LOG_PROBS=${ROLLOUT_CALCULATE_LOG_PROBS:-False}
 DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-1024}
 DATA_DIR=${DATA_DIR:-/data/ronghao/uenv/uenv-bridge/data/gsm8k}
 CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/gsm8k}
@@ -289,8 +291,8 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
   +actor_rollout_ref.rollout.enable_sleep_mode=${ROLLOUT_ENABLE_SLEEP_MODE} \\
   actor_rollout_ref.rollout.max_num_seqs=4 \\
-  actor_rollout_ref.rollout.max_num_batched_tokens=512 \\
-  actor_rollout_ref.rollout.calculate_log_probs=True \\
+  actor_rollout_ref.rollout.max_num_batched_tokens=2048 \\
+  actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
   actor_rollout_ref.ref.fsdp_config.param_offload=False \\
   actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \\
