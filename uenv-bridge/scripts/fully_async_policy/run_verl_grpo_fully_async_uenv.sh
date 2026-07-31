@@ -24,6 +24,7 @@ Common overrides:
   PPO_MICRO_BATCH_SIZE_PER_GPU  Default: 1
   ROLLOUT_N                     Default: 2
   DATA_MAX_RESPONSE_LENGTH      Default: 32
+  ROLLOUT_CALCULATE_LOG_PROBS   Ask async rollout engine to return token logprobs. Default: True.
   NGPUS_PER_NODE                Container-visible GPU count. Default: 4
   TRAINING_GPUS_PER_NODE        GPUs used by trainer/actor. Default: NGPUS_PER_NODE - ROLLOUT_GPUS_PER_NODE
   ROLLOUT_GPUS_PER_NODE         GPUs used by fully async rollouter. Default: 1, or 2 when NGPUS_PER_NODE >= 4
@@ -113,6 +114,7 @@ REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-$
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-32}
 ROLLOUT_N=${ROLLOUT_N:-2}
+ROLLOUT_CALCULATE_LOG_PROBS=${ROLLOUT_CALCULATE_LOG_PROBS:-True}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 INFER_BACKEND=${INFER_BACKEND:-vllm}
 
@@ -357,7 +359,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \\
   actor_rollout_ref.rollout.layered_summon=True \\
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
   actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
-  actor_rollout_ref.rollout.calculate_log_probs=True \\
+  actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.rollout.enforce_eager=${ROLLOUT_ENFORCE_EAGER} \\
   actor_rollout_ref.rollout.enable_chunked_prefill=${ROLLOUT_ENABLE_CHUNKED_PREFILL} \\
   actor_rollout_ref.rollout.max_num_seqs=${ROLLOUT_MAX_NUM_SEQS} \\
