@@ -52,8 +52,39 @@ def _load_catalog(path: Path, instance_id: str) -> dict[str, Any]:
     return data[instance_id]
 
 
-def _pro_workspace_dir(variant: str) -> str:
-    return "/app" if variant.lower() == "pro" else "/testbed"
+def _smith_catalog_candidates(repo_root: Path) -> list[Path]:
+    return [
+        repo_root / "fixtures/swe/smith_catalog.json",
+        repo_root / "config/swe/smith-smoke.json",
+        Path("/var/lib/uenv/envs/swe-bench-smith/0.1.0-local/catalog.json"),
+    ]
+
+
+def _resolve_instances_catalog(
+    *,
+    variant: str,
+    explicit: str,
+    repo_root: Path,
+) -> Path:
+    """Prefer explicit path; for smith fall back to local EnvPackage/fixture catalogs."""
+    from uenv_runtime.agent_job import normalize_benchmark_variant
+
+    if explicit.strip():
+        path = Path(explicit)
+        if not path.is_absolute():
+            path = repo_root / path
+        return path
+    if normalize_benchmark_variant(variant) == "smith":
+        for cand in _smith_catalog_candidates(repo_root):
+            if cand.is_file():
+                return cand
+    return repo_root / "config/swe/pro-python-smoke.json"
+
+
+def _workspace_dir(variant: str, override: str = "") -> str:
+    from uenv_runtime.agent_job import resolve_workspace_dir
+
+    return resolve_workspace_dir(variant, override)
 
 
 def _infer_repo_language(instance: dict[str, Any]) -> str:
@@ -353,12 +384,38 @@ def main() -> int:
     out = Path(args.output_dir)
     run_log = out / "run.log"
     repo_root = Path(os.environ.get("UENV_REPO", "/root/UEnv"))
-    catalog_path = Path(args.instances)
-    if not catalog_path.is_absolute():
-        catalog_path = repo_root / catalog_path
+    # CLI/default instances may still point at Pro smoke; resolve after AgentJob variant override.
+    from uenv_runtime.agent_job import normalize_benchmark_variant
+
+    if normalize_benchmark_variant(args.benchmark_variant) == "smith" and not (
+        agent_job and agent_job.instances_catalog
+    ):
+        # Keep explicit --instances only when it already contains the target (checked below).
+        catalog_path = _resolve_instances_catalog(
+            variant=args.benchmark_variant,
+            explicit="",
+            repo_root=repo_root,
+        )
+        # If caller passed a usable smith catalog via --instances, prefer it.
+        explicit = Path(args.instances)
+        if not explicit.is_absolute():
+            explicit = repo_root / explicit
+        if explicit.is_file():
+            try:
+                data = json.loads(explicit.read_text(encoding="utf-8"))
+                if args.instance in data:
+                    catalog_path = explicit
+            except Exception:
+                pass
+        args.instances = str(catalog_path)
+    else:
+        catalog_path = Path(args.instances)
+        if not catalog_path.is_absolute():
+            catalog_path = repo_root / catalog_path
 
     row = _load_catalog(catalog_path, args.instance)
-    workspace_dir = _pro_workspace_dir(args.benchmark_variant)
+    job_workspace = agent_job.workspace_dir if agent_job else ""
+    workspace_dir = _workspace_dir(args.benchmark_variant, job_workspace)
 
     if args.gateway:
         client = UEnvGatewayClient(args.gateway, api_key=args.api_key, run_id=run_id)
@@ -416,11 +473,31 @@ def main() -> int:
                 patch = row.get("patch", "")
                 if patch.strip():
                     ws.write_remote_text("/tmp/gold.patch", patch)
-                    r = ws.execute_command(
-                        "git apply -v /tmp/gold.patch || "
-                        "patch --batch --fuzz=5 -p1 < /tmp/gold.patch"
+                    # SWE-smith：数据集 patch 为造 bug 补丁；Worker provision 已注入，
+                    # gold 用 git apply -R 还原。Pro/Verified 仍正向应用 gold。
+                    from uenv_runtime.agent_job import normalize_benchmark_variant
+
+                    is_smith = normalize_benchmark_variant(args.benchmark_variant) == "smith"
+                    if is_smith:
+                        apply_cmd = (
+                            f"cd {workspace_dir} && git apply -R -v /tmp/gold.patch && "
+                            f"source /opt/miniconda3/bin/activate testbed 2>/dev/null; "
+                            f"cd {workspace_dir} && pip install -e . -q"
+                        )
+                    else:
+                        apply_cmd = (
+                            "git apply -v /tmp/gold.patch || "
+                            "patch --batch --fuzz=5 -p1 < /tmp/gold.patch"
+                        )
+                    r = ws.execute_command(apply_cmd)
+                    _save_json(
+                        out / "gold_apply.json",
+                        {
+                            **(r.model_dump() if hasattr(r, "model_dump") else {"raw": str(r)}),
+                            "reverse": is_smith,
+                            "workspace_dir": workspace_dir,
+                        },
                     )
-                    _save_json(out / "gold_apply.json", r.model_dump())
                 result = ws.submit()
             else:
                 agent = Agent(
@@ -455,6 +532,17 @@ def main() -> int:
                         "model_response_count": len(rollout_fields.get("turns", [])),
                         **loop_summary,
                     },
+                )
+                # Pre-submit: confirm agent stayed in the right repo.
+                # Pro=/app；Verified/Lite/Smith=/testbed — 勿写死 /app。
+                pre = ws.execute_command(
+                    f"git -C {workspace_dir} remote get-url origin; "
+                    f"git -C {workspace_dir} status --short | head -40; "
+                    f"git -C {workspace_dir} diff --stat | tail -20"
+                )
+                _save_json(
+                    out / "pre_submit_git.json",
+                    pre.model_dump() if hasattr(pre, "model_dump") else {"raw": str(pre)},
                 )
                 _save_json(out / "llm_rollout_trace.json", rollout_fields)
                 result = ws.submit()

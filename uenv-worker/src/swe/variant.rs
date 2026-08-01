@@ -1,7 +1,7 @@
 //! BenchmarkVariant — SWE-bench 变体（plan §5.4 / §6）。
 //!
 //! 不把 `env_type` 拆成多个顶层类型；统一 `env_type=swe`，用 `benchmark_variant`
-//! 区分 Verified / Lite / Pro。Verified 与 Pro 分 catalog 发布、镜像命名空间隔离。
+//! 区分 Verified / Lite / Pro / Smith。各变体分 catalog 发布、镜像命名空间隔离。
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,8 @@ pub enum BenchmarkVariant {
     Lite,
     /// SWE-bench Pro public set（M6）。
     Pro,
+    /// SWE-bench/SWE-smith 训练任务集（Worker 260801）。
+    Smith,
 }
 
 impl Default for BenchmarkVariant {
@@ -29,6 +31,8 @@ impl BenchmarkVariant {
             "verified" | "swe-bench_verified" | "swe-bench-verified" => Some(Self::Verified),
             "lite" | "swe-bench_lite" | "swe-bench-lite" => Some(Self::Lite),
             "pro" | "swe-bench_pro" | "swe-bench-pro" => Some(Self::Pro),
+            "smith" | "swe-smith" | "swe_smith" | "swe-bench-smith" | "swe_bench_smith"
+            | "swesmith" => Some(Self::Smith),
             _ => None,
         }
     }
@@ -38,14 +42,16 @@ impl BenchmarkVariant {
             Self::Verified => "verified",
             Self::Lite => "lite",
             Self::Pro => "pro",
+            Self::Smith => "smith",
         }
     }
 
-    /// 默认 grader 名（plan §5.4.3：Verified/Lite=swebench，Pro=swebench_pro）。
+    /// 默认 grader 名（Verified/Lite=swebench，Pro=swebench_pro，Smith=swesmith）。
     pub fn default_grader(&self) -> &'static str {
         match self {
             Self::Verified | Self::Lite => "swebench",
             Self::Pro => "swebench_pro",
+            Self::Smith => "swesmith",
         }
     }
 }
@@ -65,6 +71,9 @@ mod tests {
         assert_eq!(BenchmarkVariant::parse("Lite"), Some(BenchmarkVariant::Lite));
         assert_eq!(BenchmarkVariant::parse("PRO"), Some(BenchmarkVariant::Pro));
         assert_eq!(BenchmarkVariant::parse("swe-bench_pro"), Some(BenchmarkVariant::Pro));
+        assert_eq!(BenchmarkVariant::parse("smith"), Some(BenchmarkVariant::Smith));
+        assert_eq!(BenchmarkVariant::parse("SWE-smith"), Some(BenchmarkVariant::Smith));
+        assert_eq!(BenchmarkVariant::parse("swe-bench-smith"), Some(BenchmarkVariant::Smith));
         assert_eq!(BenchmarkVariant::parse("nope"), None);
     }
 
@@ -72,5 +81,6 @@ mod tests {
     fn grader_by_variant() {
         assert_eq!(BenchmarkVariant::Verified.default_grader(), "swebench");
         assert_eq!(BenchmarkVariant::Pro.default_grader(), "swebench_pro");
+        assert_eq!(BenchmarkVariant::Smith.default_grader(), "swesmith");
     }
 }

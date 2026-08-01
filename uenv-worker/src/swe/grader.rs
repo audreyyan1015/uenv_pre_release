@@ -277,7 +277,22 @@ pub fn grader_for(name: Option<&str>) -> Box<dyn Grader> {
 pub fn grader_for_spec(name: Option<&str>, log_parser: LogParser) -> Box<dyn Grader> {
     match name {
         Some("swebench_pro") => Box::new(SwebenchProGrader),
+        // Smith：语义同 Verified pytest/Django，独立名字便于观测与后续 wrap 官方 harness。
+        Some("swesmith") => Box::new(SwesmithGrader(SwebenchGrader(log_parser))),
         _ => Box::new(SwebenchGrader(log_parser)),
+    }
+}
+
+/// SWE-smith：复用 Verified 日志解析口径，grader 名独立为 `swesmith`。
+pub struct SwesmithGrader(pub SwebenchGrader);
+
+impl Grader for SwesmithGrader {
+    fn name(&self) -> &'static str {
+        "swesmith"
+    }
+
+    fn grade(&self, output: &str, fail_to_pass: &[String], pass_to_pass: &[String]) -> GradeResult {
+        self.0.grade(output, fail_to_pass, pass_to_pass)
     }
 }
 
@@ -327,6 +342,7 @@ mod tests {
         assert_eq!(grader_for(None).name(), "swebench");
         assert_eq!(grader_for(Some("swebench")).name(), "swebench");
         assert_eq!(grader_for(Some("swebench_pro")).name(), "swebench_pro");
+        assert_eq!(grader_for(Some("swesmith")).name(), "swesmith");
         assert_eq!(grader_for_spec(None, LogParser::Django).name(), "swebench_django");
     }
 

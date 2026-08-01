@@ -194,7 +194,11 @@ impl SweInstancePool {
         self.set_session_run_id(&session_id, run_id);
         let result = (|| {
             if let Some(p) = gold_patch {
-                self.apply_patch(&session_id, p, "gold")?;
+                if variant == BenchmarkVariant::Smith {
+                    self.get(&session_id)?.apply_patch_reverse(p, "gold")?;
+                } else {
+                    self.apply_patch(&session_id, p, "gold")?;
+                }
             }
             self.submit(&session_id)
         })();

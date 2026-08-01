@@ -31,6 +31,38 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+def normalize_benchmark_variant(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    if raw in {
+        "smith",
+        "swe-smith",
+        "swe_smith",
+        "swe-bench-smith",
+        "swe_bench_smith",
+        "swesmith",
+    }:
+        return "smith"
+    if raw in {"pro", "swe-bench-pro", "swe_bench_pro", "swe-bench_pro"}:
+        return "pro"
+    if raw in {"lite", "swe-bench-lite", "swe_bench_lite"}:
+        return "lite"
+    if raw in {"verified", "swe-bench-verified", "swe_bench_verified", ""}:
+        return "verified"
+    return raw
+
+
+def default_workspace_dir(variant: str | None) -> str:
+    """Pro 镜像仓库根为 /app；Verified/Lite/Smith 为 /testbed。"""
+    return "/app" if normalize_benchmark_variant(variant) == "pro" else "/testbed"
+
+
+def resolve_workspace_dir(variant: str | None, workspace_dir: str | None = None) -> str:
+    explicit = (workspace_dir or "").strip()
+    if explicit:
+        return explicit
+    return default_workspace_dir(variant)
+
+
 @dataclass
 class AgentJob:
     job_id: str
@@ -57,6 +89,13 @@ class AgentJob:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentJob":
+        variant = normalize_benchmark_variant(
+            str(data.get("benchmark_variant") or data.get("benchmarkVariant") or "pro")
+        )
+        workspace = resolve_workspace_dir(
+            variant,
+            str(data.get("workspace_dir") or data.get("workspaceDir") or ""),
+        )
         return cls(
             job_id=str(data.get("job_id") or data.get("jobId") or ""),
             run_id=str(data.get("run_id") or data.get("runId") or ""),
@@ -64,7 +103,7 @@ class AgentJob:
             gateway_api_key=data.get("gateway_api_key") or data.get("gatewayApiKey"),
             session_id=data.get("session_id") or data.get("sessionId"),
             instance_id=str(data.get("instance_id") or data.get("instanceId") or ""),
-            benchmark_variant=str(data.get("benchmark_variant") or data.get("benchmarkVariant") or "pro"),
+            benchmark_variant=variant,
             env_package_id=str(data.get("env_package_id") or data.get("envPackageId") or ""),
             env_package_version=str(data.get("env_package_version") or data.get("envPackageVersion") or ""),
             agent_bridge_id=str(data.get("agent_bridge_id") or data.get("agentBridgeId") or ""),
@@ -72,7 +111,7 @@ class AgentJob:
             driver_entrypoint=str(data.get("driver_entrypoint") or data.get("driverEntrypoint") or ""),
             model_endpoint=str(data.get("model_endpoint") or data.get("modelEndpoint") or ""),
             max_iterations=int(data.get("max_iterations") or data.get("maxIterations") or 30),
-            workspace_dir=str(data.get("workspace_dir") or data.get("workspaceDir") or "/app"),
+            workspace_dir=workspace,
             episode_id=str(data.get("episode_id") or data.get("episodeId") or ""),
             llm_config_path=str(data.get("llm_config_path") or data.get("llmConfigPath") or ""),
             mode=str(data.get("mode") or "llm"),
@@ -101,6 +140,7 @@ def load_agent_job(path: Optional[str | Path] = None) -> Optional[AgentJob]:
 
 def write_agent_job_template(path: Path, **overrides: Any) -> AgentJob:
     """Write a sample AgentJob JSON for local / for-episode testing."""
+    variant = normalize_benchmark_variant(str(overrides.get("benchmark_variant", "pro")))
     job = AgentJob(
         job_id=overrides.get("job_id", "job-local-1"),
         run_id=overrides.get("run_id", "run-local-1"),
@@ -108,9 +148,10 @@ def write_agent_job_template(path: Path, **overrides: Any) -> AgentJob:
         gateway_api_key=overrides.get("gateway_api_key", "swe-pro-secret"),
         session_id=overrides.get("session_id"),
         instance_id=overrides["instance_id"],
-        benchmark_variant=overrides.get("benchmark_variant", "pro"),
+        benchmark_variant=variant,
         mode=overrides.get("mode", "gold"),
         max_iterations=int(overrides.get("max_iterations", 30)),
+        workspace_dir=resolve_workspace_dir(variant, overrides.get("workspace_dir")),
         llm_config_path=str(overrides.get("llm_config_path", "")),
         instances_catalog=str(overrides.get("instances_catalog", "")),
     )
