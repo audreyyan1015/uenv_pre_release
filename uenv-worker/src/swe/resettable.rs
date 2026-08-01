@@ -73,11 +73,18 @@ impl PodmanResettableInstance {
     ///
     /// SWE-bench 实例镜像内含已编译 C 扩展（如 scikit-learn 的 `.so`，属 ignored）；
     /// `-x` 会连同删除导致 `ImportError`，故评测路径用本变体。
+    ///
+    /// `base_commit` 为空时回退 `HEAD`（SWE-smith 数据集无 commit 字段，镜像已置于任务态）。
     pub fn reset_script_keep_built(repo_path: &str, base_commit: &str) -> String {
+        let commit = if base_commit.trim().is_empty() {
+            "HEAD"
+        } else {
+            base_commit
+        };
         format!(
             "cd {repo} && git reset --hard {commit} && git clean -fd",
             repo = shell_quote(repo_path),
-            commit = shell_quote(base_commit),
+            commit = shell_quote(commit),
         )
     }
 
@@ -271,6 +278,14 @@ mod tests {
     fn reset_script_quotes_special_chars() {
         let script = PodmanResettableInstance::reset_script("/path with space", "v1.0");
         assert!(script.contains("cd '/path with space'"));
+    }
+
+    #[test]
+    fn reset_script_keep_built_empty_commit_uses_head() {
+        let script = PodmanResettableInstance::reset_script_keep_built("/testbed", "");
+        assert!(script.contains("git reset --hard 'HEAD'"));
+        assert!(script.contains("git clean -fd"));
+        assert!(!script.contains("git clean -fdx"));
     }
 
     #[test]

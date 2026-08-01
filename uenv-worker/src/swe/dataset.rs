@@ -12,8 +12,11 @@ use crate::swe::repo_specs::{spec_for, LogParser, RepoSpec, DEFAULT_SPEC};
 use crate::swe::spec::{EvaluationSpec, InstanceSpec, TaskSpec};
 use crate::swe::variant::BenchmarkVariant;
 
-/// 官方 Verified 评测镜像前缀（plan §6.2：Pro 禁止共用此命名空间）。
+/// 官方 Verified 评测镜像前缀（plan §6.2：Pro / Smith 禁止共用此命名空间）。
 pub const VERIFIED_IMAGE_PREFIX: &str = "swebench/sweb.eval.";
+
+/// SWE-smith 镜像命名空间（Docker Hub `jyangballin/swesmith.x86_64.*`）。
+pub const SMITH_IMAGE_MARKER: &str = "swesmith";
 
 /// 标准 conda 环境激活前缀（SWE-bench 镜像内 `testbed` env）。
 pub const CONDA_ACTIVATE: &str = "source /opt/miniconda3/bin/activate testbed 2>/dev/null";
@@ -25,6 +28,8 @@ pub struct SweInstance {
     pub repo: String,
     #[serde(default)]
     pub version: String,
+    /// SWE-smith 等数据集可能缺省；Worker provision 时对空值回退 `HEAD`。
+    #[serde(default)]
     pub base_commit: String,
     #[serde(default)]
     pub environment_setup_commit: String,
@@ -40,10 +45,10 @@ pub struct SweInstance {
     pub fail_to_pass: Vec<String>,
     #[serde(rename = "PASS_TO_PASS", default)]
     pub pass_to_pass: Vec<String>,
-    /// 变体（plan §5.4 / §6.2）：verified | lite | pro。缺省 verified。
+    /// 变体（plan §5.4 / §6.2）：verified | lite | pro | smith。缺省 verified。
     #[serde(default)]
     pub benchmark_variant: Option<String>,
-    /// 显式镜像引用（Pro 用 Pro registry；Verified 缺省由 instance_id 派生）。
+    /// 显式镜像引用（Pro/Smith 必填；Verified 缺省由 instance_id 派生）。
     #[serde(default)]
     pub image_cache_key: Option<String>,
     /// 显式测试命令（Pro `run_scripts` / 非 pytest runner）。
@@ -79,7 +84,7 @@ impl SweInstance {
             .unwrap_or_default()
     }
 
-    /// 该变体的 grader 名（verified/lite=swebench，pro=swebench_pro）。
+    /// 该变体的 grader 名（verified/lite=swebench，pro=swebench_pro，smith=swesmith）。
     pub fn grader_name(&self) -> &'static str {
         self.variant().default_grader()
     }
@@ -94,11 +99,13 @@ impl SweInstance {
         self.repo_spec().log_parser
     }
 
-    /// 容器内工作区路径：Verified=`/testbed`；Pro（jefzda/sweap-images）=`/app`。
+    /// 容器内工作区路径：Verified/Smith=`/testbed`；Pro（jefzda/sweap-images）=`/app`。
     pub fn workspace_dir(&self) -> &'static str {
         match self.variant() {
             BenchmarkVariant::Pro => "/app",
-            _ => "/testbed",
+            BenchmarkVariant::Verified | BenchmarkVariant::Lite | BenchmarkVariant::Smith => {
+                "/testbed"
+            }
         }
     }
 
@@ -147,12 +154,18 @@ impl SweInstance {
     }
 
     /// 镜像命名空间是否与变体一致（plan §6.2 启动校验）：
-    /// Verified/Lite 应在 `swebench/sweb.eval.*`；Pro 不得占用该命名空间。
+    /// Verified/Lite 应在 `swebench/sweb.eval.*`；Pro/Smith 不得占用该命名空间；
+    /// Smith 应显式带 `swesmith` 标记（或已提供非 Verified 前缀的 `image_cache_key`）。
     pub fn image_namespace_consistent(&self) -> bool {
         let img = self.image_ref();
         match self.variant() {
-            BenchmarkVariant::Verified | BenchmarkVariant::Lite => img.starts_with(VERIFIED_IMAGE_PREFIX),
+            BenchmarkVariant::Verified | BenchmarkVariant::Lite => {
+                img.starts_with(VERIFIED_IMAGE_PREFIX)
+            }
             BenchmarkVariant::Pro => !img.starts_with(VERIFIED_IMAGE_PREFIX),
+            BenchmarkVariant::Smith => {
+                !img.starts_with(VERIFIED_IMAGE_PREFIX) && img.contains(SMITH_IMAGE_MARKER)
+            }
         }
     }
 
@@ -162,6 +175,7 @@ impl SweInstance {
             BenchmarkVariant::Verified => "princeton-nlp/SWE-bench_Verified",
             BenchmarkVariant::Lite => "princeton-nlp/SWE-bench_Lite",
             BenchmarkVariant::Pro => "SWE-bench_Pro/public",
+            BenchmarkVariant::Smith => "SWE-bench/SWE-smith",
         };
         InstanceSpec {
             instance_id: self.instance_id.clone(),
@@ -358,5 +372,31 @@ mod tests {
         }"#;
         let store = InstanceStore::from_json(raw).unwrap();
         assert_eq!(store.image_namespace_violations(), vec!["bad__pro-1".to_string()]);
+    }
+
+    #[test]
+    fn smith_variant_uses_swesmith_grader_and_testbed() {
+        let raw = r#"{
+          "oauthlib__oauthlib.1fd52536.pr_123": {
+            "instance_id": "oauthlib__oauthlib.1fd52536.pr_123",
+            "repo": "oauthlib/oauthlib",
+            "base_commit": "1fd52536",
+            "benchmark_variant": "smith",
+            "image_cache_key": "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest",
+            "FAIL_TO_PASS": ["tests/test_oauth.py::test_fix"],
+            "PASS_TO_PASS": []
+          }
+        }"#;
+        let store = InstanceStore::from_json(raw).unwrap();
+        let inst = store.get("oauthlib__oauthlib.1fd52536.pr_123").unwrap();
+        assert_eq!(inst.variant(), crate::swe::variant::BenchmarkVariant::Smith);
+        assert_eq!(inst.grader_name(), "swesmith");
+        assert_eq!(inst.workspace_dir(), "/testbed");
+        assert!(inst.image_namespace_consistent());
+        assert!(store.image_namespace_violations().is_empty());
+        assert_eq!(
+            inst.to_instance_spec().dataset.as_deref(),
+            Some("SWE-bench/SWE-smith")
+        );
     }
 }

@@ -26,7 +26,7 @@ pub struct WorkerConfig {
     pub trajectory_upload: TrajectoryUploadConfig,
 }
 
-/// SWE 变体加载（plan §5.4.3）：M1–M4 默认 `["verified"]`，M6 可加 `"pro"`。
+/// SWE 变体加载（plan §5.4.3）：M1–M4 默认 `["verified"]`，M6 可加 `"pro"`，训练加 `"smith"`。
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct SweSection {
     #[serde(default = "default_swe_variants")]
@@ -47,6 +47,10 @@ pub struct SweSection {
     /// worker 不再从第三方重新拉取（EnvPackage 设计 §5.1 / §8.1）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_package_dir: Option<String>,
+    /// 额外 EnvPackage 目录（与 `env_package_dir` 合并 catalog；后者覆盖同名 instance）。
+    /// 用于 Pro + Smith 同 Worker 并存（260801）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_package_dirs: Vec<String>,
 }
 
 fn default_swe_variants() -> Vec<String> {
@@ -61,7 +65,25 @@ impl Default for SweSection {
             warm_tag: false,
             seccomp_profile_dir: None,
             env_package_dir: None,
+            env_package_dirs: Vec::new(),
         }
+    }
+}
+
+impl SweSection {
+    /// 解析全部 EnvPackage 目录：`env_package_dir` 在前，随后 `env_package_dirs`，去重保序。
+    pub fn all_env_package_dirs(&self) -> Vec<String> {
+        let mut dirs = Vec::new();
+        if let Some(d) = self.env_package_dir.as_ref().filter(|s| !s.trim().is_empty()) {
+            dirs.push(d.clone());
+        }
+        for d in &self.env_package_dirs {
+            let t = d.trim();
+            if !t.is_empty() && !dirs.iter().any(|x| x == t) {
+                dirs.push(t.to_string());
+            }
+        }
+        dirs
     }
 }
 
@@ -425,6 +447,16 @@ impl WorkerConfig {
         if let Ok(v) = std::env::var("UENV_SWE_ENV_PACKAGE") {
             if !v.trim().is_empty() {
                 self.swe.env_package_dir = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_ENV_PACKAGES") {
+            let dirs: Vec<String> = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !dirs.is_empty() {
+                self.swe.env_package_dirs = dirs;
             }
         }
     }

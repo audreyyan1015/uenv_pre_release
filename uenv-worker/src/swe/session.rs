@@ -144,7 +144,8 @@ impl SweSession {
             platform_episode_id: Mutex::new(None),
         };
 
-        // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified 在 /testbed）。
+        // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified/Smith 在 /testbed）。
+        //    Smith 空 commit → HEAD（镜像已含 repo；见 reset_script_keep_built）。
         let reset_script =
             PodmanResettableInstance::reset_script_keep_built(ws, &instance.base_commit);
         let r = session.exec_raw(&reset_script)?; // 失败时 session 析构 → 清理容器
@@ -152,6 +153,29 @@ impl SweSession {
             return Err(format!("reset failed (code {}): {}\n{}", r.exit_code, r.stdout, r.stderr).into());
         }
         session.run_pro_setup_at_provision()?;
+
+        // SWE-smith：数据集 `patch` 为造 bug 补丁；镜像默认干净，需在 provision 注入后 Agent 才看到失败测试。
+        if instance.variant() == crate::swe::variant::BenchmarkVariant::Smith
+            && !instance.patch.trim().is_empty()
+        {
+            session.apply_patch(&instance.patch, "smith_bug")?;
+            if let Some(install) = instance.resolved_install_command() {
+                let install_script = format!(
+                    "{}; cd {} && {}",
+                    crate::swe::dataset::CONDA_ACTIVATE,
+                    ws,
+                    install
+                );
+                let ir = session.exec_raw(&install_script)?;
+                if ir.exit_code != 0 {
+                    return Err(format!(
+                        "smith post-bug install failed (code {}): {}\n{}",
+                        ir.exit_code, ir.stdout, ir.stderr
+                    )
+                    .into());
+                }
+            }
+        }
 
         session.record_provision_reset(&observation.issue_text, provision_start.elapsed().as_millis() as u64);
 
@@ -326,6 +350,15 @@ impl SweSession {
 
     /// 应用补丁：`git apply -v` 失败回退 `patch --batch --fuzz=5 -p1`（对齐 harness）。
     pub fn apply_patch(&self, patch: &str, label: &str) -> Result<(), DynErr> {
+        self.apply_patch_with_reverse(patch, label, false)
+    }
+
+    /// SWE-smith：数据集 `patch` 为造 bug 补丁，gold 验收需 `git apply -R` 还原。
+    pub fn apply_patch_reverse(&self, patch: &str, label: &str) -> Result<(), DynErr> {
+        self.apply_patch_with_reverse(patch, label, true)
+    }
+
+    fn apply_patch_with_reverse(&self, patch: &str, label: &str, reverse: bool) -> Result<(), DynErr> {
         if patch.trim().is_empty() {
             return Ok(());
         }
@@ -339,13 +372,19 @@ impl SweSession {
         let _ = std::fs::remove_file(&tmp);
         cp?;
         let ws = self.instance.workspace_dir();
-        let script = format!(
-            "cd {ws} && (git apply -v {dest} || (patch --batch --forward --fuzz=5 -p1 < {dest}; ec=$?; [ $ec -eq 0 -o $ec -eq 1 ]))"
-        );
+        let script = if reverse {
+            format!(
+                "cd {ws} && (git apply -R -v {dest} || (patch --batch --reverse --fuzz=5 -p1 < {dest}; ec=$?; [ $ec -eq 0 -o $ec -eq 1 ]))"
+            )
+        } else {
+            format!(
+                "cd {ws} && (git apply -v {dest} || (patch --batch --forward --fuzz=5 -p1 < {dest}; ec=$?; [ $ec -eq 0 -o $ec -eq 1 ]))"
+            )
+        };
         let r = self.exec_raw(&script)?;
         if r.exit_code != 0 {
             return Err(format!(
-                "apply {label} patch failed (code {}): {}\n{}",
+                "apply {label} patch failed (code {} reverse={reverse}): {}\n{}",
                 r.exit_code, r.stdout, r.stderr
             )
             .into());

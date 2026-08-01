@@ -1,0 +1,5 @@
+{
+  "exit_code": 0,
+  "stdout": "https://github.com/swesmith/oauthlib__oauthlib.1fd52536\n M oauthlib/oauth1/rfc5849/__init__.py\n oauthlib/oauth1/rfc5849/__init__.py | 29 +++++++++--------------------\n 1 file changed, 9 insertions(+), 20 deletions(-)\n",
+  "stderr": ""
+}

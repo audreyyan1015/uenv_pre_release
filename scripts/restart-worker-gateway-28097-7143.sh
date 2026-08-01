@@ -47,7 +47,7 @@ fi
 if [[ -x /var/lib/uenv/envs/dscodebench/0.2.0/venv/bin/python ]]; then
   export UENV_CODE_PYTHON="${UENV_CODE_PYTHON:-/var/lib/uenv/envs/dscodebench/0.2.0/venv/bin/python}"
 fi
-# EnvPackage：优先 0.3.4（全量 catalog）；.env 已设则尊重
+# EnvPackage：Pro 为主；Smith 本地包经 yaml env_package_dirs / UENV_SWE_ENV_PACKAGES 合并
 export UENV_SWE_ENV_PACKAGE="${UENV_SWE_ENV_PACKAGE:-}"
 if [[ -z "$UENV_SWE_ENV_PACKAGE" ]]; then
   if [[ -d /var/lib/uenv/envs/swe-bench-pro/0.3.4 ]]; then
@@ -56,13 +56,16 @@ if [[ -z "$UENV_SWE_ENV_PACKAGE" ]]; then
     export UENV_SWE_ENV_PACKAGE=/var/lib/uenv/envs/swe-bench-pro/0.2.0
   fi
 fi
+if [[ -z "${UENV_SWE_ENV_PACKAGES:-}" && -d /var/lib/uenv/envs/swe-bench-smith/0.1.0-local ]]; then
+  export UENV_SWE_ENV_PACKAGES=/var/lib/uenv/envs/swe-bench-smith/0.1.0-local
+fi
 # Legacy fallback when EnvPackage not synced
 export UENV_SWE_INSTANCES="${UENV_SWE_INSTANCES:-/root/UEnv/config/swe/pro.json}"
 export UENV_SWE_RUNTIME=docker
 # 本机已预拉 / docker load 的镜像走 local；缺图时再由运维拉，不在重启脚本里强制公网 pull
 export UENV_SWE_IMAGE_PULL_POLICY="${UENV_SWE_IMAGE_PULL_POLICY:-local_only}"
 
-echo "== starting worker (SWE_ENV_PACKAGE=$UENV_SWE_ENV_PACKAGE DSCODE_ROOT=${UENV_DSCODEBENCH_ROOT:-unset}) =="
+echo "== starting worker (SWE_ENV_PACKAGE=$UENV_SWE_ENV_PACKAGE SWE_ENV_PACKAGES=${UENV_SWE_ENV_PACKAGES:-} DSCODE_ROOT=${UENV_DSCODEBENCH_ROOT:-unset}) =="
 nohup ./target/release/uenv-worker --config config/uenv-worker.deploy-7143-swe-pro.yaml serve \
   >> /var/log/uenv/worker-swe-pro.log 2>&1 &
 echo "worker_pid=$!"

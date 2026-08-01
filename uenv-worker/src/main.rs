@@ -73,7 +73,7 @@ async fn main() {
                 swe_prewarm: cfg.swe.prewarm.clone(),
                 swe_warm_tag: cfg.swe.warm_tag,
                 swe_seccomp_dir: cfg.swe.seccomp_profile_dir.clone(),
-                swe_env_package_dir: cfg.swe.env_package_dir.clone(),
+                swe_env_package_dirs: cfg.swe.all_env_package_dirs(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");
