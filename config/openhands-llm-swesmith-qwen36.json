@@ -1,0 +1,11 @@
+{
+  "model": "openai/Qwen/Qwen3.6-35B-A3B",
+  "base_url": "http://127.0.0.1:18199/v1",
+  "api_key": "EMPTY",
+  "temperature": 0.0,
+  "max_output_tokens": 2048,
+  "thinking_token_budget": 1024,
+  "timeout": 7200,
+  "request_timeout": 7200,
+  "num_retries": 2
+}

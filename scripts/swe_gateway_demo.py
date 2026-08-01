@@ -36,9 +36,27 @@ def main():
     ap.add_argument("--instance", required=True)
     ap.add_argument("--instances", default="fixtures/swe/swe_instances.json")
     ap.add_argument("--command-mode", default="FullShell")
+    ap.add_argument("--benchmark-variant", default="verified",
+                    help="verified|lite|pro|smith")
     ap.add_argument("--api-key", default=None, help="X-API-Key（网关启用鉴权时必填）")
     ap.add_argument("--gold", dest="gold", action="store_true", default=True)
     ap.add_argument("--no-gold", dest="gold", action="store_false")
+    ap.add_argument(
+        "--reverse-gold",
+        action="store_true",
+        default=None,
+        help="对 gold patch 使用 git apply -R（SWE-smith 默认开启）",
+    )
+    ap.add_argument(
+        "--no-reverse-gold",
+        action="store_false",
+        dest="reverse_gold",
+        help="强制正向应用 gold patch",
+    )
+    ap.add_argument("--workspace", default="",
+                    help="git apply 工作目录；默认 verified/smith=/testbed，pro=/app")
+    ap.add_argument("--reinstall", action="store_true",
+                    help="apply 后执行 pip install -e .（Smith 推荐）")
     args = ap.parse_args()
     key = args.api_key
 
@@ -48,12 +66,17 @@ def main():
         print(f"instance {args.instance} not in {args.instances}", file=sys.stderr)
         sys.exit(1)
     gold_patch = catalog[args.instance].get("patch", "")
+    variant = args.benchmark_variant or catalog[args.instance].get("benchmark_variant") or "verified"
+    workspace = args.workspace or ("/app" if variant == "pro" else "/testbed")
+    reverse_gold = args.reverse_gold
+    if reverse_gold is None:
+        reverse_gold = variant in ("smith", "swe-smith", "swe-bench-smith", "swesmith")
 
     base = args.endpoint
-    print(f"[1] POST /sessions  instance={args.instance} mode={args.command_mode}")
+    print(f"[1] POST /sessions  instance={args.instance} variant={variant} mode={args.command_mode}")
     created = call(base, "POST", "/runtime/v1/sessions", {
         "instance_id": args.instance,
-        "benchmark_variant": "verified",
+        "benchmark_variant": variant,
         "command_mode": args.command_mode,
     }, api_key=key)
     sid = created["session_id"]
@@ -63,14 +86,25 @@ def main():
 
     try:
         if args.gold and gold_patch.strip():
-            print("[2] POST /write  (gold patch -> /tmp/gold.patch) + POST /exec (git apply)")
+            mode = "git apply -R" if reverse_gold else "git apply"
+            print(f"[2] POST /write  (gold patch -> /tmp/gold.patch) + POST /exec ({mode} in {workspace})")
             call(base, "POST", f"/runtime/v1/sessions/{sid}/write", {
                 "path": "/tmp/gold.patch", "content": gold_patch,
             }, api_key=key)
+            apply_cmd = (
+                f"cd {workspace} && git apply -R -v /tmp/gold.patch"
+                if reverse_gold
+                else f"cd {workspace} && (git apply -v /tmp/gold.patch || patch --batch --fuzz=5 -p1 < /tmp/gold.patch)"
+            )
             applied = call(base, "POST", f"/runtime/v1/sessions/{sid}/exec", {
-                "command": "cd /testbed && (git apply -v /tmp/gold.patch || patch --batch --fuzz=5 -p1 < /tmp/gold.patch)",
+                "command": apply_cmd,
             }, api_key=key)
-            print(f"    git apply exit_code={applied['exit_code']}")
+            print(f"    {mode} exit_code={applied['exit_code']}")
+            if args.reinstall or reverse_gold:
+                rein = call(base, "POST", f"/runtime/v1/sessions/{sid}/exec", {
+                    "command": f"source /opt/miniconda3/bin/activate testbed 2>/dev/null; cd {workspace} && pip install -e . -q && echo REINSTALL_OK",
+                }, api_key=key)
+                print(f"    reinstall exit_code={rein.get('exit_code')}")
         else:
             print("[2] (skip gold patch — negative control)")
 
