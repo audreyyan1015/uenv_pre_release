@@ -10,8 +10,22 @@ use uenv_hub_server::{build_state, routes};
 use uenv_hub_types::{InterfaceSchema, PublishVersionRequest, ResourceSpec, SearchQuery};
 
 async fn spawn_server() -> (SocketAddr, tempfile::TempDir) {
+    spawn_server_with_seed_examples(false).await
+}
+
+async fn spawn_server_with_seed_examples(
+    seed_examples: bool,
+) -> (SocketAddr, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("test.db");
+    let catalog_seed_dir = if seed_examples {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/swe")
+            .display()
+            .to_string()
+    } else {
+        tmp.path().join("no-catalog").display().to_string()
+    };
     let config = Config {
         server: ServerConfig {
             host: "127.0.0.1".into(),
@@ -35,9 +49,9 @@ async fn spawn_server() -> (SocketAddr, tempfile::TempDir) {
         },
         packages: PackagesConfig {
             artifact_dir: tmp.path().join("artifacts").display().to_string(),
-            catalog_seed_dir: tmp.path().join("no-catalog").display().to_string(),
+            catalog_seed_dir,
             // Other tests don't need example packages; the package test publishes its own.
-            seed_examples: false,
+            seed_examples,
         },
     };
 
@@ -403,7 +417,9 @@ async fn swe_instance_catalog_served_by_variant() {
     // Seed a temp catalog dir and point the handler at it (M1-1 / M6-1).
     let dir = tempfile::tempdir().unwrap();
     let verified = r#"{"astropy__astropy-7166":{"instance_id":"astropy__astropy-7166","repo":"astropy/astropy","base_commit":"deadbeef","FAIL_TO_PASS":["t::a"],"PASS_TO_PASS":[]}}"#;
+    let smith = r#"{"oauthlib__smith-1":{"instance_id":"oauthlib__smith-1","repo":"oauthlib/oauthlib","base_commit":"","benchmark_variant":"smith","image_cache_key":"jyangballin/swesmith.x86_64.oauthlib:latest","FAIL_TO_PASS":["t::smith"],"PASS_TO_PASS":[]}}"#;
     std::fs::write(dir.path().join("verified.json"), verified).unwrap();
+    std::fs::write(dir.path().join("smith-smoke.json"), smith).unwrap();
     // SAFETY: single-threaded test setup before the server handles requests.
     unsafe { std::env::set_var("UENV_HUB_SWE_CATALOG_DIR", dir.path()) };
 
@@ -416,6 +432,13 @@ async fn swe_instance_catalog_served_by_variant() {
     assert_eq!(ok.status(), reqwest::StatusCode::OK);
     let body = ok.text().await.unwrap();
     assert!(body.contains("astropy__astropy-7166"));
+
+    let smith_ok = reqwest::get(format!("{base}/api/v1/swe/smith/instances"))
+        .await
+        .unwrap();
+    assert_eq!(smith_ok.status(), reqwest::StatusCode::OK);
+    let smith_body = smith_ok.text().await.unwrap();
+    assert!(smith_body.contains("oauthlib__smith-1"));
 
     // Unknown variant → 404.
     let bad = reqwest::get(format!("{base}/api/v1/swe/bogus/instances"))
@@ -1024,8 +1047,57 @@ async fn swe_is_a_registered_task_environment() {
         .and_then(|e| e.as_array())
         .expect("swe declares its benchmark variants");
     assert!(datasets.iter().any(|v| v == "swe-bench-verified"));
+    assert!(datasets.iter().any(|v| v == "swe-bench-smith"));
     // The Action contract has to cover a container shell, or the scaffold's
     // commands have no declared shape to travel in.
     let action = swe.interface.action.as_ref().expect("swe action schema");
     assert!(action.to_string().contains("exec"));
+}
+
+/// SWE-smith is distributed as a complete EnvPackage and a resolvable
+/// OpenHands Episode Stack, not merely accepted as a free-form routing string.
+#[tokio::test]
+async fn swe_smith_package_and_episode_stack_are_seeded() {
+    let (addr, _tmp) = spawn_server_with_seed_examples(true).await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+
+    let package = client
+        .get_package_manifest("swe-bench-smith", "latest")
+        .await
+        .expect("SWE-smith package must be seeded");
+    assert_eq!(package.version, "0.1.0");
+    assert_eq!(package.worker_overlay["swe"]["benchmark_variant"], "smith");
+    assert_eq!(package.worker_overlay["swe"]["grader"], "swesmith");
+    assert_eq!(package.agent_defaults["workspace_dir"], "/testbed");
+    assert_eq!(
+        package.agent_defaults["driver_entrypoint"],
+        "run_swesmith_official.py"
+    );
+    for artifact in [
+        "catalog.json",
+        "images.manifest.json",
+        "eval_spec.json",
+        "worker.overlay.yaml",
+    ] {
+        assert!(
+            package.artifacts.iter().any(|item| item.name == artifact),
+            "missing SWE-smith artifact {artifact}"
+        );
+    }
+
+    let stack = client
+        .resolve_stack("swe-bench-smith-openhands", "latest")
+        .await
+        .expect("SWE-smith OpenHands stack must resolve");
+    assert_eq!(stack.task_env_manifest.env_type, "swe");
+    assert_eq!(stack.task_env.dataset.as_deref(), Some("swe-bench-smith"));
+    assert!(
+        stack
+            .components
+            .iter()
+            .any(|component| component.role == "env_package"
+                && component.id == "swe-bench-smith"
+                && component.resolved == "0.1.0")
+    );
+    assert!(stack.runtime_gateway.required);
 }

@@ -264,6 +264,9 @@ class AgentControlClient:
 
 def _job_from_proto(job: Any) -> AgentJob:
     """proto AgentJob → agent_job.AgentJob（driver 消费的 dataclass）。"""
+    from .agent_job import normalize_benchmark_variant, resolve_workspace_dir
+
+    variant = normalize_benchmark_variant(job.benchmark_variant or "pro")
     return AgentJob(
         job_id=job.job_id,
         run_id=job.run_id,
@@ -271,7 +274,7 @@ def _job_from_proto(job: Any) -> AgentJob:
         gateway_api_key=job.gateway_api_key or None,
         session_id=job.session_id or None,
         instance_id=job.instance_id,
-        benchmark_variant=job.benchmark_variant or "pro",
+        benchmark_variant=variant,
         env_package_id=job.env_package_id,
         env_package_version=job.env_package_version,
         agent_bridge_id=job.agent_bridge_id,
@@ -279,7 +282,7 @@ def _job_from_proto(job: Any) -> AgentJob:
         driver_entrypoint=job.driver_entrypoint,
         model_endpoint=job.model_endpoint_config.url if job.HasField("model_endpoint_config") else "",
         max_iterations=int(job.max_iterations) or 30,
-        workspace_dir=job.workspace_dir or "/app",
+        workspace_dir=resolve_workspace_dir(variant, job.workspace_dir or ""),
         episode_id=job.episode_id,
         llm_config_path=job.llm_config_path,
         mode=job.mode or "llm",

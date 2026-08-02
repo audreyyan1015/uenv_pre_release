@@ -321,10 +321,11 @@ async fn search(
 
 /// Serve the SWE-bench instance catalog for a benchmark variant.
 ///
-/// Reads `${UENV_HUB_SWE_CATALOG_DIR:-config/swe}/<variant>.json` (the same flat
-/// `instance_id -> row` map the worker's `InstanceStore::from_json` expects) and
-/// returns it verbatim. Decouples the data plane (catalog files / object store)
-/// from the control plane (env registry DB); worker pulls here with optional token.
+/// Reads `${UENV_HUB_SWE_CATALOG_DIR:-config/swe}/<variant>.json` (or the
+/// checked-in `smith-smoke.json` for Smith) and returns the same flat
+/// `instance_id -> row` map the worker's `InstanceStore::from_json` expects.
+/// Decouples the data plane (catalog files / object store) from the control plane
+/// (env registry DB); worker pulls here with optional token.
 async fn swe_instances(
     State(_state): State<AppState>,
     _principal: Principal,
@@ -332,13 +333,23 @@ async fn swe_instances(
     Path(variant): Path<String>,
 ) -> ApiResult<Response> {
     let variant = variant.to_ascii_lowercase();
-    if !matches!(variant.as_str(), "verified" | "lite" | "pro") {
+    if !matches!(variant.as_str(), "verified" | "lite" | "pro" | "smith") {
         return Err(crate::errors::ApiError::not_found(format!(
-            "unknown swe benchmark variant `{variant}` (expected verified|lite|pro)"
+            "unknown swe benchmark variant `{variant}` (expected verified|lite|pro|smith)"
         )));
     }
     let dir = std::env::var("UENV_HUB_SWE_CATALOG_DIR").unwrap_or_else(|_| "config/swe".to_string());
-    let path = std::path::Path::new(&dir).join(format!("{variant}.json"));
+    let dir = std::path::Path::new(&dir);
+    let path = if variant == "smith" {
+        let smoke = dir.join("smith-smoke.json");
+        if smoke.is_file() {
+            smoke
+        } else {
+            dir.join("smith.json")
+        }
+    } else {
+        dir.join(format!("{variant}.json"))
+    };
     let body = std::fs::read_to_string(&path).map_err(|_| {
         crate::errors::ApiError::not_found(format!(
             "swe catalog for variant `{variant}` not seeded (looked in {})",

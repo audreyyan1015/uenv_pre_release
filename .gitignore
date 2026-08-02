@@ -35,6 +35,7 @@ secrets/*
 !/scripts/deploy-openhands-20877.sh
 !/scripts/run-openhands-pro-20877.sh
 !/scripts/restart-worker-gateway-28097-7143.sh
+!/scripts/test-hub-swesmith-e2e.sh
 !/scripts/deploy-adapter-core-75157.sh
 !/scripts/deploy-trajectory-chain.sh
 !/scripts/verify-openhands-trajectory-e2e-20877.sh
