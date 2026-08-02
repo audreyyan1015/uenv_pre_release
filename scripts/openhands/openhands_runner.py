@@ -370,19 +370,26 @@ def _first_present(*docs: dict[str, Any], key: str) -> Any:
 
 def _read_rollout_fields(out_dir: Path, submit_doc: dict[str, Any]) -> dict[str, Any]:
     bundle_doc = _read_json_file(out_dir / "trajectory_bundle.json")
+    # driver finalize() 也会单独落盘 llm_rollout_trace.json；优先作为 typed 回填源。
+    trace_doc = _read_json_file(out_dir / "llm_rollout_trace.json")
     response_ids, response_mask = _read_rollout_trace(out_dir, submit_doc)
+    if not response_ids and not response_mask:
+        response_ids, response_mask = _rollout_trace_from_doc(trace_doc)
     return {
-        "parallel_mode": str(_first_present(submit_doc, bundle_doc, key="parallel_mode") or ""),
+        "parallel_mode": str(
+            _first_present(submit_doc, bundle_doc, trace_doc, key="parallel_mode") or ""
+        ),
         "rollout_param_version": _optional_int(
-            _first_present(submit_doc, bundle_doc, key="rollout_param_version")
+            _first_present(submit_doc, bundle_doc, trace_doc, key="rollout_param_version")
         ),
         "rollout_policy_version": _first_present(
             submit_doc,
             bundle_doc,
+            trace_doc,
             key="rollout_policy_version",
         ),
         "rollout_log_probs": _float_list(
-            _first_present(submit_doc, bundle_doc, key="rollout_log_probs")
+            _first_present(submit_doc, bundle_doc, trace_doc, key="rollout_log_probs")
         ),
         "worker_start_ts": _optional_float(
             _first_present(submit_doc, bundle_doc, key="worker_start_ts")
@@ -494,6 +501,21 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
             (out_dir / "runner_stderr.log").write_text(proc.stderr[-16000:], encoding="utf-8")
             if proc.returncode == 0:
                 status, reward, trajectory_id, rollout_fields = _read_reward(out_dir)
+                require_trace = os.environ.get(
+                    "UENV_REQUIRE_SWE_RESPONSE_TRACE", "1"
+                ).strip().lower() not in {"0", "false", "no", "off"}
+                if (
+                    require_trace
+                    and mode == "llm"
+                    and status == "completed"
+                    and not (rollout_fields.get("response_ids") or [])
+                ):
+                    status = "failed"
+                    err = (
+                        "llm mode completed without rollout_trace.response_ids; "
+                        "refusing pad-fallback training sample "
+                        "(set UENV_REQUIRE_SWE_RESPONSE_TRACE=0 to bypass)"
+                    )
             else:
                 status = "failed"
                 err = f"run script exit {proc.returncode}: {proc.stderr[-2000:]}"

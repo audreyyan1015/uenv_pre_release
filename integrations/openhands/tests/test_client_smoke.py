@@ -35,37 +35,45 @@ class FakeWrite:
 
 
 class FakeLogprobRecord:
-    def __init__(self, token, logprob):
+    def __init__(self, token, logprob, token_id=None):
         self.token = token
         self.logprob = logprob
+        self.token_id = token_id
 
 
 class FakeChoice:
-    def __init__(self):
-        self.logprobs = {"content": [
-            FakeLogprobRecord("OK", -0.1),
-            FakeLogprobRecord(".", -0.2),
-        ]}
+    def __init__(self, records):
+        self.logprobs = {"content": records}
+        self.finish_reason = "stop"
+        self.message = {"role": "assistant", "content": "".join(r.token for r in records if not str(r.token).startswith("token_id:"))}
 
 
 class FakeRawResponse:
-    id = "chatcmpl-test"
-    choices = [FakeChoice()]
+    def __init__(self, records, response_id="chatcmpl-test", uenv_ids=None):
+        self.id = response_id
+        self.choices = [FakeChoice(records)]
+        if uenv_ids is not None:
+            self.uenv_response_ids = uenv_ids
 
 
 class FakeResponse:
-    raw_response = FakeRawResponse()
+    def __init__(self, raw):
+        self.raw_response = raw
 
 
 class OfflineRolloutCollector(RolloutTraceCollector):
-    def __init__(self):
+    def __init__(self, provider="ark"):
         self._api_key = "test"
         self._base_url = "http://127.0.0.1"
-        self.model = "volcengine/doubao-test"
-        self._provider_model = "doubao-test"
+        self.model = "volcengine/doubao-test" if provider == "ark" else "openai/deepseek-test"
+        self._provider_model = self.model.split("/", 1)[-1]
+        self._provider = provider
+        self._tokenizer_name = ""
+        self._return_tokens_as_token_ids = provider != "ark"
         self._responses = []
+        self._hf_tokenizer = None
 
-    def _tokenize(self, texts):
+    def _ark_tokenize(self, texts):
         self.assert_texts = texts
         return [[101, 102]]
 
@@ -123,14 +131,58 @@ class OfflineAdapterTests(unittest.TestCase):
         self.assertEqual([c[0] for c in calls], ["run", "write"])
 
     def test_rollout_collector_exports_replay_turns(self):
-        collector = OfflineRolloutCollector()
-        collector.record(FakeResponse())
+        collector = OfflineRolloutCollector(provider="ark")
+        collector.record(
+            FakeResponse(
+                FakeRawResponse(
+                    [
+                        FakeLogprobRecord("OK", -0.1),
+                        FakeLogprobRecord(".", -0.2),
+                    ]
+                )
+            )
+        )
         document = collector.finalize()
         self.assertEqual(document["source_model"], "volcengine/doubao-test")
         self.assertEqual(document["turns"][0]["assistant_output"], "OK.")
         self.assertEqual(document["turns"][0]["response_ids"], [101, 102])
         self.assertEqual(document["turns"][0]["logprobs"], [-0.1, -0.2])
         self.assertEqual(document["rollout_trace"]["response_ids"], [101, 102])
+        self.assertEqual(document["rollout_log_probs"], [-0.1, -0.2])
+
+    def test_rollout_collector_uses_provider_token_ids(self):
+        collector = OfflineRolloutCollector(provider="openai")
+        collector.record(
+            FakeResponse(
+                FakeRawResponse(
+                    [
+                        FakeLogprobRecord("token_id:11", -0.1, token_id=11),
+                        FakeLogprobRecord("token_id:12", -0.2, token_id=12),
+                    ]
+                )
+            )
+        )
+        document = collector.finalize()
+        self.assertEqual(document["rollout_trace"]["response_ids"], [11, 12])
+        self.assertEqual(document["rollout_log_probs"], [-0.1, -0.2])
+        self.assertEqual(document["rollout_trace_metadata"]["provider"], "openai")
+
+    def test_rollout_collector_uses_uenv_response_ids(self):
+        collector = OfflineRolloutCollector(provider="openai")
+        collector.record(
+            FakeResponse(
+                FakeRawResponse(
+                    [
+                        FakeLogprobRecord("hi", -0.3),
+                        FakeLogprobRecord("!", -0.4),
+                    ],
+                    uenv_ids=[201, 202],
+                )
+            )
+        )
+        document = collector.finalize()
+        self.assertEqual(document["rollout_trace"]["response_ids"], [201, 202])
+        self.assertEqual(len(document["rollout_trace"]["response_mask"]), 2)
 
 
 class LiveGatewayTest(unittest.TestCase):
