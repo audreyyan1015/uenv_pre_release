@@ -139,6 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             queue: Arc::clone(&state.agent_job_queue),
             registry: Arc::clone(&state.agent_registry),
             heartbeat_interval_ms: config.scheduler.heartbeat_interval_ms as i32,
+            agent_job_reclaim_grace_secs: config.scheduler.agent_job_reclaim_grace_secs,
         }))
         .add_service(AdminServiceServer::new(AdminServiceImpl {
             state: state.clone(),

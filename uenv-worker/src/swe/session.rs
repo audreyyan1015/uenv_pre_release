@@ -109,6 +109,9 @@ impl SweSession {
         //    M0-1 / M2-4），再 `run -d <flags> <image> sleep infinity`。
         let seccomp = policy.resolve_seccomp_file();
         let policy_mode = policy.mode;
+        let stress_run_id = std::env::var("UENV_SWE_CONTAINER_RUN_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
         let run_args = build_swe_run_args(
             &container,
             &provision_image,
@@ -116,6 +119,7 @@ impl SweSession {
             Some(ws),
             seccomp.as_deref(),
             is_pro,
+            stress_run_id.as_deref(),
         );
         let run_out = Command::new(runtime.cli())
             .args(&run_args)
@@ -600,8 +604,13 @@ pub fn build_swe_run_args(
     workdir: Option<&str>,
     seccomp_file: Option<&str>,
     pro_image: bool,
+    stress_run_id: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), container.to_string()];
+    if let Some(run_id) = stress_run_id {
+        args.push("--label".to_string());
+        args.push(format!("io.uenv.swe.run_id={run_id}"));
+    }
     match mode {
         CommandPolicy::RestrictedShell => {
             args.push("--cap-drop=ALL".to_string());
@@ -675,7 +684,7 @@ mod tests {
 
     #[test]
     fn restricted_run_args_drop_caps_and_isolate_network() {
-        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None, false);
+        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None, false, None);
         assert_eq!(&a[..4], &["run", "-d", "--name", "c1"]);
         assert!(a.contains(&"--cap-drop=ALL".to_string()));
         assert!(a.contains(&"no-new-privileges".to_string()));
@@ -688,10 +697,11 @@ mod tests {
 
     #[test]
     fn full_run_args_bridge_network_no_capdrop() {
-        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None, false);
+        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None, false, Some("stress-run-1"));
         assert!(a.contains(&"--network=bridge".to_string()));
         assert!(!a.contains(&"--cap-drop=ALL".to_string()));
         assert!(!a.contains(&"--network=none".to_string()));
+        assert!(a.contains(&"io.uenv.swe.run_id=stress-run-1".to_string()));
     }
 
     #[test]
@@ -703,6 +713,7 @@ mod tests {
             None,
             Some("/profiles/full.json"),
             false,
+            None,
         );
         assert!(a.contains(&"--security-opt".to_string()));
         assert!(a.contains(&"seccomp=/profiles/full.json".to_string()));

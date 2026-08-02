@@ -128,6 +128,7 @@ async fn swe_agent_episode_full_orchestration() {
         queue: Arc::clone(&state.agent_job_queue),
         registry: Arc::clone(&state.agent_registry),
         heartbeat_interval_ms: 5000,
+        agent_job_reclaim_grace_secs: 0,
     };
 
     let mut job = None;
@@ -746,6 +747,7 @@ async fn swe_agent_batch_all_complete() {
         queue: Arc::clone(&state.agent_job_queue),
         registry: Arc::clone(&state.agent_registry),
         heartbeat_interval_ms: 5000,
+        agent_job_reclaim_grace_secs: 0,
     };
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_c = Arc::clone(&stop);
