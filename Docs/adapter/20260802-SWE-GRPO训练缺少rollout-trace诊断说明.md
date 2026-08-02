@@ -128,15 +128,33 @@ response_ids
 response_mask
 ```
 
-`uenv/scripts/openhands/openhands_runner.py` 也会尝试从 `submit_result.json` 或 `trajectory_bundle.json` 读取 rollout trace 后上报。缺口主要在 OpenHands/SWE driver 是否能从每次 LLM 调用中收集并写入：
+`uenv/scripts/openhands/openhands_runner.py` 也会尝试从 `submit_result.json`、`llm_rollout_trace.json` 或 `trajectory_bundle.json` 读取 rollout trace 后上报。
+
+### 2026-08-02 修复状态
+
+缺口已在 OpenHands 侧补齐：
+
+1. `integrations/openhands/uenv_runtime/llm_rollout.py` 的 `RolloutTraceCollector` 已从 Ark-only 扩展为 OpenAI-compatible / vLLM 可用：
+   - 每次真实 LLM 调用强制 `logprobs=true`
+   - 优先解析 provider 返回的 `token_id` / `token_id:N` / `uenv_response_ids`
+   - Ark 仍走 `/tokenization`
+   - OpenAI-compatible 可回退 `/tokenize` 或 LLM config 中的 HF `tokenizer`
+2. `run_swebenchpro_official.py` 在 llm 模式 finalize 后写入 `llm_rollout_trace.json`，并合并进 `submit_result.json`
+3. `openhands_runner.py` 读取上述字段回填 `CompleteAgentJob`；默认 `UENV_REQUIRE_SWE_RESPONSE_TRACE=1`，llm 模式缺 trace 时 fail-fast
+4. 7142 DeepSeek vLLM 已启用 `--return-tokens-as-token-ids --max-logprobs 20`
+
+实机 smith llm smoke（`/var/log/uenv/openhands-runs/rollout-trace-smoke-20260802-234803`）：
 
 ```text
-rollout_trace.response_ids
-rollout_trace.response_mask
-rollout_log_probs
+turns=3
+response_ids_len=6144
+rollout_log_probs_len=6144
+aligned=true
+source=openai_chat_logprobs+token_ids
+turn_id_sources=provider_token_ids × 3
 ```
 
-需要注意，`parallel_mode=fully_async` 只会改变 Server/Adapter 对结果的协议要求，不会自动让 OpenHands 返回 token ids/logprobs。真实字段仍然需要 OpenHands runner 在模型调用后显式采集、落盘并通过 `CompleteAgentJob` 回填。
+VeRL 训练侧自建 vLLM 也需要能返回 token ids（推荐同样加 `--return-tokens-as-token-ids`），否则 OpenHands 只能依赖 `/tokenize` 或 config 里的 `tokenizer=`。
 
 ## 7. Adapter 当前处理
 
