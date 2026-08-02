@@ -109,6 +109,9 @@ impl SweSession {
         //    M0-1 / M2-4），再 `run -d <flags> <image> sleep infinity`。
         let seccomp = policy.resolve_seccomp_file();
         let policy_mode = policy.mode;
+        let stress_run_id = std::env::var("UENV_SWE_CONTAINER_RUN_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
         let run_args = build_swe_run_args(
             &container,
             &provision_image,
@@ -116,6 +119,7 @@ impl SweSession {
             Some(ws),
             seccomp.as_deref(),
             is_pro,
+            stress_run_id.as_deref(),
         );
         let run_out = Command::new(runtime.cli())
             .args(&run_args)
@@ -144,7 +148,8 @@ impl SweSession {
             platform_episode_id: Mutex::new(None),
         };
 
-        // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified 在 /testbed）。
+        // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified/Smith 在 /testbed）。
+        //    Smith 空 commit → HEAD（镜像已含 repo；见 reset_script_keep_built）。
         let reset_script =
             PodmanResettableInstance::reset_script_keep_built(ws, &instance.base_commit);
         let r = session.exec_raw(&reset_script)?; // 失败时 session 析构 → 清理容器
@@ -152,6 +157,29 @@ impl SweSession {
             return Err(format!("reset failed (code {}): {}\n{}", r.exit_code, r.stdout, r.stderr).into());
         }
         session.run_pro_setup_at_provision()?;
+
+        // SWE-smith：数据集 `patch` 为造 bug 补丁；镜像默认干净，需在 provision 注入后 Agent 才看到失败测试。
+        if instance.variant() == crate::swe::variant::BenchmarkVariant::Smith
+            && !instance.patch.trim().is_empty()
+        {
+            session.apply_patch(&instance.patch, "smith_bug")?;
+            if let Some(install) = instance.resolved_install_command() {
+                let install_script = format!(
+                    "{}; cd {} && {}",
+                    crate::swe::dataset::CONDA_ACTIVATE,
+                    ws,
+                    install
+                );
+                let ir = session.exec_raw(&install_script)?;
+                if ir.exit_code != 0 {
+                    return Err(format!(
+                        "smith post-bug install failed (code {}): {}\n{}",
+                        ir.exit_code, ir.stdout, ir.stderr
+                    )
+                    .into());
+                }
+            }
+        }
 
         session.record_provision_reset(&observation.issue_text, provision_start.elapsed().as_millis() as u64);
 
@@ -326,6 +354,15 @@ impl SweSession {
 
     /// 应用补丁：`git apply -v` 失败回退 `patch --batch --fuzz=5 -p1`（对齐 harness）。
     pub fn apply_patch(&self, patch: &str, label: &str) -> Result<(), DynErr> {
+        self.apply_patch_with_reverse(patch, label, false)
+    }
+
+    /// SWE-smith：数据集 `patch` 为造 bug 补丁，gold 验收需 `git apply -R` 还原。
+    pub fn apply_patch_reverse(&self, patch: &str, label: &str) -> Result<(), DynErr> {
+        self.apply_patch_with_reverse(patch, label, true)
+    }
+
+    fn apply_patch_with_reverse(&self, patch: &str, label: &str, reverse: bool) -> Result<(), DynErr> {
         if patch.trim().is_empty() {
             return Ok(());
         }
@@ -339,13 +376,19 @@ impl SweSession {
         let _ = std::fs::remove_file(&tmp);
         cp?;
         let ws = self.instance.workspace_dir();
-        let script = format!(
-            "cd {ws} && (git apply -v {dest} || (patch --batch --forward --fuzz=5 -p1 < {dest}; ec=$?; [ $ec -eq 0 -o $ec -eq 1 ]))"
-        );
+        let script = if reverse {
+            format!(
+                "cd {ws} && (git apply -R -v {dest} || (patch --batch --reverse --fuzz=5 -p1 < {dest}; ec=$?; [ $ec -eq 0 -o $ec -eq 1 ]))"
+            )
+        } else {
+            format!(
+                "cd {ws} && (git apply -v {dest} || (patch --batch --forward --fuzz=5 -p1 < {dest}; ec=$?; [ $ec -eq 0 -o $ec -eq 1 ]))"
+            )
+        };
         let r = self.exec_raw(&script)?;
         if r.exit_code != 0 {
             return Err(format!(
-                "apply {label} patch failed (code {}): {}\n{}",
+                "apply {label} patch failed (code {} reverse={reverse}): {}\n{}",
                 r.exit_code, r.stdout, r.stderr
             )
             .into());
@@ -600,8 +643,13 @@ pub fn build_swe_run_args(
     workdir: Option<&str>,
     seccomp_file: Option<&str>,
     pro_image: bool,
+    stress_run_id: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), container.to_string()];
+    if let Some(run_id) = stress_run_id {
+        args.push("--label".to_string());
+        args.push(format!("io.uenv.swe.run_id={run_id}"));
+    }
     match mode {
         CommandPolicy::RestrictedShell => {
             args.push("--cap-drop=ALL".to_string());
@@ -675,7 +723,7 @@ mod tests {
 
     #[test]
     fn restricted_run_args_drop_caps_and_isolate_network() {
-        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None, false);
+        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None, false, None);
         assert_eq!(&a[..4], &["run", "-d", "--name", "c1"]);
         assert!(a.contains(&"--cap-drop=ALL".to_string()));
         assert!(a.contains(&"no-new-privileges".to_string()));
@@ -688,10 +736,11 @@ mod tests {
 
     #[test]
     fn full_run_args_bridge_network_no_capdrop() {
-        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None, false);
+        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None, false, Some("stress-run-1"));
         assert!(a.contains(&"--network=bridge".to_string()));
         assert!(!a.contains(&"--cap-drop=ALL".to_string()));
         assert!(!a.contains(&"--network=none".to_string()));
+        assert!(a.contains(&"io.uenv.swe.run_id=stress-run-1".to_string()));
     }
 
     #[test]
@@ -703,6 +752,7 @@ mod tests {
             None,
             Some("/profiles/full.json"),
             false,
+            None,
         );
         assert!(a.contains(&"--security-opt".to_string()));
         assert!(a.contains(&"seccomp=/profiles/full.json".to_string()));

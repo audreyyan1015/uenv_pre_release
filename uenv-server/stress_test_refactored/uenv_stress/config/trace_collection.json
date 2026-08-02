@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "purpose": "offline real-LLM trace corpus collection; this is not a 1024-Worker stress test",
+  "dscodebench": {
+    "dataset_count": 100,
+    "collection_concurrency": 100,
+    "uses_1024_workers": false,
+    "trace_corpus_path": "/home/uenv-stress/trace-corpora/dscodebench/dscodebench_trace_corpus.jsonl",
+    "note": "Collect 100 DSCodeBench real-LLM trajectories in parallel for later round-robin Episode replay."
+  },
+  "swebench_pro": {
+    "instance_count": 50,
+    "target_valid_traces": 50,
+    "collection_concurrency": 4,
+    "uses_1024_workers": false,
+    "source_model": "doubao",
+    "source_version": "doubao-openhands-swebench-pro",
+    "trace_corpus_path": "/home/uenv-stress/trace-corpora/swebench_pro/trace-corpus.jsonl",
+    "note": "Collect 50 SWE-bench Pro real-LLM/OpenHands trajectories for later round-robin Episode replay. This is trace collection, not scale evidence."
+  },
+  "math_rule_tasks": {
+    "datasets": [
+      "olymmath",
+      "scitab",
+      "pubmedqa"
+    ],
+    "samples_per_dataset": 100,
+    "collection_concurrency": 8,
+    "uses_1024_workers": false,
+    "source_model": "doubao",
+    "trace_corpus_root": "/home/uenv-stress/trace-corpora/math",
+    "note": "Collect 100 real-UEnv/Math-plugin traces for each rule-reward dataset. Scale tests replay these frozen outputs; collection itself is not scale evidence."
+  }
+}

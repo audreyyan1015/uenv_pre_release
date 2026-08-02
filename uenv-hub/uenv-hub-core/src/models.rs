@@ -35,6 +35,36 @@ pub struct EnvRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub is_deleted: i64,
+    /// `active` | `canonical` | `deprecated` (see [`dto::EnvLifecycle`]).
+    pub lifecycle: String,
+    pub superseded_by: Option<String>,
+    /// JSON array of former `env_type` names.
+    pub compat_aliases: Option<String>,
+}
+
+impl EnvRow {
+    /// Parsed lifecycle stage.
+    pub fn lifecycle(&self) -> dto::EnvLifecycle {
+        dto::EnvLifecycle::parse_or_active(&self.lifecycle)
+    }
+
+    /// Migration guidance to attach to responses, when this env is deprecated.
+    pub fn deprecation_notice(&self) -> Option<dto::DeprecationNotice> {
+        if self.lifecycle() != dto::EnvLifecycle::Deprecated {
+            return None;
+        }
+        let message = match &self.superseded_by {
+            Some(next) => format!(
+                "env_type `{}` is deprecated; use `{}` for new workloads",
+                self.env_type, next
+            ),
+            None => format!("env_type `{}` is deprecated", self.env_type),
+        };
+        Some(dto::DeprecationNotice {
+            superseded_by: self.superseded_by.clone(),
+            message,
+        })
+    }
 }
 
 /// Parameters to create a new environment.
@@ -48,6 +78,9 @@ pub struct NewEnv {
     pub repository: Option<String>,
     pub license: Option<String>,
     pub tags: Vec<String>,
+    pub lifecycle: dto::EnvLifecycle,
+    pub superseded_by: Option<String>,
+    pub compat_aliases: Vec<String>,
 }
 
 impl From<dto::CreateEnvRequest> for NewEnv {
@@ -61,6 +94,9 @@ impl From<dto::CreateEnvRequest> for NewEnv {
             repository: r.repository,
             license: r.license,
             tags: r.tags,
+            lifecycle: r.lifecycle,
+            superseded_by: r.superseded_by,
+            compat_aliases: r.compat_aliases,
         }
     }
 }
@@ -74,6 +110,9 @@ pub struct EnvPatch {
     pub repository: Option<String>,
     pub license: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub lifecycle: Option<dto::EnvLifecycle>,
+    pub superseded_by: Option<String>,
+    pub compat_aliases: Option<Vec<String>>,
 }
 
 impl From<dto::EnvPatchRequest> for EnvPatch {
@@ -85,6 +124,9 @@ impl From<dto::EnvPatchRequest> for EnvPatch {
             repository: r.repository,
             license: r.license,
             tags: r.tags,
+            lifecycle: r.lifecycle,
+            superseded_by: r.superseded_by,
+            compat_aliases: r.compat_aliases,
         }
     }
 }
@@ -125,6 +167,12 @@ pub struct VersionRow {
     pub yank_reason: Option<String>,
     pub published_by: Option<i64>,
     pub published_at: i64,
+    /// JSON [`dto::RubricSpec`].
+    pub rubric_json: Option<String>,
+    /// `0` when a publish gate barred this version from resolving as `latest`.
+    pub latest_eligible: i64,
+    /// JSON array of gate findings.
+    pub gate_notes: Option<String>,
 }
 
 /// Row of the `env_images` table.
@@ -160,6 +208,9 @@ pub struct FullManifest {
     pub version: VersionRow,
     pub image: Option<ImageRow>,
     pub config: Option<ConfigRow>,
+    /// Set when the owning environment is deprecated, so consumers of a single
+    /// manifest response learn where to migrate without a second request.
+    pub deprecation: Option<dto::DeprecationNotice>,
 }
 
 /// Parameters to publish a new version (already validated by domain layer).
@@ -180,6 +231,7 @@ pub struct NewManifest {
     pub default_config: Option<serde_json::Value>,
     pub resources: dto::ResourceSpec,
     pub published_by: Option<i64>,
+    pub rubric: Option<dto::RubricSpec>,
 }
 
 impl From<dto::PublishVersionRequest> for NewManifest {
@@ -200,6 +252,7 @@ impl From<dto::PublishVersionRequest> for NewManifest {
             default_config: r.default_config,
             resources: r.resources,
             published_by: None,
+            rubric: r.rubric,
         }
     }
 }
@@ -391,4 +444,61 @@ pub struct NewPackageVersion {
     pub changelog: Option<String>,
     pub published_by: Option<i64>,
     pub artifacts: Vec<NewPackageArtifact>,
+}
+
+// ---------------------------------------------------------------------------
+// Episode stacks
+// ---------------------------------------------------------------------------
+
+/// Row of the `episode_stacks` table.
+#[derive(Debug, Clone, FromRow)]
+pub struct EpisodeStackRow {
+    pub id: i64,
+    pub stack_id: String,
+    pub description: Option<String>,
+    pub latest_version: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_deleted: i64,
+}
+
+/// Row of the `episode_stack_versions` table.
+///
+/// Component references stay in their declared form (`latest`, `^0.4`); the
+/// resolution step reads them and pins them, so a stack picks up newly published
+/// gate-eligible environment versions without a republish.
+#[derive(Debug, Clone, FromRow)]
+pub struct EpisodeStackVersionRow {
+    pub id: i64,
+    pub stack_db_id: i64,
+    pub version: String,
+    pub version_normalized: String,
+    pub publisher: Option<String>,
+    pub changelog: Option<String>,
+    pub execution_mode: String,
+    pub task_env_json: String,
+    pub agent_scaffold_json: Option<String>,
+    pub runtime_gateway_json: String,
+    pub env_packages_json: String,
+    pub worker_features_json: String,
+    pub is_yanked: i64,
+    pub yank_reason: Option<String>,
+    pub published_by: Option<i64>,
+    pub published_at: i64,
+}
+
+/// Parameters to publish a new Episode Stack version.
+#[derive(Debug, Clone)]
+pub struct NewEpisodeStackVersion {
+    pub version: String,
+    pub description: Option<String>,
+    pub publisher: Option<String>,
+    pub changelog: Option<String>,
+    pub execution_mode: String,
+    pub task_env_json: String,
+    pub agent_scaffold_json: Option<String>,
+    pub runtime_gateway_json: String,
+    pub env_packages_json: String,
+    pub worker_features_json: String,
+    pub published_by: Option<i64>,
 }

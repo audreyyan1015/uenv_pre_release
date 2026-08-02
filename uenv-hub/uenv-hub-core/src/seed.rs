@@ -46,23 +46,39 @@ pub async fn seed_templates(store: &SqliteStore) -> Result<()> {
 /// After publishing `0.2.0`, any non-yanked legacy `1.0.0` placeholder is yanked
 /// so `/versions/latest` resolves to the standardized schema (semver: 1.0.0 > 0.2.0).
 pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
-    // `qa` 是单轮问答/分类验证环境的正式名（原 `math` 更名而来）。两者共用同一份
-    // dataset 路由与判分实现，`math` 保留为兼容别名，训练侧全部切到 `qa` 后可下线。
+    // `qa` 是单轮问答/分类验证任务环境的正式名（原 `math` 更名而来）。两者共用同一份
+    // dataset 路由与判分实现（`plugins/qa/run.sh` 复用 math 插件二进制），差别只在
+    // 身份：`qa` 为 canonical，`math` 标 deprecated 并指回 `qa`。
+    //
+    // 退役用「标记」而非「删除」：Worker 启动时按 env.types 拉
+    // `GET /envs/{env_type}/versions/latest`，在 prewarm_on_startup 打开时把非 2xx
+    // 当致命错误，所以 `math` 必须继续以 200 可解析。
     ensure_env(
         store,
-        "qa",
-        "QaEnv — 单轮问答/分类验证环境 (gsm8k/pubmedqa/scitab/olymmath)",
-        &["qa", "reasoning", "validation", "single-turn"],
+        EnvIdentity {
+            env_type: "qa",
+            description: "QaEnv — 单轮问答/分类验证任务环境 (gsm8k/pubmedqa/scitab/olymmath)",
+            tags: &["qa", "reasoning", "validation", "single-turn"],
+            lifecycle: dto::EnvLifecycle::Canonical,
+            superseded_by: None,
+            compat_aliases: &["math"],
+        },
     )
     .await?;
     ensure_env_version(store, "qa", qa_manifest()).await?;
+    ensure_env_version(store, "qa", qa_rubric_manifest()).await?;
     yank_legacy_placeholder(store, "qa", "1.0.0", "0.2.0").await?;
 
     ensure_env(
         store,
-        "math",
-        "MathEnv — 兼容别名，已更名为 qa（单轮问答/分类验证环境）；新接入请用 qa",
-        &["math", "reasoning", "qa", "validation", "deprecated"],
+        EnvIdentity {
+            env_type: "math",
+            description: "MathEnv — 已更名为 qa（单轮问答/分类验证任务环境）；新接入一律用 qa",
+            tags: &["math", "reasoning", "qa", "validation", "deprecated"],
+            lifecycle: dto::EnvLifecycle::Deprecated,
+            superseded_by: Some("qa"),
+            compat_aliases: &[],
+        },
     )
     .await?;
     ensure_env_version(store, "math", math_manifest()).await?;
@@ -70,19 +86,48 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
 
     ensure_env(
         store,
-        "code",
-        "CodeEnv — 代码执行 + 单测奖励环境 (DSCodeBench)",
-        &["code", "execution"],
+        EnvIdentity {
+            env_type: "code",
+            description: "CodeEnv — 代码执行 + 单测奖励任务环境 (DSCodeBench)",
+            tags: &["code", "execution"],
+            lifecycle: dto::EnvLifecycle::Canonical,
+            superseded_by: None,
+            compat_aliases: &[],
+        },
     )
     .await?;
     ensure_env_version(store, "code", code_manifest()).await?;
     yank_legacy_placeholder(store, "code", "1.0.0", "0.2.0").await?;
 
+    // `swe` was reachable only as an EnvPackage (`swe-bench-verified`), never as a
+    // registry entry, even though the OpenHands scaffold declares
+    // `required_env_types: ["swe"]`. That left the most-used environment on this
+    // Hub the one thing an Episode Stack could not name, and left the scaffold's
+    // own declaration pointing at nothing checkable. Registering it closes both.
     ensure_env(
         store,
-        "agent",
-        "Multi-turn tool-using agent environment",
-        &["agent", "multi-turn"],
+        EnvIdentity {
+            env_type: "swe",
+            description: "SweEnv — 仓库级缺陷修复任务环境 (SWE-bench Verified / Pro，容器内 FullShell)",
+            tags: &["swe", "code", "agent", "multi-turn", "container"],
+            lifecycle: dto::EnvLifecycle::Canonical,
+            superseded_by: None,
+            compat_aliases: &["swebench"],
+        },
+    )
+    .await?;
+    ensure_env_version(store, "swe", swe_manifest()).await?;
+
+    ensure_env(
+        store,
+        EnvIdentity {
+            env_type: "agent",
+            description: "Multi-turn tool-using agent environment",
+            tags: &["agent", "multi-turn"],
+            lifecycle: dto::EnvLifecycle::Active,
+            superseded_by: None,
+            compat_aliases: &[],
+        },
     )
     .await?;
     ensure_env_version(store, "agent", simple_manifest("agent", "0.1.0")).await?;
@@ -123,27 +168,74 @@ async fn yank_legacy_placeholder(
     Ok(())
 }
 
-/// Create an env row when it does not exist yet (metadata only).
-async fn ensure_env(
-    store: &SqliteStore,
-    env_type: &str,
-    description: &str,
-    tags: &[&str],
-) -> Result<()> {
-    if store.find_env_row(env_type).await?.is_none() {
+/// Registry identity of one environment (capability class).
+struct EnvIdentity<'a> {
+    env_type: &'a str,
+    description: &'a str,
+    tags: &'a [&'a str],
+    lifecycle: dto::EnvLifecycle,
+    /// Successor for a deprecated class.
+    superseded_by: Option<&'a str>,
+    /// Former names kept resolvable.
+    compat_aliases: &'a [&'a str],
+}
+
+/// Create an env row when missing, and reconcile its lifecycle identity when it
+/// already exists.
+///
+/// The reconcile half matters for upgrades: a Hub seeded before the rename
+/// already has `qa` and `math` rows, and their identity would otherwise stay
+/// blank forever. Only the identity fields are touched — description/tags edited
+/// through the API are left alone once the identity already matches.
+async fn ensure_env(store: &SqliteStore, id: EnvIdentity<'_>) -> Result<()> {
+    let aliases: Vec<String> = id.compat_aliases.iter().map(|a| (*a).to_string()).collect();
+    let Some(existing) = store.find_env_row(id.env_type).await? else {
         store
             .create_env(NewEnv {
-                env_type: env_type.into(),
+                env_type: id.env_type.into(),
                 namespace: "default".into(),
-                description: Some(description.into()),
+                description: Some(id.description.into()),
                 author: Some("uenv-team".into()),
                 homepage: None,
                 repository: None,
                 license: Some("Apache-2.0".into()),
-                tags: tags.iter().map(|t| (*t).to_string()).collect(),
+                tags: id.tags.iter().map(|t| (*t).to_string()).collect(),
+                lifecycle: id.lifecycle,
+                superseded_by: id.superseded_by.map(str::to_string),
+                compat_aliases: aliases,
             })
             .await?;
+        return Ok(());
+    };
+
+    let current_aliases: Vec<String> = existing
+        .compat_aliases
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let in_sync = existing.lifecycle() == id.lifecycle
+        && existing.superseded_by.as_deref() == id.superseded_by
+        && current_aliases == aliases;
+    if in_sync {
+        return Ok(());
     }
+
+    store
+        .update_env(
+            id.env_type,
+            crate::models::EnvPatch {
+                lifecycle: Some(id.lifecycle),
+                superseded_by: id.superseded_by.map(str::to_string),
+                compat_aliases: Some(aliases),
+                ..Default::default()
+            },
+        )
+        .await?;
+    tracing::info!(
+        env_type = id.env_type,
+        lifecycle = id.lifecycle.as_str(),
+        "reconciled env lifecycle identity"
+    );
     Ok(())
 }
 
@@ -213,7 +305,161 @@ pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_di
     )
     .await?;
     seed_agent_bridge_openhands(store, artifact_root, catalog_dir).await?;
+    seed_agent_bridge_toolenv(store, artifact_root, catalog_dir).await?;
+    seed_qa_rubric_scorer(store, artifact_root, catalog_dir).await?;
     seed_benchmark_fixture_packages(store, artifact_root, catalog_dir).await?;
+    seed_episode_stacks(store).await?;
+    Ok(())
+}
+
+/// Seed the two reference Episode Stacks, one per execution mode.
+///
+/// Runs after the packages because a stack is only meaningful once the things it
+/// composes exist — the same reason the publish path rejects a stack naming an
+/// unpublished component. Each stack is skipped (not failed) when a component is
+/// missing, so a Hub seeded from a partial catalog still boots.
+///
+/// The two are chosen to cover the axis that actually matters: `native` needs no
+/// scaffold and no gateway, `agent` needs both, and a stack that gets that pairing
+/// wrong is the SWE-bench defect this round fixed.
+async fn seed_episode_stacks(store: &SqliteStore) -> Result<()> {
+    let swe_stack = dto::PublishStackRequest {
+        version: "1.0.0".into(),
+        publisher: Some("org-uenv-hub".into()),
+        description: Some(
+            "SWE-bench Verified × OpenHands — 容器内多轮修复，命令经 Worker Runtime Gateway 路由"
+                .into(),
+        ),
+        changelog: Some("初版：swe@0.1.0 + uenv-agent-openhands@1.0.0 + runtime/v1".into()),
+        execution_mode: dto::ExecutionMode::Agent,
+        task_env: dto::TaskEnvRef {
+            env_type: "swe".into(),
+            version: "latest".into(),
+            dataset: Some("swe-bench-verified".into()),
+        },
+        agent_scaffold: Some(dto::AgentScaffoldRef {
+            package_id: "uenv-agent-openhands".into(),
+            version: "latest".into(),
+            agent_kind: Some("openhands".into()),
+            consumer: Some(dto::CONSUMER_OPENHANDS_AGENT.into()),
+        }),
+        runtime_gateway: dto::RuntimeGatewayReq {
+            required: true,
+            api: Some("runtime/v1".into()),
+            api_key_required: true,
+        },
+        env_packages: vec!["swe-bench-verified@1.0.0".into()],
+        required_worker_features: vec![
+            "runtime_gateway".into(),
+            "swe_instance_pool".into(),
+            "trajectory_v2_2".into(),
+        ],
+    };
+    ensure_stack(store, "swe-bench-verified-openhands", swe_stack).await?;
+
+    let qa_stack = dto::PublishStackRequest {
+        version: "1.0.0".into(),
+        publisher: Some("org-uenv-hub".into()),
+        description: Some(
+            "GSM8K 单轮验证 — Worker 直接调模型并按 rubric 判分，无 scaffold、无 gateway".into(),
+        ),
+        changelog: Some("初版：qa@latest + native 模式".into()),
+        execution_mode: dto::ExecutionMode::Native,
+        task_env: dto::TaskEnvRef {
+            env_type: "qa".into(),
+            version: "latest".into(),
+            dataset: Some("gsm8k".into()),
+        },
+        agent_scaffold: None,
+        runtime_gateway: dto::RuntimeGatewayReq::default(),
+        env_packages: vec![],
+        required_worker_features: vec![],
+    };
+    ensure_stack(store, "qa-gsm8k-native", qa_stack).await?;
+    Ok(())
+}
+
+/// Publish one seed stack when absent, running the same validation the API does.
+///
+/// The seed goes through `validate` + `cross_check` rather than inserting rows
+/// directly: a seeded stack that the publish endpoint would have rejected is a
+/// contradiction the Hub should not ship, and this is where it gets caught.
+async fn ensure_stack(
+    store: &SqliteStore,
+    stack_id: &str,
+    req: dto::PublishStackRequest,
+) -> Result<()> {
+    if store.get_stack_manifest(stack_id, &req.version).await.is_ok() {
+        return Ok(());
+    }
+
+    let mut report = dto::ValidationReport::ok();
+    crate::domain::stack::validate(&req, &mut report);
+    if !report.valid {
+        tracing::warn!(stack_id, issues = ?report.issues, "skip stack seed: invalid declaration");
+        return Ok(());
+    }
+
+    let Ok((_, env_facts)) = store
+        .task_env_facts(&req.task_env.env_type, &req.task_env.version)
+        .await
+    else {
+        tracing::warn!(
+            stack_id,
+            env_type = %req.task_env.env_type,
+            "skip stack seed: Task Environment not published here"
+        );
+        return Ok(());
+    };
+    let scaffold_facts = match &req.agent_scaffold {
+        Some(s) => match store.scaffold_facts(&s.package_id, &s.version).await {
+            Ok((_, facts)) => Some(facts),
+            Err(_) => {
+                tracing::warn!(
+                    stack_id,
+                    package_id = %s.package_id,
+                    "skip stack seed: Agent scaffold not published here"
+                );
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+    for pkg_ref in &req.env_packages {
+        let Some((id, version)) = pkg_ref.split_once('@') else {
+            continue;
+        };
+        if store.get_package_manifest(id, version).await.is_err() {
+            tracing::warn!(stack_id, pkg_ref, "skip stack seed: EnvPackage not published here");
+            return Ok(());
+        }
+    }
+
+    crate::domain::stack::cross_check(&req, &env_facts, scaffold_facts.as_ref(), &mut report);
+    if !report.valid {
+        tracing::warn!(stack_id, issues = ?report.issues, "skip stack seed: cross-check failed");
+        return Ok(());
+    }
+
+    let nv = crate::models::NewEpisodeStackVersion {
+        version: req.version.clone(),
+        description: req.description.clone(),
+        publisher: req.publisher.clone(),
+        changelog: req.changelog.clone(),
+        execution_mode: req.execution_mode.as_str().to_string(),
+        task_env_json: serde_json::to_string(&req.task_env)?,
+        agent_scaffold_json: match &req.agent_scaffold {
+            Some(s) => Some(serde_json::to_string(s)?),
+            None => None,
+        },
+        runtime_gateway_json: serde_json::to_string(&req.runtime_gateway)?,
+        env_packages_json: serde_json::to_string(&req.env_packages)?,
+        worker_features_json: serde_json::to_string(&req.required_worker_features)?,
+        published_by: None,
+    };
+    let version = req.version.clone();
+    store.publish_stack(stack_id, nv).await?;
+    tracing::info!(stack_id, version = %version, "seeded EpisodeStack");
     Ok(())
 }
 
@@ -320,6 +566,7 @@ async fn seed_math_smoke_fixtures(
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["math_fixtures".into()],
+            consumers: vec![dto::CONSUMER_WORKER.into()],
         },
         worker_overlay: overlay,
         agent_defaults: json!({}),
@@ -425,6 +672,15 @@ pub async fn seed_dscodebench_mvp(
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["dscodebench".into(), "code_eval".into()],
+            // Both the Worker (official harness scoring) and a ToolEnv Agent host
+            // (multi-turn run_python / submit_code) consume this package. Declaring
+            // both here is what makes them provably use one digest instead of two
+            // hand-copied dataset trees — an Agent dry run only predicts the
+            // Worker's verdict if the data and dependency locks are identical.
+            consumers: vec![
+                dto::CONSUMER_WORKER.into(),
+                dto::CONSUMER_TOOLENV_AGENT.into(),
+            ],
         },
         worker_overlay: overlay,
         agent_defaults: json!({}),
@@ -536,6 +792,10 @@ async fn seed_swe_package(
             "swe_instance_pool".into(),
             "trajectory_v2_2".into(),
         ],
+        // The SWE images and catalog are staged on the Worker; the OpenHands
+        // scaffold reaches the container through the Runtime Gateway rather than
+        // by syncing this package itself.
+        consumers: vec![dto::CONSUMER_WORKER.into()],
     };
 
     let req = dto::PublishPackageRequest {
@@ -736,22 +996,26 @@ fn discover_swe_image_tars(
     (artifacts, map)
 }
 
-/// Seed `uenv-agent-openhands@1.0.0` when `integrations/openhands` exists beside the repo.
+/// Seed `uenv-agent-openhands@1.0.1` when `integrations/openhands` exists beside
+/// the repo.
+///
+/// `1.0.1` re-publishes the same bundle with the catalog fields (`agent_kind`,
+/// `required_env_types`) that `1.0.0` predates. A Hub seeded before those fields
+/// existed cannot gain them by re-seeding — seeding is skip-if-present, and
+/// rewriting a published version would break the "no silent overwrite" rule — so
+/// the fields arrive as a new version. The artifacts are byte-identical, so an
+/// Agent that synced `1.0.0` still reports a matching `bundle_digest`.
 pub async fn seed_agent_bridge_openhands(
     store: &SqliteStore,
     artifact_root: &Path,
     catalog_dir: &Path,
 ) -> Result<()> {
     let package_id = "uenv-agent-openhands";
-    let version = "1.0.0";
+    let version = "1.0.1";
     if store.get_package_manifest(package_id, version).await.is_ok() {
         return Ok(());
     }
-    let bridge_root = catalog_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|r| r.join("integrations/openhands"));
-    let Some(src) = bridge_root.filter(|p| p.is_dir()) else {
+    let Some(src) = find_seed_source(catalog_dir, "integrations/openhands") else {
         tracing::warn!(
             package_id,
             "skip agent bridge seed: integrations/openhands not found beside catalog_dir"
@@ -850,12 +1114,15 @@ pub async fn seed_agent_bridge_openhands(
             uenv_worker_min: "0.1.0".into(),
             uenv_server_min: None,
             features: vec!["runtime_gateway".into()],
+            consumers: vec![dto::CONSUMER_OPENHANDS_AGENT.into()],
         },
         worker_overlay: json!({}),
         agent_defaults: json!({
+            "agent_kind": "openhands",
             "driver_entrypoint": "run_swebenchpro_official.py",
             "workspace_dir": "/app",
-            "tools": ["terminal", "file_editor"]
+            "tools": ["terminal", "file_editor"],
+            "required_env_types": ["swe"]
         }),
         contracts: dto::PackageContracts {
             runtime_gateway_api: Some("runtime/v1".into()),
@@ -863,6 +1130,138 @@ pub async fn seed_agent_bridge_openhands(
             ..Default::default()
         },
         // Agent-bridge is a code bundle, not an environment → no interface contract.
+        interface: dto::InterfaceSchema::default(),
+        artifacts,
+        file_artifacts: vec![],
+    };
+    package::publish_inline_package(store, artifact_root, package_id, req, None).await?;
+    tracing::info!(package_id, version, "seeded AgentBridgePackage");
+    Ok(())
+}
+
+/// Resolve a seed source directory given `catalog_dir` (`config/swe` by default).
+///
+/// A deployment stages the sources it wants seeded next to the Hub workspace,
+/// while a full checkout has them at the repo root two levels above
+/// `catalog_dir`; both layouts occur, so both are tried instead of forcing one.
+/// Returns `None` when the directory exists in neither.
+fn find_seed_source(catalog_dir: &Path, rel: &str) -> Option<PathBuf> {
+    let hub_root = catalog_dir.parent().and_then(|p| p.parent());
+    let candidates = [
+        hub_root.map(|r| r.join(rel)),
+        hub_root.and_then(|r| r.parent()).map(|r| r.join(rel)),
+        Some(PathBuf::from(rel)),
+    ];
+    candidates.into_iter().flatten().find(|p| p.is_dir())
+}
+
+/// Seed `uenv-agent-toolenv@1.0.0` — the Verifiers-style ToolEnv scaffold that
+/// drives DSCodeBench in agent mode.
+///
+/// The Agent host registers with `agent_bridge_id=uenv-agent-toolenv`, so the Hub
+/// has to publish a package under that exact id; otherwise the id an Agent
+/// reports refers to nothing the Hub can vouch for, and the scaffold keeps
+/// arriving by hand-copy. Sources live in `uenv-bridge/scripts/benchmark/`; a
+/// missing tree is logged and skipped so a partial checkout still boots.
+pub async fn seed_agent_bridge_toolenv(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    catalog_dir: &Path,
+) -> Result<()> {
+    let package_id = "uenv-agent-toolenv";
+    let version = "1.0.0";
+    if store.get_package_manifest(package_id, version).await.is_ok() {
+        return Ok(());
+    }
+    let Some(src) = find_seed_source(catalog_dir, "uenv-bridge/scripts/benchmark") else {
+        tracing::warn!(
+            package_id,
+            "skip toolenv bridge seed: uenv-bridge/scripts/benchmark not found beside catalog_dir"
+        );
+        return Ok(());
+    };
+
+    let mut artifacts: Vec<dto::InlineArtifact> = Vec::new();
+    for (name, kind, rel) in [
+        ("dscode_toolenv_agent.py", "other", "drivers/dscode_toolenv_agent.py"),
+        (
+            "run_dscodebench_agent_toolenv.sh",
+            "other",
+            "drivers/run_dscodebench_agent_toolenv.sh",
+        ),
+        ("report_dscode_agentic.py", "other", "drivers/report_dscode_agentic.py"),
+        ("evaluate_dscodebench.py", "eval_script", "drivers/evaluate_dscodebench.py"),
+    ] {
+        let path = src.join(name);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            tracing::warn!(package_id, file = name, "skip missing toolenv bridge file");
+            continue;
+        };
+        artifacts.push(dto::InlineArtifact {
+            name: name.into(),
+            kind: kind.into(),
+            sync_mode: "inline".into(),
+            media_type: Some("text/plain".into()),
+            target_rel_path: Some(rel.into()),
+            content: Some(content),
+            content_b64: None,
+        });
+    }
+    if artifacts.is_empty() {
+        tracing::warn!(package_id, "skip toolenv bridge seed: no artifacts collected");
+        return Ok(());
+    }
+
+    // The env package the Agent sandbox must agree with, digest and all. Naming
+    // it here is what turns "keep the sandbox in sync" into a checkable claim.
+    let manifest = json!({
+        "package_id": package_id,
+        "version": version,
+        "agent_kind": "toolenv",
+        "required_env_package": "dscodebench@0.1.0",
+        "drivers": ["run_dscodebench_agent_toolenv.sh", "dscode_toolenv_agent.py"],
+    });
+    artifacts.insert(
+        0,
+        dto::InlineArtifact {
+            name: "MANIFEST.json".into(),
+            kind: "other".into(),
+            sync_mode: "inline".into(),
+            media_type: Some("application/json".into()),
+            target_rel_path: Some("MANIFEST.json".into()),
+            content: Some(serde_json::to_string_pretty(&manifest)?),
+            content_b64: None,
+        },
+    );
+
+    let req = dto::PublishPackageRequest {
+        version: version.into(),
+        publisher: Some("org-uenv-agent".into()),
+        description: Some(
+            "Verifiers-style ToolEnv agent scaffold for DSCodeBench (drivers + reporter)".into(),
+        ),
+        changelog: Some(format!("Seed {package_id}@{version} from {}", src.display())),
+        platform: dto::PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec!["runtime_gateway".into(), "code_toolenv".into()],
+            consumers: vec![dto::CONSUMER_TOOLENV_AGENT.into()],
+        },
+        worker_overlay: json!({}),
+        agent_defaults: json!({
+            "agent_kind": "toolenv",
+            "driver_entrypoint": "run_dscodebench_agent_toolenv.sh",
+            "tools": ["run_python", "read_file", "write_file", "submit"],
+            "required_env_types": ["code"],
+            "required_env_package": "dscodebench@0.1.0",
+            "evaluation_mode": "inline_harness",
+            "agent_pool_id": "toolenv-default"
+        }),
+        contracts: dto::PackageContracts {
+            runtime_gateway_api: Some("runtime/v1".into()),
+            tool_bridge_schema: Some("toolenv-uenv-v1".into()),
+            ..Default::default()
+        },
         interface: dto::InterfaceSchema::default(),
         artifacts,
         file_artifacts: vec![],
@@ -892,6 +1291,344 @@ fn qa_manifest() -> NewManifest {
             "v0.2.0: 由 math 更名而来的单轮问答/分类验证环境 (gsm8k/pubmedqa/scitab/olymmath[-easy|-hard]); 判分按 dataset 路由，对齐 plugins/qa/manifest.yaml".into(),
         ),
         ..math_manifest()
+    }
+}
+
+/// `qa@0.3.0` — the first version that carries the **rubric contract**.
+///
+/// A verification environment rewards by rule, so `0.2.0` (which declares only
+/// the dataset routing) leaves a training run unable to say which gold standard
+/// its rewards matched. `0.3.0` adds that statement: which scorer runs in
+/// production, which reference implementation it was compared against, and the
+/// measured agreement over a pinned corpus.
+///
+/// The metrics are the measured ones from the alignment run recorded in
+/// `plugins/qa/RUBRIC.md` (58 corpus cases, 56 agreements → 0.9655, zero
+/// over-credit, two under-credit). `corpus_digest` / `report_digest` are left
+/// unset here on purpose: the seed ships no evidence *bytes*, and inventing a
+/// digest for a file the Hub does not serve would be worse than declaring none.
+/// Publishing them is `uenv env rubric publish` (hosts the corpus/report bytes)
+/// followed by `uenv env rubric import` (derives the block, digests included) and
+/// a new version — never an overwrite of this one.
+fn qa_rubric_manifest() -> NewManifest {
+    let mut datasets: BTreeMap<String, dto::RubricDataset> = BTreeMap::new();
+    for (name, notes) in [
+        ("gsm8k", Some("官方 `#### ` 约定抽取最终答案")),
+        ("pubmedqa", Some("yes/no/maybe 分类判定")),
+        ("scitab", Some("表格陈述支持/反驳分类判定")),
+        ("olymmath", Some("数值等价判定；禁止子串包含")),
+        ("olymmath-easy", Some("同 olymmath，难度切分")),
+        ("olymmath-hard", Some("同 olymmath，难度切分")),
+    ] {
+        datasets.insert(
+            name.to_string(),
+            dto::RubricDataset {
+                scorer: Some(name.to_string()),
+                notes: notes.map(str::to_string),
+            },
+        );
+    }
+
+    NewManifest {
+        version: "0.3.0".into(),
+        changelog: Some(
+            "v0.3.0: 声明 rubric 判分契约 — production_scorer=uenv-math-plugin/score_action, \
+             参照实现 verifiers+math_verify, 对齐率 0.9655 (58 例中 56 例一致), 过宽 0 例, \
+             过严 2 例; 过宽>0 的版本不得 promote 为 latest"
+                .into(),
+        ),
+        rubric: Some(dto::RubricSpec {
+            schema_version: dto::RUBRIC_SCHEMA_VERSION.to_string(),
+            backend: Some("verifiers+math_verify".into()),
+            production_scorer: Some("uenv-math-plugin/score_action".into()),
+            alignment: Some(dto::RubricAlignment {
+                corpus_id: Some("qa_rubric_corpus@2026-07-25".into()),
+                corpus_digest: None,
+                report_digest: None,
+                package_ref: None,
+                metrics: Some(dto::RubricMetrics {
+                    total: Some(58),
+                    agreed: Some(56),
+                    agreement_rate: 56.0 / 58.0,
+                    over_credit_count: 0,
+                    under_credit_count: 2,
+                    verifiers_version: None,
+                    math_verify_version: None,
+                }),
+            }),
+            datasets,
+            known_gaps: vec![
+                dto::RubricGap {
+                    id: "natural_language_without_hash".into(),
+                    severity: "too_strict".into(),
+                    notes: Some(
+                        "自然语言作答且未给出 `#### ` 标记时判 0，参照实现可能判对".into(),
+                    ),
+                },
+                dto::RubricGap {
+                    id: "long_lhs_assignment_rejected".into(),
+                    severity: "intentional".into(),
+                    notes: Some("拒绝把长赋值式当作最终答案，避免过宽".into()),
+                },
+            ],
+            // 0.3.0 states the agreement but ships no rule bytes, so C13 warns on
+            // this version by design. `qa@0.3.1` (seeded once `uenv-qa-rubric` is
+            // published) is the version that closes it.
+            reference_scorer: None,
+        }),
+        ..math_manifest()
+    }
+}
+
+/// Benchmark variants the `swe` Task Environment routes, matching the EnvPackage
+/// ids seeded by [`seed_packages`] and the Worker's `benchmark_variant` overlay.
+const SWE_DATASETS: &[&str] = &["swe-bench-verified", "swe-bench-pro"];
+
+/// The `swe` env registry manifest (v0.1.0).
+///
+/// Container-backed and multi-turn, so unlike `qa` / `code` it declares no
+/// process entrypoint: an episode runs inside the instance image, reached through
+/// the Worker Runtime Gateway. The Action/Observation/State contract is the same
+/// one the SWE EnvPackages publish, minus the per-variant `const` on
+/// `benchmark_variant` — the registry entry describes the capability class, and
+/// the variant is a config value.
+fn swe_manifest() -> NewManifest {
+    let datasets: Vec<Value> = SWE_DATASETS.iter().map(|d| json!(d)).collect();
+    NewManifest {
+        version: "0.1.0".into(),
+        changelog: Some(
+            "v0.1.0: 把 swe 登记为一等任务环境（此前仅以 EnvPackage 存在，Episode Stack 无法引用）; \
+             Action/Observation/State 对齐 swe-bench-verified/pro 包的 interface"
+                .into(),
+        ),
+        entrypoint: None,
+        supported_backends: vec!["container".into()],
+        dependencies: None,
+        min_uenv_version: Some("0.1.0".into()),
+        base_image: None,
+        health_check_path: None,
+        interface: swe_env_interface_schema(),
+        examples: vec![Example {
+            title: Some("SWE-bench Verified — 执行单测后提交".into()),
+            request: json!({
+                "env_config": {
+                    "dataset": "swe-bench-verified",
+                    "instance_id": "astropy__astropy-12907"
+                },
+                "actions": [
+                    {"type": "exec", "command": "python -m pytest -q"},
+                    {"type": "submit"}
+                ]
+            }),
+        }],
+        image: None,
+        config_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "dataset": {
+                    "type": "string",
+                    "enum": datasets,
+                    "description": "benchmark 变体路由键；与 EnvPackage id 及 Worker swe.benchmark_variant 对齐"
+                },
+                "instance_id": {"type": "string", "description": "实例真值 id，如 astropy__astropy-12907"},
+                "command_mode": {"type": "string", "enum": ["FullShell", "Restricted"]},
+                "max_iterations": {"type": "integer", "minimum": 1}
+            },
+            "required": ["dataset"]
+        })),
+        default_config: Some(json!({"dataset": "swe-bench-verified", "command_mode": "FullShell"})),
+        resources: ResourceSpec {
+            cpu: Some(4.0),
+            memory_mb: Some(8192),
+            gpu: Some(0),
+            gpu_type: None,
+            disk_mb: Some(20480),
+        },
+        published_by: None,
+        rubric: None,
+    }
+}
+
+/// Variant-agnostic Action/Observation/State contract for the `swe` env.
+fn swe_env_interface_schema() -> InterfaceSchema {
+    let mut schema = swe_interface_schema("swe-bench-verified");
+    if let Some(state) = schema.state.as_mut() {
+        if let Some(variant) = state
+            .get_mut("properties")
+            .and_then(|p| p.get_mut("benchmark_variant"))
+        {
+            *variant = json!({
+                "type": "string",
+                "enum": SWE_DATASETS,
+                "description": "该 episode 运行的 benchmark 变体"
+            });
+        }
+    }
+    schema
+}
+
+/// Package id / version / file name of the QA gold-standard rule package.
+const QA_RUBRIC_PACKAGE: &str = "uenv-qa-rubric";
+const QA_RUBRIC_VERSION: &str = "1.0.0";
+const QA_RUBRIC_SCORER_FILE: &str = "qa_rubric.py";
+
+/// Seed `uenv-qa-rubric@1.0.0` — the QA gold-standard **rule bytes** — and, once
+/// they exist, `qa@0.3.1` which pins them by digest.
+///
+/// `qa@0.3.0` already claims a 0.9655 agreement against "verifiers+math_verify".
+/// That names a library, not a rule set, and the rules are what decide the score:
+/// replacing GSM8K's `####` extraction with a boxed-only parser leaves the backend
+/// string identical and flips every GSM8K case to zero. So the claim is only
+/// checkable if the extraction rules travel with it, digest included — which is
+/// what this package carries and what C13 looks for.
+///
+/// The alignment harness ships alongside the rules on purpose: with both files a
+/// consumer can re-run the comparison and land on the same numbers, instead of
+/// reading rules it has no way to execute.
+pub async fn seed_qa_rubric_scorer(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    catalog_dir: &Path,
+) -> Result<()> {
+    let manifest = match store
+        .get_package_manifest(QA_RUBRIC_PACKAGE, QA_RUBRIC_VERSION)
+        .await
+    {
+        Ok(m) => m,
+        Err(_) => match publish_qa_rubric_scorer(store, artifact_root, catalog_dir).await? {
+            Some(m) => m,
+            // Sources absent (partial checkout): leave `qa` at 0.3.0 rather than
+            // pin a digest to bytes this Hub cannot serve.
+            None => return Ok(()),
+        },
+    };
+
+    let Some(scorer) = manifest
+        .artifacts
+        .iter()
+        .find(|a| a.name == QA_RUBRIC_SCORER_FILE)
+    else {
+        tracing::warn!(
+            package_id = QA_RUBRIC_PACKAGE,
+            "skip qa@0.3.1: published rubric package has no {QA_RUBRIC_SCORER_FILE} artifact"
+        );
+        return Ok(());
+    };
+
+    ensure_env_version(store, "qa", qa_rubric_scorer_manifest(&scorer.digest)).await?;
+    Ok(())
+}
+
+async fn publish_qa_rubric_scorer(
+    store: &SqliteStore,
+    artifact_root: &Path,
+    catalog_dir: &Path,
+) -> Result<Option<dto::EnvPackageManifest>> {
+    let Some(src) = find_seed_source(catalog_dir, "uenv-bridge/scripts") else {
+        tracing::warn!(
+            package_id = QA_RUBRIC_PACKAGE,
+            "skip rubric scorer seed: uenv-bridge/scripts not found beside catalog_dir"
+        );
+        return Ok(None);
+    };
+
+    let mut artifacts: Vec<dto::InlineArtifact> = Vec::new();
+    for (name, kind) in [
+        (QA_RUBRIC_SCORER_FILE, "rubric_scorer"),
+        ("verify_qa_rubric_alignment.py", "eval_script"),
+    ] {
+        let path = src.join(name);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            tracing::warn!(
+                package_id = QA_RUBRIC_PACKAGE,
+                file = name,
+                "skip missing rubric scorer file"
+            );
+            continue;
+        };
+        artifacts.push(dto::InlineArtifact {
+            name: name.into(),
+            kind: kind.into(),
+            sync_mode: "inline".into(),
+            media_type: Some("text/x-python".into()),
+            target_rel_path: Some(format!("rubric/{name}")),
+            content: Some(content),
+            content_b64: None,
+        });
+    }
+    // The rules themselves are the package; the harness alone is not publishable.
+    if !artifacts.iter().any(|a| a.name == QA_RUBRIC_SCORER_FILE) {
+        tracing::warn!(
+            package_id = QA_RUBRIC_PACKAGE,
+            "skip rubric scorer seed: {QA_RUBRIC_SCORER_FILE} not found under {}",
+            src.display()
+        );
+        return Ok(None);
+    }
+
+    let req = dto::PublishPackageRequest {
+        version: QA_RUBRIC_VERSION.into(),
+        publisher: Some("org-uenv-hub".into()),
+        description: Some(
+            "QA rubric gold standard — verifiers-style Rubric + per-dataset extraction rules, \
+             plus the alignment harness that re-derives the reported agreement"
+                .into(),
+        ),
+        changelog: Some(format!(
+            "Seed {QA_RUBRIC_PACKAGE}@{QA_RUBRIC_VERSION} from {}",
+            src.display()
+        )),
+        platform: dto::PackagePlatform {
+            uenv_worker_min: "0.1.0".into(),
+            uenv_server_min: None,
+            features: vec![],
+            consumers: vec![dto::CONSUMER_RUBRIC_AUDITOR.into()],
+        },
+        worker_overlay: json!({}),
+        agent_defaults: json!({}),
+        contracts: dto::PackageContracts::default(),
+        interface: dto::InterfaceSchema::default(),
+        artifacts,
+        file_artifacts: vec![],
+    };
+    let manifest =
+        package::publish_inline_package(store, artifact_root, QA_RUBRIC_PACKAGE, req, None).await?;
+    tracing::info!(
+        package_id = QA_RUBRIC_PACKAGE,
+        version = QA_RUBRIC_VERSION,
+        "seeded QA rubric gold-standard package"
+    );
+    Ok(Some(manifest))
+}
+
+/// `qa@0.3.1` — same measured agreement as `0.3.0`, now with the gold standard
+/// pinned by digest instead of named by library.
+///
+/// A new version rather than an edit of `0.3.0`: a published manifest is what a
+/// finished training run cites, so rewriting it in place would silently change
+/// the meaning of rewards already collected.
+fn qa_rubric_scorer_manifest(scorer_digest: &str) -> NewManifest {
+    let base = qa_rubric_manifest();
+    let rubric = base.rubric.map(|mut r| {
+        r.reference_scorer = Some(dto::RubricScorerRef {
+            package_ref: format!("{QA_RUBRIC_PACKAGE}@{QA_RUBRIC_VERSION}"),
+            artifact: QA_RUBRIC_SCORER_FILE.into(),
+            digest: scorer_digest.to_string(),
+            entrypoint: Some("qa_rubric:score".into()),
+            rubric_classes: vec!["ReferenceScorer".into()],
+            requires: vec!["verifiers".into(), "math_verify".into()],
+        });
+        r
+    });
+    NewManifest {
+        version: "0.3.1".into(),
+        changelog: Some(format!(
+            "v0.3.1: rubric 判分规则本体经 Hub 分发 — reference_scorer={QA_RUBRIC_PACKAGE}@\
+             {QA_RUBRIC_VERSION}::{QA_RUBRIC_SCORER_FILE} (digest 固定), entrypoint=qa_rubric:score; \
+             对齐率与 0.3.0 相同 (0.9655)，差别是消费方现在能取到规则本体自证"
+        )),
+        rubric,
+        ..base
     }
 }
 
@@ -971,6 +1708,7 @@ fn math_manifest() -> NewManifest {
             disk_mb: None,
         },
         published_by: None,
+        rubric: None,
     }
 }
 
@@ -1032,6 +1770,7 @@ fn code_manifest() -> NewManifest {
             disk_mb: None,
         },
         published_by: None,
+        rubric: None,
     }
 }
 
@@ -1156,5 +1895,6 @@ fn simple_manifest(env_type: &str, version: &str) -> NewManifest {
             disk_mb: None,
         },
         published_by: None,
+        rubric: None,
     }
 }

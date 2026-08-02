@@ -1,0 +1,12 @@
+{
+  "input_matched": 1,
+  "skipped_filter": 0,
+  "error_count": 0,
+  "resolved_count": 0,
+  "resolve_rate": 0.0,
+  "variants": [
+    "smith"
+  ],
+  "output_dir": "/var/lib/uenv/rollouts/swesmith-llm-dsv3-smoke",
+  "errors": []
+}

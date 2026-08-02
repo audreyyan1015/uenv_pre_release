@@ -2159,6 +2159,9 @@ dependencies = [
 [[package]]
 name = "uenv-math-env"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "uenv-server"
@@ -2171,6 +2174,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures",
+ "libc",
  "parking_lot",
  "prost",
  "prost-types",

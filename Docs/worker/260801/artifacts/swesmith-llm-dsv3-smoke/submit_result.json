@@ -1,0 +1,78 @@
+{
+  "instance_id": "oauthlib__oauthlib.1fd52536.combine_file__0fceycuu",
+  "resolved": false,
+  "reward": 0.0,
+  "tests_passed": 0,
+  "tests_total": 13,
+  "per_test": [
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::ClientRealmTests::test_client_realm_sign_with_additional_realm",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::ClientRealmTests::test_client_realm_sign_with_default_realm",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::ClientConstructorTests::test_convert_to_unicode_resource_owner",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::ClientConstructorTests::test_give_explicit_nonce",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::ClientConstructorTests::test_give_explicit_timestamp",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureMethodTest::test_hmac_sha1_method",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureMethodTest::test_hmac_sha256_method",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureMethodTest::test_plaintext_method",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureMethodTest::test_register_method",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureMethodTest::test_rsa_method",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureTypeTest::test_invalid_signature_type",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureTypeTest::test_params_in_body",
+      "passed": false
+    },
+    {
+      "node_id": "tests/oauth1/rfc5849/test_client.py::SignatureTypeTest::test_params_in_query",
+      "passed": false
+    }
+  ],
+  "trajectory_ref": {
+    "trajectory_id": "trj-worker-7143-pro-1785605632110-00045",
+    "worker_id": "worker-7143-pro",
+    "gateway_base_url": "http://127.0.0.1:28097",
+    "instance_id": "oauthlib__oauthlib.1fd52536.combine_file__0fceycuu",
+    "benchmark_variant": "smith",
+    "session_id": "sess-oauthlib--oauthlib-1fd52536-combine-file--0fceycuu-79",
+    "run_id": "run-smith-llm-dsv3b-011305",
+    "storage_url": "http://8.130.75.157:8077",
+    "storage_kind": "server",
+    "step_count": 3,
+    "reward": 0.0,
+    "resolved": false,
+    "sealed_at_ms": 1785605632110,
+    "upload_status": "pending"
+  },
+  "elapsed_sec": 1243.6179978847504
+}

@@ -83,7 +83,29 @@ impl ModelClient {
         &self,
         payload: &[u8],
         reward_config: &[u8],
-        _step_index: u32,
+        step_index: u32,
+        require_rollout_meta: bool,
+        model_endpoint: Option<&ModelEndpoint>,
+    ) -> Result<ModelInferOutput, ModelInferError> {
+        self.infer_with_rollout_context(
+            payload,
+            reward_config,
+            step_index,
+            &[],
+            None,
+            require_rollout_meta,
+            model_endpoint,
+        )
+        .await
+    }
+
+    pub async fn infer_with_rollout_context(
+        &self,
+        payload: &[u8],
+        reward_config: &[u8],
+        step_index: u32,
+        current_observation: &[u8],
+        previous_action: Option<&[u8]>,
         require_rollout_meta: bool,
         model_endpoint: Option<&ModelEndpoint>,
     ) -> Result<ModelInferOutput, ModelInferError> {
@@ -160,9 +182,29 @@ impl ModelClient {
             .or_else(|| gen_cfg.get("max_tokens").and_then(Value::as_i64))
             .unwrap_or(self.llm.max_tokens);
 
+        let mut messages = vec![json!({"role": "user", "content": question})];
+        if step_index > 1 {
+            if let Some(previous_action) = previous_action.filter(|value| !value.is_empty()) {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": String::from_utf8_lossy(previous_action),
+                }));
+            }
+            if !current_observation.is_empty() {
+                messages.push(json!({
+                    "role": "user",
+                    "content": format!(
+                        "The evaluator returned this feedback for the previous candidate:\n{}\n\
+                         Revise the implementation and return the complete Python code.",
+                        String::from_utf8_lossy(current_observation)
+                    ),
+                }));
+            }
+        }
+
         let mut request_body = json!({
             "model": model_name,
-            "messages": [{"role": "user", "content": question}],
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": false,
@@ -516,6 +558,53 @@ mod tests {
         assert_eq!(action, b"ok");
         let request = captured.lock().expect("lock").clone().to_ascii_lowercase();
         assert!(request.contains("authorization: bearer sk-test"));
+    }
+
+    #[tokio::test]
+    async fn includes_previous_action_and_evaluator_feedback_after_first_step() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_for_task = captured.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0; 16384];
+            let n = stream.read(&mut buffer).await.expect("read");
+            *captured_for_task.lock().expect("lock") =
+                String::from_utf8_lossy(&buffer[..n]).to_string();
+            let body = b"{\"choices\":[{\"message\":{\"content\":\"def add(a,b): return a+b\"}}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let client = ModelClient::with_config(LlmConfig {
+            endpoint: format!("http://{}/v1", addr),
+            model_name: "real-model".to_string(),
+            ..LlmConfig::default()
+        });
+        client
+            .infer_with_rollout_context(
+                br#"{"question":"Implement add. Task ID: gate3-real-1"}"#,
+                br#"{"type":"code_tests"}"#,
+                2,
+                br#"{"passed":false,"error":"assertion failed"}"#,
+                Some(b"def add(a, b): return a - b"),
+                false,
+                None,
+            )
+            .await
+            .expect("infer");
+
+        let request = captured.lock().expect("lock").clone();
+        assert!(request.contains("\"role\":\"assistant\""));
+        assert!(request.contains("return a - b"));
+        assert!(request.contains("evaluator returned this feedback"));
+        assert!(request.contains("assertion failed"));
     }
 
     #[tokio::test]
