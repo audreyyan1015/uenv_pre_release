@@ -118,6 +118,17 @@ impl UEnvEpisodeService {
         let async_context = ensure_async_request_context(&mut req)?;
 
         let episode_id = req.episode_id.clone();
+        let received_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        tracing::info!(
+            episode_id = %episode_id,
+            batch_id = %req.correlation_id,
+            env_type = %req.env_type,
+            received_ts,
+            "episode_received"
+        );
         // 同一个 episode_id 重新进入时，清掉上一次取消留下的短期标记，避免新请求被旧状态影响。
         self.state.cancelled_episodes.remove(&episode_id);
         let handle = Arc::new(EpisodeHandle::new(episode_id.clone(), req.attempt_id));

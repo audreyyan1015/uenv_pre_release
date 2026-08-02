@@ -15,9 +15,11 @@ Run:
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from uenv_runtime import UEnvGatewayClient, UEnvRuntime  # noqa: E402
+from uenv_runtime.llm_rollout import RolloutTraceCollector  # noqa: E402
 from uenv_runtime.runtime import _attr  # noqa: E402
 
 
@@ -32,6 +34,42 @@ class FakeWrite:
         self.content = content
 
 
+class FakeLogprobRecord:
+    def __init__(self, token, logprob):
+        self.token = token
+        self.logprob = logprob
+
+
+class FakeChoice:
+    def __init__(self):
+        self.logprobs = {"content": [
+            FakeLogprobRecord("OK", -0.1),
+            FakeLogprobRecord(".", -0.2),
+        ]}
+
+
+class FakeRawResponse:
+    id = "chatcmpl-test"
+    choices = [FakeChoice()]
+
+
+class FakeResponse:
+    raw_response = FakeRawResponse()
+
+
+class OfflineRolloutCollector(RolloutTraceCollector):
+    def __init__(self):
+        self._api_key = "test"
+        self._base_url = "http://127.0.0.1"
+        self.model = "volcengine/doubao-test"
+        self._provider_model = "doubao-test"
+        self._responses = []
+
+    def _tokenize(self, texts):
+        self.assert_texts = texts
+        return [[101, 102]]
+
+
 class OfflineAdapterTests(unittest.TestCase):
     def test_attr_reads_objects_and_dicts(self):
         self.assertEqual(_attr(FakeCmd("ls"), "command"), "ls")
@@ -43,6 +81,36 @@ class OfflineAdapterTests(unittest.TestCase):
         self.assertEqual(UEnvGatewayClient("127.0.0.1:48999").base_url, "http://127.0.0.1:48999")
         self.assertEqual(UEnvGatewayClient("http://h:1/").base_url, "http://h:1")
 
+    def test_submit_polls_running_gateway_job_until_completed(self):
+        client = UEnvGatewayClient(
+            "127.0.0.1:48999", submit_timeout=1, submit_poll_interval=0
+        )
+        completed = {
+            "status": "completed",
+            "result": {
+                "instance_id": "demo",
+                "resolved": True,
+                "reward": 1.0,
+                "tests_passed": 2,
+                "tests_total": 2,
+            },
+        }
+        with mock.patch.object(
+            client,
+            "_request",
+            side_effect=[{"status": "running", "session_id": "s1"}, completed],
+        ) as request:
+            result = client.submit("s1")
+        self.assertTrue(result.resolved)
+        self.assertEqual(result.tests_passed, 2)
+        self.assertEqual(
+            request.call_args_list,
+            [
+                mock.call("POST", "/runtime/v1/sessions/s1/submit"),
+                mock.call("GET", "/runtime/v1/sessions/s1/submit"),
+            ],
+        )
+
     def test_run_action_dispatch_by_classname(self):
         # No session is created; we only verify dispatch routing via monkeypatch.
         rt = UEnvRuntime("127.0.0.1:1", instance_id="x")
@@ -53,6 +121,16 @@ class OfflineAdapterTests(unittest.TestCase):
         rt.run_action(FakeCmd("ls"))
         rt.run_action(FakeWrite("/p", "c"))
         self.assertEqual([c[0] for c in calls], ["run", "write"])
+
+    def test_rollout_collector_exports_replay_turns(self):
+        collector = OfflineRolloutCollector()
+        collector.record(FakeResponse())
+        document = collector.finalize()
+        self.assertEqual(document["source_model"], "volcengine/doubao-test")
+        self.assertEqual(document["turns"][0]["assistant_output"], "OK.")
+        self.assertEqual(document["turns"][0]["response_ids"], [101, 102])
+        self.assertEqual(document["turns"][0]["logprobs"], [-0.1, -0.2])
+        self.assertEqual(document["rollout_trace"]["response_ids"], [101, 102])
 
 
 class LiveGatewayTest(unittest.TestCase):

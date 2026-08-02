@@ -190,6 +190,12 @@ enum Command {
         run_id: String,
         reply: oneshot::Sender<Result<bool>>,
     },
+    RequeueAgentJob {
+        job: AgentJob,
+        previous_agent_id: String,
+        previous_run_id: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
     CommitAgentCompletion {
         request: AgentJobCompleteRequest,
         result: EpisodeResult,
@@ -509,6 +515,25 @@ impl PersistenceStore {
         rx.await.context("persistence reply dropped")?
     }
 
+    /// 将已经由失联 Agent 领取的 job 原子地恢复到 pending。
+    /// `job.run_id` 是新一代 dispatch lease；旧 Agent 携带旧 run_id 的迟到完成会被拒绝。
+    pub async fn requeue_agent_job(
+        &self,
+        job: AgentJob,
+        previous_agent_id: &str,
+        previous_run_id: &str,
+    ) -> Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Command::RequeueAgentJob {
+            job,
+            previous_agent_id: previous_agent_id.to_string(),
+            previous_run_id: previous_run_id.to_string(),
+            reply,
+        })
+        .await?;
+        rx.await.context("persistence reply dropped")?
+    }
+
     pub async fn commit_agent_completion(
         &self,
         request: AgentJobCompleteRequest,
@@ -731,6 +756,15 @@ fn handle_command(
             run_id,
             reply,
         } => finish!(reply, lease_agent_job(conn, &job_id, &agent_id, &run_id)),
+        Command::RequeueAgentJob {
+            job,
+            previous_agent_id,
+            previous_run_id,
+            reply,
+        } => finish!(
+            reply,
+            requeue_agent_job(conn, &job, &previous_agent_id, &previous_run_id)
+        ),
         Command::CommitAgentCompletion {
             request,
             result,
@@ -1506,6 +1540,30 @@ fn lease_agent_job(conn: &Connection, job_id: &str, agent_id: &str, run_id: &str
     Ok(changed == 1)
 }
 
+/// 仅当当前 SQLite lease 仍精确属于失联 Agent 的旧 run_id 时才回收。
+/// 这个 compare-and-swap 避免 late completion 或并发恢复覆盖新一代 lease。
+fn requeue_agent_job(
+    conn: &Connection,
+    job: &AgentJob,
+    previous_agent_id: &str,
+    previous_run_id: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE agent_jobs SET phase='pending',agent_id='',run_id=?2,job_blob=?3,leased_at_ms=NULL,
+             completion_checksum=NULL,updated_at_ms=?4,version=version+1
+         WHERE job_id=?1 AND phase='leased' AND agent_id=?5 AND run_id=?6",
+        params![
+            job.job_id,
+            job.run_id,
+            job.encode_to_vec(),
+            now_ms(),
+            previous_agent_id,
+            previous_run_id,
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
 fn commit_agent_completion(
     conn: &mut Connection,
     request: &AgentJobCompleteRequest,
@@ -1865,6 +1923,68 @@ mod tests {
                 .expect("conflicting completion"),
             IdempotencyDecision::Conflict(_)
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stale_agent_lease_requeue_requires_the_old_lease_and_issues_a_new_one() {
+        let root = std::env::temp_dir().join(format!("uenv-persistence-{}", uuid::Uuid::new_v4()));
+        let path = root.join("state.db");
+        let store = PersistenceStore::open(path.clone(), &cfg(&path)).expect("open");
+        let job = AgentJob {
+            job_id: "job-stale-lease".to_string(),
+            episode_id: "episode-stale-lease".to_string(),
+            run_id: "run-old".to_string(),
+            ..Default::default()
+        };
+        store
+            .find_or_create_episode(
+                EpisodeRequest {
+                    episode_id: job.episode_id.clone(),
+                    ..Default::default()
+                },
+                "sync",
+                now_ms() + 30_000,
+            )
+            .await
+            .expect("create episode");
+        store
+            .enqueue_agent_job("pool-agent", job.clone(), now_ms() + 30_000)
+            .await
+            .expect("enqueue job");
+        assert!(
+            store
+                .lease_agent_job(&job.job_id, "agent-old", &job.run_id)
+                .await
+                .expect("old lease")
+        );
+
+        let mut replacement = job.clone();
+        replacement.run_id = "run-new".to_string();
+        assert!(
+            store
+                .requeue_agent_job(replacement.clone(), "agent-old", "run-old")
+                .await
+                .expect("requeue old lease")
+        );
+        assert!(
+            !store
+                .lease_agent_job(&job.job_id, "agent-old", "run-old")
+                .await
+                .expect("old lease cannot be revived")
+        );
+        assert!(
+            store
+                .lease_agent_job(&job.job_id, "agent-new", &replacement.run_id)
+                .await
+                .expect("new lease")
+        );
+        assert!(
+            !store
+                .requeue_agent_job(replacement, "agent-old", "run-old")
+                .await
+                .expect("stale compare-and-swap rejected")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

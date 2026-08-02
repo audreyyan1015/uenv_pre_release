@@ -163,12 +163,6 @@ impl AgentRegistry {
         self.agents.read().len()
     }
 
-    /// agent_id 是否已注册（不区分是否 stale）。心跳/poll 据此对未注册 Agent 快速失败，
-    /// 让 Agent 侧知道需要重新 RegisterAgent（Server 重启后内存注册表清空）。
-    pub fn is_registered(&self, agent_id: &str) -> bool {
-        self.agents.read().iter().any(|a| a.agent_id == agent_id)
-    }
-
     /// 只读快照：供 admin HTTP 展示 Agent 池状态。
     pub fn snapshot(&self) -> Vec<AgentSnapshot> {
         self.agents
@@ -198,15 +192,18 @@ impl AgentRegistry {
         a.last_heartbeat_at.elapsed().as_secs() > self.heartbeat_timeout_secs
     }
 
-    /// 当前心跳超时的 Agent id 列表（复用 is_stale 阈值判定）。
-    /// 供后台 reaper 对掉线 Agent 名下 in-flight job 做失败收口。
-    pub fn stale_agent_ids(&self) -> Vec<String> {
+    /// 判断指定 Agent 是否已经超过“心跳超时 + 回收宽限”仍未恢复。
+    ///
+    /// 找不到该 Agent 也视为不可恢复：持久化恢复后，旧 lease 对应的进程可能根本
+    /// 不会重新注册；此时必须允许健康 Agent 接手，而不是永久保留该 lease。
+    pub fn is_agent_stale_for_reclaim(&self, agent_id: &str, grace_secs: u64) -> bool {
+        let reclaim_after_secs = self.heartbeat_timeout_secs.saturating_add(grace_secs);
         self.agents
             .read()
             .iter()
-            .filter(|a| self.is_stale(a))
-            .map(|a| a.agent_id.clone())
-            .collect()
+            .find(|a| a.agent_id == agent_id)
+            .map(|a| a.last_heartbeat_at.elapsed().as_secs() > reclaim_after_secs)
+            .unwrap_or(true)
     }
 
     fn capacity_of(a: &AgentInfo) -> u32 {

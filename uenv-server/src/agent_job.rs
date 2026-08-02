@@ -17,6 +17,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
@@ -32,6 +33,8 @@ use crate::proto::v1::{
 
 /// in-flight Job：已被 agent 领取、等待 complete 的任务。
 struct InFlightJob {
+    /// Job 所属 Agent pool；回收时必须回到同一个路由队列。
+    pool_id: String,
     /// 领取该 Job 的 agent_id。complete 时必须与这里记录的值一致。
     agent_id: String,
     run_id: String,
@@ -54,6 +57,8 @@ pub struct AgentJobQueue {
     /// Agent 注册表引用（poll/complete 时增减负载）。
     registry: Arc<AgentRegistry>,
     persistence: OnceLock<Arc<crate::persistence::PersistenceStore>>,
+    /// 成功从失联 Agent 回收并重新入队的总数，供 admin/日志巡检核对。
+    reclaimed_stale_jobs: AtomicU64,
 }
 
 impl AgentJobQueue {
@@ -63,6 +68,7 @@ impl AgentJobQueue {
             in_flight: DashMap::new(),
             registry,
             persistence: OnceLock::new(),
+            reclaimed_stale_jobs: AtomicU64::new(0),
         }
     }
 
@@ -83,6 +89,7 @@ impl AgentJobQueue {
         self.in_flight.insert(
             job_id.clone(),
             InFlightJob {
+                pool_id: pool_id.to_string(),
                 agent_id: String::new(),
                 run_id: job.run_id.clone(),
                 job: job.clone(),
@@ -109,6 +116,7 @@ impl AgentJobQueue {
         self.in_flight.insert(
             job_id.clone(),
             InFlightJob {
+                pool_id: pool_id.to_string(),
                 agent_id: agent_id.clone(),
                 run_id: job.run_id.clone(),
                 job: job.clone(),
@@ -146,6 +154,10 @@ impl AgentJobQueue {
         self.in_flight.len()
     }
 
+    pub fn reclaimed_stale_jobs(&self) -> u64 {
+        self.reclaimed_stale_jobs.load(Ordering::Relaxed)
+    }
+
     /// 各 pool 的待领 Job 数（admin 展示）。
     pub fn pending_by_pool(&self) -> Vec<(String, usize)> {
         self.pending
@@ -177,64 +189,100 @@ impl AgentJobQueue {
         tracing::warn!(job_id = %job_id, pool_id = %pool_id, "agent_job_abandoned");
     }
 
-    /// 对所有心跳超时（stale）的 Agent 名下 in-flight job 做 server 发起的失败收口。
+    /// 回收由失联 Agent 领取的 job，并以新的 run_id 重新放回原 pool。
     ///
-    /// 通过与 CompleteAgentJob 相同的 oneshot 通知路径唤醒等待的 episode（status=failed，
-    /// error_message 标明 agent 掉线），并回收 Agent 负载、清 in-flight——语义与
-    /// abandon 一致，区别是这里会向 waiter 投递失败结果而不是静默丢弃。
-    /// reaper 移除 in-flight 后，agent 迟到的 complete 会得到 UNKNOWN_JOB（既有行为）。
-    ///
-    /// 只处理已领取（agent_id 非空）的 job；仍 pending 的 job 留给存活 Agent 领取。
-    /// 返回被收口的 job_id 列表。
-    pub fn reap_stale_agent_jobs(&self) -> Vec<String> {
-        let mut reaped = Vec::new();
-        for agent_id in self.registry.stale_agent_ids() {
-            let job_ids: Vec<String> = self
+    /// 先对 SQLite 做带旧 `(agent_id, run_id)` 条件的 CAS，再替换内存 lease。
+    /// 因此旧 Agent 即使迟到恢复，其完成请求也不会被新 lease 接受或覆盖。
+    pub async fn reclaim_stale_jobs(&self, reclaim_grace_secs: u64) -> usize {
+        let candidates: Vec<(String, String, String, String, AgentJob)> = self
+            .in_flight
+            .iter()
+            .filter_map(|entry| {
+                let inflight = entry.value();
+                if inflight.agent_id.is_empty()
+                    || !self
+                        .registry
+                        .is_agent_stale_for_reclaim(&inflight.agent_id, reclaim_grace_secs)
+                {
+                    return None;
+                }
+                Some((
+                    entry.key().clone(),
+                    inflight.pool_id.clone(),
+                    inflight.agent_id.clone(),
+                    inflight.run_id.clone(),
+                    inflight.job.clone(),
+                ))
+            })
+            .collect();
+
+        let mut reclaimed = 0;
+        for (job_id, pool_id, previous_agent_id, previous_run_id, mut replacement) in candidates {
+            // run_id 在 AgentJob 协议中已被 CompleteAgentJob 回传，可直接作为每代 lease token。
+            replacement.run_id = format!("{}:reclaim:{}", previous_run_id, uuid::Uuid::new_v4());
+            let persisted = match self.persistence.get() {
+                Some(store) => match store
+                    .requeue_agent_job(
+                        replacement.clone(),
+                        &previous_agent_id,
+                        &previous_run_id,
+                    )
+                    .await
+                {
+                    Ok(requeued) => requeued,
+                    Err(error) => {
+                        tracing::error!(
+                            job_id = %job_id,
+                            previous_agent_id = %previous_agent_id,
+                            error = %error,
+                            "agent_job_stale_reclaim_persist_failed"
+                        );
+                        false
+                    }
+                },
+                None => true,
+            };
+            if !persisted {
+                continue;
+            }
+
+            let replaced = self
                 .in_flight
-                .iter()
-                .filter(|e| e.value().agent_id == agent_id)
-                .map(|e| e.key().clone())
-                .collect();
-            for job_id in job_ids {
-                let Some((_, inflight)) = self.in_flight.remove(&job_id) else {
-                    continue;
-                };
-                self.registry.decrement_load(&inflight.agent_id);
+                .get_mut(&job_id)
+                .map(|mut inflight| {
+                    if inflight.agent_id != previous_agent_id || inflight.run_id != previous_run_id {
+                        return false;
+                    }
+                    inflight.agent_id.clear();
+                    inflight.run_id = replacement.run_id.clone();
+                    inflight.job = replacement.clone();
+                    true
+                })
+                .unwrap_or(false);
+            if !replaced {
                 tracing::warn!(
                     job_id = %job_id,
-                    agent_id = %inflight.agent_id,
-                    run_id = %inflight.run_id,
-                    "agent_job_reaped"
+                    previous_agent_id = %previous_agent_id,
+                    "agent_job_stale_reclaim_raced_terminal"
                 );
-                let complete = AgentJobCompleteRequest {
-                    job_id: job_id.clone(),
-                    run_id: inflight.run_id.clone(),
-                    status: "failed".to_string(),
-                    error_message: format!(
-                        "agent {} stale/disconnected: heartbeat timeout",
-                        inflight.agent_id
-                    ),
-                    agent_id: inflight.agent_id.clone(),
-                    metadata: std::collections::HashMap::from([(
-                        "failure_source".to_string(),
-                        "agent_stale_reaper".to_string(),
-                    )]),
-                    ..Default::default()
-                };
-                // 与 complete_agent_job 的非持久化分支一致：complete → EpisodeResult，
-                // 包成 AgentJobCompletion 唤醒 waiter（attempt 0 / session 取 job 记录）。
-                let result = crate::service::agent_complete_to_episode_result(
-                    &complete,
-                    &inflight.job.episode_id,
-                    0,
-                    &inflight.job.session_id,
-                    "failed",
-                );
-                let _ = inflight.done.send(AgentJobCompletion { complete, result });
-                reaped.push(job_id);
+                continue;
             }
+
+            self.pending
+                .entry(pool_id)
+                .or_default()
+                .push_back(replacement);
+            self.registry.decrement_load(&previous_agent_id);
+            self.reclaimed_stale_jobs.fetch_add(1, Ordering::Relaxed);
+            reclaimed += 1;
+            tracing::warn!(
+                job_id = %job_id,
+                previous_agent_id = %previous_agent_id,
+                new_run_id = %self.in_flight.get(&job_id).map(|entry| entry.run_id.clone()).unwrap_or_default(),
+                "agent_job_stale_reclaimed_requeued"
+            );
         }
-        reaped
+        reclaimed
     }
 }
 
@@ -244,6 +292,8 @@ pub struct AgentControlServiceImpl {
     pub registry: Arc<AgentRegistry>,
     /// 心跳建议间隔（毫秒），回给 Agent。
     pub heartbeat_interval_ms: i32,
+    /// Agent 心跳超时后额外等待多久才回收已领取 job。
+    pub agent_job_reclaim_grace_secs: u64,
 }
 
 #[tonic::async_trait]
@@ -287,23 +337,21 @@ impl AgentControlService for AgentControlServiceImpl {
     }
 
     /// Agent 心跳：刷新健康时间并校准负载。
-    ///
-    /// 未注册的 agent_id 返回 NOT_FOUND：Server 重启后内存注册表清空，
-    /// Agent 需要这个明确信号触发重新 RegisterAgent，而不是静默心跳落空。
     async fn agent_heartbeat(
         &self,
         request: Request<AgentHeartbeatRequest>,
     ) -> Result<Response<AgentHeartbeatResponse>, Status> {
         let req = request.into_inner();
         let known = self.registry.heartbeat(&req.agent_id, req.active_jobs);
-        if !known {
-            return Err(Status::not_found(format!(
-                "unknown agent_id={}, re-register required",
-                req.agent_id
-            )));
+        let reclaimed = self
+            .queue
+            .reclaim_stale_jobs(self.agent_job_reclaim_grace_secs)
+            .await;
+        if reclaimed > 0 {
+            tracing::warn!(reclaimed, trigger_agent_id = %req.agent_id, "agent_job_stale_reclaim_on_heartbeat");
         }
         Ok(Response::new(AgentHeartbeatResponse {
-            ok: true,
+            ok: known,
             next_heartbeat_interval_ms: self.heartbeat_interval_ms,
         }))
     }
@@ -319,20 +367,20 @@ impl AgentControlService for AgentControlServiceImpl {
     ) -> Result<Response<PollAgentJobResponse>, Status> {
         let req = request.into_inner();
 
+        let reclaimed = self
+            .queue
+            .reclaim_stale_jobs(self.agent_job_reclaim_grace_secs)
+            .await;
+        if reclaimed > 0 {
+            tracing::warn!(reclaimed, "agent_job_stale_reclaim_on_poll");
+        }
+
         let polling_agent_id = req.worker_id.clone();
         if polling_agent_id.is_empty() {
             return Ok(Response::new(PollAgentJobResponse {
                 has_job: false,
                 job: None,
             }));
-        }
-        // 与心跳一致：未注册的 agent poll 返回 NOT_FOUND，触发 Agent 侧重新注册，
-        // 避免 Server 重启后 Agent 永远 poll 空转。
-        if !self.registry.is_registered(&polling_agent_id) {
-            return Err(Status::not_found(format!(
-                "unknown agent_id={}, re-register required",
-                polling_agent_id
-            )));
         }
 
         let Some(job) = (|| {
@@ -622,6 +670,7 @@ mod tests {
                 queue: Arc::clone(&queue),
                 registry: Arc::clone(&registry),
                 heartbeat_interval_ms: 5000,
+                agent_job_reclaim_grace_secs: 0,
             },
             queue,
             registry,
@@ -704,167 +753,59 @@ mod tests {
         assert!(ok.ack);
     }
 
-    /// 把 a2 重新注册为心跳超时的 stale agent（register 幂等替换），
-    /// 模拟 poll 领取 job 之后掉线的场景。
-    fn make_a2_stale(registry: &Arc<AgentRegistry>) {
-        let mut stale = agent("a2", "2.0.0");
-        stale.last_heartbeat_at =
-            std::time::Instant::now() - std::time::Duration::from_secs(120);
-        registry.register(stale);
-    }
+    #[tokio::test]
+    async fn stale_agent_job_is_released_and_reassigned_with_a_fresh_lease() {
+        let registry = Arc::new(AgentRegistry::new(1));
+        registry.register(agent("a1", "1.0.0"));
+        registry.register(agent("a2", "1.0.0"));
+        let queue = Arc::new(AgentJobQueue::new(Arc::clone(&registry)));
+        let svc = AgentControlServiceImpl {
+            queue: Arc::clone(&queue),
+            registry: Arc::clone(&registry),
+            heartbeat_interval_ms: 5000,
+            agent_job_reclaim_grace_secs: 0,
+        };
+        let _rx = queue.enqueue("openhands-default", job("job-stale", "run-old", "1.0.0"));
+        let first = svc
+            .poll_agent_job(Request::new(PollAgentJobRequest {
+                agent_pool_id: "openhands-default".to_string(),
+                worker_id: "a1".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .job
+            .expect("a1 gets initial job");
 
-    async fn poll_job_to_a2(svc: &AgentControlServiceImpl, queue: &Arc<AgentJobQueue>) {
-        queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
-        let resp = svc
+        let mut stale_a1 = agent("a1", "1.0.0");
+        stale_a1.last_heartbeat_at = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        registry.register(stale_a1);
+        assert_eq!(queue.reclaim_stale_jobs(0).await, 1);
+        assert_eq!(queue.reclaimed_stale_jobs(), 1);
+
+        let second = svc
             .poll_agent_job(Request::new(PollAgentJobRequest {
                 agent_pool_id: "openhands-default".to_string(),
                 worker_id: "a2".to_string(),
             }))
             .await
             .unwrap()
-            .into_inner();
-        assert!(resp.has_job);
-    }
-
-    #[tokio::test]
-    async fn reaper_fails_in_flight_job_of_stale_agent_and_wakes_waiter() {
-        let (svc, queue, registry) = svc();
-        let rx = {
-            let rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
-            let resp = svc
-                .poll_agent_job(Request::new(PollAgentJobRequest {
-                    agent_pool_id: "openhands-default".to_string(),
-                    worker_id: "a2".to_string(),
-                }))
-                .await
-                .unwrap()
-                .into_inner();
-            assert!(resp.has_job);
-            rx
-        };
-        make_a2_stale(&registry);
-
-        let reaped = queue.reap_stale_agent_jobs();
-
-        assert_eq!(reaped, vec!["job-1".to_string()]);
-        assert_eq!(queue.in_flight_len(), 0);
-        let completion = rx.await.expect("waiter woken by reaper");
-        let complete = completion.complete;
-        assert_eq!(complete.status, "failed");
-        assert!(complete.error_message.contains("stale"));
-        assert_eq!(completion.result.status, "failed");
-        assert!(completion.result.error_message.contains("stale"));
-        assert_eq!(
-            complete.metadata.get("failure_source").map(String::as_str),
-            Some("agent_stale_reaper")
-        );
-    }
-
-    #[tokio::test]
-    async fn reaper_leaves_healthy_agent_jobs_untouched() {
-        let (svc, queue, _registry) = svc();
-        poll_job_to_a2(&svc, &queue).await;
-
-        let reaped = queue.reap_stale_agent_jobs();
-
-        assert!(reaped.is_empty());
-        assert_eq!(
-            queue.in_flight_snapshot(),
-            vec![("job-1".to_string(), "a2".to_string())]
-        );
-        // 健康 agent 的 complete 仍被正常接受。
-        let ok = svc
-            .complete_agent_job(Request::new(AgentJobCompleteRequest {
-                job_id: "job-1".to_string(),
-                run_id: "run-1".to_string(),
-                status: "completed".to_string(),
-                reward: 1.0,
-                trajectory_id: String::new(),
-                error_message: String::new(),
-                agent_id: "a2".to_string(),
-                ..Default::default()
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(ok.ack);
-    }
-
-    #[tokio::test]
-    async fn late_complete_after_reap_gets_unknown_job() {
-        let (svc, queue, registry) = svc();
-        poll_job_to_a2(&svc, &queue).await;
-        make_a2_stale(&registry);
-        assert_eq!(queue.reap_stale_agent_jobs(), vec!["job-1".to_string()]);
+            .into_inner()
+            .job
+            .expect("healthy agent gets requeued job");
+        assert_ne!(first.run_id, second.run_id);
 
         let late = svc
             .complete_agent_job(Request::new(AgentJobCompleteRequest {
-                job_id: "job-1".to_string(),
-                run_id: "run-1".to_string(),
-                status: "completed".to_string(),
-                reward: 1.0,
-                trajectory_id: String::new(),
-                error_message: String::new(),
-                agent_id: "a2".to_string(),
+                job_id: first.job_id,
+                run_id: first.run_id,
+                agent_id: "a1".to_string(),
                 ..Default::default()
             }))
             .await
             .unwrap()
             .into_inner();
-
         assert!(!late.ack);
-        assert_eq!(late.code, "UNKNOWN_JOB");
-    }
-
-    #[tokio::test]
-    async fn heartbeat_unknown_agent_returns_not_found() {
-        let (svc, _queue, _registry) = svc();
-
-        let err = svc
-            .agent_heartbeat(Request::new(AgentHeartbeatRequest {
-                agent_id: "ghost".to_string(),
-                active_jobs: 0,
-                timestamp_ms: 0,
-            }))
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.code(), tonic::Code::NotFound);
-    }
-
-    #[tokio::test]
-    async fn heartbeat_registered_agent_ok() {
-        let (svc, _queue, _registry) = svc();
-
-        let resp = svc
-            .agent_heartbeat(Request::new(AgentHeartbeatRequest {
-                agent_id: "a1".to_string(),
-                active_jobs: 0,
-                timestamp_ms: 0,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-
-        assert!(resp.ok);
-        assert_eq!(resp.next_heartbeat_interval_ms, 5000);
-    }
-
-    #[tokio::test]
-    async fn poll_unknown_agent_returns_not_found() {
-        let (svc, queue, _registry) = svc();
-        let _rx = queue.enqueue("openhands-default", job("job-1", "run-1", "2.0.0"));
-
-        let err = svc
-            .poll_agent_job(Request::new(PollAgentJobRequest {
-                agent_pool_id: "openhands-default".to_string(),
-                worker_id: "ghost".to_string(),
-            }))
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.code(), tonic::Code::NotFound);
-        // 未注册 agent 的 poll 不得消费队列中的 job。
-        assert!(queue.is_pending("openhands-default", "job-1"));
+        assert_eq!(late.code, "RUN_MISMATCH");
     }
 }

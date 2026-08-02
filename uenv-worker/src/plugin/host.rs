@@ -15,6 +15,16 @@ use crate::plugin::arpc::PluginRpcClient;
 use crate::plugin::instance::{PluginInstance, PluginInstanceState};
 
 static PLUGIN_INSTANCE_SEQ: AtomicU64 = AtomicU64::new(0);
+const DEFAULT_PLUGIN_READY_TIMEOUT_SECS: u64 = 2;
+const MAX_PLUGIN_READY_TIMEOUT_SECS: u64 = 300;
+
+fn plugin_ready_timeout(raw: Option<&str>) -> Duration {
+    let seconds = raw
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| (1..=MAX_PLUGIN_READY_TIMEOUT_SECS).contains(value))
+        .unwrap_or(DEFAULT_PLUGIN_READY_TIMEOUT_SECS);
+    Duration::from_secs(seconds)
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginManifest {
@@ -123,6 +133,11 @@ impl PluginHost {
         let mut child = ProcessBackend::create(&entry, &uds_path)?;
         let pid = child.id().ok_or("failed to resolve plugin pid")?;
         let started = tokio::time::Instant::now();
+        let ready_timeout = plugin_ready_timeout(
+            std::env::var("UENV_PLUGIN_READY_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        );
         while tokio::fs::metadata(&uds_path).await.is_err() {
             if let Some(status) = child.try_wait()? {
                 return Err(format!(
@@ -130,10 +145,10 @@ impl PluginHost {
                 )
                 .into());
             }
-            if started.elapsed() > Duration::from_secs(2) {
+            if started.elapsed() > ready_timeout {
                 return Err(format!(
-                    "plugin UDS did not become ready within timeout: {}",
-                    uds_path.display()
+                    "plugin UDS did not become ready within {}s timeout: {}",
+                    ready_timeout.as_secs(), uds_path.display()
                 )
                 .into());
             }
@@ -337,6 +352,20 @@ impl PluginHost {
         Ok(managed.metadata.uds_path.clone())
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_ready_timeout_is_bounded_and_defaults_to_two_seconds() {
+        assert_eq!(plugin_ready_timeout(None), Duration::from_secs(2));
+        assert_eq!(plugin_ready_timeout(Some("30")), Duration::from_secs(30));
+        assert_eq!(plugin_ready_timeout(Some("0")), Duration::from_secs(2));
+        assert_eq!(plugin_ready_timeout(Some("301")), Duration::from_secs(2));
+        assert_eq!(plugin_ready_timeout(Some("invalid")), Duration::from_secs(2));
+    }
 }
 
 fn scan_manifests(
