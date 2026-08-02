@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import threading
 import time
@@ -36,6 +37,7 @@ class ModelGatewayConfig:
     preserve_thinking: bool = False
     strip_reasoning: bool = False
     thinking_token_budget: int | None = None
+    max_tokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -44,15 +46,22 @@ class ModelGateway:
     _server: ThreadingHTTPServer | None = field(default=None, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _upstreams: list[str] = field(default_factory=list, init=False, repr=False)
+    _served_model_cache: dict[str, str | None] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _next_index: int = field(default=0, init=False, repr=False)
 
     def start(self, upstreams: list[str]) -> str:
         self.set_upstreams(upstreams)
         if self._server is None:
-            self._server = self._build_server()
-            self._thread = threading.Thread(target=self._server.serve_forever, name="uenv-model-gateway", daemon=True)
-            self._thread.start()
+            try:
+                self._server = self._build_server()
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE:
+                    raise
+                self._wait_for_existing_gateway()
+            else:
+                self._thread = threading.Thread(target=self._server.serve_forever, name="uenv-model-gateway", daemon=True)
+                self._thread.start()
         return self.public_url
 
     def stop(self) -> None:
@@ -92,6 +101,7 @@ class ModelGateway:
             raise ValueError("model gateway requires at least one upstream endpoint")
         with self._lock:
             self._upstreams = normalized
+            self._served_model_cache = {}
             self._next_index %= len(normalized)
 
     def choose_upstream(self) -> tuple[int, str]:
@@ -118,6 +128,10 @@ class ModelGateway:
                 return
 
             def _handle_proxy(self) -> None:
+                if self.command == "GET" and gateway._is_gateway_health_path(self.path):
+                    self._handle_gateway_health()
+                    return
+
                 started = time.time()
                 upstream_index = -1
                 upstream = ""
@@ -168,7 +182,49 @@ class ModelGateway:
                         }
                     )
 
+            def _handle_gateway_health(self) -> None:
+                response_body = json.dumps(
+                    {
+                        "ok": True,
+                        "upstreams": gateway.upstreams,
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+
         return ThreadingHTTPServer((self.config.bind_host, self.config.port), Handler)
+
+    def _wait_for_existing_gateway(self) -> None:
+        expected_upstreams = self.upstreams
+        deadline = time.time() + 30
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(self._gateway_health_url(), timeout=1) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if payload.get("ok") is True and payload.get("upstreams") == expected_upstreams:
+                    return
+                last_error = RuntimeError(f"gateway health upstream mismatch: {payload!r}")
+            except Exception as exc:
+                last_error = exc
+            time.sleep(0.2)
+        raise OSError(
+            errno.EADDRINUSE,
+            f"model gateway port {self.config.port} is already in use, but no compatible UEnv gateway responded: {last_error}",
+        )
+
+    def _gateway_health_url(self) -> str:
+        base = self.public_url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        return f"{base}/uenv/gateway/health"
+
+    def _is_gateway_health_path(self, path: str) -> bool:
+        route = urllib.parse.urlsplit(path).path
+        return route in {"/uenv/gateway/health", "/v1/uenv/gateway/health"}
 
     def _forward(
         self,
@@ -185,7 +241,7 @@ class ModelGateway:
             if key.lower() in {"host", "content-length", "connection", "accept-encoding"}:
                 continue
             request_headers[key] = value
-        forward_body = self._forward_request_body(method=method, path=path, headers=headers, body=body)
+        forward_body = self._forward_request_body(method=method, path=path, headers=headers, body=body, upstream=upstream)
         request = urllib.request.Request(
             upstream_url,
             data=forward_body if method != "GET" else None,
@@ -224,14 +280,15 @@ class ModelGateway:
         query = f"?{parsed.query}" if parsed.query else ""
         return f"{upstream}{route}{query}"
 
-    def _forward_request_body(self, *, method: str, path: str, headers: Any, body: bytes) -> bytes:
+    def _forward_request_body(self, *, method: str, path: str, headers: Any, body: bytes, upstream: str) -> bytes:
         should_rewrite = (
             self.config.disable_thinking
             or self.config.force_enable_thinking
             or self.config.preserve_thinking
             or self.config.thinking_token_budget is not None
+            or self.config.max_tokens is not None
         )
-        if method.upper() == "GET" or not should_rewrite or not body:
+        if method.upper() == "GET" or not body:
             return body
         if not self._is_chat_completions_path(path):
             return body
@@ -244,6 +301,10 @@ class ModelGateway:
             return body
         if not isinstance(data, dict):
             return body
+        self._rewrite_model_to_single_upstream_model(data, upstream)
+        self._clamp_generation_token_budget(data)
+        if not should_rewrite:
+            return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         chat_template_kwargs = data.get("chat_template_kwargs")
         if not isinstance(chat_template_kwargs, dict):
             chat_template_kwargs = {}
@@ -257,6 +318,65 @@ class ModelGateway:
         if self.config.thinking_token_budget is not None:
             data["thinking_token_budget"] = self.config.thinking_token_budget
         return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    def _clamp_generation_token_budget(self, data: dict[str, Any]) -> None:
+        limit = self.config.max_tokens
+        if limit is None or limit <= 0:
+            return
+        token_keys = ("max_tokens", "max_completion_tokens", "max_new_tokens", "max_output_tokens")
+        has_token_budget = False
+        for key in token_keys:
+            if key not in data:
+                continue
+            has_token_budget = True
+            data[key] = self._clamped_token_value(data.get(key), limit)
+        if not has_token_budget:
+            data["max_tokens"] = limit
+
+    def _clamped_token_value(self, value: Any, limit: int) -> Any:
+        if value in (None, ""):
+            return limit
+        try:
+            current = int(value)
+        except (TypeError, ValueError):
+            return value
+        return min(current, limit)
+
+    def _rewrite_model_to_single_upstream_model(self, data: dict[str, Any], upstream: str) -> None:
+        requested_model = data.get("model")
+        if not isinstance(requested_model, str) or not requested_model:
+            return
+        served_model = self._single_upstream_model(upstream)
+        if not served_model or served_model == requested_model:
+            return
+        data["model"] = served_model
+
+    def _single_upstream_model(self, upstream: str) -> str | None:
+        missing = object()
+        with self._lock:
+            cached = self._served_model_cache.get(upstream, missing)
+        if cached is not missing:
+            return cached
+
+        served_model: str | None = None
+        try:
+            request = urllib.request.Request(f"{upstream}/models", method="GET")
+            with urllib.request.urlopen(request, timeout=min(self.config.request_timeout_seconds, 10.0)) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            models = payload.get("data") if isinstance(payload, dict) else None
+            ids = [
+                item.get("id")
+                for item in models or []
+                if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
+            ]
+            if len(ids) == 1:
+                served_model = ids[0]
+        except Exception:
+            served_model = None
+
+        with self._lock:
+            self._served_model_cache[upstream] = served_model
+        return served_model
 
     def _is_chat_completions_path(self, path: str) -> bool:
         route = urllib.parse.urlsplit(path).path.rstrip("/")
@@ -280,7 +400,7 @@ class ModelGateway:
         return self._attach_model_version(response_body, upstream=upstream, model_version=model_version), model_version
 
     def _response_without_reasoning(self, response_body: bytes) -> bytes:
-        if not self.config.strip_reasoning:
+        if not self.config.strip_reasoning and not self.config.preserve_thinking:
             return response_body
         try:
             data = json.loads(response_body.decode("utf-8"))
@@ -296,8 +416,15 @@ class ModelGateway:
             message = choice.get("message")
             if not isinstance(message, dict):
                 continue
+            if self.config.preserve_thinking:
+                reasoning = self._first_value(message, "reasoning", "reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    content = message.get("content")
+                    think = f"<think>\n{reasoning}\n</think>"
+                    message["content"] = f"{think}\n{content}" if isinstance(content, str) and content else think
+                    changed = True
             for key in ("reasoning", "reasoning_content", "reasoning_details"):
-                if key in message:
+                if self.config.strip_reasoning and key in message:
                     message.pop(key, None)
                     changed = True
         if not changed:
