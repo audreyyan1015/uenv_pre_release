@@ -23,6 +23,9 @@
   model_gateway_public_url: ${oc.env:UENV_MODEL_GATEWAY_PUBLIC_URL,""}
   model_gateway_log_path: ${oc.env:UENV_MODEL_GATEWAY_LOG_PATH,""}
   model_gateway_disable_thinking: ${oc.env:UENV_MODEL_GATEWAY_DISABLE_THINKING,false}
+  model_gateway_max_tokens: ${oc.env:UENV_MODEL_GATEWAY_MAX_TOKENS,""}
+  model_gateway_stop_on_close: ${oc.env:UENV_MODEL_GATEWAY_STOP_ON_CLOSE,true}
+  require_swe_response_trace: ${oc.env:UENV_REQUIRE_SWE_RESPONSE_TRACE,true}
   parallel_mode: ${oc.env:UENV_AGENT_LOOP_PARALLEL_MODE,sync}
   batch_size: ${oc.env:UENV_AGENT_LOOP_BATCH_SIZE,0}
   batch_retry_attempts: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS,3}
