@@ -211,6 +211,7 @@ fn agents_json(state: &ServerState) -> Value {
     json!({
         "server_epoch":      status.server_epoch,
         "agent_count":       status.agent_count,
+        "stale_reclaimed_jobs": status.stale_reclaimed_jobs,
         // outstanding 表示已入队但尚未完成的 AgentJob 总数，等于 pending + running。
         "outstanding_jobs":  status.outstanding_jobs,
         "pending_jobs":      status.pending_jobs,   // 已入队、尚未被 Agent 领取。

@@ -47,12 +47,10 @@ except Exception:
             if self.tokenizer is None:
                 return []
             if hasattr(self.tokenizer, "apply_chat_template"):
-                return list(
-                    self.tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=True,
-                        add_generation_prompt=True,
-                    )
+                return self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
                 )
             return list(self.tokenizer.encode(prompt_text(messages), add_special_tokens=False))
 
@@ -828,7 +826,31 @@ class UEnvAgentLoop(AgentLoopBase):
 
     async def _prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
         prompt_ids = await self.apply_chat_template(messages)
-        return [int(token_id) for token_id in prompt_ids]
+        return self._normalize_token_ids(prompt_ids)
+
+    def _normalize_token_ids(self, tokenized_output: Any) -> list[int]:
+        token_ids = tokenized_output
+        if isinstance(tokenized_output, dict):
+            token_ids = tokenized_output.get("input_ids", tokenized_output)
+        elif hasattr(tokenized_output, "input_ids"):
+            token_ids = tokenized_output.input_ids
+
+        token_ids = self._python_value(token_ids)
+        if isinstance(token_ids, tuple):
+            token_ids = list(token_ids)
+        if isinstance(token_ids, list) and len(token_ids) == 1 and isinstance(token_ids[0], (list, tuple)):
+            token_ids = list(token_ids[0])
+        if not isinstance(token_ids, list):
+            raise TypeError(f"token_ids must be list-like token ids, got {type(token_ids).__name__}: {token_ids!r}")
+
+        normalized_ids = []
+        for index, token_id in enumerate(token_ids):
+            token_id = self._python_value(token_id)
+            try:
+                normalized_ids.append(int(token_id))
+            except (TypeError, ValueError) as exc:
+                raise TypeError(f"token_id at index {index} must be int-convertible, got {token_id!r}") from exc
+        return normalized_ids
 
     def _messages_from_raw_prompt(self, raw_prompt: Any) -> list[dict[str, Any]]:
         value = self._python_value(raw_prompt)

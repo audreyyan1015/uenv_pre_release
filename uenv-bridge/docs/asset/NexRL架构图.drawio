@@ -1,0 +1,83 @@
+<mxfile host="65bd71144e" scale="10" border="0">
+    <diagram id="nexrl-uenv-architecture" name="NexRL-UEnv-Architecture">
+        <mxGraphModel dx="755" dy="588" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="NexRL service-oriented RL training flow and UEnv integration points" style="text;html=1;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="160" y="20" width="1080" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="nexrl_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eef6ff;strokeColor=#4b8bbe;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="90" width="800" height="550" as="geometry"/>
+                </mxCell>
+                <mxCell id="data" value="DataLoader&#xa;training samples" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="350" y="170" width="150" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="rollout" value="RolloutWorker&#xa;agent/env interaction" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="570" y="170" width="170" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="infer" value="Inference Service&#xa;OpenAI-compatible&#xa;SGLang / vLLM / TGI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="815" y="220" width="210" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="traj" value="TrajectoryPool&#xa;group / buffer / batch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="340" y="320" width="170" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="trainer" value="Trainer&#xa;GRPO / OPD / SFT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="570" y="400" width="170" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="train_service" value="Train Service&#xa;forward / forward_backward&#xa;FSDP / Megatron / Tinker / Weaver" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="805" y="520" width="230" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" parent="1" source="data" target="rollout" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" parent="1" source="rollout" target="traj" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="655" y="280"/>
+                            <mxPoint x="425" y="280"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="traj" target="trainer" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="425" y="440"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="trainer" target="train_service" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="865" y="449.9999999999999" as="sourcePoint"/>
+                        <mxPoint x="1215" y="560" as="targetPoint"/>
+                        <Array as="points">
+                            <mxPoint x="655" y="565"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e5" value="weight sync" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;dashed=1;" parent="1" source="train_service" target="sync" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e6" value="updated weights" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;dashed=1;" parent="1" source="sync" target="infer" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e7" value="OpenAI API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" parent="1" source="rollout" target="infer" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="4" value="NexRL Controller / Ray Actors" style="text;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontFamily=Helvetica;fontSize=16;fontColor=default;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="565" y="110" width="240" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="trainer" target="sync" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="740" y="460" as="sourcePoint"/>
+                        <mxPoint x="920" y="530" as="targetPoint"/>
+                        <Array as="points"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="sync" value="WeightSyncController&#xa;policy version / freeze / sync" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;" parent="1" vertex="1">
+                    <mxGeometry x="815" y="402.5" width="210" height="75" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

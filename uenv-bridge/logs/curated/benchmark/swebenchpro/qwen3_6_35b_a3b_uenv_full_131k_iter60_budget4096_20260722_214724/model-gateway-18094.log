@@ -1,0 +1,2 @@
+gateway_url=http://10.10.20.142:18094/v1
+upstreams=['http://127.0.0.1:18081/v1']

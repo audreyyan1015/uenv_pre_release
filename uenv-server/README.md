@@ -2,7 +2,7 @@
 
 UEnv Server 是 UEnv **全栈方案** 的控制平面：接收训练框架（或 Mock 客户端）提交的 Episode，维护 Worker 注册表与调度决策，**主动**调用 Worker `DispatchEpisode`。
 
-> Layer 2 Worker Pool 权威文档：[Docs/worker-pool-layer-design.md](../Docs/worker-pool-layer-design.md)  
+> Layer 2 Worker Pool 权威文档：[Docs/worker-pool-layer-design.md](../Docs/worker-pool-layer-design.md)
 > 协议规范：[PROTOCOL.md](../PROTOCOL.md)
 
 ## 克隆本项目

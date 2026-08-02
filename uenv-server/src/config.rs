@@ -38,6 +38,8 @@ pub struct SchedulerConfig {
     pub heartbeat_interval_ms: u64,
     /// Worker 超过此秒数无心跳则认为连接断开（默认 30s，约 6 个心跳周期）
     pub heartbeat_timeout_secs: u64,
+    /// AgentJob 在 Agent 心跳超时后额外等待的秒数；超过后会回收旧 lease 并重入队。
+    pub agent_job_reclaim_grace_secs: u64,
     /// 多池路由：benchmark 变体 → Agent 池 的映射（如 {pro: openhands-pro}）。
     /// 空表示不启用变体选池策略。请求不指定池时，Server 据此自动选池。
     pub agent_pool_routing: HashMap<String, String>,
@@ -113,6 +115,7 @@ impl Default for SchedulerConfig {
             schedule_retry_interval_ms: 500,
             heartbeat_interval_ms: 5000,
             heartbeat_timeout_secs: 30,
+            agent_job_reclaim_grace_secs: 15,
             agent_pool_routing: HashMap::new(),
         }
     }
@@ -305,6 +308,7 @@ episode:
         assert_eq!(cfg.scheduler.schedule_retry_interval_ms, 500);
         assert_eq!(cfg.scheduler.heartbeat_interval_ms, 5000);
         assert_eq!(cfg.scheduler.heartbeat_timeout_secs, 30);
+        assert_eq!(cfg.scheduler.agent_job_reclaim_grace_secs, 15);
         assert_eq!(cfg.episode.default_timeout_secs, 300);
         assert_eq!(cfg.episode.stale_warning_secs, 150);
         assert_eq!(cfg.episode.max_attempts, 3);
@@ -328,6 +332,7 @@ episode:
         assert_eq!(cfg.scheduler.schedule_retry_interval_ms, 250);
         assert_eq!(cfg.scheduler.heartbeat_interval_ms, 3000);
         assert_eq!(cfg.scheduler.heartbeat_timeout_secs, 30); // 未在 YAML 中设置，应为默认值
+        assert_eq!(cfg.scheduler.agent_job_reclaim_grace_secs, 15);
         assert_eq!(cfg.episode.default_timeout_secs, 180);
         assert_eq!(cfg.episode.stale_warning_secs, 400);
         assert_eq!(cfg.episode.max_attempts, 5);

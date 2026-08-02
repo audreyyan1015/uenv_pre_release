@@ -16,6 +16,7 @@ LOG_DIR=${LOG_DIR:-${REPO_DIR}/logs/verl_grpo_${TRAINING_STEPS}step_agent_loop}
 SAMPLE_COUNT=${SAMPLE_COUNT:-2}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ROLLOUT_N=${ROLLOUT_N:-2}
+ROLLOUT_CALCULATE_LOG_PROBS=${ROLLOUT_CALCULATE_LOG_PROBS:-False}
 ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-False}
 ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-False}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.25}
@@ -148,7 +149,7 @@ python3 -m verl.trainer.main_ppo \\
   +actor_rollout_ref.rollout.enable_sleep_mode=${ROLLOUT_ENABLE_SLEEP_MODE} \\
   actor_rollout_ref.rollout.max_num_seqs=4 \\
   actor_rollout_ref.rollout.max_num_batched_tokens=512 \\
-  actor_rollout_ref.rollout.calculate_log_probs=True \\
+  actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \\
   actor_rollout_ref.ref.fsdp_config.param_offload=True \\
   actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \\
