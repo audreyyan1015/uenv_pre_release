@@ -363,6 +363,16 @@ impl HttpClient {
         self.send_body(Method::POST, "/api/v1/envs", req).await
     }
 
+    /// Patch an existing environment's registry metadata (Publisher role).
+    pub async fn patch_env(
+        &self,
+        env_type: &str,
+        req: &uenv_hub_types::EnvPatchRequest,
+    ) -> Result<EnvDetail> {
+        self.send_body(Method::PATCH, &format!("/api/v1/envs/{env_type}"), req)
+            .await
+    }
+
     pub async fn list_templates(&self) -> Result<Vec<TemplateSummary>> {
         self.get_json("/api/v1/templates", &[], None).await
     }
@@ -392,6 +402,74 @@ impl HttpClient {
         self.get_json(
             "/api/v1/packages",
             &[("page", page.to_string()), ("per_page", per_page.to_string())],
+            None,
+        )
+        .await
+    }
+
+    /// List the Agent-bridge catalog (scaffolds this Hub publishes).
+    pub async fn list_agent_bridges(
+        &self,
+    ) -> Result<Vec<uenv_hub_types::AgentBridgeSummary>> {
+        self.get_json("/api/v1/agent-bridges", &[], None).await
+    }
+
+    // --- Episode Stacks ----------------------------------------------------
+
+    /// Publish an Episode Stack version (Publisher role). The Hub cross-checks the
+    /// composition before storing it, so a rejected call means the components do
+    /// not fit together — not that the request was malformed.
+    pub async fn publish_stack(
+        &self,
+        stack_id: &str,
+        req: &uenv_hub_types::PublishStackRequest,
+    ) -> Result<uenv_hub_types::PublishStackResponse> {
+        self.send_body(
+            Method::POST,
+            &format!("/api/v1/episode-stacks/{stack_id}/versions"),
+            req,
+        )
+        .await
+    }
+
+    /// List registered Episode Stacks (latest version of each).
+    pub async fn list_stacks(
+        &self,
+        page: u32,
+        per_page: u32,
+    ) -> Result<Page<uenv_hub_types::StackSummary>> {
+        self.get_json(
+            "/api/v1/episode-stacks",
+            &[("page", page.to_string()), ("per_page", per_page.to_string())],
+            None,
+        )
+        .await
+    }
+
+    /// Fetch one Episode Stack version's stored declaration (`latest` ok).
+    pub async fn get_stack(
+        &self,
+        stack_id: &str,
+        version: &str,
+    ) -> Result<uenv_hub_types::EpisodeStackManifest> {
+        self.get_json(
+            &format!("/api/v1/episode-stacks/{stack_id}/versions/{version}"),
+            &[],
+            None,
+        )
+        .await
+    }
+
+    /// Resolve an Episode Stack into a launch plan: every component pinned, the
+    /// EnvPackage sync plans, and the `stack_digest` identifying the whole thing.
+    pub async fn resolve_stack(
+        &self,
+        stack_id: &str,
+        version: &str,
+    ) -> Result<uenv_hub_types::ResolvedEpisodeStack> {
+        self.get_json(
+            &format!("/api/v1/episode-stacks/{stack_id}/versions/{version}/resolve"),
+            &[],
             None,
         )
         .await

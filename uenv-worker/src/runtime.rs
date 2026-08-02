@@ -3,18 +3,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::State;
 use axum::routing::get;
-use axum::Router;
 use tonic::transport::Server;
 
 use crate::control_plane::client::{
-    detect_resource_spec, ControlPlane, SchedulerControlPlaneClient, SchedulerMode,
+    ControlPlane, SchedulerControlPlaneClient, SchedulerMode, detect_resource_spec,
 };
 use crate::episode::executor::EpisodeExecutor;
-use crate::llm::LlmConfig;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
 use crate::hub::{self, EnvResolver};
+use crate::llm::LlmConfig;
 use crate::metrics::MetricsExporter;
 use crate::plugin::host::PluginHost;
 use crate::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
@@ -51,7 +51,7 @@ pub struct WorkerRuntime {
     pub swe_prewarm: Vec<String>,
     pub swe_warm_tag: bool,
     pub swe_seccomp_dir: Option<String>,
-    pub swe_env_package_dir: Option<String>,
+    pub swe_env_package_dirs: Vec<String>,
 }
 
 impl WorkerRuntime {
@@ -197,7 +197,7 @@ impl WorkerRuntime {
         let metrics = MetricsExporter::new();
         let worker_id = self.worker_id.clone();
         let gw_public = gateway_public_url(&self.gateway_listen);
-        let synced_packages = load_synced_env_packages(self.swe_env_package_dir.as_deref());
+        let synced_packages = load_synced_env_packages(&self.swe_env_package_dirs);
         let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
             scheduler_mode,
             self.server_endpoint.clone(),
@@ -226,6 +226,7 @@ impl WorkerRuntime {
         control_plane.spawn_heartbeat_loop();
         let wal = WalWriter::new(&self.wal_dir)?;
         metrics.set_wal_pending_records(wal.pending_count());
+        metrics.set_wal_quarantined_records(wal.quarantined_count());
         control_plane.spawn_replay_loop(wal.clone(), metrics.clone());
 
         // SWE-bench 实例目录：优先 Hub 下发，失败回退本地 fixtures（与 env manifest 降级一致）。
@@ -235,7 +236,7 @@ impl WorkerRuntime {
                 hub_endpoint.as_deref(),
                 hub_token.as_deref(),
                 &self.swe_variants,
-                self.swe_env_package_dir.as_deref(),
+                &self.swe_env_package_dirs,
             )
             .await,
         );
@@ -251,7 +252,8 @@ impl WorkerRuntime {
         let swe_seccomp_dir = self.swe_seccomp_dir.as_ref().map(PathBuf::from);
         // M4：加载本地已同步的 Hub EnvPackage（含预制镜像 tar），使池优先从 Hub tar
         // `docker load` 镜像而非公网 pull（「Hub 批发镜像给 Worker」落地）。
-        let swe_env_package = load_env_package_dir(self.swe_env_package_dir.as_deref());
+        // 多包时取「含最多 image tar」的包用于 preload；catalog 已在上方合并。
+        let swe_env_package = load_env_package_dir_for_images(&self.swe_env_package_dirs);
         if let Some(pkg) = &swe_env_package {
             let tars = pkg.image_tars().len();
             tracing::info!(
@@ -265,14 +267,15 @@ impl WorkerRuntime {
             );
         }
         let swe_pool = Arc::new(
-            crate::swe::instance_pool::SweInstancePool::new(swe_store.clone(), swe_runtime, swe_capacity)
-                .with_metrics(metrics.clone())
-                .with_seccomp_dir(swe_seccomp_dir)
-                .with_env_package(swe_env_package)
-                .with_trajectory_meta(
-                    worker_id,
-                    gateway_public_url(&self.gateway_listen),
-                ),
+            crate::swe::instance_pool::SweInstancePool::new(
+                swe_store.clone(),
+                swe_runtime,
+                swe_capacity,
+            )
+            .with_metrics(metrics.clone())
+            .with_seccomp_dir(swe_seccomp_dir)
+            .with_env_package(swe_env_package)
+            .with_trajectory_meta(worker_id, gateway_public_url(&self.gateway_listen)),
         );
 
         // M2-1 / M4-4：启动按 catalog 子集预热镜像（去冷拉延迟）；M0-3/M4-3 可选 warm tag 写回。
@@ -280,9 +283,10 @@ impl WorkerRuntime {
             let pool = swe_pool.clone();
             let ids = self.swe_prewarm.clone();
             let warm_tag = self.swe_warm_tag;
-            let (ok, fail) = tokio::task::spawn_blocking(move || pool.prewarm_images(&ids, warm_tag))
-                .await
-                .unwrap_or((0, 0));
+            let (ok, fail) =
+                tokio::task::spawn_blocking(move || pool.prewarm_images(&ids, warm_tag))
+                    .await
+                    .unwrap_or((0, 0));
             tracing::info!(
                 trace_id = "runtime",
                 worker_id = "worker",
@@ -299,13 +303,8 @@ impl WorkerRuntime {
             let listen = self.gateway_listen.clone();
             let api_key = self.gateway_api_key.clone();
             tokio::spawn(async move {
-                if let Err(err) = crate::runtime_gateway::serve_gateway(
-                    pool,
-                    listen,
-                    api_key,
-                    gw_public,
-                )
-                .await
+                if let Err(err) =
+                    crate::runtime_gateway::serve_gateway(pool, listen, api_key, gw_public).await
                 {
                     tracing::error!(
                         trace_id = "runtime",
@@ -332,14 +331,23 @@ impl WorkerRuntime {
             wal,
             self.disconnect_dispatch_policy,
         );
-        spawn_observability_server(metrics, self.metrics_listen.clone(), self.health_listen.clone()).await?;
+        spawn_observability_server(
+            metrics,
+            self.metrics_listen.clone(),
+            self.health_listen.clone(),
+        )
+        .await?;
         let addr: SocketAddr = self.listen.parse()?;
         // 长耗时 episode（OlymMATH thinking 可达数分钟）期间 DispatchEpisode 可能长时间
         // 只有 progress/heartbeat frame。开启 HTTP/2 + TCP keepalive，避免中间层/对端空闲重置。
-        let http2_keepalive_interval =
-            Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS", 30));
-        let http2_keepalive_timeout =
-            Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS", 10));
+        let http2_keepalive_interval = Duration::from_secs(env_u64_default(
+            "UENV_WORKER_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS",
+            30,
+        ));
+        let http2_keepalive_timeout = Duration::from_secs(env_u64_default(
+            "UENV_WORKER_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS",
+            10,
+        ));
         let tcp_keepalive =
             Duration::from_secs(env_u64_default("UENV_WORKER_GRPC_TCP_KEEPALIVE_SECS", 60));
         let max_message_bytes =
@@ -421,59 +429,85 @@ fn gateway_public_url(listen: &str) -> String {
     }
 }
 
-/// Load the synced Hub EnvPackage directory (for hosted image-tar preload), if
-/// configured via arg or `UENV_SWE_ENV_PACKAGE` and actually synced.
-fn load_env_package_dir(
-    env_package_dir: Option<&str>,
+/// Load the synced Hub EnvPackage directory used for hosted image-tar preload.
+/// When multiple packages are configured, prefer the one with the most image tars
+/// (Pro packages typically host tars; Smith usually relies on local docker images).
+fn load_env_package_dir_for_images(
+    env_package_dirs: &[String],
 ) -> Option<std::sync::Arc<crate::swe::env_package::EnvPackageDir>> {
     use crate::swe::env_package::EnvPackageDir;
-    let dir = env_package_dir
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("UENV_SWE_ENV_PACKAGE").ok())
-        .filter(|s| !s.trim().is_empty())?;
-    let path = std::path::Path::new(&dir);
-    if !EnvPackageDir::is_synced(path) {
-        return None;
-    }
-    match EnvPackageDir::load(path) {
-        Ok(pkg) => Some(std::sync::Arc::new(pkg)),
-        Err(err) => {
-            tracing::warn!(dir = %dir, error = %err, msg = "swe_env_package_load_failed_for_image_preload");
-            None
+    let mut best: Option<(usize, EnvPackageDir)> = None;
+    for dir in resolve_env_package_dirs(env_package_dirs) {
+        let path = std::path::Path::new(&dir);
+        if !EnvPackageDir::is_synced(path) {
+            continue;
+        }
+        match EnvPackageDir::load(path) {
+            Ok(pkg) => {
+                let tars = pkg.image_tars().len();
+                match &best {
+                    Some((n, _)) if *n >= tars => {}
+                    _ => best = Some((tars, pkg)),
+                }
+            }
+            Err(err) => {
+                tracing::warn!(dir = %dir, error = %err, msg = "swe_env_package_load_failed_for_image_preload");
+            }
         }
     }
+    best.map(|(_, pkg)| std::sync::Arc::new(pkg))
 }
 
-/// Build RegisterWorker.synced_env_packages from a synced EnvPackage directory.
-fn load_synced_env_packages(env_package_dir: Option<&str>) -> Vec<crate::proto::scheduler::v1::SyncedEnvPackage> {
+/// Build RegisterWorker.synced_env_packages from all synced EnvPackage directories.
+fn load_synced_env_packages(
+    env_package_dirs: &[String],
+) -> Vec<crate::proto::scheduler::v1::SyncedEnvPackage> {
     use crate::proto::scheduler::v1::SyncedEnvPackage;
     use crate::swe::env_package::EnvPackageDir;
-    let Some(dir) = env_package_dir
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("UENV_SWE_ENV_PACKAGE").ok())
-        .filter(|s| !s.trim().is_empty())
-    else {
-        return Vec::new();
+    let mut out = Vec::new();
+    for dir in resolve_env_package_dirs(env_package_dirs) {
+        let path = std::path::Path::new(&dir);
+        if !EnvPackageDir::is_synced(path) {
+            continue;
+        }
+        let marker = EnvPackageDir::read_synced_marker(path);
+        let pkg = match EnvPackageDir::load(path) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        out.push(SyncedEnvPackage {
+            package_id: pkg.package_id,
+            version: pkg.version,
+            bundle_digest: marker.map(|m| m.bundle_digest).unwrap_or_default(),
+        });
+    }
+    out
+}
+
+/// Collect EnvPackage dirs from runtime config + env fallbacks (`UENV_SWE_ENV_PACKAGE`
+/// / `UENV_SWE_ENV_PACKAGES`), de-duplicated in order.
+fn resolve_env_package_dirs(configured: &[String]) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let push = |dirs: &mut Vec<String>, s: &str| {
+        let t = s.trim();
+        if !t.is_empty() && !dirs.iter().any(|x| x == t) {
+            dirs.push(t.to_string());
+        }
     };
-    let path = std::path::Path::new(&dir);
-    if !EnvPackageDir::is_synced(path) {
-        return Vec::new();
+    for d in configured {
+        push(&mut dirs, d);
     }
-    let marker = EnvPackageDir::read_synced_marker(path);
-    let pkg = EnvPackageDir::load(path).ok();
-    match (marker, pkg) {
-        (Some(m), Some(p)) => vec![SyncedEnvPackage {
-            package_id: p.package_id,
-            version: p.version,
-            bundle_digest: m.bundle_digest,
-        }],
-        (None, Some(p)) => vec![SyncedEnvPackage {
-            package_id: p.package_id,
-            version: p.version,
-            bundle_digest: String::new(),
-        }],
-        _ => Vec::new(),
+    if dirs.is_empty() {
+        if let Ok(v) = std::env::var("UENV_SWE_ENV_PACKAGE") {
+            push(&mut dirs, &v);
+        }
     }
+    if let Ok(v) = std::env::var("UENV_SWE_ENV_PACKAGES") {
+        for part in v.split(',') {
+            push(&mut dirs, part);
+        }
+    }
+    dirs
 }
 
 /// 加载 SWE-bench 实例目录
@@ -483,11 +517,11 @@ async fn load_swe_catalog(
     hub_endpoint: Option<&str>,
     hub_token: Option<&str>,
     variants: &[String],
-    env_package_dir: Option<&str>,
+    env_package_dirs: &[String],
 ) -> crate::swe::dataset::InstanceStore {
     use crate::swe::dataset::InstanceStore;
-    let local_path =
-        std::env::var("UENV_SWE_INSTANCES").unwrap_or_else(|_| "fixtures/swe/swe_instances.json".to_string());
+    let local_path = std::env::var("UENV_SWE_INSTANCES")
+        .unwrap_or_else(|_| "fixtures/swe/swe_instances.json".to_string());
     let variants: Vec<String> = if variants.is_empty() {
         vec!["verified".to_string()]
     } else {
@@ -495,16 +529,12 @@ async fn load_swe_catalog(
     };
 
     let mut merged = InstanceStore::default();
+    let mut loaded_from_package = false;
 
-    // Highest precedence: a locally-synced Hub EnvPackage (uenv env sync output).
-    // Loading the catalog from here is what lets the Worker run a complete,
-    // pre-provisioned environment without re-pulling from third parties.
-    let env_pkg_dir = env_package_dir
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("UENV_SWE_ENV_PACKAGE").ok())
-        .filter(|s| !s.trim().is_empty());
-    if let Some(dir) = &env_pkg_dir {
-        match crate::swe::env_package::EnvPackageDir::load(std::path::Path::new(dir)) {
+    // Highest precedence: locally-synced Hub EnvPackage dirs (uenv env sync output).
+    // Multiple packages (e.g. Pro + Smith) are merged; later dirs override same instance_id.
+    for dir in resolve_env_package_dirs(env_package_dirs) {
+        match crate::swe::env_package::EnvPackageDir::load(std::path::Path::new(&dir)) {
             Ok(pkg) => match InstanceStore::from_json_file(&pkg.catalog_path) {
                 Ok(store) => {
                     tracing::info!(
@@ -520,8 +550,6 @@ async fn load_swe_catalog(
                         path = %pkg.catalog_path.display(),
                         msg = "swe_catalog_loaded_from_env_package"
                     );
-                    // Honesty for ops: if the package mandates local_only but the
-                    // runtime policy env is unset, warn (we never mutate process env).
                     if matches!(
                         pkg.image_pull_policy,
                         Some(crate::swe::image_cache::ImagePullPolicy::LocalOnly)
@@ -533,7 +561,7 @@ async fn load_swe_catalog(
                         );
                     }
                     merged.merge_from(store);
-                    return finalize_catalog(merged);
+                    loaded_from_package = true;
                 }
                 Err(err) => tracing::warn!(
                     trace_id = "runtime",
@@ -553,6 +581,11 @@ async fn load_swe_catalog(
                 msg = "swe_env_package_load_failed_falling_back"
             ),
         }
+    }
+    if loaded_from_package {
+        // Still allow EXTRA catalog merge for ad-hoc smoke instances.
+        merge_extra_catalog(&mut merged);
+        return finalize_catalog(merged);
     }
 
     if hub_enabled {
@@ -589,7 +622,6 @@ async fn load_swe_catalog(
                             error = %err,
                             msg = "swe_catalog_hub_pull_failed"
                         );
-                        // 变体级本地回退（Hub 未 seed pro 时仍可用 config/swe/{variant}.json）。
                         let variant_path = format!("config/swe/{variant}.json");
                         if let Ok(store) = InstanceStore::from_json_file(&variant_path) {
                             tracing::info!(
@@ -633,7 +665,13 @@ async fn load_swe_catalog(
         }
     }
 
-    // 可选：合并额外本地 catalog（联调/烟雾实例，不覆盖 Hub 同 id）。
+    merge_extra_catalog(&mut merged);
+    // plan §6.2 启动校验：变体与镜像命名空间一致性（Pro 不得占用 sweb.eval.*）。
+    finalize_catalog(merged)
+}
+
+fn merge_extra_catalog(merged: &mut crate::swe::dataset::InstanceStore) {
+    use crate::swe::dataset::InstanceStore;
     if let Ok(extra_path) = std::env::var("UENV_SWE_EXTRA_CATALOG") {
         let extra_path = extra_path.trim();
         if !extra_path.is_empty() {
@@ -660,14 +698,13 @@ async fn load_swe_catalog(
             }
         }
     }
-
-    // plan §6.2 启动校验：变体与镜像命名空间一致性（Pro 不得占用 sweb.eval.*）。
-    finalize_catalog(merged)
 }
 
 /// Startup validation common to every catalog source: warn on image-namespace
 /// violations (Pro must not occupy `sweb.eval.*`) and return the store.
-fn finalize_catalog(merged: crate::swe::dataset::InstanceStore) -> crate::swe::dataset::InstanceStore {
+fn finalize_catalog(
+    merged: crate::swe::dataset::InstanceStore,
+) -> crate::swe::dataset::InstanceStore {
     let violations = merged.image_namespace_violations();
     if !violations.is_empty() {
         tracing::warn!(
@@ -688,7 +725,9 @@ async fn spawn_observability_server(
     health_listen: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if metrics_listen != health_listen {
-        return Err("metrics_listen and health_listen must be equal in current implementation".into());
+        return Err(
+            "metrics_listen and health_listen must be equal in current implementation".into(),
+        );
     }
     let addr: SocketAddr = metrics_listen.parse()?;
     let app = Router::new()

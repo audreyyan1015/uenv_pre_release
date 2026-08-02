@@ -1,0 +1,12 @@
+{
+  "input_matched": 1,
+  "skipped_filter": 0,
+  "error_count": 0,
+  "resolved_count": 1,
+  "resolve_rate": 1.0,
+  "variants": [
+    "smith"
+  ],
+  "output_dir": "Docs/worker/260801/artifacts/swesmith-rollout-smoke",
+  "errors": []
+}

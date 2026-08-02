@@ -25,6 +25,24 @@ class AgentControlUnavailable(RuntimeError):
     """grpcio 未安装或 agent stub 未生成时抛出。"""
 
 
+class AgentRegistrationLost(RuntimeError):
+    """Server 侧已没有该 agent 的注册（NOT_FOUND 或心跳 ok=false）。
+
+    Server 重启后内存注册表清空，Agent 收到此异常应重新 RegisterAgent。
+    """
+
+
+def _is_not_found(grpc_mod: Any, exc: Exception) -> bool:
+    """判断异常是否为 gRPC NOT_FOUND（Server 表示 agent 未注册）。"""
+    code = getattr(exc, "code", None)
+    if not callable(code):
+        return False
+    try:
+        return code() == grpc_mod.StatusCode.NOT_FOUND
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _load_grpc_modules() -> tuple[Any, Any, Any]:
     """懒加载 grpc + 生成的 agent stub。失败抛 AgentControlUnavailable。"""
     try:
@@ -38,6 +56,7 @@ def _load_grpc_modules() -> tuple[Any, Any, Any]:
     # 生成的 stub 位于 gen/uenv/v1/（包名 uenv.v1）；旧文档曾写扁平 gen/agent_pb2。
     pb2 = None
     pb2_grpc = None
+    import_errors: list[str] = []
     for pkg in (
         "uenv.v1",
         "uenv_runtime.gen.uenv.v1",
@@ -51,12 +70,17 @@ def _load_grpc_modules() -> tuple[Any, Any, Any]:
             sys.modules.setdefault("agent_pb2", pb2)
             pb2_grpc = importlib.import_module(f"{prefix}agent_pb2_grpc")
             break
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            import_errors.append(
+                f"{prefix or '<root>'}agent_pb2_grpc: "
+                f"{type(exc).__name__}: {exc}"
+            )
             continue
     if pb2 is None or pb2_grpc is None:
         raise AgentControlUnavailable(
             "agent gRPC stub not found; run `make proto-agent-python` to generate "
-            "integrations/openhands/uenv_runtime/gen/agent_pb2*.py"
+            "integrations/openhands/uenv_runtime/gen/agent_pb2*.py; "
+            "import failures: " + " | ".join(import_errors)
         )
     return grpc, pb2, pb2_grpc
 
@@ -128,7 +152,14 @@ class AgentControlClient:
             agent_pool_id=agent_pool_id,
             worker_id=agent_id,
         )
-        resp = self._stub.PollAgentJob(req, timeout=self.timeout_sec)
+        try:
+            resp = self._stub.PollAgentJob(req, timeout=self.timeout_sec)
+        except Exception as exc:
+            if _is_not_found(self._grpc, exc):
+                raise AgentRegistrationLost(
+                    f"server lost registration for agent_id={agent_id} (NOT_FOUND)"
+                ) from exc
+            raise
         if not resp.has_job:
             return None
         return _job_from_proto(resp.job)
@@ -211,18 +242,37 @@ class AgentControlClient:
         return bool(resp.ack)
 
     def agent_heartbeat(self, agent_id: str, active_jobs: int, timestamp_ms: int = 0) -> int:
-        """上报心跳，返回 Server 建议的下次间隔（ms）。"""
+        """上报心跳，返回 Server 建议的下次间隔（ms）。
+
+        Server 已不认识该 agent（重启后注册表清空）时抛 AgentRegistrationLost，
+        调用方应重新 RegisterAgent。
+        """
         req = self._pb2.AgentHeartbeatRequest(
             agent_id=agent_id,
             active_jobs=int(active_jobs),
             timestamp_ms=int(timestamp_ms),
         )
-        resp = self._stub.AgentHeartbeat(req, timeout=self.timeout_sec)
+        try:
+            resp = self._stub.AgentHeartbeat(req, timeout=self.timeout_sec)
+        except Exception as exc:
+            if _is_not_found(self._grpc, exc):
+                raise AgentRegistrationLost(
+                    f"server lost registration for agent_id={agent_id} (NOT_FOUND)"
+                ) from exc
+            raise
+        if not bool(resp.ok):
+            # 兼容旧 Server：不显式报错但回 ok=false。
+            raise AgentRegistrationLost(
+                f"AgentHeartbeat rejected unknown agent_id={agent_id}"
+            )
         return int(resp.next_heartbeat_interval_ms)
 
 
 def _job_from_proto(job: Any) -> AgentJob:
     """proto AgentJob → agent_job.AgentJob（driver 消费的 dataclass）。"""
+    from .agent_job import normalize_benchmark_variant, resolve_workspace_dir
+
+    variant = normalize_benchmark_variant(job.benchmark_variant or "pro")
     return AgentJob(
         job_id=job.job_id,
         run_id=job.run_id,
@@ -230,7 +280,7 @@ def _job_from_proto(job: Any) -> AgentJob:
         gateway_api_key=job.gateway_api_key or None,
         session_id=job.session_id or None,
         instance_id=job.instance_id,
-        benchmark_variant=job.benchmark_variant or "pro",
+        benchmark_variant=variant,
         env_package_id=job.env_package_id,
         env_package_version=job.env_package_version,
         agent_bridge_id=job.agent_bridge_id,
@@ -238,7 +288,7 @@ def _job_from_proto(job: Any) -> AgentJob:
         driver_entrypoint=job.driver_entrypoint,
         model_endpoint=job.model_endpoint_config.url if job.HasField("model_endpoint_config") else "",
         max_iterations=int(job.max_iterations) or 30,
-        workspace_dir=job.workspace_dir or "/app",
+        workspace_dir=resolve_workspace_dir(variant, job.workspace_dir or ""),
         episode_id=job.episode_id,
         llm_config_path=job.llm_config_path,
         mode=job.mode or "llm",

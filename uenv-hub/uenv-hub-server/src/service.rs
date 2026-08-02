@@ -9,8 +9,8 @@ use crate::errors::{ApiError, ApiResult};
 use crate::middleware::ensure_namespace;
 use serde_json::json;
 use std::path::Path;
-use uenv_hub_core::domain::manifest;
-use uenv_hub_core::models::{NewAuditEntry, NewManifest};
+use uenv_hub_core::domain::{manifest, stack};
+use uenv_hub_core::models::{NewAuditEntry, NewEpisodeStackVersion, NewManifest};
 use uenv_hub_core::{package, HubError, SqliteStore};
 use uenv_hub_types as dto;
 use uenv_hub_types::TokenInfo;
@@ -223,6 +223,132 @@ pub async fn publish_package(
     )
     .await;
     Ok(manifest)
+}
+
+/// Orchestrates publishing an Episode Stack version: structural validation, then
+/// the referential cross-check against what the Hub actually holds, then persist.
+///
+/// The cross-check is the reason a stack publish is not a plain insert. A stack is
+/// a claim that three independently-published things fit together, and nothing but
+/// the Hub can test that claim: the scaffold's `required_env_types`, the
+/// environment's `config_schema`, and the gateway requirement live in three
+/// different manifests. Validating at publish time turns a dispatch-time failure
+/// into a rejected request.
+///
+/// Warnings are returned rather than raised. A deprecated Task Environment or a
+/// `latest` that currently resolves to a gate-barred version are both real
+/// findings and both legitimate things to publish against, so the publisher is
+/// told and the version is stored.
+pub async fn publish_stack(
+    store: &SqliteStore,
+    principal: &TokenInfo,
+    source_ip: Option<String>,
+    stack_id: &str,
+    req: dto::PublishStackRequest,
+) -> ApiResult<(dto::EpisodeStackManifest, Vec<String>)> {
+    let mut report = dto::ValidationReport::ok();
+    stack::validate(&req, &mut report);
+    if !report.valid {
+        return Err(HubError::SchemaValidation(report).into());
+    }
+
+    // Resolve the referenced components. A missing component is a lookup error
+    // (404-shaped) rather than a validation issue: nothing about the request is
+    // malformed, the thing it names simply is not published here.
+    let (_, env_facts) = store
+        .task_env_facts(&req.task_env.env_type, &req.task_env.version)
+        .await
+        .map_err(|e| match e {
+            HubError::NotFound { .. } => ApiError::not_found(format!(
+                "stack references Task Environment '{}' matching '{}', which this Hub does not \
+                 publish: {e}",
+                req.task_env.env_type, req.task_env.version
+            )),
+            other => other.into(),
+        })?;
+
+    let scaffold_facts = match &req.agent_scaffold {
+        Some(s) => Some(
+            store
+                .scaffold_facts(&s.package_id, &s.version)
+                .await
+                .map_err(|e| match e {
+                    HubError::NotFound { .. } => ApiError::not_found(format!(
+                        "stack references Agent scaffold '{}' matching '{}', which this Hub does \
+                         not publish: {e}",
+                        s.package_id, s.version
+                    )),
+                    other => other.into(),
+                })?
+                .1,
+        ),
+        None => None,
+    };
+
+    for (i, pkg_ref) in req.env_packages.iter().enumerate() {
+        // `validate` already rejected unpinned entries, so a split is safe here.
+        let Some((pkg_id, pkg_version)) = pkg_ref.split_once('@') else {
+            continue;
+        };
+        if store.get_package_manifest(pkg_id, pkg_version).await.is_err() {
+            report.push_error(
+                format!("env_packages[{i}]"),
+                format!("'{pkg_ref}' is not published on this Hub"),
+            );
+        }
+    }
+
+    stack::cross_check(&req, &env_facts, scaffold_facts.as_ref(), &mut report);
+    if !report.valid {
+        return Err(HubError::SchemaValidation(report).into());
+    }
+    let notes: Vec<String> = report
+        .issues
+        .iter()
+        .map(|i| format!("{}: {}", i.location, i.message))
+        .collect();
+
+    let published_by = if principal.id != 0 {
+        Some(principal.id)
+    } else {
+        None
+    };
+    let version = req.version.clone();
+    let nv = NewEpisodeStackVersion {
+        version: req.version.clone(),
+        description: req.description.clone(),
+        publisher: req.publisher.clone(),
+        changelog: req.changelog.clone(),
+        execution_mode: req.execution_mode.as_str().to_string(),
+        task_env_json: serde_json::to_string(&req.task_env).map_err(HubError::from)?,
+        agent_scaffold_json: match &req.agent_scaffold {
+            Some(s) => Some(serde_json::to_string(s).map_err(HubError::from)?),
+            None => None,
+        },
+        runtime_gateway_json: serde_json::to_string(&req.runtime_gateway)
+            .map_err(HubError::from)?,
+        env_packages_json: serde_json::to_string(&req.env_packages).map_err(HubError::from)?,
+        worker_features_json: serde_json::to_string(&req.required_worker_features)
+            .map_err(HubError::from)?,
+        published_by,
+    };
+
+    let manifest = store.publish_stack(stack_id, nv).await?;
+    audit(
+        store,
+        principal,
+        source_ip,
+        "PUBLISH",
+        "episode_stack",
+        &format!("{stack_id}@{version}"),
+        Some(json!({
+            "execution_mode": manifest.execution_mode.as_str(),
+            "task_env": format!("{}@{}", req.task_env.env_type, env_facts.resolved_version),
+            "notes": notes,
+        })),
+    )
+    .await;
+    Ok((manifest, notes))
 }
 
 /// Best-effort audit write. A failed audit insert is logged but never fails the

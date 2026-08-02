@@ -13,12 +13,16 @@ pub enum ClientError {
     #[error("request failed: {0}")]
     Transport(String),
 
-    /// The server returned a structured API error.
-    #[error("API error [{code:?}] {message}")]
+    /// The server returned a structured API error. `details` carries whatever the
+    /// server attached — for `SchemaValidationFailed` that is the full
+    /// `ValidationReport`, which is the only place saying *which* field is wrong,
+    /// so it is rendered rather than dropped.
+    #[error("API error [{code:?}] {message}{}", render_details(.details))]
     Api {
         status: u16,
         code: ErrorCode,
         message: String,
+        details: Option<serde_json::Value>,
         request_id: Option<String>,
     },
 
@@ -50,9 +54,28 @@ impl ClientError {
             status,
             code: env.error.code,
             message: env.error.message,
+            details: env.error.details,
             request_id: env.request_id,
         }
     }
+}
+
+/// Append the actionable part of `details`: a `ValidationReport`'s issues become
+/// `\n  - location: message` lines, anything else is left out (the envelope also
+/// carries opaque payloads that add noise to a CLI message).
+fn render_details(details: &Option<serde_json::Value>) -> String {
+    let Some(value) = details else {
+        return String::new();
+    };
+    let Ok(report) = serde_json::from_value::<uenv_hub_types::ValidationReport>(value.clone())
+    else {
+        return String::new();
+    };
+    report
+        .issues
+        .iter()
+        .map(|i| format!("\n  - {}: {}", i.location, i.message))
+        .collect()
 }
 
 impl From<reqwest::Error> for ClientError {

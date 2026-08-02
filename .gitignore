@@ -13,6 +13,8 @@ __pycache__/
 *.swo
 .DS_Store
 Thumbs.db
+# Worker 本地跑测时生成的观测库（含 -shm/-wal），属运行时数据
+/uenv-worker/obs-data/
 /uenv-server/target
 secrets/*
 !secrets/README.md
@@ -57,6 +59,8 @@ secrets/*
 /uenv-server/stress_test/uenv/
 /uenv-server/stress_test/proto/
 /uenv-server/stress_test/logs/
+/uenv-server/stress_test/*.log
+/uenv-server/stress_test/distributed-*-artifacts/
 
 # SWE-bench数据集 parquet 原始文件（较大，可用 export 脚本重新生成）
 /fixtures/swe/*.parquet

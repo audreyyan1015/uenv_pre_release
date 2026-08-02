@@ -1,0 +1,16 @@
+{
+  "trajectory_id": "trj-worker-7143-pro-1785605632110-00045",
+  "worker_id": "worker-7143-pro",
+  "gateway_base_url": "http://127.0.0.1:28097",
+  "instance_id": "oauthlib__oauthlib.1fd52536.combine_file__0fceycuu",
+  "benchmark_variant": "smith",
+  "session_id": "sess-oauthlib--oauthlib-1fd52536-combine-file--0fceycuu-79",
+  "run_id": "run-smith-llm-dsv3b-011305",
+  "storage_url": "http://8.130.75.157:8077",
+  "storage_kind": "server",
+  "step_count": 3,
+  "reward": 0.0,
+  "resolved": false,
+  "sealed_at_ms": 1785605632110,
+  "upload_status": "pending"
+}

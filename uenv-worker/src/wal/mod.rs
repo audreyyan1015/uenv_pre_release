@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crc32fast::Hasher;
@@ -9,6 +10,7 @@ use crate::episode::async_context::build_idempotency_key;
 use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReplayState, WalRecord};
 
 const WAL_EXT: &str = "wal";
+const QUARANTINE_DIR: &str = "quarantine";
 
 #[derive(Clone)]
 pub struct WalWriter {
@@ -18,6 +20,12 @@ pub struct WalWriter {
 #[derive(Clone)]
 pub struct WalPendingRecord {
     pub idempotency_key: String,
+    pub episode_id: String,
+    pub attempt_id: u32,
+    pub worker_id: String,
+    pub server_epoch: u64,
+    pub request_checksum: String,
+    pub result_checksum: String,
     pub result: EpisodeResult,
     pub dispatch_lease_id: String,
     pub dispatch_token: Vec<u8>,
@@ -87,26 +95,35 @@ impl WalWriter {
                     match EpisodeResult::decode(wal.protobuf_payload.as_slice()) {
                         Ok(result) => out.push(WalPendingRecord {
                             idempotency_key,
+                            episode_id: wal.episode_id.clone(),
+                            attempt_id: wal.attempt_id,
+                            worker_id: wal.worker_id.clone(),
+                            server_epoch: wal.server_epoch,
+                            request_checksum: wal.request_checksum.clone(),
+                            result_checksum: wal.result_checksum.clone(),
                             result,
                             dispatch_lease_id: wal.dispatch_lease_id.clone(),
                             dispatch_token: wal.dispatch_token.clone(),
                         }),
                         Err(err) => {
                             tracing::error!(path = %path.display(), error = %err, msg = "wal_decode_result_failed");
-                            let _ = fs::remove_file(&path);
+                            self.quarantine(&path, "result_decode");
                         }
                     }
                 }
                 Err(err) => {
                     tracing::error!(path = %path.display(), error = %err, msg = "wal_record_corrupted_skip");
-                    let _ = fs::remove_file(&path);
+                    self.quarantine(&path, "record_corrupt");
                 }
             }
         }
         out
     }
 
-    pub fn mark_acked(&self, idempotency_key: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn mark_acked(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let path = self.path_of(idempotency_key);
         if path.exists() {
             fs::remove_file(path)?;
@@ -121,6 +138,16 @@ impl WalWriter {
         entries
             .flatten()
             .filter(|e| e.path().extension().and_then(|v| v.to_str()) == Some(WAL_EXT))
+            .count() as u64
+    }
+
+    pub fn quarantined_count(&self) -> u64 {
+        let Ok(entries) = fs::read_dir(self.dir.join(QUARANTINE_DIR)) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.path().is_file())
             .count() as u64
     }
 
@@ -143,11 +170,57 @@ impl WalWriter {
         bytes.extend_from_slice(&crc.to_le_bytes());
         bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&payload);
-        fs::write(path, bytes)?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp = self
+            .dir
+            .join(format!(".{}.{}.tmp", std::process::id(), nonce));
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, &path)?;
+        sync_directory(&self.dir)?;
         Ok(())
     }
 
-    fn read_record(&self, path: &Path) -> Result<WalRecord, Box<dyn std::error::Error + Send + Sync>> {
+    fn quarantine(&self, path: &Path, reason: &str) {
+        let quarantine_dir = self.dir.join(QUARANTINE_DIR);
+        if let Err(err) = fs::create_dir_all(&quarantine_dir) {
+            tracing::error!(path = %path.display(), error = %err, msg = "wal_quarantine_create_failed");
+            return;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown.wal");
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let destination = quarantine_dir.join(format!("{file_name}.{reason}.{timestamp}"));
+        match fs::rename(path, &destination) {
+            Ok(()) => {
+                let _ = sync_directory(&quarantine_dir);
+                let _ = sync_directory(&self.dir);
+                tracing::warn!(
+                    source = %path.display(),
+                    destination = %destination.display(),
+                    reason,
+                    msg = "wal_record_quarantined"
+                );
+            }
+            Err(err) => {
+                tracing::error!(path = %path.display(), error = %err, msg = "wal_quarantine_move_failed");
+            }
+        }
+    }
+
+    fn read_record(
+        &self,
+        path: &Path,
+    ) -> Result<WalRecord, Box<dyn std::error::Error + Send + Sync>> {
         let bytes = fs::read(path)?;
         if bytes.len() < 8 {
             return Err("wal_too_short".into());
@@ -165,6 +238,10 @@ impl WalWriter {
         }
         Ok(WalRecord::decode(payload)?)
     }
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    OpenOptions::new().read(true).open(path)?.sync_all()
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -223,6 +300,12 @@ mod tests {
         let loaded = wal.load_pending();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].idempotency_key, key);
+        assert_eq!(loaded[0].episode_id, "ep-1");
+        assert_eq!(loaded[0].attempt_id, 1);
+        assert_eq!(loaded[0].worker_id, "worker-1");
+        assert_eq!(loaded[0].server_epoch, 1);
+        assert!(!loaded[0].request_checksum.is_empty());
+        assert!(!loaded[0].result_checksum.is_empty());
         wal.mark_acked(&key).expect("acked");
         assert_eq!(wal.pending_count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -237,6 +320,8 @@ mod tests {
         let wal = WalWriter::new(&dir).expect("new wal");
         assert!(wal.load_pending().is_empty());
         assert_eq!(wal.pending_count(), 0);
+        assert_eq!(wal.quarantined_count(), 1);
+        assert!(dir.join(QUARANTINE_DIR).is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,7 +12,7 @@
 //! - [`session`]：`SweSession` 会话原语（provision/exec/write/read/apply/evaluate）。
 //! - [`instance_pool`]：`SweInstancePool` L2 会话池（Gateway 与 native 共享）。
 //! - [`grader`]：`Grader` trait（`swebench`；M6 `swebench_pro`）。
-//! - [`variant`]：`BenchmarkVariant`（verified / lite / pro）。
+//! - [`variant`]：`BenchmarkVariant`（verified / lite / pro / smith）。
 
 pub mod artifact;
 pub mod artifact_store;
@@ -38,7 +38,10 @@ pub use artifact_store::ArtifactStore;
 pub use command_policy::{CommandPolicy, CommandPolicyConfig};
 pub use dataset::{image_ref, InstanceStore, SweInstance};
 pub use env_package::EnvPackageDir;
-pub use grader::{grader_for, grader_for_spec, GradeResult, Grader, SwebenchGrader, SwebenchProGrader};
+pub use grader::{
+    grader_for, grader_for_spec, GradeResult, Grader, SwebenchGrader, SwebenchProGrader,
+    SwesmithGrader,
+};
 pub use harness::{run_instance, ContainerRuntime, EpisodeOutcome, RunOptions};
 pub use hub_config::SweDefaultConfig;
 pub use image_cache::{ImageCacheFactory, ImageState};

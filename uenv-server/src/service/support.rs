@@ -6,11 +6,11 @@ async fn dispatch_to_worker(
     state: &std::sync::Arc<crate::state::ServerState>,
     endpoint: &str,
     request: EpisodeRequest,
+    accepted: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> anyhow::Result<()> {
     // service 层只关心“派发是否成功”，具体 gRPC 客户端细节放在 ports 模块中。
-    crate::ports::dispatch_to_worker(state, endpoint, request).await
+    crate::ports::dispatch_to_worker(state, endpoint, request, accepted).await
 }
-
 
 #[derive(Clone)]
 pub(crate) struct SweAgentSpec {
@@ -214,7 +214,6 @@ async fn destroy_session(
     // 关闭 session 失败不应覆盖 episode 已经形成的终态，所以调用方通常只记录日志或忽略错误。
     crate::ports::destroy_session(gateway_public_url, gateway_api_key, session_id).await
 }
-
 
 pub struct AdminServiceImpl {
     /// admin RPC 使用同一份 ServerState，因此能看到实时 worker、episode 和 pending 状态。

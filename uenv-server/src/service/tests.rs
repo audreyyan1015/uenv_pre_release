@@ -106,6 +106,43 @@ mod tests {
         assert_eq!(extract_parallel_mode(&req).expect("mode"), "fully_async");
     }
 
+    #[test]
+    fn explicit_env_step_failure_is_non_retryable() {
+        let error = anyhow::anyhow!(
+            "execute_episode_failed: error_code=ERR_ENV_STEP_FAILED: scoring failed"
+        );
+
+        assert_eq!(
+            deterministic_dispatch_error_code(&error),
+            Some(ErrorCode::ErrEnvStepFailed)
+        );
+    }
+
+    #[test]
+    fn legacy_h2_cancelled_step_failure_is_non_retryable() {
+        let status = tonic::Status::internal(
+            "execute_episode_failed: h2 Reset(StreamId(1), CANCEL, Remote)",
+        );
+        let error: anyhow::Error = status.into();
+
+        assert_eq!(
+            deterministic_dispatch_error_code(&error),
+            Some(ErrorCode::ErrEnvStepFailed)
+        );
+    }
+
+    #[test]
+    fn model_and_transport_failures_remain_retryable() {
+        let model_error = anyhow::anyhow!(
+            "execute_episode_failed: ERR_MODEL_CALL_FAILED: gateway timeout"
+        );
+        let transport_error: anyhow::Error =
+            tonic::Status::unavailable("connection refused").into();
+
+        assert_eq!(deterministic_dispatch_error_code(&model_error), None);
+        assert_eq!(deterministic_dispatch_error_code(&transport_error), None);
+    }
+
     #[tokio::test]
     async fn queue_timeout_returns_terminal_timeout_result() {
         let mut cfg = ServerConfig::default();

@@ -1,0 +1,20 @@
+{
+  "gateway": "http://127.0.0.1:28097",
+  "instance": "oauthlib__oauthlib.1fd52536.combine_file__0fceycuu",
+  "mode": "llm",
+  "run_id": "run-smith-llm-dsv3b-011305",
+  "session_id": null,
+  "agent_job_file": null,
+  "max_iterations": 12,
+  "llm_model": "openai/deepseek-v3-0324-awq",
+  "benchmark_variant": "smith",
+  "repo": "swesmith/oauthlib__oauthlib.1fd52536",
+  "base_commit": "",
+  "patch_openhands_status": {
+    "patched": true,
+    "reregistered": [
+      "terminal",
+      "file_editor"
+    ]
+  }
+}

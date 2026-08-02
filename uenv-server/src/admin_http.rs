@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -74,9 +74,22 @@ pub async fn serve(state: Arc<ServerState>, bind_addr: String, port: u16, admin_
                 ("401 Unauthorized", "text/plain", "unauthorized".to_string())
             } else {
                 match path {
-                    "/health" => ("200 OK", "text/plain", "ok".to_string()),
-                    "/agents" => ("200 OK", "application/json", agents_json(&state).to_string()),
-                    _ => ("200 OK", "application/json", status_json(&state).to_string()),
+                    "/health" if state.is_ready() => ("200 OK", "text/plain", "ok".to_string()),
+                    "/health" => (
+                        "503 Service Unavailable",
+                        "text/plain",
+                        "persistence_not_ready".to_string(),
+                    ),
+                    "/agents" => (
+                        "200 OK",
+                        "application/json",
+                        agents_json(&state).to_string(),
+                    ),
+                    _ => (
+                        "200 OK",
+                        "application/json",
+                        status_json(&state).to_string(),
+                    ),
                 }
             };
 
@@ -124,6 +137,19 @@ fn status_json(state: &ServerState) -> Value {
         .collect();
 
     json!({
+        "ready":           state.is_ready(),
+        "accepting":       state.is_accepting_episodes(),
+        "persistence":     state.persistence_store().map(|store| {
+            let health = store.health();
+            json!({
+                "healthy": health.healthy,
+                "schema_version": health.schema_version,
+                "database_bytes": health.database_bytes,
+                "wal_bytes": health.wal_bytes,
+                "writer_queue_depth": health.writer_queue_depth,
+                "last_error": health.last_error,
+            })
+        }),
         "server_epoch":    status.server_epoch,
         "worker_count":    status.worker_count,
         "total_capacity":  status.total_capacity,
@@ -185,6 +211,7 @@ fn agents_json(state: &ServerState) -> Value {
     json!({
         "server_epoch":      status.server_epoch,
         "agent_count":       status.agent_count,
+        "stale_reclaimed_jobs": status.stale_reclaimed_jobs,
         // outstanding 表示已入队但尚未完成的 AgentJob 总数，等于 pending + running。
         "outstanding_jobs":  status.outstanding_jobs,
         "pending_jobs":      status.pending_jobs,   // 已入队、尚未被 Agent 领取。

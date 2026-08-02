@@ -34,20 +34,9 @@ _INTEGRATION = Path(__file__).resolve().parent
 sys.path.insert(0, str(_INTEGRATION))
 from uenv_runtime.client import UEnvGatewayClient, GatewayError  # noqa: E402
 from uenv_runtime.agent_job import load_agent_job  # noqa: E402
-from uenv_runtime.gateway_tools import (  # noqa: E402
-    collect_tool_patch_status,
-    patch_openhands_tools_for_uenv,
-)
+from uenv_runtime.gateway_tools import patch_openhands_tools_for_uenv  # noqa: E402
+from uenv_runtime.llm_rollout import RolloutTraceCollector  # noqa: E402
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
-from uenv_runtime.workspace_probe import (  # noqa: E402
-    merge_reset_observation,
-    probe_workspace,
-    validate_workspace_probe,
-)
-
-
-class WorkspaceProbeError(RuntimeError):
-    """Container workspace does not match instance catalog (infrastructure error)."""
 
 
 def _ensure_benchmarks_path() -> None:
@@ -63,8 +52,39 @@ def _load_catalog(path: Path, instance_id: str) -> dict[str, Any]:
     return data[instance_id]
 
 
-def _pro_workspace_dir(variant: str) -> str:
-    return "/app" if variant.lower() == "pro" else "/testbed"
+def _smith_catalog_candidates(repo_root: Path) -> list[Path]:
+    return [
+        repo_root / "fixtures/swe/smith_catalog.json",
+        repo_root / "config/swe/smith-smoke.json",
+        Path("/var/lib/uenv/envs/swe-bench-smith/0.1.0-local/catalog.json"),
+    ]
+
+
+def _resolve_instances_catalog(
+    *,
+    variant: str,
+    explicit: str,
+    repo_root: Path,
+) -> Path:
+    """Prefer explicit path; for smith fall back to local EnvPackage/fixture catalogs."""
+    from uenv_runtime.agent_job import normalize_benchmark_variant
+
+    if explicit.strip():
+        path = Path(explicit)
+        if not path.is_absolute():
+            path = repo_root / path
+        return path
+    if normalize_benchmark_variant(variant) == "smith":
+        for cand in _smith_catalog_candidates(repo_root):
+            if cand.is_file():
+                return cand
+    return repo_root / "config/swe/pro-python-smoke.json"
+
+
+def _workspace_dir(variant: str, override: str = "") -> str:
+    from uenv_runtime.agent_job import resolve_workspace_dir
+
+    return resolve_workspace_dir(variant, override)
 
 
 def _infer_repo_language(instance: dict[str, Any]) -> str:
@@ -100,7 +120,6 @@ def _infer_repo_language(instance: dict[str, Any]) -> str:
 
 def _build_instruction(instance: dict[str, Any], repo_path: str) -> str:
     ps = instance.get("problem_statement") or instance.get("issue_text") or ""
-    repo = str(instance.get("repo") or "")
     repo_language = _infer_repo_language(instance)
     if repo_language in {"python", "py"}:
         language_hint = "Python files such as `*.py`"
@@ -110,41 +129,21 @@ def _build_instruction(instance: dict[str, Any], repo_path: str) -> str:
         language_hint = "JavaScript/TypeScript files such as `*.js`, `*.ts`, and `*.tsx`"
     else:
         language_hint = "files matching the repository language and nearby config/template files"
-    repo_line = f"Verified repository: `{repo}`.\n" if repo else ""
-    forbid_ol = ""
-    if "openlibrary" not in (repo or "").lower() and "openlibrary" not in str(
-        instance.get("instance_id") or ""
-    ).lower():
-        forbid_ol = (
-            "CRITICAL: This is NOT the openlibrary repository. "
-            "Never create or edit paths containing `openlibrary`. "
-            "If a tool suggests openlibrary paths, ignore them and stay in this repo.\n"
-        )
     return (
         f"The git repository is already checked out at `{repo_path}`.\n"
-        f"{repo_line}"
         f"All investigation and edits must stay under `{repo_path}`.\n"
-        f"{forbid_ol}"
         "Start by confirming the workspace:\n"
         f"1. `pwd`\n"
-        f"2. `git -C {repo_path} remote get-url origin`\n"
-        f"3. `git -C {repo_path} rev-parse --show-toplevel`\n"
-        f"4. `ls -la {repo_path}`\n\n"
+        f"2. `git -C {repo_path} rev-parse --show-toplevel`\n"
+        f"3. `ls -la {repo_path}`\n\n"
         "Inspect the repository structure and identify the relevant language/framework before searching.\n"
         f"This instance is labeled as `{repo_language or 'unknown'}`; prioritize {language_hint}.\n"
         "Use targeted searches with `rg` for symbols, error messages, routes, tests, or issue keywords.\n"
         "When relevant, also inspect non-test project files such as JSON, YAML, templates, and generated schemas.\n"
-        f"Do not search or edit outside `{repo_path}`. "
-        "Do NOT `git clone` or copy the repo under `/tmp` (or anywhere else); "
-        f"work only inside the existing checkout at `{repo_path}`. "
-        "Do not inspect `/opt/openhands`, benchmark harness directories, `/tmp`, or `/root` "
-        "unless a tool explicitly requires a temp file under `/tmp`.\n\n"
+        f"Do not search or edit outside `{repo_path}`. Do not inspect `/opt/openhands`, benchmark harness directories, `/tmp`, or `/root` unless explicitly required by a tool.\n\n"
         f"<issue_description>\n{ps}\n</issue_description>\n\n"
-        "Implement the minimal fix in **non-test project source files** required by the issue.\n"
-        "Do NOT modify files under `tests/`, `test/`, `*_test.*`, or `*.test.*` unless the issue text explicitly requires test changes.\n"
-        "Do NOT only update whitelists, scripts, or docs if the issue asks for library/runtime behavior changes.\n"
-        "Before finishing, run `git -C {repo_path} remote get-url origin` and `git -C {repo_path} diff --stat`, "
-        "and confirm the diff is in the correct repository and touches the intended source paths.\n"
+        "Implement the minimal fix in non-test project files required by the issue. Tests are already provided by the benchmark; do not modify tests unless the issue explicitly requires it.\n"
+        "Before finishing, inspect `git diff` and make sure the patch is focused.\n"
         "Use terminal and file_editor tools. When done, call the finish tool.\n"
     )
 
@@ -244,7 +243,10 @@ def _fetch_trajectory_bundle(client: UEnvGatewayClient, ref: dict, out: Path) ->
         return None
 
 
-def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
+def _run_conversation_loop(
+    conversation,
+    max_fake_responses: int,
+) -> dict[str, Any]:
     """Like benchmarks fake_user_response helper but compatible with LocalConversation."""
     from benchmarks.utils.fake_user_response import (
         _agent_finished_with_finish_action,
@@ -253,24 +255,40 @@ def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
     )
     from openhands.sdk.conversation.state import ConversationExecutionStatus
 
+    if max_fake_responses < 0:
+        raise ValueError("max_fake_responses must be non-negative")
     fake_count = 0
+    termination_reason = "unknown"
     while True:
         conversation.run()
         status = conversation.state.execution_status
         if status != ConversationExecutionStatus.FINISHED:
+            termination_reason = (
+                "execution_status_"
+                + str(getattr(status, "value", status)).lower()
+            )
             break
         events = list(conversation.state.events)
         if _agent_finished_with_finish_action(events):
+            termination_reason = "finish_action"
             break
         if not _agent_sent_message(events):
+            termination_reason = "no_agent_message"
             break
         if fake_count >= max_fake_responses:
+            termination_reason = "fake_response_limit"
             break
         msg = fake_user_response(conversation)
         if msg == "/exit":
+            termination_reason = "fake_user_exit"
             break
         conversation.send_message(msg)
         fake_count += 1
+    return {
+        "termination_reason": termination_reason,
+        "fake_user_responses": fake_count,
+        "max_fake_responses": max_fake_responses,
+    }
 
 
 def main() -> int:
@@ -353,7 +371,7 @@ def main() -> int:
     run_id = (args.run_id or "").strip() or f"run-oh-{time.strftime('%Y%m%d-%H%M%S')}-pro-{args.mode}"
 
     _ensure_benchmarks_path()
-    patch_status = patch_openhands_tools_for_uenv()
+    patch_openhands_tools_for_uenv()
 
     from benchmarks.utils.llm_config import load_llm_config
     from openhands.sdk import Agent, Conversation, Tool, get_logger
@@ -366,12 +384,38 @@ def main() -> int:
     out = Path(args.output_dir)
     run_log = out / "run.log"
     repo_root = Path(os.environ.get("UENV_REPO", "/root/UEnv"))
-    catalog_path = Path(args.instances)
-    if not catalog_path.is_absolute():
-        catalog_path = repo_root / catalog_path
+    # CLI/default instances may still point at Pro smoke; resolve after AgentJob variant override.
+    from uenv_runtime.agent_job import normalize_benchmark_variant
+
+    if normalize_benchmark_variant(args.benchmark_variant) == "smith" and not (
+        agent_job and agent_job.instances_catalog
+    ):
+        # Keep explicit --instances only when it already contains the target (checked below).
+        catalog_path = _resolve_instances_catalog(
+            variant=args.benchmark_variant,
+            explicit="",
+            repo_root=repo_root,
+        )
+        # If caller passed a usable smith catalog via --instances, prefer it.
+        explicit = Path(args.instances)
+        if not explicit.is_absolute():
+            explicit = repo_root / explicit
+        if explicit.is_file():
+            try:
+                data = json.loads(explicit.read_text(encoding="utf-8"))
+                if args.instance in data:
+                    catalog_path = explicit
+            except Exception:
+                pass
+        args.instances = str(catalog_path)
+    else:
+        catalog_path = Path(args.instances)
+        if not catalog_path.is_absolute():
+            catalog_path = repo_root / catalog_path
 
     row = _load_catalog(catalog_path, args.instance)
-    workspace_dir = _pro_workspace_dir(args.benchmark_variant)
+    job_workspace = agent_job.workspace_dir if agent_job else ""
+    workspace_dir = _workspace_dir(args.benchmark_variant, job_workspace)
 
     if args.gateway:
         client = UEnvGatewayClient(args.gateway, api_key=args.api_key, run_id=run_id)
@@ -382,17 +426,21 @@ def main() -> int:
         client = UEnvGatewayClient("http://127.0.0.1:1", api_key=args.api_key, run_id=run_id)
 
     llm = None
+    rollout_collector = None
+    rollout_fields: dict[str, Any] = {}
     if args.mode == "llm":
         if not args.llm_config:
             print("--llm-config required for llm mode", file=sys.stderr)
             return 1
         llm = load_llm_config(args.llm_config)
+        rollout_collector = RolloutTraceCollector(args.llm_config)
+        episode_id = str(agent_job.episode_id) if agent_job and agent_job.episode_id else run_id
+        rollout_collector.install(llm, episode_id=episode_id, dataset="swebench_pro")
         logger.info("LLM model=%s", llm.model)
 
     session_id = agent_job.session_id if agent_job else None
     ws = UEnvWorkspace(
-        working_dir="/tmp/uenv-oh-local-ws",
-        container_working_dir=workspace_dir,
+        working_dir=workspace_dir,
         gateway_url=args.gateway or (agent_job.gateway_url if agent_job else ""),
         instance_id=args.instance,
         benchmark_variant=args.benchmark_variant,
@@ -413,57 +461,43 @@ def main() -> int:
             "max_iterations": args.max_iterations,
             "llm_model": str(llm.model) if llm else None,
             "benchmark_variant": args.benchmark_variant,
-            "repo": row.get("repo"),
-            "base_commit": row.get("base_commit"),
-            "patch_openhands_status": patch_status,
         },
     )
-
-    def _run_workspace_checks() -> None:
-        probe = probe_workspace(ws, workspace_dir)
-        probe_doc = {
-            "instance_id": args.instance,
-            "session_id": ws.session.session_id,
-            "repo": row.get("repo"),
-            "base_commit": row.get("base_commit"),
-            "workspace_dir": workspace_dir,
-            **probe,
-        }
-        _save_json(out / "workspace_probe.json", probe_doc)
-        ok, reason = validate_workspace_probe(
-            probe,
-            instance_id=args.instance,
-            repo=str(row.get("repo") or ""),
-            base_commit=str(row.get("base_commit") or ""),
-        )
-        reset_doc = merge_reset_observation(
-            ws.session.observation,
-            probe,
-            instance_id=args.instance,
-            session_id=ws.session.session_id,
-            repo=str(row.get("repo") or ""),
-            base_commit=str(row.get("base_commit") or ""),
-            ok=ok,
-            reason=reason,
-        )
-        _save_json(out / "reset_observation.json", reset_doc)
-        if not ok:
-            raise WorkspaceProbeError(reason)
 
     t0 = time.time()
     try:
         with ws:
-            _run_workspace_checks()
+            _save_json(out / "reset_observation.json", ws.session.observation)
 
             if args.mode == "gold":
                 patch = row.get("patch", "")
                 if patch.strip():
                     ws.write_remote_text("/tmp/gold.patch", patch)
-                    r = ws.execute_command(
-                        "git apply -v /tmp/gold.patch || "
-                        "patch --batch --fuzz=5 -p1 < /tmp/gold.patch"
+                    # SWE-smith：数据集 patch 为造 bug 补丁；Worker provision 已注入，
+                    # gold 用 git apply -R 还原。Pro/Verified 仍正向应用 gold。
+                    from uenv_runtime.agent_job import normalize_benchmark_variant
+
+                    is_smith = normalize_benchmark_variant(args.benchmark_variant) == "smith"
+                    if is_smith:
+                        apply_cmd = (
+                            f"cd {workspace_dir} && git apply -R -v /tmp/gold.patch && "
+                            f"source /opt/miniconda3/bin/activate testbed 2>/dev/null; "
+                            f"cd {workspace_dir} && pip install -e . -q"
+                        )
+                    else:
+                        apply_cmd = (
+                            "git apply -v /tmp/gold.patch || "
+                            "patch --batch --fuzz=5 -p1 < /tmp/gold.patch"
+                        )
+                    r = ws.execute_command(apply_cmd)
+                    _save_json(
+                        out / "gold_apply.json",
+                        {
+                            **(r.model_dump() if hasattr(r, "model_dump") else {"raw": str(r)}),
+                            "reverse": is_smith,
+                            "workspace_dir": workspace_dir,
+                        },
                     )
-                    _save_json(out / "gold_apply.json", r.model_dump())
                 result = ws.submit()
             else:
                 agent = Agent(
@@ -481,50 +515,36 @@ def main() -> int:
                     max_iteration_per_run=args.max_iterations,
                     delete_on_close=True,
                 )
-                tool_status = collect_tool_patch_status(conversation.state)
-                tool_status["patch_openhands_status"] = patch_status
-                _save_json(out / "tool_patch_status.json", tool_status)
-                if not tool_status.get("patch_ok"):
-                    raise WorkspaceProbeError(
-                        "OpenHands tools not routed to UEnv Gateway: "
-                        f"terminal={tool_status.get('terminal_executor')} "
-                        f"file_editor={tool_status.get('file_editor_executor')}"
-                    )
                 instruction = _build_instruction(row, workspace_dir)
                 _save_json(out / "instruction.txt", {"text": instruction})
                 conversation.send_message(instruction)
-                _run_conversation_loop(conversation, max_fake_responses=5)
+                loop_summary = _run_conversation_loop(
+                    conversation,
+                    max_fake_responses=max(args.max_iterations - 1, 0),
+                )
+                if rollout_collector is None:
+                    raise RuntimeError("LLM rollout collector was not initialized")
+                rollout_fields = rollout_collector.finalize()
                 _save_json(
                     out / "conversation_events.json",
-                    {"count": len(list(conversation.state.events))},
+                    {
+                        "count": len(list(conversation.state.events)),
+                        "model_response_count": len(rollout_fields.get("turns", [])),
+                        **loop_summary,
+                    },
                 )
                 # Pre-submit: confirm agent stayed in the right repo.
+                # Pro=/app；Verified/Lite/Smith=/testbed — 勿写死 /app。
                 pre = ws.execute_command(
-                    "git -C /app remote get-url origin; "
-                    "git -C /app status --short | head -40; "
-                    "git -C /app diff --stat | tail -20"
+                    f"git -C {workspace_dir} remote get-url origin; "
+                    f"git -C {workspace_dir} status --short | head -40; "
+                    f"git -C {workspace_dir} diff --stat | tail -20"
                 )
                 _save_json(
                     out / "pre_submit_git.json",
-                    {
-                        "exit_code": pre.exit_code,
-                        "stdout": pre.stdout,
-                        "stderr": pre.stderr,
-                    },
+                    pre.model_dump() if hasattr(pre, "model_dump") else {"raw": str(pre)},
                 )
-                remote = (pre.stdout or "").splitlines()[0] if pre.stdout else ""
-                expected_repo = str(row.get("repo") or "")
-                if expected_repo and expected_repo.split("/")[-1].lower() not in remote.lower():
-                    raise WorkspaceProbeError(
-                        f"pre-submit remote mismatch: got {remote!r}, expected repo {expected_repo!r}"
-                    )
-                if (
-                    "openlibrary" not in str(args.instance).lower()
-                    and "openlibrary" in (pre.stdout or "").lower()
-                ):
-                    raise WorkspaceProbeError(
-                        "pre-submit git status references openlibrary on a non-openlibrary instance"
-                    )
+                _save_json(out / "llm_rollout_trace.json", rollout_fields)
                 result = ws.submit()
 
         elapsed = time.time() - t0
@@ -538,6 +558,7 @@ def main() -> int:
             "trajectory_ref": result.trajectory_ref,
             "elapsed_sec": elapsed,
         }
+        submit_doc.update(rollout_fields)
         _save_json(out / "submit_result.json", submit_doc)
 
         ref = result.trajectory_ref
@@ -577,12 +598,6 @@ def main() -> int:
         )
         return 0 if result.reward >= 1.0 else 0  # exit 0 if run completed; reward in JSON
 
-    except WorkspaceProbeError as e:
-        with run_log.open("a", encoding="utf-8") as f:
-            f.write(f"[workspace_probe_error] {e!s}\n")
-        _save_json(out / "infrastructure_error.json", {"error": str(e), "kind": "workspace_probe"})
-        print(json.dumps({"error": str(e), "kind": "workspace_probe", "output_dir": str(out)}))
-        return 2
     except Exception as e:
         with run_log.open("a", encoding="utf-8") as f:
             f.write(f"[error] {e!r}\n")

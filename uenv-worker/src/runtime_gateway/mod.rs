@@ -13,8 +13,9 @@
 //! - `DELETE /runtime/v1/sessions/{id}`       释放
 //! - `GET    /runtime/v1/health`              探活
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
@@ -33,10 +34,19 @@ use crate::swe::variant::BenchmarkVariant;
 #[derive(Clone)]
 struct GatewayState {
     pool: Arc<SweInstancePool>,
+    /// Per-session submit state.  Evaluation is long-running, so the HTTP
+    /// submit request starts it and this map serves short polling requests.
+    submissions: Arc<Mutex<HashMap<String, SubmitState>>>,
     /// 可选 `X-API-Key`（M5-5）：`Some` 时所有非 health 路由强制校验。
     api_key: Option<String>,
     /// Public URL returned in for-episode responses (AgentJob.gateway_url).
     gateway_public_url: String,
+}
+
+enum SubmitState {
+    Running,
+    Completed(serde_json::Value),
+    Failed(String),
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResp>)>;
@@ -58,6 +68,7 @@ pub fn router(
 ) -> Router {
     let state = GatewayState {
         pool,
+        submissions: Arc::new(Mutex::new(HashMap::new())),
         api_key,
         gateway_public_url,
     };
@@ -67,7 +78,7 @@ pub fn router(
         .route("/runtime/v1/sessions/{id}/exec", post(exec))
         .route("/runtime/v1/sessions/{id}/read", post(read))
         .route("/runtime/v1/sessions/{id}/write", post(write))
-        .route("/runtime/v1/sessions/{id}/submit", post(submit))
+        .route("/runtime/v1/sessions/{id}/submit", post(submit).get(submit_status))
         .route("/runtime/v1/sessions/{id}", delete(destroy))
         .route("/runtime/v1/trajectories/{id}", get(get_trajectory))
         .route("/runtime/v1/trajectories", get(list_trajectories))
@@ -372,16 +383,17 @@ struct TestEntry {
     passed: bool,
 }
 
-async fn submit(
-    State(st): State<GatewayState>,
-    Path(id): Path<String>,
-) -> ApiResult<SubmitResp> {
-    let pool = st.pool.clone();
-    let submit = tokio::task::spawn_blocking(move || pool.submit(&id))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
-        .map_err(session_error)?;
+#[derive(Serialize)]
+struct SubmitStatusResp {
+    session_id: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
+fn submit_result_value(submit: crate::swe::session::SubmitOutcome) -> serde_json::Value {
     let outcome = submit.outcome;
     let per_test: Vec<TestEntry> = outcome
         .artifact
@@ -396,7 +408,7 @@ async fn submit(
         .unwrap_or_default();
     let tests_passed = per_test.iter().filter(|t| t.passed).count();
     let tests_total = per_test.len();
-    Ok(Json(SubmitResp {
+    serde_json::to_value(SubmitResp {
         instance_id: outcome.instance_id,
         resolved: outcome.resolved,
         reward: outcome.reward,
@@ -404,7 +416,89 @@ async fn submit(
         tests_total,
         per_test,
         trajectory_ref: submit.trajectory_ref,
-    }))
+    })
+    .expect("SubmitResp must serialize")
+}
+
+fn submit_state_response(session_id: String, state: &SubmitState) -> (StatusCode, Json<SubmitStatusResp>) {
+    match state {
+        SubmitState::Running => (
+            StatusCode::ACCEPTED,
+            Json(SubmitStatusResp {
+                session_id,
+                status: "running",
+                result: None,
+                error: None,
+            }),
+        ),
+        SubmitState::Completed(result) => (
+            StatusCode::OK,
+            Json(SubmitStatusResp {
+                session_id,
+                status: "completed",
+                result: Some(result.clone()),
+                error: None,
+            }),
+        ),
+        SubmitState::Failed(error) => (
+            StatusCode::OK,
+            Json(SubmitStatusResp {
+                session_id,
+                status: "failed",
+                result: None,
+                error: Some(error.clone()),
+            }),
+        ),
+    }
+}
+
+async fn submit(
+    State(st): State<GatewayState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<SubmitStatusResp>), (StatusCode, Json<ErrorResp>)> {
+    {
+        let submissions = st.submissions.lock().expect("submit state lock");
+        if let Some(state) = submissions.get(&id) {
+            return Ok(submit_state_response(id, state));
+        }
+    }
+
+    {
+        let mut submissions = st.submissions.lock().expect("submit state lock");
+        if let Some(state) = submissions.get(&id) {
+            return Ok(submit_state_response(id, state));
+        }
+        submissions.insert(id.clone(), SubmitState::Running);
+    }
+
+    let pool = st.pool.clone();
+    let submissions = Arc::clone(&st.submissions);
+    let session_id = id.clone();
+    tokio::spawn(async move {
+        let submit_session_id = session_id.clone();
+        let state = match tokio::task::spawn_blocking(move || pool.submit(&submit_session_id)).await {
+            Ok(Ok(submit)) => SubmitState::Completed(submit_result_value(submit)),
+            Ok(Err(error)) => SubmitState::Failed(error.to_string()),
+            Err(error) => SubmitState::Failed(format!("submit worker task failed: {error}")),
+        };
+        submissions
+            .lock()
+            .expect("submit state lock")
+            .insert(session_id, state);
+    });
+
+    Ok(submit_state_response(id, &SubmitState::Running))
+}
+
+async fn submit_status(
+    State(st): State<GatewayState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<SubmitStatusResp>), (StatusCode, Json<ErrorResp>)> {
+    let submissions = st.submissions.lock().expect("submit state lock");
+    let state = submissions
+        .get(&id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "submit has not been started for this session"))?;
+    Ok(submit_state_response(id, state))
 }
 
 #[derive(Deserialize)]
@@ -458,6 +552,10 @@ async fn destroy(
     State(st): State<GatewayState>,
     Path(id): Path<String>,
 ) -> ApiResult<DeleteResp> {
+    st.submissions
+        .lock()
+        .expect("submit state lock")
+        .remove(&id);
     let pool = st.pool.clone();
     let released = tokio::task::spawn_blocking(move || pool.destroy(&id))
         .await
