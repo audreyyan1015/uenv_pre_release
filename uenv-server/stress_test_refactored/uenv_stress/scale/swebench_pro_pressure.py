@@ -2602,7 +2602,8 @@ def run_one(
                         f"python3 -B {worker_run}/worker_fleet_supervisor.py "
                         f"--spec {fleet_spec_path} --pid-file {fleet_pid_path} "
                         f"--metrics-file {fleet_metrics_path} "
-                        f"--resource-csv {worker_run}/fleet-resources.csv"
+                        f"--resource-csv {worker_run}/fleet-resources.csv "
+                        f"--run-id {run_id}"
                     ),
                     f"{worker_run}/fleet-supervisor.log",
                     "/usr/bin/python3.12",
