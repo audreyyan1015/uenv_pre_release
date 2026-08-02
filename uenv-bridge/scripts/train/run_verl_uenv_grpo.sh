@@ -43,6 +43,12 @@ Common environment overrides:
   UENV_MODEL_GATEWAY_DISABLE_THINKING
                                   Inject chat_template_kwargs.enable_thinking=false for OpenAI chat requests. Default: 0
   UENV_MODEL_GATEWAY_MAX_TOKENS   Clamp OpenAI chat output token budget before forwarding to vLLM. Default: empty
+  UENV_MODEL_GATEWAY_STOP_ON_CLOSE
+                                  Stop adapter gateway when each AgentLoop instance closes. Default: 0 for multi-worker, 1 otherwise
+  UENV_REQUIRE_SWE_RESPONSE_TRACE
+                                  Refuse SWE training results without typed response_ids. Default: 1
+  UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR
+                                  Treat known text-only MoE checkpoints as having no multimodal processor. Default: 0
   EXTRA_VERL_ARGS               Extra Hydra overrides appended to the VeRL command. Default: empty
   RAY_NUM_CPUS                  Default: NGPUS_PER_NODE * 4
   SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.75.157:8088
@@ -150,18 +156,35 @@ PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
 UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE:-1}
+UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR:-0}
+case "${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR}" in
+  1|true|True|enabled|yes|on)
+    UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR_RAY=enabled
+    ;;
+  *)
+    UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR_RAY=disabled
+    ;;
+esac
 UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH:-1}
 UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
 UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
 UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
 UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
-UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-1800}
+UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-3600}
 UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED:-0}
 UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST:-0.0.0.0}
 UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18080}
 UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL:-http://10.10.20.142:${UENV_MODEL_GATEWAY_PORT}/v1}
 UENV_MODEL_GATEWAY_DISABLE_THINKING=${UENV_MODEL_GATEWAY_DISABLE_THINKING:-0}
 UENV_MODEL_GATEWAY_MAX_TOKENS=${UENV_MODEL_GATEWAY_MAX_TOKENS:-}
+UENV_REQUIRE_SWE_RESPONSE_TRACE=${UENV_REQUIRE_SWE_RESPONSE_TRACE:-1}
+if [ -z "${UENV_MODEL_GATEWAY_STOP_ON_CLOSE+x}" ]; then
+  if [ "${AGENT_NUM_WORKERS}" -gt 1 ]; then
+    UENV_MODEL_GATEWAY_STOP_ON_CLOSE=0
+  else
+    UENV_MODEL_GATEWAY_STOP_ON_CLOSE=1
+  fi
+fi
 EXTRA_VERL_ARGS=${EXTRA_VERL_ARGS:-}
 EXTRA_VERL_ARGS=${EXTRA_VERL_ARGS//$'\n'/ }
 ACTOR_LR=${ACTOR_LR:-1e-6}
@@ -225,6 +248,7 @@ export TORCHINDUCTOR_COMPILE_THREADS=1
 export UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER}
 export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN}
 export UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE}
+export UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR}
 export UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH}
 export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
 export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
@@ -238,6 +262,8 @@ export UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL}
 export UENV_MODEL_GATEWAY_LOG_PATH=\"${MODEL_GATEWAY_LOG_PATH}\"
 export UENV_MODEL_GATEWAY_DISABLE_THINKING=${UENV_MODEL_GATEWAY_DISABLE_THINKING}
 export UENV_MODEL_GATEWAY_MAX_TOKENS=${UENV_MODEL_GATEWAY_MAX_TOKENS}
+export UENV_MODEL_GATEWAY_STOP_ON_CLOSE=${UENV_MODEL_GATEWAY_STOP_ON_CLOSE}
+export UENV_REQUIRE_SWE_RESPONSE_TRACE=${UENV_REQUIRE_SWE_RESPONSE_TRACE}
 pip install -q 'grpcio>=1.80' --break-system-packages 2>/dev/null || pip install -q 'grpcio>=1.80'
 export UENV_AGENT_LOOP_CLIENT=rust_core
 export UENV_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT}
@@ -285,8 +311,8 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent \\
   actor_rollout_ref.rollout.agent.agent_loop_config_path=/uenv/uenv-bridge/configs/uenv-agent-loop.yaml \\
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
-  actor_rollout_ref.rollout.enforce_eager=True \\
-  actor_rollout_ref.rollout.enable_chunked_prefill=False \\
+  actor_rollout_ref.rollout.enforce_eager=False \\
+  actor_rollout_ref.rollout.enable_chunked_prefill=True \\
   actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
   +actor_rollout_ref.rollout.enable_sleep_mode=${ROLLOUT_ENABLE_SLEEP_MODE} \\
   actor_rollout_ref.rollout.max_num_seqs=4 \\
@@ -317,6 +343,7 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \\
   +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=enabled \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR_RAY} \\
   +ray_kwargs.ray_init.include_dashboard=False \\
   ${EXTRA_VERL_ARGS}" 2>&1 | tee "${LOG_FILE}"
 }
