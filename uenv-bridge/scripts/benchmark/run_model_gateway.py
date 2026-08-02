@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("--preserve-thinking", action="store_true")
     parser.add_argument("--strip-reasoning", action="store_true")
     parser.add_argument("--thinking-token-budget", type=int, default=None)
+    parser.add_argument("--max-tokens", type=int, default=None)
     args = parser.parse_args()
 
     gateway = ModelGateway(
@@ -37,6 +38,7 @@ def main() -> int:
             preserve_thinking=args.preserve_thinking,
             strip_reasoning=args.strip_reasoning,
             thinking_token_budget=args.thinking_token_budget,
+            max_tokens=args.max_tokens,
         )
     )
     stopped = threading.Event()

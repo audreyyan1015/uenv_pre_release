@@ -227,6 +227,60 @@ if os.environ.get("UENV_PATCH_VERL_MODEL_VERSION_RESPONSE") in {"1", "true", "Tr
     _run_when_module_imported("verl.workers.rollout.vllm_rollout.vllm_async_server", _patch_verl_model_version_response)
 
 
+def _patch_verl_text_only_processor() -> None:
+    """Treat known text-only MoE checkpoints as having no multimodal processor.
+
+    The local Qwen3.6-35B-A3B checkpoint is a text MoE model, but its
+    preprocessor metadata can make ``AutoProcessor`` load ``Qwen3VLProcessor``.
+    VeRL then builds 4-channel VL position ids, while the text MoE actor expects
+    ordinary text position ids. Returning ``None`` from ``hf_processor`` keeps
+    VeRL on its text-only path without modifying the upstream VeRL checkout.
+    """
+
+    import sys
+    import warnings
+
+    verl_utils = sys.modules.get("verl.utils")
+    tokenizer_module = sys.modules.get("verl.utils.tokenizer")
+    if verl_utils is None or tokenizer_module is None:
+        raise AttributeError("verl.utils is not fully initialized")
+    if getattr(tokenizer_module, "_uenv_text_only_processor_patch_applied", False):
+        return
+
+    original_hf_processor = tokenizer_module.hf_processor
+
+    def hf_processor(name_or_path, **kwargs):
+        try:
+            from transformers import AutoConfig
+
+            config_kwargs = {}
+            if "trust_remote_code" in kwargs:
+                config_kwargs["trust_remote_code"] = kwargs["trust_remote_code"]
+            config = AutoConfig.from_pretrained(name_or_path, **config_kwargs)
+            model_type = getattr(config, "model_type", None)
+            architectures = set(getattr(config, "architectures", None) or [])
+            if model_type == "qwen3_5_moe" or "Qwen3_5MoeForConditionalGeneration" in architectures:
+                if not getattr(tokenizer_module, "_uenv_text_only_processor_warned", False):
+                    warnings.warn(
+                        "UEnv patch: treating qwen3_5_moe checkpoint as text-only; "
+                        "VeRL hf_processor returns None.",
+                        stacklevel=1,
+                    )
+                    tokenizer_module._uenv_text_only_processor_warned = True
+                return None
+        except Exception:
+            pass
+        return original_hf_processor(name_or_path, **kwargs)
+
+    tokenizer_module.hf_processor = hf_processor
+    verl_utils.hf_processor = hf_processor
+    tokenizer_module._uenv_text_only_processor_patch_applied = True
+
+
+if os.environ.get("UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR") in {"1", "true", "True", "enabled"}:
+    _run_when_module_imported("verl.utils", _patch_verl_text_only_processor)
+
+
 def _patch_torch_cuda_is_available_no_devices() -> None:
     """Treat Ray CPU actors with zero visible GPUs as CUDA-unavailable.
 

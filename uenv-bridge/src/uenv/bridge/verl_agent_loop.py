@@ -128,6 +128,11 @@ def _int_value(value: Any, default: int) -> int:
     return int(value)
 
 
+def _optional_int_value(value: Any) -> int | None:
+    text = _optional_string(value)
+    return int(text) if text is not None else None
+
+
 def _bool_value(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -163,6 +168,9 @@ class UEnvAgentLoopConfig:
     model_gateway_public_url: str = ""
     model_gateway_log_path: str = ""
     model_gateway_disable_thinking: bool = False
+    model_gateway_max_tokens: int | None = None
+    model_gateway_stop_on_close: bool = True
+    require_swe_response_trace: bool = True
     parallel_mode: str = "sync"
 
 
@@ -206,6 +214,9 @@ class UEnvAgentLoop(AgentLoopBase):
         model_gateway_public_url: str = "",
         model_gateway_log_path: str = "",
         model_gateway_disable_thinking: bool | None = None,
+        model_gateway_max_tokens: int | None = None,
+        model_gateway_stop_on_close: bool | None = None,
+        require_swe_response_trace: bool | None = None,
         parallel_mode: str = "sync",
         **kwargs: Any,
     ) -> None:
@@ -237,6 +248,9 @@ class UEnvAgentLoop(AgentLoopBase):
             model_gateway_public_url=_optional_string(model_gateway_public_url) or "",
             model_gateway_log_path=_optional_string(model_gateway_log_path) or "",
             model_gateway_disable_thinking=_bool_value(model_gateway_disable_thinking, False),
+            model_gateway_max_tokens=_optional_int_value(model_gateway_max_tokens),
+            model_gateway_stop_on_close=_bool_value(model_gateway_stop_on_close, True),
+            require_swe_response_trace=_bool_value(require_swe_response_trace, True),
             parallel_mode=_optional_string(parallel_mode) or "sync",
         )
         self.model_gateway = ModelGateway(
@@ -248,6 +262,7 @@ class UEnvAgentLoop(AgentLoopBase):
                 request_timeout_seconds=self.config_for_uenv.timeout_seconds,
                 log_path=self.config_for_uenv.model_gateway_log_path,
                 disable_thinking=self.config_for_uenv.model_gateway_disable_thinking,
+                max_tokens=self.config_for_uenv.model_gateway_max_tokens,
             )
         )
         self.client = client or build_agent_loop_episode_client(
@@ -264,7 +279,8 @@ class UEnvAgentLoop(AgentLoopBase):
         )
 
     def close(self) -> None:
-        self.model_gateway.stop()
+        if self.config_for_uenv.model_gateway_stop_on_close:
+            self.model_gateway.stop()
         close = getattr(self.client, "close", None)
         if callable(close):
             close()
@@ -298,6 +314,7 @@ class UEnvAgentLoop(AgentLoopBase):
             )
 
         response_ids = self._response_ids_from_result(result)
+        self._raise_if_missing_required_response_trace(request, result, response_ids)
         max_response_length = self._rollout_response_length()
         response_ids = response_ids[:max_response_length] if max_response_length else response_ids
         if not response_ids:
@@ -326,7 +343,9 @@ class UEnvAgentLoop(AgentLoopBase):
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
+                "uenv_trajectory_id": result.trajectory_id,
                 "uenv_trajectory": self._trajectory_to_jsonable(result),
+                "uenv_response_source": self._response_source_from_result(result),
                 "turn_scores": [],
                 "tool_rewards": [],
             },
@@ -498,6 +517,7 @@ class UEnvAgentLoop(AgentLoopBase):
             )
 
         response_ids = self._response_ids_from_result(result)
+        self._raise_if_missing_required_response_trace(request, result, response_ids)
         max_response_length = self._rollout_response_length()
         response_ids = response_ids[:max_response_length] if max_response_length else response_ids
         if not response_ids:
@@ -519,7 +539,9 @@ class UEnvAgentLoop(AgentLoopBase):
                 "uenv_request_id": result.request_id,
                 "uenv_status": result.status,
                 "uenv_termination_reason": result.summary.terminate_reason or result.status,
+                "uenv_trajectory_id": result.trajectory_id,
                 "uenv_trajectory": self._trajectory_to_jsonable(result),
+                "uenv_response_source": self._response_source_from_result(result),
                 "turn_scores": [],
                 "tool_rewards": [],
             },
@@ -676,18 +698,27 @@ class UEnvAgentLoop(AgentLoopBase):
             "logprobs": sampling_params.get("logprobs"),
             "max_new_tokens": self._rollout_response_length(),
         }
+        env_config = self._env_config(
+            sample_kwargs=sample_kwargs,
+            env_type=env_type,
+            task_name=task_name,
+            data_source=data_source,
+            dataset=dataset,
+            prompt_as_text=prompt_as_text,
+            max_steps=max_steps,
+        )
+        reward_config = self._reward_config(
+            sample_kwargs=sample_kwargs,
+            env_type=env_type,
+            reward_model=reward_model,
+        )
 
         payload = {
             "protocol_version": "1.0",
             "framework": "verl",
             "correlation_id": f"{batch_id}-{sample_index}",
             "request_ts": time.time(),
-            "env_config": {
-                "task_name": task_name,
-                "data_source": data_source,
-                "dataset": dataset,
-                "raw_prompt": prompt_as_text,
-            },
+            "env_config": env_config,
             "model_endpoint": {
                 "endpoint_type": "http",
                 "url": model_endpoint,
@@ -707,10 +738,7 @@ class UEnvAgentLoop(AgentLoopBase):
                 },
                 "stop_conditions": ["done", "max_steps", "timeout"],
             },
-            "reward_config": {
-                "reward_type": "rubric" if env_type in ("qa", "math") else "external",
-                "rubric_config": self._jsonable(reward_model),
-            },
+            "reward_config": reward_config,
             "metadata": metadata,
             "timeout_seconds": self.config_for_uenv.timeout_seconds,
         }
@@ -792,6 +820,11 @@ class UEnvAgentLoop(AgentLoopBase):
                     "status": result.status,
                     "error_code": result.error_code,
                     "error_message": result.error_message,
+                    "trajectory_id": result.trajectory_id,
+                    "result_metadata": result.metadata,
+                    "rollout_param_version": result.rollout_param_version,
+                    "rollout_policy_version": result.rollout_policy_version,
+                    "rollout_log_probs_len": len(result.rollout_log_probs),
                     "batch_id": metadata.get("batch_id"),
                     "sample_index": metadata.get("sample_index"),
                     "request_metadata": metadata,
@@ -801,6 +834,8 @@ class UEnvAgentLoop(AgentLoopBase):
                     "total_steps": result.summary.total_steps,
                     "terminate_reason": result.summary.terminate_reason,
                     "response_text": self._response_text_from_result(result),
+                    "response_source": self._response_source_from_result(result),
+                    "used_pad_fallback": not response_ids,
                     "response_ids": response_ids,
                     "verl_response_ids": verl_response_ids,
                     "verl_response_mask": verl_response_mask,
@@ -823,6 +858,34 @@ class UEnvAgentLoop(AgentLoopBase):
             if step.action:
                 return step.action.decode("utf-8", errors="replace")
         return ""
+
+    def _response_source_from_result(self, result: EpisodeResult) -> str:
+        for step in result.trajectory.steps:
+            if step.response_ids:
+                return "rollout_trace"
+        for step in result.trajectory.steps:
+            text = step.info.get("response_text") or step.action.decode("utf-8", errors="replace")
+            if text:
+                return "text"
+        return "empty"
+
+    def _raise_if_missing_required_response_trace(
+        self,
+        request: EpisodeRequest,
+        result: EpisodeResult,
+        response_ids: list[int],
+    ) -> None:
+        if not self.config_for_uenv.require_swe_response_trace or request.env_type != "swe":
+            return
+        if any(step.response_ids for step in result.trajectory.steps):
+            return
+        raise RuntimeError(
+            "UEnv SWE episode completed without response token trace; refusing to train on pad/text fallback. "
+            f"request_id={result.request_id} trajectory_id={result.trajectory_id or ''} "
+            f"response_source={self._response_source_from_result(result)} fallback_response_tokens={len(response_ids)}. "
+            "OpenHands/Worker must populate AgentJobCompleteRequest.rollout_trace.response_ids/response_mask "
+            "or return an EpisodeResult trajectory step with typed rollout_trace."
+        )
 
     async def _prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
         prompt_ids = await self.apply_chat_template(messages)
@@ -919,6 +982,76 @@ class UEnvAgentLoop(AgentLoopBase):
         value = getattr(self.tokenizer, "pad_token_id", None)
         return int(value) if value is not None else 0
 
+    def _env_config(
+        self,
+        *,
+        sample_kwargs: dict[str, Any],
+        env_type: str,
+        task_name: str,
+        data_source: str | None,
+        dataset: str,
+        prompt_as_text: str,
+        max_steps: int,
+    ) -> dict[str, Any]:
+        env_config: dict[str, Any] = {
+            "task_name": task_name,
+            "data_source": data_source,
+            "dataset": dataset,
+            "raw_prompt": prompt_as_text,
+        }
+        if env_type != "swe":
+            return env_config
+
+        def value(key: str, default: Any = "") -> Any:
+            return self._value_from_extra_info(sample_kwargs, key, default)
+
+        env_config.update(
+            {
+                "instance_id": value("instance_id"),
+                "benchmark_variant": value("benchmark_variant", "pro"),
+                "command_mode": value("command_mode", "full_shell"),
+                "env_package_id": value("env_package_id", "swe-bench-pro"),
+                "env_package_version": value("env_package_version", "0.3.4"),
+                "execution_mode": value("execution_mode", "agent"),
+                "mode": value("agent_mode", value("mode", "llm")),
+                "agent_bridge_id": value("agent_bridge_id", "uenv-agent-openhands"),
+                "agent_bridge_version": value("agent_bridge_version", "1.0.0"),
+                "agent_pool_id": value("agent_pool_id", "openhands-default"),
+                "driver_entrypoint": value("driver_entrypoint", "run_swebenchpro_official.py"),
+                "workspace_dir": value("workspace_dir", "/app"),
+                "llm_config_path": value(
+                    "llm_config_path",
+                    "/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json",
+                ),
+                "max_iterations": value("max_iterations", max_steps),
+                "repo": value("repo"),
+                "repo_language": value("repo_language"),
+                "base_commit": value("base_commit"),
+                "dockerhub_tag": value("dockerhub_tag"),
+            }
+        )
+        pool_selector = value("pool_selector", None)
+        if isinstance(pool_selector, dict):
+            env_config["pool_selector"] = pool_selector
+        return {key: self._jsonable(val) for key, val in env_config.items() if val not in (None, "")}
+
+    def _reward_config(
+        self,
+        *,
+        sample_kwargs: dict[str, Any],
+        env_type: str,
+        reward_model: Any,
+    ) -> dict[str, Any]:
+        if env_type == "swe":
+            return {
+                "type": "swe_resolved",
+                "target": str(self._value_from_extra_info(sample_kwargs, "instance_id", "")),
+            }
+        return {
+            "reward_type": "rubric" if env_type in ("qa", "math") else "external",
+            "rubric_config": self._jsonable(reward_model),
+        }
+
     def _env_type(self, sample_kwargs: dict[str, Any]) -> str:
         candidates = [
             sample_kwargs.get("task_name"),
@@ -926,6 +1059,8 @@ class UEnvAgentLoop(AgentLoopBase):
             sample_kwargs.get("data_source"),
         ]
         lowered = " ".join(str(self._python_value(item) or "").lower() for item in candidates)
+        if any(token in lowered for token in ("swe", "swebench", "swe-bench")):
+            return "swe"
         if any(
             token in lowered
             for token in (
@@ -983,6 +1118,12 @@ class UEnvAgentLoop(AgentLoopBase):
             return "olymmath"
         if "gsm8k" in lowered:
             return "gsm8k"
+        if "swe-bench-pro" in lowered or "swebenchpro" in lowered:
+            return "swe-bench-pro"
+        if "swesmith" in lowered or "swe-smith" in lowered:
+            return "swesmith"
+        if "swe-gym" in lowered or "swegym" in lowered:
+            return "swe-gym"
         return value
 
     def _model_endpoint(self, sample_kwargs: dict[str, Any], sampling_params: dict[str, Any]) -> str:
