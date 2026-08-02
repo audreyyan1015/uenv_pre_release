@@ -54,6 +54,11 @@ def memory_bytes() -> tuple[int, int]:
     return values["MemTotal"], values["MemAvailable"]
 
 
+def load_averages() -> tuple[float, float, float]:
+    values = Path("/proc/loadavg").read_text(encoding="utf-8").split()
+    return float(values[0]), float(values[1]), float(values[2])
+
+
 def process_group_metrics() -> tuple[int, int, int, int]:
     """Return process count, RSS bytes, open FD count and thread count."""
     process_count = 0
@@ -108,6 +113,9 @@ metrics = {
     "peak_rss_bytes": 0,
     "peak_open_fds": 0,
     "peak_threads": 0,
+    "max_load1": 0.0,
+    "max_load5": 0.0,
+    "max_load15": 0.0,
     "worker_exit_count": 0,
     "started_unix": time.time(),
 }
@@ -145,13 +153,17 @@ try:
     next_resource_sample = 0.0
     while not stopping:
         process_count, rss_bytes, open_fds, threads = process_group_metrics()
-        _mem_total, mem_available = memory_bytes()
+        mem_total, mem_available = memory_bytes()
+        load1, load5, load15 = load_averages()
         metrics["sample_count"] += 1
         metrics["min_mem_available_bytes"] = min(metrics["min_mem_available_bytes"], mem_available)
         metrics["peak_processes"] = max(metrics["peak_processes"], process_count)
         metrics["peak_rss_bytes"] = max(metrics["peak_rss_bytes"], rss_bytes)
         metrics["peak_open_fds"] = max(metrics["peak_open_fds"], open_fds)
         metrics["peak_threads"] = max(metrics["peak_threads"], threads)
+        metrics["max_load1"] = max(metrics["max_load1"], load1)
+        metrics["max_load5"] = max(metrics["max_load5"], load5)
+        metrics["max_load15"] = max(metrics["max_load15"], load15)
         metrics["updated_unix"] = time.time()
         write_json_atomic(metrics_target, metrics)
         failed = [
@@ -168,6 +180,8 @@ try:
             append_resource_row(Path(args.resource_csv), {
                 "timestamp": time.time(), "run_id": args.run_id, "processes": process_count,
                 "rss_bytes": rss_bytes, "open_fds": open_fds, "threads": threads,
+                "mem_total_bytes": mem_total, "available_bytes": mem_available,
+                "load1": load1, "load5": load5, "load15": load15,
                 "worker_exits": metrics["worker_exit_count"], "oom_events": 0,
             })
             next_resource_sample = time.monotonic() + args.resource_sample_seconds
@@ -190,6 +204,8 @@ finally:
     metrics["finished_unix"] = time.time()
     metrics["exit_code"] = exit_code
     remaining_processes, remaining_rss, remaining_fds, remaining_threads = process_group_metrics()
+    mem_total, mem_available = memory_bytes()
+    load1, load5, load15 = load_averages()
     metrics["cleanup"] = {
         "remaining_processes": remaining_processes,
         "remaining_rss_bytes": remaining_rss,
@@ -200,6 +216,8 @@ finally:
         append_resource_row(Path(args.resource_csv), {
             "timestamp": time.time(), "run_id": args.run_id, "processes": remaining_processes,
             "rss_bytes": remaining_rss, "open_fds": remaining_fds, "threads": remaining_threads,
+            "mem_total_bytes": mem_total, "available_bytes": mem_available,
+            "load1": load1, "load5": load5, "load15": load15,
             "worker_exits": metrics["worker_exit_count"], "oom_events": 0,
         })
     write_json_atomic(metrics_target, metrics)

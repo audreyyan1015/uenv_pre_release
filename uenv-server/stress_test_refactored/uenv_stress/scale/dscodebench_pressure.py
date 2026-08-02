@@ -823,10 +823,12 @@ async def main():
         "name": "DSCodeBench",
         "path": args.dataset_jsonl,
         "loaded_rows": len(dataset_rows),
+        "loaded_items": len(dataset_rows),
         "offset": args.dataset_offset,
         "problem_ids": [str(row["problem_id"]) for row in dataset_rows],
         "submitted_episodes": submitted,
         "unique_problem_count": len(dataset_problem_usage),
+        "unique_items": len(dataset_problem_usage),
         "reuse_factor": submitted / len(dataset_problem_usage) if dataset_problem_usage else 0.0,
         "problem_usage_top20": dict(
             sorted(dataset_problem_usage.items(), key=lambda item: (-item[1], item[0]))[:20]
@@ -845,6 +847,30 @@ async def main():
         "min_response_tokens": min(training_trace_token_counts) if training_trace_token_counts else 0,
         "total_response_tokens": sum(training_trace_token_counts),
     }
+    planned_batches = args.exact_batches if args.exact_batches > 0 else batch_sequence
+    submission_strategy = (
+        "submit_all_batches_then_collect"
+        if args.exact_batches > 0
+        else "duration_window_refill"
+    )
+    document.update(stress_common.pressure_result_metrics(
+        configured_workers=args.workers,
+        worker_capacity=args.slots,
+        batch_size=episode_batch_size,
+        planned_batches=planned_batches,
+        concurrent_batches=concurrent_batches,
+        submission_strategy=submission_strategy,
+        client_submit_seconds=client_submit_seconds,
+        submitted_batches=batch_sequence,
+        elapsed_seconds=elapsed,
+        submitted=submitted,
+        completed=completed,
+        failed=failed,
+        rpc_error_episodes=rpc_errors,
+        protocol_errors=protocol_errors,
+        latencies_ms=latencies,
+    ))
+    stress_common.assert_pressure_result_schema(document)
     observation_path = args.output + ".episode-observations.jsonl"
     observation_count = stress_common.write_episode_observations_jsonl(
         observation_path, episode_observations
@@ -1774,6 +1800,11 @@ def run_scale(
             (local_run / f"result-{mode}.json").write_text(json.dumps(result, indent=2, sort_keys=True))
             print(f"[dscodebench_pressure:{workers_count}x{capacity}] mode={mode} PASS throughput={result['throughput_eps']:.2f} ep/s", flush=True)
         (local_run / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True))
+        # Preserve the scheduler/event evidence before optional trace export.
+        (local_run / "server.log").write_text(
+            base.get_text(server, f"{server_run}/server.log"),
+            encoding="utf-8",
+        )
         if model_mode == "real" and real_llm_trace_output_dir:
             # 多节点时每台机器各有一份 trace 产物，文件名带 host 后缀区分；
             # 单节点保持改造前的文件名。
@@ -1804,19 +1835,29 @@ def run_scale(
                     manifest["trace_corpus"]["local_jsonl_per_node"] = local_jsonl_by_node
                 (local_run / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
         if any(fleet_metrics_paths.values()):
-            if len(nodes) == 1:
-                fleet_resource_metrics = json.loads(
-                    base.get_text(worker_clients[nodes[0].host], fleet_metrics_paths[nodes[0].host])
+            per_node_metrics = {}
+            for node in nodes:
+                if not fleet_metrics_paths[node.host]:
+                    continue
+                metrics_text = base.get_text(
+                    worker_clients[node.host], fleet_metrics_paths[node.host]
                 )
-            else:
-                # 多节点时按节点保留各自的 fleet 资源指标。
-                fleet_resource_metrics = {
-                    "per_node": {
-                        node.host: json.loads(base.get_text(worker_clients[node.host], fleet_metrics_paths[node.host]))
-                        for node in nodes
-                        if fleet_metrics_paths[node.host]
-                    }
-                }
+                per_node_metrics[node.host] = json.loads(metrics_text)
+                (local_run / f"fleet-metrics-{node.host}.json").write_text(
+                    metrics_text, encoding="utf-8"
+                )
+                (local_run / f"fleet-resources-{node.host}.csv").write_text(
+                    base.get_text(
+                        worker_clients[node.host],
+                        f"{worker_run}/fleet-resources.csv",
+                    ),
+                    encoding="utf-8",
+                )
+            fleet_resource_metrics = (
+                next(iter(per_node_metrics.values()))
+                if len(nodes) == 1
+                else {"per_node": per_node_metrics}
+            )
             (local_run / "fleet-metrics.json").write_text(
                 json.dumps(fleet_resource_metrics, indent=2, sort_keys=True)
             )

@@ -65,8 +65,8 @@
     "trace_corpus_path": "/home/uenv-stress/trace-corpora-mixed-20260726/swebench_pro/swebench_pro.jsonl",
     "trace_sampling_strategy": "round_robin_episode",
     "trace_latency_basis": "observed_episode_elapsed_proxy",
-    "max_steps": 10,
-    "openhands_max_iterations": 10,
+    "max_steps": 50,
+    "openhands_max_iterations": 50,
     "evidence_boundary": "64 real UEnv SWE Worker processes, 8 OpenHands agents per worker node, 2 concurrent OpenHands tasks per agent, real OpenHands runner, real OpenHands SDK, real UEnv AgentControlService polling/completion path, real runtime gateway and Docker/container path; only the LLM endpoint is replaced by a local trace_replay simulator using 50 task-matched real SWE-bench Pro LLM traces. container_concurrency is intentionally separate from registered_workers."
   },
   "math_rule_pressure": {

@@ -295,6 +295,8 @@ async def main():
     latencies = []
     used_items = {}
     missing_ids = []
+    duplicate_ids = []
+    unknown_ids = []
     episode_observations = []
     lock = asyncio.Lock()
     semaphore = asyncio.Semaphore(args.concurrent_batches)
@@ -373,6 +375,8 @@ async def main():
                 latencies.append(elapsed)
                 episode_observations.extend(batch_observations)
                 missing_ids.extend(missing)
+                duplicate_ids.extend(duplicates)
+                unknown_ids.extend(unknown)
                 failed += len(missing) + len(duplicates)
                 protocol_errors += len(missing) + len(duplicates) + len(unknown)
                 for result in response.results:
@@ -408,10 +412,12 @@ async def main():
             semaphore.release()
 
     started = time.monotonic()
+    submit_started = started
     tasks = []
     for sequence in range(args.exact_batches):
         await semaphore.acquire()
         tasks.append(asyncio.create_task(send_batch(sequence)))
+    client_submit_seconds = time.monotonic() - submit_started
     if tasks:
         await asyncio.gather(*tasks)
     elapsed = time.monotonic() - started
@@ -445,11 +451,9 @@ async def main():
             "reuse_factor": submitted / max(1, len(used_items)),
             "real_input": True,
         },
-        "batch_size": args.episode_batch_size,
-        "concurrent_batches": args.concurrent_batches,
-        "planned_batches": args.exact_batches,
-        "capacity_waves": submitted / max(1, args.workers * args.capacity),
         "missing_result_ids": sorted(set(missing_ids)),
+        "duplicate_result_ids": sorted(set(duplicate_ids)),
+        "unknown_result_ids": sorted(set(unknown_ids)),
         "infrastructure": {
             "passed": bool(submitted and completed == submitted and not failed and not rpc_errors and not protocol_errors)
         },
@@ -459,6 +463,29 @@ async def main():
             "note": "Trace replay scale evidence is not new model-quality evidence.",
         },
     })
+    result.update(common.pressure_result_metrics(
+        configured_workers=args.workers,
+        worker_capacity=args.capacity,
+        batch_size=args.episode_batch_size,
+        planned_batches=args.exact_batches,
+        concurrent_batches=args.concurrent_batches,
+        submission_strategy="submit_all_batches_then_collect",
+        client_submit_seconds=client_submit_seconds,
+        submitted_batches=args.exact_batches,
+        elapsed_seconds=elapsed,
+        submitted=submitted,
+        completed=completed,
+        failed=failed,
+        rpc_error_episodes=rpc_errors,
+        protocol_errors=protocol_errors,
+        latencies_ms=latencies,
+    ))
+    result["dataset"].update({
+        "loaded_items": len(rows),
+        "unique_items": len(used_items),
+        "submitted_episodes": submitted,
+    })
+    common.assert_pressure_result_schema(result)
     observation_path = args.output + ".episode-observations.jsonl"
     observation_count = common.write_episode_observations_jsonl(
         observation_path, episode_observations
@@ -886,12 +913,26 @@ def run_scale(args: argparse.Namespace) -> dict:
                 )
                 if result["status"] != "passed":
                     raise RuntimeError(f"{task}/{mode} scale evidence failed")
-        fleet_metrics = {
-            node.host: json.loads(
-                base.get_text(worker_clients[node.host], fleet_metrics_paths[node.host])
+        (local_run / "server.log").write_text(
+            base.get_text(server, f"{server_run}/server.log"),
+            encoding="utf-8",
+        )
+        fleet_metrics = {}
+        for node in nodes:
+            metrics_text = base.get_text(
+                worker_clients[node.host], fleet_metrics_paths[node.host]
             )
-            for node in nodes
-        }
+            fleet_metrics[node.host] = json.loads(metrics_text)
+            (local_run / f"fleet-metrics-{node.host}.json").write_text(
+                metrics_text, encoding="utf-8"
+            )
+            (local_run / f"fleet-resources-{node.host}.csv").write_text(
+                base.get_text(
+                    worker_clients[node.host],
+                    f"{worker_run}/fleet-resources.csv",
+                ),
+                encoding="utf-8",
+            )
         outcome = {
             "run_id": run_id,
             "scale": f"{workers_count}x{args.capacity}",
