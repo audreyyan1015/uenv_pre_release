@@ -84,6 +84,7 @@ fn build(name: &'static str, description: &'static str) -> Template {
 }
 
 fn manifest_toml(name: &str) -> String {
+    let identity = identity_block(name);
     format!(
         r#"# UEnvHub manifest for the `{name}` environment.
 # `uenv env publish` reads this file and uploads it to UEnvHub.
@@ -94,7 +95,7 @@ description = "TODO: describe the {name} environment"
 author = "you@example.com"
 license = "Apache-2.0"
 tags = ["{name}", "example"]
-
+{identity}
 [version]
 version = "0.1.0"
 changelog = "Initial scaffold from `uenv env init --template {name}`."
@@ -141,6 +142,31 @@ type = "number"
 requirements_path = "requirements.txt"
 "#
     )
+}
+
+/// The registry-identity lines a scaffold starts with.
+///
+/// The `math` template exists only so an old checkout still resolves; scaffolding
+/// from it must not quietly produce a new environment under a retired name, so it
+/// carries the deprecation forward. The `qa` template states the canonical
+/// identity and points at the command that derives a rubric from a real alignment
+/// run — a scaffolded rubric would have to invent an agreement rate, and an
+/// invented one is worse than none.
+fn identity_block(name: &str) -> &'static str {
+    match name {
+        "qa" => {
+            "lifecycle = \"canonical\"\ncompat_aliases = [\"math\"]\n\n\
+             # 判分契约（rubric）不在脚手架里手写：改完判分后跑对齐脚本，再\n\
+             #   uenv env rubric publish <pkg> --corpus <corpus> --metrics <metrics.json>\n\
+             #   uenv env rubric import --metrics <metrics.json> --corpus <corpus> --package-ref <pkg@ver>\n\
+             # 由真实报告生成 [rubric]（含 corpus/report digest）。过宽>0 的版本不会被 promote 为 latest。\n"
+        }
+        "math" => {
+            "# `math` 已退役，正式名为 `qa`；此模板仅为兼容旧 checkout 保留。\n\
+             lifecycle = \"deprecated\"\nsuperseded_by = \"qa\"\n"
+        }
+        _ => "",
+    }
 }
 
 fn dockerfile() -> String {

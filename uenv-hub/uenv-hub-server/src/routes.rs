@@ -8,7 +8,7 @@ use crate::middleware::{ensure_role, Principal};
 use crate::service;
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -54,6 +54,15 @@ pub fn build_router(state: AppState) -> Router {
             "/packages/:package_id/versions/:version/artifacts/:name",
             get(get_package_artifact),
         )
+        // Agent-bridge catalog: which Agent scaffolds this Hub publishes.
+        .route("/agent-bridges", get(list_agent_bridges))
+        // Episode Stacks: the registered composition of Task Environment +
+        // Agent scaffold + Runtime Gateway, and its resolved launch plan.
+        .route("/episode-stacks", get(list_stacks))
+        .route("/episode-stacks/:stack_id/versions", get(list_stack_versions).post(publish_stack))
+        .route("/episode-stacks/:stack_id/versions/:version", get(get_stack))
+        .route("/episode-stacks/:stack_id/versions/:version/yank", post(yank_stack))
+        .route("/episode-stacks/:stack_id/versions/:version/resolve", get(resolve_stack))
         // templates
         .route("/templates", get(list_templates))
         .route("/templates/:name/archive", get(template_archive))
@@ -219,6 +228,34 @@ async fn fetch_manifest(state: &AppState, env_type: &str, version: &str) -> ApiR
     Ok(manifest)
 }
 
+/// Advertise a deprecated environment **in headers on a 200 response**.
+///
+/// Deliberately not 404/410: a Worker resolves `env.types` against
+/// `versions/latest` at boot and, with `prewarm_on_startup` enabled, treats a
+/// non-2xx as fatal. Failing the old name would take down every Worker still
+/// configured with it, i.e. turn a rename into an outage. So the manifest keeps
+/// being served and the migration signal rides along in `Deprecation` /
+/// `Warning` / `Link` (RFC 8594 / RFC 9111 / RFC 8288) plus the `deprecation`
+/// field in the body.
+fn attach_deprecation(mut resp: Response, manifest: &dto::FullManifest) -> Response {
+    let Some(notice) = &manifest.deprecation else {
+        return resp;
+    };
+    let h = resp.headers_mut();
+    h.insert("deprecation", HeaderValue::from_static("true"));
+    if let Ok(v) = HeaderValue::from_str(&format!("299 - \"{}\"", notice.message)) {
+        h.insert("warning", v);
+    }
+    if let Some(next) = &notice.superseded_by {
+        if let Ok(v) = HeaderValue::from_str(&format!(
+            "</api/v1/envs/{next}/versions/latest>; rel=\"successor-version\""
+        )) {
+            h.insert(header::LINK, v);
+        }
+    }
+    resp
+}
+
 async fn get_version(
     State(state): State<AppState>,
     _principal: Principal,
@@ -226,7 +263,10 @@ async fn get_version(
     Path((env_type, version)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let manifest = fetch_manifest(&state, &env_type, &version).await?;
-    Ok(json_with_etag(&headers, &manifest))
+    Ok(attach_deprecation(
+        json_with_etag(&headers, &manifest),
+        &manifest,
+    ))
 }
 
 async fn get_interface(
@@ -337,6 +377,20 @@ async fn list_packages(
 ) -> ApiResult<Response> {
     let page = state.store.list_packages(q.page, q.per_page).await?;
     Ok(json_with_etag(&headers, &page))
+}
+
+/// `GET /agent-bridges` — the Agent-bridge catalog.
+///
+/// Returns `package_id` / `version` / `bundle_digest` per scaffold, matching
+/// `uenv.v1.SyncedAgentBridge`, so an operator (or the Server) can check what an
+/// Agent registered against what the Hub actually published.
+async fn list_agent_bridges(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let items = state.store.list_agent_bridges().await?;
+    Ok(json_with_etag(&headers, &items))
 }
 
 /// `POST /packages/{package_id}/versions` — publish a package version.
@@ -461,6 +515,107 @@ async fn get_package_artifact(
 }
 
 // ---------------------------------------------------------------------------
+// episode stacks
+// ---------------------------------------------------------------------------
+
+/// `GET /episode-stacks` — paginated stack list (latest version of each).
+async fn list_stacks(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Response> {
+    let page = state.store.list_stacks(q.page, q.per_page).await?;
+    Ok(json_with_etag(&headers, &page))
+}
+
+/// `GET /episode-stacks/{stack_id}/versions` — every version, newest first.
+async fn list_stack_versions(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path(stack_id): Path<String>,
+) -> ApiResult<Response> {
+    let items = state.store.list_stack_versions(&stack_id).await?;
+    Ok(json_with_etag(&headers, &items))
+}
+
+/// `POST /episode-stacks/{stack_id}/versions` — publish a stack version.
+async fn publish_stack(
+    State(state): State<AppState>,
+    Principal(principal): Principal,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    Path(stack_id): Path<String>,
+    Json(req): Json<dto::PublishStackRequest>,
+) -> ApiResult<(StatusCode, Json<dto::PublishStackResponse>)> {
+    ensure_role(&principal, Role::Publisher)?;
+    let (manifest, notes) = service::publish_stack(
+        &state.store,
+        &principal,
+        client_ip(&connect_info),
+        &stack_id,
+        req,
+    )
+    .await?;
+    let resp = dto::PublishStackResponse {
+        stack_id: manifest.stack_id.clone(),
+        version: manifest.version.clone(),
+        published_at: manifest.published_at,
+        manifest_url: format!(
+            "/api/v1/episode-stacks/{}/versions/{}",
+            manifest.stack_id, manifest.version
+        ),
+        notes,
+    };
+    Ok((StatusCode::CREATED, Json(resp)))
+}
+
+/// `GET /episode-stacks/{stack_id}/versions/{version}` — the stored declaration
+/// (`latest` ok). Component references stay in their declared form here; use
+/// `/resolve` for the pinned launch plan.
+async fn get_stack(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((stack_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let manifest = state.store.get_stack_manifest(&stack_id, &version).await?;
+    Ok(json_with_etag(&headers, &manifest))
+}
+
+/// `GET /episode-stacks/{stack_id}/versions/{version}/resolve` — the launch plan.
+///
+/// One request returns every component pinned to a concrete version, the sync
+/// plans for the required EnvPackages, and a `stack_digest` a training run can
+/// record. Deliberately not cached by ETag alone on the client side: a stack
+/// pinning `latest` resolves differently as new versions are published, and the
+/// digest in the body is what tells two runs apart.
+async fn resolve_stack(
+    State(state): State<AppState>,
+    _principal: Principal,
+    headers: HeaderMap,
+    Path((stack_id, version)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let resolved = state.store.resolve_stack(&stack_id, &version).await?;
+    Ok(json_with_etag(&headers, &resolved))
+}
+
+/// `POST /episode-stacks/{stack_id}/versions/{version}/yank` — withdraw a version.
+async fn yank_stack(
+    State(state): State<AppState>,
+    Principal(principal): Principal,
+    Path((stack_id, version)): Path<(String, String)>,
+    Json(req): Json<dto::YankRequest>,
+) -> ApiResult<StatusCode> {
+    ensure_role(&principal, Role::Publisher)?;
+    state
+        .store
+        .yank_stack(&stack_id, &version, &req.reason)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
 // publish / mutations
 // ---------------------------------------------------------------------------
 
@@ -494,6 +649,10 @@ async fn publish_version(
             "/api/v1/envs/{}/versions/{}",
             manifest.env_type, manifest.version
         ),
+        // Publishing succeeded either way; the gate only decides whether this
+        // version may resolve as `latest`, and the publisher is told which.
+        promoted_to_latest: manifest.latest_eligible,
+        gate_notes: manifest.gate_notes.clone(),
     };
     Ok((StatusCode::CREATED, Json(resp)))
 }
