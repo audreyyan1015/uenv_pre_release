@@ -799,7 +799,7 @@ def run_scale(args: argparse.Namespace) -> dict:
                 client,
                 f"python3 -B {worker_run}/worker_fleet_supervisor.py "
                 f"--spec {spec_path} --pid-file {pid_path} --metrics-file {metrics_path} "
-                f"--resource-csv {worker_run}/fleet-resources.csv",
+                f"--resource-csv {worker_run}/fleet-resources.csv --run-id {run_id}",
                 f"{worker_run}/fleet-supervisor.log",
                 "/usr/bin/python3.12",
                 f"{worker_run}/worker_fleet_supervisor.py",
