@@ -19,7 +19,7 @@ Usage:
   SERVER_ADAPTER_CORE_ENDPOINT=<server-core-host:port> ./scripts/run_layer4_distributed_smoke.sh
 
 Common environment overrides:
-  IMAGE                         VeRL image. Default: localhost/uenv-bridge-verl:layer4-build
+  IMAGE                         VeRL image. Default: localhost/uenv-bridge-verl:qwen35-torch210-vllm019-tf514-kernelfix
   VERL_WORKSPACE                Host VeRL workspace. Default: /data/podman/verl/workspace
   MODEL_PATH                    Host policy model path. Default: /data/ronghao/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
   HOST_MODEL_PATH               Host policy model path; preferred when MODEL_PATH is used as an old container-path alias.
@@ -34,6 +34,7 @@ Common environment overrides:
   PPO_MINI_BATCH_SIZE           Default: 64
   ROLLOUT_N                     Default: 5
   ROLLOUT_TP                    Default: 1
+  ROLLOUT_CALCULATE_LOG_PROBS   Ask rollout engine to return token logprobs. Default: False for sync.
   DATA_MAX_RESPONSE_LENGTH      Default: 1024
   UENV_AGENT_LOOP_BATCH         Batch episodes before Python -> Rust core RPC. Default: 1
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
@@ -44,6 +45,7 @@ Common environment overrides:
   UENV_MODEL_GATEWAY_PUBLIC_URL Worker-visible gateway URL. Default: http://10.10.20.142:<port>/v1
   UENV_MODEL_GATEWAY_DISABLE_THINKING
                                   Inject chat_template_kwargs.enable_thinking=false for OpenAI chat requests. Default: 0
+  EXTRA_VERL_ARGS               Extra Hydra overrides appended to the VeRL command. Default: empty
   RAY_NUM_CPUS                  Default: NGPUS_PER_NODE * 4
   SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.75.157:8088
   LOG_ROOT                      Host directory for run logs. Default: <repo>/temp/logs
@@ -112,7 +114,7 @@ if [ -z "${SERVER_ADAPTER_CORE_ENDPOINT}" ]; then
 fi
 
 # VeRL policy model
-IMAGE=${IMAGE:-localhost/uenv-bridge-verl:layer4-build}
+IMAGE=${IMAGE:-localhost/uenv-bridge-verl:qwen35-torch210-vllm019-tf514-kernelfix}
 DEFAULT_HOST_MODEL_PATH=/data/ronghao/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
 DEFAULT_CONTAINER_MODEL_PATH=/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
 
@@ -131,6 +133,7 @@ REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-$
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 ROLLOUT_N=${ROLLOUT_N:-5}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
+ROLLOUT_CALCULATE_LOG_PROBS=${ROLLOUT_CALCULATE_LOG_PROBS:-False}
 DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-1024}
 DATA_DIR=${DATA_DIR:-/data/ronghao/uenv/uenv-bridge/data/gsm8k}
 CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/gsm8k}
@@ -162,6 +165,7 @@ UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST:-0.0.0.0}
 UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18080}
 UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL:-http://10.10.20.142:${UENV_MODEL_GATEWAY_PORT}/v1}
 UENV_MODEL_GATEWAY_DISABLE_THINKING=${UENV_MODEL_GATEWAY_DISABLE_THINKING:-0}
+EXTRA_VERL_ARGS=${EXTRA_VERL_ARGS:-}
 ACTOR_LR=${ACTOR_LR:-1e-6}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
@@ -208,6 +212,7 @@ run_verl_training() {
     -lc "set -euo pipefail
 cd /workspace/verl
 export PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_IN_CONTAINER}
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
@@ -286,8 +291,8 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
   +actor_rollout_ref.rollout.enable_sleep_mode=${ROLLOUT_ENABLE_SLEEP_MODE} \\
   actor_rollout_ref.rollout.max_num_seqs=4 \\
-  actor_rollout_ref.rollout.max_num_batched_tokens=512 \\
-  actor_rollout_ref.rollout.calculate_log_probs=True \\
+  actor_rollout_ref.rollout.max_num_batched_tokens=2048 \\
+  actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
   actor_rollout_ref.ref.fsdp_config.param_offload=False \\
   actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \\
@@ -311,8 +316,10 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS} \\
   +ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE} \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \\
   +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=enabled \\
-  +ray_kwargs.ray_init.include_dashboard=False" 2>&1 | tee "${LOG_FILE}"
+  +ray_kwargs.ray_init.include_dashboard=False \\
+  ${EXTRA_VERL_ARGS}" 2>&1 | tee "${LOG_FILE}"
 }
 
 summarize_agent_loop_records() {

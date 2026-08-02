@@ -1,9 +1,9 @@
 # 跨模块调整清单 — `math`→`qa` 改造 & DSCode ToolEnv Agent
 
-> 日期：2026-07-25  
-> 状态：**已实机联调打通（qa 全链路 + ToolEnv on 208.77 + 真实 vLLM 小样本）**；余项见 §联调结果  
-> 前置规划：[验证型环境改造与DSCode-Agent评测-实施规划](./验证型环境改造与DSCode-Agent评测-实施规划.md)  
-> 选型结论：[Math环境与术语规范-可证明性与DSCode-Agent选型](./Math环境与术语规范-可证明性与DSCode-Agent选型.md)  
+> 日期：2026-07-25
+> 状态：**已实机联调打通（qa 全链路 + ToolEnv on 208.77 + 真实 vLLM 小样本）**；余项见 §联调结果
+> 前置规划：[验证型环境改造与DSCode-Agent评测-实施规划](./验证型环境改造与DSCode-Agent评测-实施规划.md)
+> 选型结论：[Math环境与术语规范-可证明性与DSCode-Agent选型](./Math环境与术语规范-可证明性与DSCode-Agent选型.md)
 > 实机参考：[secrets/README.md](../../../secrets/README.md)（7142 / 7143 / Server `8.130.75.157` / Hub `8.130.95.176` / Agent `8.130.208.77`）
 
 ---

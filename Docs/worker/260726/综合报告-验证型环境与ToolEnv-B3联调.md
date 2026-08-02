@@ -1,6 +1,6 @@
 # 综合报告：验证型环境 / ToolEnv Agent / 金标 Rubric（2026-07-25）
 
-> 范围：按用户顺序完成 **B2 → 208.77 生产化 → math 收敛 → A 金标 → B3 联调 → 关 7142 临时 vLLM**。  
+> 范围：按用户顺序完成 **B2 → 208.77 生产化 → math 收敛 → A 金标 → B3 联调 → 关 7142 临时 vLLM**。
 > 关联：
 > - [跨模块调整清单](./跨模块调整清单-qa改造与ToolEnv-Agent.md)
 > - [实施规划](./验证型环境改造与DSCode-Agent评测-实施规划.md)
@@ -110,7 +110,7 @@ Client (submit_code_agent_episode)
   → CompleteAgentJob → EpisodeResult
 ```
 
-实机样例（编排）：`code-agent-numpy_1-8e1c1c1c`，`status=completed`，约 **3.6s**（缺 `test_script` 时 `reward=0`）。  
+实机样例（编排）：`code-agent-numpy_1-8e1c1c1c`，`status=completed`，约 **3.6s**（缺 `test_script` 时 `reward=0`）。
 实机样例（完整判分，2026-07-25 续）：`code-agent-numpy_1-f4f55b2b`，mock + 完整 `test_script` → **`reward=1.0`，`tests_passed=20/20`**（adapter-core 已含 `test_script` 透传并重新部署）。
 
 ---
@@ -119,7 +119,7 @@ Client (submit_code_agent_episode)
 
 Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubric注册.md)。本节只列 **Server / Bridge / Worker / Agent 机 / OpenHands / 文档与 CI / 评测口径** 上仍未收口、但本轮联调已暴露的事项。
 
-> **进度（2026-07-25 续 / 07-26 FE）**：§4.3–§4.5 已落地并验收；§4.1 / §4.6 / §4.7 与 Bridge 训练侧清查仍开放。  
+> **进度（2026-07-25 续 / 07-26 FE）**：§4.3–§4.5 已落地并验收；§4.1 / §4.6 / §4.7 与 Bridge 训练侧清查仍开放。
 > **前端**：Obs 部署 + seed 冒烟已做；**§4.2 Bridge 真实 UI 联调仍开放（P0）**；能力差距见 [前端观测面与系统能力差距-待补齐](./前端观测面与系统能力差距-待补齐.md)。
 
 ### 4.1 Server（控制面 / Adapter Core）
@@ -133,12 +133,12 @@ Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubr
 | Admin 指标分池 | `/agents` 已能列出 pool，但缺少按 bridge（`uenv-agent-toolenv` vs `uenv-agent-openhands`）聚合的 pending / in-flight / 完成率 / 平均 reward。百卡联调时同机双 Agent 更依赖分池看板 | P2 |
 | Complete 语义与二次判分 | 当前 reward 由 poller Complete 回填；poller 内部再调 Worker harness 是「Agent 侧自建」而非 Server 编排。文档与错误码需写清：Server 不保证 Worker 二次判分一定发生 | P2 |
 
-**验收建议**：带完整 `test_script` 的 mock/LLM 各一题，admin 能按 pool 看到 job 生命周期；超时与 abandon 行为可复现且有日志关键字（已有 `code_agent_*`）。  
+**验收建议**：带完整 `test_script` 的 mock/LLM 各一题，admin 能按 pool 看到 job 生命周期；超时与 abandon 行为可复现且有日志关键字（已有 `code_agent_*`）。
 **备注**：mock + `test_script` 非零 reward 已在 §3 验证；LLM 题与落盘对齐仍待做。
 
 ### 4.2 Bridge（训练入口 / `uenv-bridge` + `core.rs`）
 
-**现状**：`default_env_type` 已改为 `qa`；`core.rs` 含 `test_script` / `execution_mode` 透传；**adapter-core 已于 2026-07-25 续部署到 Server**（后含 Obs 的滚动见 2026-07-25 晚），B3 mock 非零 reward 已通。  
+**现状**：`default_env_type` 已改为 `qa`；`core.rs` 含 `test_script` / `execution_mode` 透传；**adapter-core 已于 2026-07-25 续部署到 Server**（后含 Obs 的滚动见 2026-07-25 晚），B3 mock 非零 reward 已通。
 **前端（2026-07-25/26）**：Server 上 Vite 前端 `http://8.130.75.157:8888`、Obs `127.0.0.1:50053`、同源 `/obs` 代理已冒烟（seed `_orphan` + state/stream）。**这不等于 FE-2 真实链路联调**——UI 仍未由 Bridge `SubmitEpisode` / VeRL AgentLoop 真实事件驱动。
 
 | 待办 | 说明 | 状态 |
@@ -253,9 +253,9 @@ Hub 侧待办见专文 [Hub待调整事宜](./Hub待调整事宜-qa制品与Rubr
 
 ## 6. 建议下一步（本轮范围外 / 仍开放）
 
-1. ~~带 `test_script` 的 B3 mock 再跑一题，确认 `reward=1.0`。~~ **已完成**（`numpy_1` → 1.0 / 20/20）。  
-2. Hub 侧按专文更新制品与注册契约（吸收 `plugins/qa/RUBRIC.md`）。  
-3. 为 208.77 配置稳定推理端后切 `POLICY=llm`，跑一小样本 Agent 评测。  
-4. Bridge 训练侧清查残留 `math`；Server 落盘/分池指标；文档状态位回写。  
-5. **Bridge：按 §4.2 清单用 `8.130.75.157:8888` 做真实 Episode → Obs → UI 联调**（见 [差距专文](./前端观测面与系统能力差距-待补齐.md)）。  
+1. ~~带 `test_script` 的 B3 mock 再跑一题，确认 `reward=1.0`。~~ **已完成**（`numpy_1` → 1.0 / 20/20）。
+2. Hub 侧按专文更新制品与注册契约（吸收 `plugins/qa/RUBRIC.md`）。
+3. 为 208.77 配置稳定推理端后切 `POLICY=llm`，跑一小样本 Agent 评测。
+4. Bridge 训练侧清查残留 `math`；Server 落盘/分池指标；文档状态位回写。
+5. **Bridge：按 §4.2 清单用 `8.130.75.157:8888` 做真实 Episode → Obs → UI 联调**（见 [差距专文](./前端观测面与系统能力差距-待补齐.md)）。
 6. 主线合入：proto + server + core + poller + qa 收敛 + 金标修复 + OpenHands stubs。
