@@ -31,13 +31,13 @@ supports / refutes / not enough info
 
 ## 3. UEnv 评测链路
 
-按照 Worker 侧五类 benchmark 文档，SciTab 复用 `math` 环境，由 Worker 内部根据 `env_config.dataset=scitab` 路由到对应判分逻辑。
+按照 Worker 侧五类 benchmark 文档，SciTab 复用通用验证型 `qa` 环境，由 Worker 内部根据 `env_config.dataset=scitab` 路由到对应判分逻辑。
 
 ```text
 SciTab 样本
   -> Adapter 构造 EpisodeRequest
   -> AdapterCore / Server
-  -> Worker math plugin
+  -> Worker qa plugin
   -> Worker 调用 adapter model gateway
   -> gateway 转发到本机 vLLM 模型 endpoint
   -> Worker 解析 supports/refutes/not enough info 并计算 reward
@@ -49,10 +49,10 @@ SciTab 样本
 
 | 字段 | 值 | 说明 |
 |---|---|---|
-| `env_type` | `math` | 由 Server 调度到 math Worker / plugin |
+| `env_type` | `qa` | 由 Server 调度到 qa Worker / plugin |
 | `env_config.dataset` | `scitab` | Worker 内部路由到 SciTab 判分逻辑 |
 | `reward_config.target` | `supports/refutes/not enough info` | 当前样本 gold label |
-| `model_endpoint.url` | `http://10.10.20.142:18096/v1` | Worker 访问 adapter model gateway |
+| `model_endpoint.url` | `http://10.10.20.142:18094/v1` | Worker 访问 adapter model gateway |
 | `generation_config.max_tokens` | `32768` | 本次 UEnv thinking 口径最大生成长度 |
 | `generation_config.thinking_token_budget` | `16384` | Qwen thinking token budget |
 | `generation_config.chat_template_kwargs.enable_thinking` | `true` | 显式开启 thinking |
@@ -70,7 +70,7 @@ SciTab 样本
 | Tensor parallel | 8 |
 | vLLM `max_model_len` | 65536 |
 | vLLM reasoning parser | `qwen3` |
-| Adapter model gateway | `http://10.10.20.142:18096/v1` |
+| Adapter model gateway | `http://10.10.20.142:18094/v1` |
 | Gateway upstream | `http://127.0.0.1:18081/v1` |
 | Gateway thinking 注入 | `--enable-thinking --preserve-thinking --thinking-token-budget 16384` |
 | AdapterCore endpoint | `8.130.75.157:8088` |
@@ -87,14 +87,16 @@ SciTab 样本
 
 ## 5. 运行命令
 
+本节命令假设在 Adapter / 7142 机器上执行。`UENV_ROLLOUT_MODEL_ENDPOINT` 必须指向当前已经启动、且 Worker 可访问的 adapter model gateway；如果端口没有监听，Server 侧会出现 `model client connection error`，并在 3 次重试后返回 `exceeded max attempts (3)`。
+
 从零开始运行时，先启动 8GPU vLLM，监听本机 `18081`：
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-podman rm -f uenv-scitab-vllm-18081 2>/dev/null || true
+podman rm -f uenv-benchmark-vllm-18081 2>/dev/null || true
 
-podman run -d --name uenv-scitab-vllm-18081 \
+podman run -d --name uenv-benchmark-vllm-18081 \
   --entrypoint python3 \
   --network host \
   --pids-limit=-1 \
@@ -127,25 +129,26 @@ curl --noproxy '*' http://127.0.0.1:18081/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_$(date +%Y%m%d_%H%M%S)
-mkdir -p "$BASE"
+GATEWAY_LOG_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/scitab/gateway-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$GATEWAY_LOG_DIR"
 
 PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --upstream http://127.0.0.1:18081/v1 \
   --bind-host 0.0.0.0 \
-  --port 18096 \
-  --public-url http://10.10.20.142:18096/v1 \
+  --port 18094 \
+  --public-url http://10.10.20.142:18094/v1 \
   --request-timeout-seconds 7200 \
   --enable-thinking \
   --preserve-thinking \
   --thinking-token-budget 16384 \
-  --log-path "$BASE/model-gateway-official-reasoning-fields-18096-budget16384.jsonl"
+  --log-path "$GATEWAY_LOG_DIR/model-gateway-official-reasoning-fields-18094-budget16384.jsonl"
 ```
 
 确认 gateway 已就绪：
 
 ```bash
-curl --noproxy '*' http://127.0.0.1:18096/v1/models
+curl --noproxy '*' http://127.0.0.1:18094/v1/models
+curl --noproxy '*' http://10.10.20.142:18094/v1/models
 ```
 
 运行 UEnv 全量评测：
@@ -153,12 +156,15 @@ curl --noproxy '*' http://127.0.0.1:18096/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_budget16384_full_20260717_121807
+RUN_ID=scitab-full-$(date +%Y%m%d-%H%M%S)
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/scitab/${RUN_ID}
 mkdir -p "$OUT"
 
 OUTPUT_DIR="$OUT" \
+RUN_ID="$RUN_ID" \
+UENV_OBS_URL=http://8.130.75.157:8888/obs \
 UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
-UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18096/v1 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18094/v1 \
 UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
 BATCH_SIZE=1 \
 PROMPT_STYLE=official \
@@ -170,7 +176,20 @@ TEMPERATURE=0.0 \
 TOP_P=1.0 \
 TIMEOUT_SECONDS=7200 \
 CLIENT_TIMEOUT_SECONDS=7800 \
-./scripts/benchmark/run_scitab_uenv_baseline.sh
+./scripts/benchmark/run_scitab_uenv_baseline.sh 2>&1 | tee "$OUT/run.log"
+```
+
+关闭本轮 vLLM 和 gateway：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+podman rm -f uenv-benchmark-vllm-18081
+
+pgrep -af 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+pkill -f 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+
+ss -ltnp | grep -E ':18081|:18094' || echo "vLLM/gateway ports are closed"
 ```
 
 本次正式结果目录：
@@ -183,7 +202,7 @@ temp/benchmarks/scitab/qwen3_6_35b_a3b_uenv_official_reasoning_fields_max32768_b
 
 | 模型 | UEnv endpoint | Model endpoint | 样本数 | completed | failed | Parse rate | Accuracy | Macro-F1 | reward accuracy |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | `http://10.10.20.142:18096/v1` | 1224 | 1224 | 0 | 1.0000 | 0.7451 | 0.7340 | 0.7451 |
+| `Qwen/Qwen3.6-35B-A3B` | `8.130.75.157:8088` | `http://10.10.20.142:18094/v1` | 1224 | 1224 | 0 | 1.0000 | 0.7451 | 0.7340 | 0.7451 |
 
 各类别指标：
 

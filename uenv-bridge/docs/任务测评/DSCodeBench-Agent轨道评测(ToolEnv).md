@@ -1,8 +1,8 @@
 # DSCodeBench Agent 轨道评测（Verifiers 风格 ToolEnv）
 
-> 日期：2026-07-25  
-> 轨道：`agentic`　指标：`agentic_pass@1`  
-> 官方单轮轨道：[DSCodeBench 代码生成基线评测](./DSCodeBench代码生成基线评测.md)（指标 `pass@1`）  
+> 日期：2026-07-25
+> 轨道：`agentic`　指标：`agentic_pass@1`
+> 官方单轮轨道：[DSCodeBench 代码生成基线评测](./DSCodeBench代码生成基线评测.md)（指标 `pass@1`）
 > 选型与规划：[验证型环境改造与DSCode-Agent评测-实施规划](../../../Docs/worker/260722/验证型环境改造与DSCode-Agent评测-实施规划.md)
 
 ---

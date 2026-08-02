@@ -83,6 +83,8 @@ UEnv 全链路的实现方式：
 Adapter -> Adapter Core / Server -> Worker code env -> Model Gateway -> vLLM -> Worker harness -> Adapter
 ```
 
+本节命令假设在 Adapter / 7142 机器上执行。`UENV_ROLLOUT_MODEL_ENDPOINT` 必须指向当前已经启动、且 Worker 可访问的 adapter model gateway；如果端口没有监听，Server 侧会出现 `model client connection error`，并在 3 次重试后返回 `exceeded max attempts (3)`。
+
 关键配置如下：
 
 | 配置 | 值 |
@@ -116,9 +118,11 @@ Adapter -> Adapter Core / Server -> Worker code env -> Model Gateway -> vLLM -> 
 从零开始运行时，先启动 8GPU vLLM：
 
 ```bash
-podman rm -f uenv-dscodebench-vllm-18081 2>/dev/null || true
+cd /data/ronghao/uenv/uenv-bridge
 
-podman run -d --name uenv-dscodebench-vllm-18081 \
+podman rm -f uenv-benchmark-vllm-18081 2>/dev/null || true
+
+podman run -d --name uenv-benchmark-vllm-18081 \
   --entrypoint python3 \
   --network host \
   --pids-limit=-1 \
@@ -151,8 +155,8 @@ curl --noproxy '*' http://127.0.0.1:18081/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535
-mkdir -p "$BASE"
+GATEWAY_LOG_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/gateway-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$GATEWAY_LOG_DIR"
 
 PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --upstream http://127.0.0.1:18081/v1 \
@@ -163,13 +167,14 @@ PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --enable-thinking \
   --strip-reasoning \
   --thinking-token-budget 16384 \
-  --log-path "$BASE/model-gateway-thinking-strip-reasoning-18094-budget16384.jsonl"
+  --log-path "$GATEWAY_LOG_DIR/model-gateway-thinking-strip-reasoning-18094-budget16384.jsonl"
 ```
 
 确认 gateway 已就绪：
 
 ```bash
 curl --noproxy '*' http://127.0.0.1:18094/v1/models
+curl --noproxy '*' http://10.10.20.142:18094/v1/models
 ```
 
 运行 UEnv 全量评测：
@@ -177,7 +182,14 @@ curl --noproxy '*' http://127.0.0.1:18094/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_worker_execute_fields_20260720_151535 \
+RUN_ID=dscodebench-full-$(date +%Y%m%d-%H%M%S)
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/dscodebench/${RUN_ID}
+mkdir -p "$OUT"
+
+OUTPUT_DIR="$OUT" \
+RUN_ID="$RUN_ID" \
+UENV_OBS_URL=http://8.130.75.157:8888/obs \
+UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
 UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18094/v1 \
 UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
 LIMIT= \
@@ -197,7 +209,20 @@ TIMEOUT_SECONDS=7200 \
 CLIENT_TIMEOUT_SECONDS=7800 \
 EVALUATION_MODE=inline_harness \
 RESUME=0 \
-./scripts/benchmark/run_dscodebench_uenv_baseline.sh
+./scripts/benchmark/run_dscodebench_uenv_baseline.sh 2>&1 | tee "$OUT/run.log"
+```
+
+关闭本轮 vLLM 和 gateway：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+podman rm -f uenv-benchmark-vllm-18081
+
+pgrep -af 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+pkill -f 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+
+ss -ltnp | grep -E ':18081|:18094' || echo "vLLM/gateway ports are closed"
 ```
 
 本次全量产物路径如下：

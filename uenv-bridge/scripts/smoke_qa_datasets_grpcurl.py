@@ -164,27 +164,65 @@ def main() -> int:
         default=os.environ.get("UENV_OBS_URL", ""),
         help="Obs base URL, e.g. http://8.130.75.157:8888/obs.",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Repeat the QA smoke cases to keep the UI run visible longer.",
+    )
+    parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=0.0,
+        help="Sleep after each completed episode before submitting the next one.",
+    )
+    parser.add_argument(
+        "--close-delay-seconds",
+        type=float,
+        default=0.0,
+        help="Sleep before emitting RUN_CLOSED so the frontend can show an active run.",
+    )
     args = parser.parse_args()
 
     server = args.server
     run_id = args.run_id.strip()
     obs_url = args.obs_url.strip()
+    repeat = max(1, args.repeat)
+    delay_seconds = max(0.0, args.delay_seconds)
+    close_delay_seconds = max(0.0, args.close_delay_seconds)
     results = []
     if run_id:
         _post_obs_event(obs_url, "RUN_STARTED", run_id, payload={"entry": "smoke_qa_datasets_grpcurl"})
     exit_code = 0
-    for case in CASES:
-        rid = f"qa-{case['name']}-{int(time.time())}"
-        data = execute_batch(server, case, rid, run_id=run_id)
-        first = (data.get("results") or [{}])[0]
-        status = first.get("status")
-        reward = first.get("reward")
-        ok = status == "completed" and float(reward or 0) == 1.0
-        results.append({"case": case["name"], "status": status, "reward": reward, "ok": ok})
-        if not ok:
-            print(json.dumps({"failed": first, "case": case["name"]}, indent=2))
-            exit_code = 1
+    for round_index in range(repeat):
+        for case in CASES:
+            rid = f"qa-r{round_index + 1}-{case['name']}-{int(time.time())}"
+            data = execute_batch(server, case, rid, run_id=run_id)
+            first = (data.get("results") or [{}])[0]
+            status = first.get("status")
+            reward = first.get("reward")
+            ok = status == "completed" and float(reward or 0) == 1.0
+            results.append(
+                {
+                    "round": round_index + 1,
+                    "case": case["name"],
+                    "request_id": rid,
+                    "status": status,
+                    "reward": reward,
+                    "ok": ok,
+                }
+            )
+            print(json.dumps(results[-1], ensure_ascii=False), flush=True)
+            if not ok:
+                print(json.dumps({"failed": first, "case": case["name"]}, indent=2))
+                exit_code = 1
+                break
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+        if exit_code != 0:
             break
+    if close_delay_seconds > 0:
+        time.sleep(close_delay_seconds)
     if run_id:
         _post_obs_event(
             obs_url,

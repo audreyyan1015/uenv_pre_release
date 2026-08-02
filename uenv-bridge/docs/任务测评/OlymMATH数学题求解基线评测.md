@@ -30,13 +30,13 @@ OlymMATH 是奥赛级数学推理评测集。输入为自然语言数学题，�
 
 ## 3. UEnv 评测链路
 
-按照 Worker 侧五类 benchmark 文档，OlymMATH 复用 `math` 环境，由 Worker 内部根据 `env_config.dataset` 路由到 OlymMATH 判分逻辑。
+按照 Worker 侧五类 benchmark 文档，OlymMATH 复用通用验证型 `qa` 环境，由 Worker 内部根据 `env_config.dataset` 路由到 OlymMATH 判分逻辑。
 
 ```text
 OlymMATH 样本
   -> Adapter 构造 EpisodeRequest
   -> AdapterCore / Server
-  -> Worker math plugin
+  -> Worker qa plugin
   -> Worker 调用 adapter model gateway
   -> gateway 转发到本机 vLLM 模型 endpoint
   -> Worker 抽取最终答案并计算 reward
@@ -48,7 +48,7 @@ OlymMATH 样本
 
 | 字段 | 值 | 说明 |
 |---|---|---|
-| `env_type` | `math` | 由 Server 调度到 math Worker / plugin |
+| `env_type` | `qa` | 由 Server 调度到 qa Worker / plugin |
 | `env_config.dataset` | `olymmath-easy` / `olymmath-hard` | 按样本 difficulty 设置 |
 | `reward_config.target` | 官方 `answer` | Worker 使用 OlymMATH backend 抽取并判分 |
 | `model_endpoint.url` | `http://10.10.20.142:18094/v1` | Worker 访问 adapter model gateway |
@@ -85,17 +85,16 @@ OlymMATH 样本
 
 ## 5. 运行命令
 
+本节命令假设在 Adapter / 7142 机器上执行。`UENV_ROLLOUT_MODEL_ENDPOINT` 必须指向当前已经启动、且 Worker 可访问的 adapter model gateway；如果端口没有监听，Server 侧会出现 `model client connection error`，并在 3 次重试后返回 `exceeded max attempts (3)`。
+
 从零开始运行时，先启动 8GPU vLLM，监听本机 `18081`。由于当前 `localhost/uenv-bridge-verl:layer4-build` 内的 vLLM 版本不能识别 Qwen3.6 MoE，本轮使用 `localhost/vllm-openai:v0.19.0-cu130`：
 
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_reasoning_budget_20260715_111008
-mkdir -p "$BASE"
+podman rm -f uenv-benchmark-vllm-18081 2>/dev/null || true
 
-podman rm -f uenv-olymmath-vllm-18081 2>/dev/null || true
-
-podman run -d --name uenv-olymmath-vllm-18081 \
+podman run -d --name uenv-benchmark-vllm-18081 \
   --entrypoint python3 \
   --network host \
   --pids-limit=-1 \
@@ -128,7 +127,8 @@ curl --noproxy '*' http://127.0.0.1:18081/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-BASE=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_reasoning_budget_20260715_111008
+GATEWAY_LOG_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/gateway-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$GATEWAY_LOG_DIR"
 
 PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --upstream http://127.0.0.1:18081/v1 \
@@ -139,13 +139,14 @@ PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
   --enable-thinking \
   --strip-reasoning \
   --thinking-token-budget 16384 \
-  --log-path "$BASE/model-gateway-thinking-strip-reasoning-18094-budget16384.jsonl"
+  --log-path "$GATEWAY_LOG_DIR/model-gateway-thinking-strip-reasoning-18094-budget16384.jsonl"
 ```
 
 可用下面命令确认 gateway 已就绪：
 
 ```bash
 curl --noproxy '*' http://127.0.0.1:18094/v1/models
+curl --noproxy '*' http://10.10.20.142:18094/v1/models
 ```
 
 通过 UEnv 跑全量 OlymMATH：
@@ -153,11 +154,14 @@ curl --noproxy '*' http://127.0.0.1:18094/v1/models
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005
+RUN_ID=olymmath-full-$(date +%Y%m%d-%H%M%S)
+OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/${RUN_ID}
 mkdir -p "$OUT"
 
 RESUME=0 \
 OUTPUT_DIR="$OUT" \
+RUN_ID="$RUN_ID" \
+UENV_OBS_URL=http://8.130.75.157:8888/obs \
 UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
 UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18094/v1 \
 UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
@@ -172,7 +176,7 @@ TEMPERATURE=0.0 \
 TOP_P=1.0 \
 TIMEOUT_SECONDS=7200 \
 CLIENT_TIMEOUT_SECONDS=7800 \
-./scripts/benchmark/run_olymmath_uenv_baseline.sh
+./scripts/benchmark/run_olymmath_uenv_baseline.sh 2>&1 | tee "$OUT/run.log"
 ```
 
 初始全量运行中有 22 条样本因 Server/Worker 侧 episode 重试耗尽失败，随后使用同一输出目录按 `qid` 跳过已完成样本，只重测失败样本：
@@ -180,10 +184,13 @@ CLIENT_TIMEOUT_SECONDS=7800 \
 ```bash
 cd /data/ronghao/uenv/uenv-bridge
 
-OUT=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/qwen3_6_35b_a3b_uenv_thinking_max32768_budget16384_full_20260718_223005
+OUT=$(ls -td /data/ronghao/uenv/uenv-bridge/temp/benchmarks/olymmath/olymmath-full-* | head -n 1)
+RUN_ID=$(basename "$OUT")
 
 RESUME=1 \
 OUTPUT_DIR="$OUT" \
+RUN_ID="$RUN_ID" \
+UENV_OBS_URL=http://8.130.75.157:8888/obs \
 UENV_ADAPTER_CORE_ENDPOINT=8.130.75.157:8088 \
 UENV_ROLLOUT_MODEL_ENDPOINT=http://10.10.20.142:18094/v1 \
 UENV_ROLLOUT_MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
@@ -198,7 +205,20 @@ TEMPERATURE=0.0 \
 TOP_P=1.0 \
 TIMEOUT_SECONDS=7200 \
 CLIENT_TIMEOUT_SECONDS=7800 \
-./scripts/benchmark/run_olymmath_uenv_baseline.sh 2>&1 | tee "$OUT/resume_failed_20260720_olymmath.log"
+./scripts/benchmark/run_olymmath_uenv_baseline.sh 2>&1 | tee "$OUT/resume_failed.log"
+```
+
+关闭本轮 vLLM 和 gateway：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+podman rm -f uenv-benchmark-vllm-18081
+
+pgrep -af 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+pkill -f 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+
+ss -ltnp | grep -E ':18081|:18094' || echo "vLLM/gateway ports are closed"
 ```
 
 本轮正式结果目录：
