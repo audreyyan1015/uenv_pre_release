@@ -32,6 +32,14 @@ if str(SRC) not in sys.path:
 
 from uenv.bridge.clients import RustCoreClientConfig, RustCoreEpisodeClient
 from uenv.bridge.protocol import MODE_MULTI, EpisodeRequest, EpisodeResult
+from obs_run import (
+    add_obs_args,
+    attach_training_run_id,
+    emit_run_closed,
+    emit_run_started,
+    emit_episode_result,
+    resolve_run_id,
+)
 
 
 DEFAULT_DATA = ROOT / "data/benchmarks/swebenchpro/test.jsonl"
@@ -90,6 +98,7 @@ def build_request(
     llm_config_path: str,
     max_iterations: int,
     pool_selector: dict[str, str],
+    training_run_id: str,
     agent_mode: str = "llm",
 ) -> EpisodeRequest:
     instance_id = str(row["instance_id"])
@@ -172,6 +181,7 @@ def build_request(
         },
         "timeout_seconds": timeout_seconds,
     }
+    attach_training_run_id(payload, training_run_id)
     return EpisodeRequest(
         request_id=request_id,
         env_type="swe",
@@ -355,6 +365,7 @@ def main() -> int:
     parser.add_argument("--pool-selector-json", default="")
     parser.add_argument("--requests-log", type=Path, default=None)
     parser.add_argument("--results-log", type=Path, default=None)
+    add_obs_args(parser)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
@@ -372,6 +383,20 @@ def main() -> int:
     if args.limit is not None:
         examples = examples[: args.limit]
     batch_id = f"swebenchpro-uenv-{time.strftime('%Y%m%d_%H%M%S')}"
+    training_run_id = resolve_run_id(args.run_id, batch_id)
+    print(
+        json.dumps(
+            {
+                "benchmark": "swebenchpro",
+                "training_run_id": training_run_id,
+                "obs_url": args.obs_url,
+                "batch_id": batch_id,
+                "total_examples": len(examples),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     pool_selector = parse_pool_selector(args.pool_selector_json)
 
     result_log = args.results_log or args.output_dir / "uenv_results.jsonl"
@@ -408,6 +433,7 @@ def main() -> int:
             llm_config_path=args.llm_config_path,
             max_iterations=args.max_iterations,
             pool_selector=pool_selector,
+            training_run_id=training_run_id,
             agent_mode=args.agent_mode,
         )
         for idx, row in enumerate(pending_examples)
@@ -420,6 +446,21 @@ def main() -> int:
                 if line.strip():
                     rows.append(json.loads(line))
 
+    emit_run_started(
+        obs_url=args.obs_url,
+        obs_token=args.obs_token,
+        training_run_id=training_run_id,
+        benchmark="swebenchpro",
+        batch_id=batch_id,
+        output_dir=args.output_dir,
+        total_examples=len(examples),
+        payload={
+            "limit": args.limit,
+            "resume": args.resume,
+            "remaining_requests": len(requests),
+            "agent_mode": args.agent_mode,
+        },
+    )
     client = RustCoreEpisodeClient(
         RustCoreClientConfig(
             endpoint=args.endpoint,
@@ -428,6 +469,7 @@ def main() -> int:
         )
     )
     try:
+        request_payload_by_id = {request.request_id: payload_json(request) for request in requests}
         example_by_request_id = {request.request_id: row for request, row in zip(requests, pending_examples, strict=True)}
         for batch in tqdm(list(batched(requests, args.batch_size)), desc="UEnv SWE-bench-Pro"):
             started = time.time()
@@ -447,6 +489,22 @@ def main() -> int:
                 row = result_to_row(example_by_request_id[result.request_id], result, elapsed_ms)
                 rows.append(row)
                 append_jsonl(result_log, row)
+                request_payload = request_payload_by_id.get(result.request_id, {})
+                emit_episode_result(
+                    obs_url=args.obs_url,
+                    obs_token=args.obs_token,
+                    training_run_id=training_run_id,
+                    benchmark="swebenchpro",
+                    batch_id=batch_id,
+                    request_id=result.request_id,
+                    status=result.status,
+                    reward=float(result.summary.total_reward or 0.0),
+                    correlation_id=str(request_payload.get("correlation_id") or ""),
+                    env_type="swe",
+                    trajectory_id=result.trajectory_id,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                )
     finally:
         client.close()
 
@@ -459,6 +517,8 @@ def main() -> int:
             "adapter_core_endpoint": args.endpoint,
             "model_endpoint": args.model_endpoint,
             "model_name": args.model_name,
+            "training_run_id": training_run_id,
+            "obs_url": args.obs_url,
             "batch_id": batch_id,
             "batch_size": args.batch_size,
             "benchmark_variant": args.benchmark_variant,
@@ -474,6 +534,21 @@ def main() -> int:
             "inference_mode": "uenv_swe_agent",
             "thinking": "enabled_by_llm_config",
             "resumed_skipped_count": len(skip_ids),
+        },
+    )
+    emit_run_closed(
+        obs_url=args.obs_url,
+        obs_token=args.obs_token,
+        training_run_id=training_run_id,
+        benchmark="swebenchpro",
+        batch_id=batch_id,
+        output_dir=args.output_dir,
+        ok=all(row["uenv_status"] == "completed" for row in rows),
+        result_count=len(rows),
+        payload={
+            "completed_count": sum(1 for row in rows if row["uenv_status"] == "completed"),
+            "failed_count": sum(1 for row in rows if row["uenv_status"] != "completed"),
+            "resume": args.resume,
         },
     )
     metrics = json.loads((args.output_dir / "metrics.json").read_text(encoding="utf-8"))

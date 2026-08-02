@@ -1,0 +1,156 @@
+{
+  "repo_id": "SWE-bench/SWE-smith",
+  "local_dir": "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw",
+  "num_files": 11,
+  "files": [
+    {
+      "path": "data/train-00000-of-00011.parquet",
+      "rows": 3696,
+      "size_bytes": 7879557
+    },
+    {
+      "path": "data/train-00001-of-00011.parquet",
+      "rows": 3696,
+      "size_bytes": 12372587
+    },
+    {
+      "path": "data/train-00002-of-00011.parquet",
+      "rows": 3696,
+      "size_bytes": 4122704
+    },
+    {
+      "path": "data/train-00003-of-00011.parquet",
+      "rows": 3696,
+      "size_bytes": 10410972
+    },
+    {
+      "path": "data/train-00004-of-00011.parquet",
+      "rows": 3696,
+      "size_bytes": 115987159
+    },
+    {
+      "path": "data/train-00005-of-00011.parquet",
+      "rows": 3696,
+      "size_bytes": 8833644
+    },
+    {
+      "path": "data/train-00006-of-00011.parquet",
+      "rows": 7392,
+      "size_bytes": 11834513
+    },
+    {
+      "path": "data/train-00007-of-00011.parquet",
+      "rows": 7392,
+      "size_bytes": 16168489
+    },
+    {
+      "path": "data/train-00008-of-00011.parquet",
+      "rows": 7392,
+      "size_bytes": 69004755
+    },
+    {
+      "path": "data/train-00009-of-00011.parquet",
+      "rows": 7392,
+      "size_bytes": 13742636
+    },
+    {
+      "path": "data/train-00010-of-00011.parquet",
+      "rows": 7392,
+      "size_bytes": 7410190
+    }
+  ],
+  "total_rows": 59136,
+  "total_size_bytes": 277767206,
+  "columns": [
+    "instance_id",
+    "patch",
+    "FAIL_TO_PASS",
+    "PASS_TO_PASS",
+    "image_name",
+    "repo",
+    "problem_statement"
+  ],
+  "num_repos": 222,
+  "top_repos": [
+    [
+      "swesmith/scanny__python-pptx.278b47b1",
+      2389
+    ],
+    [
+      "swesmith/pandas-dev__pandas.95280573",
+      2354
+    ],
+    [
+      "swesmith/pylint-dev__astroid.b114f6b5",
+      1770
+    ],
+    [
+      "swesmith/python-openxml__python-docx.0cf6d71f",
+      1686
+    ],
+    [
+      "swesmith/cantools__cantools.0c6a7871",
+      1440
+    ],
+    [
+      "swesmith/pygments__pygments.27649ebb",
+      1430
+    ],
+    [
+      "swesmith/pydicom__pydicom.7d361b3d",
+      1328
+    ],
+    [
+      "swesmith/sqlfluff__sqlfluff.50a1c4b6",
+      1293
+    ],
+    [
+      "swesmith/conan-io__conan.86f29e13",
+      978
+    ],
+    [
+      "swesmith/seperman__deepdiff.ed252022",
+      964
+    ],
+    [
+      "swesmith/pallets__jinja.ada0a9a6",
+      957
+    ],
+    [
+      "swesmith/oauthlib__oauthlib.1fd52536",
+      940
+    ],
+    [
+      "swesmith/paramiko__paramiko.23f92003",
+      920
+    ],
+    [
+      "swesmith/pydata__patsy.a5d16484",
+      814
+    ],
+    [
+      "swesmith/tobymao__sqlglot.036601ba",
+      790
+    ],
+    [
+      "swesmith/python-trio__trio.cfbbe2c1",
+      778
+    ],
+    [
+      "swesmith/pyasn1__pyasn1.0f07d724",
+      766
+    ],
+    [
+      "swesmith/pyupio__safety.7654596b",
+      759
+    ],
+    [
+      "swesmith/kayak__pypika.1c9646f0",
+      745
+    ],
+    [
+      "swesmith/sunpy__sunpy.f8edfd5c",
+      743
+    ]
+  ]
+}

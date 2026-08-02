@@ -424,6 +424,7 @@ fn sample_to_worker_payload(
                 "agent_pool_id",
                 "max_iterations",
                 "pool_selector",
+                "min_steps_before_terminate",
             ] {
                 if let Some(v) = env_cfg.get(key) {
                     obj.insert(key.to_string(), v.clone());

@@ -116,15 +116,9 @@ impl RolloutModelMeta {
         {
             self.rollout_policy_version = other.rollout_policy_version;
         }
-        if self.rollout_log_probs.is_empty() {
-            self.rollout_log_probs = other.rollout_log_probs;
-        }
-        if self.response_ids.is_empty() {
-            self.response_ids = other.response_ids;
-        }
-        if self.response_mask.is_empty() {
-            self.response_mask = other.response_mask;
-        }
+        self.rollout_log_probs.extend(other.rollout_log_probs);
+        self.response_ids.extend(other.response_ids);
+        self.response_mask.extend(other.response_mask);
         self.model_latency_ms += other.model_latency_ms;
     }
 }
@@ -406,6 +400,32 @@ mod tests {
             bad.validate_for_async().expect_err("missing logprobs"),
             AsyncRolloutError::RolloutLogprobsMissing
         );
+    }
+
+    #[test]
+    fn absorb_appends_every_real_model_turn() {
+        let mut aggregate = RolloutModelMeta::default();
+        aggregate.absorb(RolloutModelMeta {
+            rollout_param_version: Some(0),
+            rollout_policy_version: Some("versioned-model".to_string()),
+            rollout_log_probs: vec![-0.1],
+            response_ids: vec![10],
+            response_mask: vec![1],
+            model_latency_ms: 5,
+        });
+        aggregate.absorb(RolloutModelMeta {
+            rollout_param_version: Some(0),
+            rollout_policy_version: Some("versioned-model".to_string()),
+            rollout_log_probs: vec![-0.2, -0.3],
+            response_ids: vec![11, 12],
+            response_mask: vec![1, 1],
+            model_latency_ms: 7,
+        });
+        assert_eq!(aggregate.rollout_log_probs, vec![-0.1, -0.2, -0.3]);
+        assert_eq!(aggregate.response_ids, vec![10, 11, 12]);
+        assert_eq!(aggregate.response_mask, vec![1, 1, 1]);
+        assert_eq!(aggregate.model_latency_ms, 12);
+        assert!(aggregate.validate_for_async().is_ok());
     }
 
     #[test]

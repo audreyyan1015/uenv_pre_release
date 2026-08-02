@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "server": {
+    "ssh_host": "8.130.75.157",
+    "private_ip": "192.168.0.136",
+    "ssh_fingerprint_sha256": "SHA256:rhrO15uNM5EoSY/4coio0s2iYkV7e+t2vaSE0G5Uqf8"
+  },
+  "workers": [
+    {
+      "ssh_host": "8.130.65.20",
+      "private_ip": "192.168.0.139",
+      "ssh_fingerprint_sha256": "SHA256:Ilv9s1diS4C4AZR0fSnxCjQs7fANg1Vyz1IqGAhTQKU"
+    },
+    {
+      "ssh_host": "8.145.51.129",
+      "private_ip": "192.168.0.138",
+      "ssh_fingerprint_sha256": "SHA256:VaErDqKKvTkmyepP+cYoQGzqDO8Chz3g3dx8Euw93uw"
+    }
+  ],
+  "banned_worker_hosts": [
+    "8.130.86.71"
+  ],
+  "production": {
+    "protected_ports": [50052, 8077, 8088]
+  }
+}
