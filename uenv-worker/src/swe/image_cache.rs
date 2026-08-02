@@ -452,8 +452,15 @@ mod tests {
         assert!(!digest_matches("repo/x@sha256:abc", "sha256:def"));
     }
 
+    /// `UENV_SWE_PULL_MIRRORS` is process-wide, so the two tests below cannot run
+    /// concurrently: one clears the variable while the other needs it set, and the
+    /// loser fails on a value the other wrote. They are serialized here rather than
+    /// merged, because each states a separate rule.
+    static PULL_MIRRORS_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn pull_mirrors_default_empty_for_zero_egress() {
+        let _guard = PULL_MIRRORS_ENV.lock().unwrap_or_else(|e| e.into_inner());
         // 纯内网：未显式配置 mirror 时必须为空，杜绝任何隐式公网前缀。
         unsafe {
             std::env::remove_var("UENV_SWE_PULL_MIRRORS");
@@ -466,6 +473,7 @@ mod tests {
 
     #[test]
     fn pull_mirrors_env_override() {
+        let _guard = PULL_MIRRORS_ENV.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("UENV_SWE_PULL_MIRRORS", "a.example,b.example");
         }
