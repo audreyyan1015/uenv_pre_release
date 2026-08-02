@@ -683,6 +683,127 @@ def sample_result_dict(result) -> dict:
     }
 
 
+PRESSURE_RESULT_REQUIRED_FIELDS = (
+    "configured_workers",
+    "worker_capacity",
+    "worker_slots",
+    "batch_size",
+    "planned_batches",
+    "concurrent_batches",
+    "requested_episode_concurrency",
+    "capacity_waves",
+    "submission_strategy",
+    "client_submit_seconds",
+    "client_submit_rate_eps",
+    "submitted_batches",
+    "submitted",
+    "completed",
+    "failed",
+    "rpc_error_episodes",
+    "protocol_errors",
+    "completion_rate",
+    "resolved_throughput_eps",
+    "completed_throughput_eps",
+    "submitted_throughput_eps",
+    "batch_latency_ms",
+)
+
+
+def pressure_result_metrics(
+    *,
+    configured_workers: int,
+    worker_capacity: int,
+    batch_size: int,
+    planned_batches: int,
+    concurrent_batches: int,
+    submission_strategy: str,
+    client_submit_seconds: float,
+    submitted_batches: int,
+    elapsed_seconds: float,
+    submitted: int,
+    completed: int,
+    failed: int,
+    rpc_error_episodes: int,
+    protocol_errors: int,
+    latencies_ms: Iterable[float],
+) -> dict:
+    """Build the mandatory, workload-independent pressure-result metrics.
+
+    Math, Code and SWE runners previously emitted the same concepts under
+    different paths.  Keeping this block at the result root gives reporting a
+    single fail-closed contract and keeps the metric definitions identical.
+    """
+    latencies_ms = list(latencies_ms)
+    worker_slots = configured_workers * worker_capacity
+    resolved = completed + failed + rpc_error_episodes
+    return {
+        "pressure_metrics_schema_version": 1,
+        "configured_workers": configured_workers,
+        "worker_capacity": worker_capacity,
+        "worker_slots": worker_slots,
+        "batch_size": batch_size,
+        "planned_batches": planned_batches,
+        "concurrent_batches": concurrent_batches,
+        "requested_episode_concurrency": batch_size * concurrent_batches,
+        "capacity_waves": submitted / max(1, worker_slots),
+        "submission_strategy": submission_strategy,
+        "client_submit_seconds": client_submit_seconds,
+        "client_submit_rate_eps": (
+            submitted / client_submit_seconds if client_submit_seconds > 0 else 0.0
+        ),
+        "submitted_batches": submitted_batches,
+        "submitted": submitted,
+        "completed": completed,
+        "failed": failed,
+        "rpc_error_episodes": rpc_error_episodes,
+        "protocol_errors": protocol_errors,
+        "completion_rate": completed / submitted if submitted else 0.0,
+        "resolved_throughput_eps": (
+            resolved / elapsed_seconds if elapsed_seconds > 0 else 0.0
+        ),
+        "completed_throughput_eps": (
+            completed / elapsed_seconds if elapsed_seconds > 0 else 0.0
+        ),
+        "submitted_throughput_eps": (
+            submitted / elapsed_seconds if elapsed_seconds > 0 else 0.0
+        ),
+        "batch_latency_ms": {
+            "count": len(latencies_ms),
+            "min": min(latencies_ms) if latencies_ms else 0.0,
+            "mean": (
+                sum(latencies_ms) / len(latencies_ms) if latencies_ms else 0.0
+            ),
+            "p50": percentile(latencies_ms, 0.50),
+            "p95": percentile(latencies_ms, 0.95),
+            "p99": percentile(latencies_ms, 0.99),
+            "max": max(latencies_ms) if latencies_ms else 0.0,
+        },
+    }
+
+
+def assert_pressure_result_schema(document: dict) -> None:
+    """Reject a pressure result before it is persisted when core metrics differ."""
+    missing = [
+        field
+        for field in PRESSURE_RESULT_REQUIRED_FIELDS
+        if field not in document or document[field] is None
+    ]
+    latency = document.get("batch_latency_ms")
+    if not isinstance(latency, dict):
+        missing.append("batch_latency_ms")
+    else:
+        missing.extend(
+            f"batch_latency_ms.{field}"
+            for field in ("count", "min", "mean", "p50", "p95", "p99", "max")
+            if field not in latency or latency[field] is None
+        )
+    if missing:
+        raise ValueError(
+            "pressure result violates the shared metric contract: "
+            + ", ".join(sorted(set(missing)))
+        )
+
+
 def dscodebench_pressure_result_document(
     *,
     run_id: str,

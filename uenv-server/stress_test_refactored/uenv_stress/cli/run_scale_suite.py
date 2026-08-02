@@ -586,10 +586,9 @@ def worker_scale_command(
     gate = config["worker_scale"]
     episode_batch_size = int(gate["episode_batch_size"])
     exact_batches = workers * int(gate["episodes_per_worker"]) // episode_batch_size
-    concurrent_batches = max(
-        1,
-        workers * int(gate["capacity_per_worker"]) // episode_batch_size,
-    )
+    # 所有计划 batch 立即交给 server；server 的 admission/scheduler 负责排队，
+    # 不能按一轮 worker 容量截断 backlog。
+    concurrent_batches = exact_batches
     command = [
         sys.executable,
         "-m",

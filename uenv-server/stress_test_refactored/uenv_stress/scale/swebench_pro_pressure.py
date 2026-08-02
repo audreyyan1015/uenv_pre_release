@@ -19,6 +19,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import threading
 import uuid
 
 from uenv_stress.core import distributed_runtime as base
@@ -96,6 +97,126 @@ while True:
         }) + "\n")
     time.sleep(.1)
 '''
+
+
+# 由控制端独立 SSH 连接触发的 worker 主机快照。结果不会仅留在失联 worker 本机，
+# 而是由 CentralHostWatchdog 追加到隔离 server 的 run 目录。
+HOST_WATCHDOG_SNAPSHOT = r'''#!/usr/bin/env python3
+import json
+from pathlib import Path
+import subprocess
+import time
+
+def text(path, limit=65536):
+    try:
+        return Path(path).read_text(errors="replace")[:limit]
+    except OSError as exc:
+        return f"<unavailable: {exc}>"
+
+def command(argv, limit=65536):
+    try:
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=8, check=False)
+        return {"exit_code": result.returncode, "stdout": result.stdout[:limit], "stderr": result.stderr[:4096]}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+print(json.dumps({
+    "ts": time.time(),
+    "loadavg": text("/proc/loadavg", 256).strip(),
+    "meminfo": text("/proc/meminfo", 8192),
+    "pressure": {
+        "cpu": text("/proc/pressure/cpu", 2048),
+        "memory": text("/proc/pressure/memory", 2048),
+        "io": text("/proc/pressure/io", 2048),
+    },
+    "cgroup": {
+        "memory_current": text("/sys/fs/cgroup/memory.current", 256).strip(),
+        "memory_events": text("/sys/fs/cgroup/memory.events", 2048),
+        "pids_current": text("/sys/fs/cgroup/pids.current", 256).strip(),
+        "pids_events": text("/sys/fs/cgroup/pids.events", 2048),
+    },
+    "filesystem": command(["df", "-Pk", "/", "/var/lib/docker"], 4096),
+    "docker_ps": command(["docker", "ps", "-a", "--no-trunc", "--format", "{{.ID}}|{{.Names}}|{{.Status}}"], 32768),
+    # Docker accepts a Unix timestamp for --until; the literal "now" is not
+    # accepted by the installed daemon and made this evidence field fail.
+    "docker_events": command(["docker", "events", "--since", "10s", "--until", str(int(time.time())), "--format", "{{json .}}"], 16384),
+    "kernel_tail": command(["journalctl", "-k", "-n", "40", "--no-pager"], 16384),
+}, sort_keys=True))
+'''
+
+
+class CentralHostWatchdog:
+    """用独立 SSH 连接采集 worker host 证据并立即写入隔离 server。"""
+
+    def __init__(self, password: str, nodes, worker_run: str, server_run: str, interval_secs: int):
+        self.password = password
+        self.nodes = list(nodes)
+        self.worker_run = worker_run
+        self.server_run = server_run
+        self.interval_secs = max(1, interval_secs)
+        self.output_path = f"{server_run}/host-watchdog.jsonl"
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="uenv-host-watchdog", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout=self.interval_secs + 15)
+        if self.thread.is_alive():
+            print(
+                "[host_watchdog] stop timed out; daemon thread will not block cleanup",
+                flush=True,
+            )
+        else:
+            print("[host_watchdog] stopped", flush=True)
+
+    def _append(self, server, document: dict) -> None:
+        line = json.dumps(document, sort_keys=True) + "\n"
+        with server.open_sftp() as sftp:
+            with sftp.open(self.output_path, "ab") as output:
+                output.write(line.encode("utf-8"))
+
+    def _run(self) -> None:
+        server = None
+        workers = {}
+        try:
+            server = base.connect(base.SERVER_HOST, self.password)
+            while not self.stop_event.is_set():
+                for node in self.nodes:
+                    event = {"watchdog_ts": time.time(), "host": node.host}
+                    try:
+                        client = workers.get(node.host)
+                        if client is None:
+                            client = base.connect(node.host, self.password)
+                            workers[node.host] = client
+                        status, stdout, stderr = base.run(
+                            client,
+                            f"python3 -B {base.q(self.worker_run)}/host_watchdog_snapshot.py",
+                            timeout=12,
+                            check=False,
+                        )
+                        event["ssh_ok"] = True
+                        event["snapshot_exit_code"] = status
+                        event["snapshot_stderr"] = stderr[-4096:]
+                        event["snapshot"] = json.loads(stdout) if status == 0 else {"raw_stdout": stdout[-4096:]}
+                    except Exception as exc:
+                        event["ssh_ok"] = False
+                        event["error"] = f"{type(exc).__name__}: {exc}"
+                        stale = workers.pop(node.host, None)
+                        if stale:
+                            stale.close()
+                    try:
+                        self._append(server, event)
+                    except Exception as exc:
+                        print(f"[host_watchdog] server append failed: {type(exc).__name__}: {exc}", flush=True)
+                self.stop_event.wait(self.interval_secs)
+        finally:
+            for client in workers.values():
+                client.close()
+            if server:
+                server.close()
 
 
 LLM_PREFLIGHT = r'''#!/usr/bin/env python3
@@ -565,6 +686,8 @@ parser.add_argument("--episode-batch-size", type=int, default=0)
 parser.add_argument("--episode-offset", type=int, default=0)
 parser.add_argument("--registration-timeout", type=int, default=120)
 parser.add_argument("--batch-timeout", type=int, default=960)
+parser.add_argument("--max-in-flight-batches", type=int, default=0)
+parser.add_argument("--progress-output", default="")
 parser.add_argument("--run-id", required=True)
 parser.add_argument("--driver", required=True)
 parser.add_argument("--catalog", required=True)
@@ -594,11 +717,25 @@ if args.total_episodes < 0 or args.episode_batch_size < 0:
     raise SystemExit("--total-episodes and --episode-batch-size must be non-negative")
 if args.episode_offset < 0:
     raise SystemExit("--episode-offset must be non-negative")
+if args.max_in_flight_batches < 0:
+    raise SystemExit("--max-in-flight-batches must be non-negative")
 
 channel = grpc.insecure_channel(args.server, options=[
     ("grpc.max_receive_message_length", 64 * 1024 * 1024),
     ("grpc.max_send_message_length", 64 * 1024 * 1024),
 ])
+
+# grpc.Channel owns background resources.  The client must close it before
+# returning to the outer driver, but registering a second close with atexit
+# can block interpreter shutdown after the result has already been emitted.
+channel_closed = False
+
+
+def close_channel():
+    global channel_closed
+    if not channel_closed:
+        channel.close()
+        channel_closed = True
 health = channel.unary_unary(
     "/uenv.bridge.v1.AdapterCoreService/HealthCheck",
     request_serializer=lambda value: value.SerializeToString(),
@@ -711,6 +848,36 @@ while planned < target_episodes:
     planned += current_size
 
 
+# ExecuteBatch 是同步 RPC：没有单独的“server 已接受”回执。进度文件明确区分
+# client 已发起（rpc_dispatched）和 RPC 已返回（resolved），避免把后者误报成提交量。
+progress_path = args.progress_output or (args.output + ".progress.jsonl")
+progress = {
+    "rpc_dispatched_episodes": 0,
+    "rpc_dispatched_batches": 0,
+    "resolved_episodes": 0,
+    "resolved_batches": 0,
+    "in_flight_batches": 0,
+}
+
+
+def write_progress(event, **extra):
+    snapshot = {
+        "event": event,
+        "timestamp": time.time(),
+        "run_id": args.run_id,
+        "planned_episodes": target_episodes,
+        "planned_batches": len(batch_specs),
+        **progress,
+        **extra,
+    }
+    with open(progress_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(snapshot, sort_keys=True) + "\n")
+    print("[swebench_pro_pressure][progress] " + json.dumps(snapshot, sort_keys=True), flush=True)
+
+
+write_progress("driver_ready")
+
+
 def execute_batch(batch_spec):
     batch_index, batch_id, current_size, samples, expected_ids, planned_at = batch_spec
     batch_started = time.monotonic()
@@ -812,62 +979,102 @@ def execute_batch(batch_spec):
 
 
 submit_started = time.monotonic()
-max_in_flight_batches = len(batch_specs)
+# 默认先将全部 batch 发给 server，由 server 的 admission、调度器和 worker/agent
+# 容量负责排队与分配。显式 --max-in-flight-batches 仍可用于限制客户端 RPC 窗口。
+max_in_flight_batches = args.max_in_flight_batches or len(batch_specs)
 missing_result_ids = []
 duplicate_result_ids = []
 unknown_result_ids = []
 episode_observations = []
 with concurrent.futures.ThreadPoolExecutor(max_workers=max_in_flight_batches) as executor:
-    future_to_batch = {executor.submit(execute_batch, spec): spec for spec in batch_specs}
+    future_to_batch = {}
+    next_batch_index = 0
+
+    def dispatch(spec):
+        future = executor.submit(execute_batch, spec)
+        future_to_batch[future] = spec
+        progress["rpc_dispatched_episodes"] += spec[2]
+        progress["rpc_dispatched_batches"] += 1
+        progress["in_flight_batches"] = len(future_to_batch)
+        write_progress(
+            "batch_rpc_dispatched",
+            batch_index=spec[0],
+            batch_id=spec[1],
+            batch_episodes=spec[2],
+        )
+
+    while next_batch_index < len(batch_specs) and len(future_to_batch) < max_in_flight_batches:
+        dispatch(batch_specs[next_batch_index])
+        next_batch_index += 1
     client_submit_seconds = time.monotonic() - submit_started
-    for future in concurrent.futures.as_completed(future_to_batch):
-        _, batch_id, current_size, samples, expected_ids, planned_at = future_to_batch[future]
-        try:
-            batch_result = future.result()
-        except Exception as exc:
-            batch_result = {
-                "batch_id": batch_id,
-                "submitted": current_size,
-                "completed": 0,
-                "failed": 0,
-                "protocol_errors": 0,
-                "rpc_error_episodes": current_size,
-                "rpc_error": {"code": type(exc).__name__, "details": str(exc)},
-                "latency_ms": 0,
-                "results": [],
-                "episode_observations": stress_common.observe_episode_batch(
-                    samples,
-                    [],
-                    suite="scale",
-                    run_id=args.run_id,
-                    phase=args.parallel_mode,
-                    planned_at=planned_at,
-                    dispatched_at=planned_at,
-                    terminal_at=time.time(),
-                    batch_rpc_latency_ms=0,
-                    rpc_error_code=type(exc).__name__,
-                    rpc_error_message=str(exc),
-                ),
-                "missing_result_ids": expected_ids,
-                "duplicate_result_ids": [],
-                "unknown_result_ids": [],
-            }
-        submitted += int(batch_result.get("submitted", 0))
-        completed += int(batch_result.get("completed", 0))
-        failed += int(batch_result.get("failed", 0))
-        protocol_errors += int(batch_result.get("protocol_errors", 0))
-        rpc_error_episodes += int(batch_result.get("rpc_error_episodes", 0))
-        latencies.append(float(batch_result.get("latency_ms", 0)))
-        all_results.extend(batch_result.get("results", []))
-        episode_observations.extend(batch_result.get("episode_observations", []))
-        missing_result_ids.extend(batch_result.get("missing_result_ids", []))
-        duplicate_result_ids.extend(batch_result.get("duplicate_result_ids", []))
-        unknown_result_ids.extend(batch_result.get("unknown_result_ids", []))
-        if "rpc_error" in batch_result and len(rpc_error_details) < 10:
-            detail = dict(batch_result["rpc_error"])
-            detail["batch_id"] = batch_result.get("batch_id", batch_id)
-            detail["sample_count"] = current_size
-            rpc_error_details.append(detail)
+    while future_to_batch:
+        done, _ = concurrent.futures.wait(
+            future_to_batch,
+            return_when=concurrent.futures.FIRST_COMPLETED,
+        )
+        for future in done:
+            _, batch_id, current_size, samples, expected_ids, planned_at = future_to_batch.pop(future)
+            try:
+                batch_result = future.result()
+            except Exception as exc:
+                batch_result = {
+                    "batch_id": batch_id,
+                    "submitted": current_size,
+                    "completed": 0,
+                    "failed": 0,
+                    "protocol_errors": 0,
+                    "rpc_error_episodes": current_size,
+                    "rpc_error": {"code": type(exc).__name__, "details": str(exc)},
+                    "latency_ms": 0,
+                    "results": [],
+                    "episode_observations": stress_common.observe_episode_batch(
+                        samples,
+                        [],
+                        suite="scale",
+                        run_id=args.run_id,
+                        phase=args.parallel_mode,
+                        planned_at=planned_at,
+                        dispatched_at=planned_at,
+                        terminal_at=time.time(),
+                        batch_rpc_latency_ms=0,
+                        rpc_error_code=type(exc).__name__,
+                        rpc_error_message=str(exc),
+                    ),
+                    "missing_result_ids": expected_ids,
+                    "duplicate_result_ids": [],
+                    "unknown_result_ids": [],
+                }
+            completed += int(batch_result.get("completed", 0))
+            failed += int(batch_result.get("failed", 0))
+            protocol_errors += int(batch_result.get("protocol_errors", 0))
+            rpc_error_episodes += int(batch_result.get("rpc_error_episodes", 0))
+            progress["resolved_episodes"] += current_size
+            progress["resolved_batches"] += 1
+            progress["in_flight_batches"] = len(future_to_batch)
+            latencies.append(float(batch_result.get("latency_ms", 0)))
+            all_results.extend(batch_result.get("results", []))
+            episode_observations.extend(batch_result.get("episode_observations", []))
+            missing_result_ids.extend(batch_result.get("missing_result_ids", []))
+            duplicate_result_ids.extend(batch_result.get("duplicate_result_ids", []))
+            unknown_result_ids.extend(batch_result.get("unknown_result_ids", []))
+            if "rpc_error" in batch_result and len(rpc_error_details) < 10:
+                detail = dict(batch_result["rpc_error"])
+                detail["batch_id"] = batch_result.get("batch_id", batch_id)
+                detail["sample_count"] = current_size
+                rpc_error_details.append(detail)
+            write_progress(
+                "batch_rpc_resolved",
+                batch_id=batch_id,
+                batch_episodes=current_size,
+                completed=int(batch_result.get("completed", 0)),
+                failed=int(batch_result.get("failed", 0)),
+                rpc_error_episodes=int(batch_result.get("rpc_error_episodes", 0)),
+            )
+            if next_batch_index < len(batch_specs):
+                dispatch(batch_specs[next_batch_index])
+                next_batch_index += 1
+submitted = progress["rpc_dispatched_episodes"]
+write_progress("driver_finished")
 elapsed = time.monotonic() - started
 resolved = completed + failed + rpc_error_episodes
 document = stress_common.swebench_pro_pressure_result_document(
@@ -896,7 +1103,19 @@ document["scale"] = {
     "episode_batch_size": episode_batch_size,
     "batch_count": len(batch_specs),
     "planned_batches": len(batch_specs),
-    "submission_strategy": "submit_all_batches_then_collect",
+    "submission_strategy": (
+        "submit_all_batches_then_collect"
+        if max_in_flight_batches == len(batch_specs)
+        else "bounded_sliding_batch_window"
+    ),
+    "max_in_flight_batches": max_in_flight_batches,
+    "driver_progress_path": progress_path,
+    "server_accepted_episodes": None,
+    "server_accepted_note": "ExecuteBatch has no accept-only acknowledgement; use server metrics/admin snapshot for authoritative pending/in-flight counts.",
+    "rpc_dispatched_episodes": progress["rpc_dispatched_episodes"],
+    "rpc_dispatched_batches": progress["rpc_dispatched_batches"],
+    "resolved_episodes": progress["resolved_episodes"],
+    "resolved_batches": progress["resolved_batches"],
     "submitted_to_uenv": submitted,
     "client_submit_seconds": client_submit_seconds,
     "worker_capacity": args.worker_capacity,
@@ -925,12 +1144,49 @@ document["scale"] = {
 document["dataset"] = {
     "name": "SWE-bench Pro",
     "selected_instance_ids": instance_ids,
+    "loaded_items": len(instance_ids),
     "unique_instance_count": len(set(instance_ids)),
+    "unique_items": len(set(instance_ids)),
     "submitted_episodes": submitted,
     "reuse_factor": submitted / len(set(instance_ids)) if instance_ids else 0.0,
     "instance_usage_top20": dict(sorted(instance_usage.items(), key=lambda item: (-item[1], item[0]))[:20]),
     "sampling_unit": "episode",
 }
+document.update(stress_common.pressure_result_metrics(
+    configured_workers=args.expected_workers,
+    worker_capacity=args.worker_capacity,
+    batch_size=episode_batch_size,
+    planned_batches=len(batch_specs),
+    concurrent_batches=max_in_flight_batches,
+    submission_strategy=(
+        "submit_all_batches_then_collect"
+        if max_in_flight_batches == len(batch_specs)
+        else "bounded_sliding_batch_window"
+    ),
+    client_submit_seconds=client_submit_seconds,
+    submitted_batches=progress["rpc_dispatched_batches"],
+    elapsed_seconds=elapsed,
+    submitted=submitted,
+    completed=completed,
+    failed=failed,
+    rpc_error_episodes=rpc_error_episodes,
+    protocol_errors=protocol_errors,
+    latencies_ms=latencies,
+))
+infrastructure_passed = bool(
+    document["infrastructure"]["passed"]
+    and submitted
+    and completed == submitted
+    and not failed
+    and not rpc_error_episodes
+    and not protocol_errors
+)
+document["infrastructure"]["passed"] = infrastructure_passed
+document["infrastructure"]["status"] = (
+    "passed" if infrastructure_passed else "failed"
+)
+document["status"] = "completed" if infrastructure_passed else "failed"
+stress_common.assert_pressure_result_schema(document)
 observation_path = args.output + ".episode-observations.jsonl"
 observation_count = stress_common.write_episode_observations_jsonl(
     observation_path, episode_observations
@@ -945,6 +1201,9 @@ document["episode_observations"] = {
 }
 with open(args.output, "w", encoding="utf-8") as destination:
     json.dump(document, destination, indent=2, sort_keys=True)
+# Close before printing the final document so the SSH caller observes a real
+# process exit immediately after receiving the result, not a leaked gRPC loop.
+close_channel()
 print(json.dumps(document, indent=2, sort_keys=True))
 if not document["infrastructure"]["passed"] or completed != submitted or protocol_errors or rpc_error_episodes:
     raise SystemExit(1)
@@ -959,7 +1218,8 @@ def server_config(expected_workers: int = 1, worker_capacity: int = 1) -> str:
     """
     total_slots = max(1, expected_workers * worker_capacity)
     return f'''port: {base.SERVER_PORT}
-admin_http_port: 0
+# 与隔离 gRPC 端口相邻，仅绑定 server loopback；driver/巡检可用 /agents 核对回收计数。
+admin_http_port: {base.SERVER_PORT + 1}
 admin_http_bind: "127.0.0.1"
 scheduler:
   strategy: round_robin
@@ -967,6 +1227,8 @@ scheduler:
   schedule_retry_interval_ms: 50
   heartbeat_interval_ms: 5000
   heartbeat_timeout_secs: 30
+  # 失联 30s 后再给 15s grace；随后将该 Agent 已领取 job 以新 lease 重入队。
+  agent_job_reclaim_grace_secs: 15
 episode:
   # 2560+ Episode 的 backlog 在几十 slot 下排队可达数小时，
   # 900s 会让队尾 Episode 全部误判 timeout；放宽到 4 小时。
@@ -1060,13 +1322,21 @@ def parse_private_port_range(value: str, count: int, *, single_port: int, label:
     return ports[:count]
 
 
-def container_ids(client) -> set[str]:
-    """读取 worker 机器上所有 Docker 容器 ID。
+SWE_CONTAINER_RUN_LABEL = "io.uenv.swe.run_id"
 
-    SWE-bench Pro pressure 开始前要求容器集合为空；结束后要求恢复到开始前的集合。
-    这样可以发现压测有没有遗留容器。
+
+def owned_container_ids(client, run_id: str) -> set[str]:
+    """读取带本次 run 专属 label 的 SWE Docker 容器 ID。
+
+    清理只允许针对该 label，绝不能用容器基线差集推断所有权；否则旧 run 的
+    finally 可能误删新 run 已创建的容器。
     """
-    _, out, _ = base.run(client, "docker ps -aq --no-trunc", timeout=30)
+    selector = f"label={SWE_CONTAINER_RUN_LABEL}={run_id}"
+    _, out, _ = base.run(
+        client,
+        f"docker ps -aq --no-trunc --filter {base.q(selector)}",
+        timeout=30,
+    )
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
@@ -1698,6 +1968,8 @@ class RunArgs:
         fleet_supervisor_threshold: int,
         registration_timeout: int,
         batch_timeout: int,
+        max_in_flight_batches: int,
+        host_watchdog_interval: int,
     ) -> None:
         self.concurrency = concurrency
         self.artifacts = artifacts
@@ -1732,6 +2004,8 @@ class RunArgs:
         self.fleet_supervisor_threshold = fleet_supervisor_threshold
         self.registration_timeout = registration_timeout
         self.batch_timeout = batch_timeout
+        self.max_in_flight_batches = max_in_flight_batches
+        self.host_watchdog_interval = host_watchdog_interval
 
 
 def run_one(
@@ -1768,6 +2042,8 @@ def run_one(
     fleet_supervisor_threshold: int,
     registration_timeout: int,
     batch_timeout: int,
+    max_in_flight_batches: int,
+    host_watchdog_interval: int,
 ) -> int:
     """执行一轮 SWE-bench Pro pressure。
 
@@ -1819,6 +2095,8 @@ def run_one(
         fleet_supervisor_threshold=fleet_supervisor_threshold,
         registration_timeout=registration_timeout,
         batch_timeout=batch_timeout,
+        max_in_flight_batches=max_in_flight_batches,
+        host_watchdog_interval=host_watchdog_interval,
     )
     password = os.environ.get("UENV_PASS")
     if not password:
@@ -1925,6 +2203,7 @@ def run_one(
 
     server = None
     worker_clients: dict = {}
+    host_watchdog: CentralHostWatchdog | None = None
     server_pid = None
     # PID 和容器集合是每台机器各自的资源，必须按节点记录（键为节点 host）；
     # 路径类字符串在各节点相同，保持标量以兼容单节点时的 manifest 结构。
@@ -1935,14 +2214,11 @@ def run_one(
     worker_pids_by_node: dict[str, list[tuple[int, str]]] = {node.host: [] for node in nodes}
     fleet_metrics_paths: dict[str, str] = {node.host: "" for node in nodes}
     before_protected = None
-    # None 表示该节点的容器基线还没有记录成功，清理时不能据此删除任何容器。
-    before_containers_by_node: dict[str, set[str] | None] = {node.host: None for node in nodes}
     error: str | None = None
     result_code = 1
     cleanup_errors: list[str] = []
     try:
         # 先连接 server 和全部 worker 节点，再记录正式 server 和容器集合的基线。
-        server = base.connect(base.SERVER_HOST, password)
         print(f"[swebench_pro_pressure][stage] connecting server {base.SERVER_HOST}", flush=True)
         server = base.connect(base.SERVER_HOST, password)
         print(f"[swebench_pro_pressure][stage] connected server {base.SERVER_HOST}", flush=True)
@@ -1961,13 +2237,13 @@ def run_one(
             args.instance_list,
             instance_list_text,
         )
-        # 容器基线和端口检查按节点分组：每台机器只检查落在本机的 worker/obs/
-        # gateway 端口和本机固定端口（agent API/health、LLM 模拟器）。
+        # 端口检查按节点分组：每台机器只检查落在本机的 worker/obs/gateway
+        # 端口和本机固定端口（agent API/health、LLM 模拟器）。容器所有权由
+        # run 专属 Docker label 确定，不再依赖全机容器基线。
         for node in active_nodes:
-            node_baseline = container_ids(worker_clients[node.host])
-            if node_baseline:
-                raise RuntimeError(f"worker host {node.host} is not container-empty: {sorted(node_baseline)}")
-            before_containers_by_node[node.host] = node_baseline
+            leftovers = owned_container_ids(worker_clients[node.host], run_id)
+            if leftovers:
+                raise RuntimeError(f"worker host {node.host} has stale containers for run {run_id}: {sorted(leftovers)}")
         # SWE-bench Pro pressure 涉及 server、worker、gateway、agent API、agent health 多个端口。
         # 全部确认空闲后再启动。
         base.assert_port_free(server, base.SERVER_PORT, base.SERVER_HOST)
@@ -2180,6 +2456,7 @@ def run_one(
         for node in active_nodes:
             client = worker_clients[node.host]
             base.put_text(client, f"{worker_run}/worker_fleet_supervisor.py", FLEET_SUPERVISOR_SOURCE, 0o700)
+            base.put_text(client, f"{worker_run}/host_watchdog_snapshot.py", HOST_WATCHDOG_SNAPSHOT, 0o700)
             worker_documents = {}
             for index in node_worker_indexes[node.host]:
                 current_worker_id = f"{worker_prefix}{index:04d}"
@@ -2286,6 +2563,7 @@ def run_one(
             "UENV_SWE_ARTIFACT_DIR": f"{worker_run}/trajectory",
             "UENV_SWE_INSTANCES": f"{worker_run}/bundle/config/swe/pro.json",
             "UENV_SWE_RUNTIME": "docker",
+            "UENV_SWE_CONTAINER_RUN_ID": run_id,
             "UENV_SWE_GATEWAY_API_KEY": f"stress-gateway-{run_id}",
             "RUST_LOG": "info",
         }
@@ -2323,7 +2601,8 @@ def run_one(
                     (
                         f"python3 -B {worker_run}/worker_fleet_supervisor.py "
                         f"--spec {fleet_spec_path} --pid-file {fleet_pid_path} "
-                        f"--metrics-file {fleet_metrics_path}"
+                        f"--metrics-file {fleet_metrics_path} "
+                        f"--resource-csv {worker_run}/fleet-resources.csv"
                     ),
                     f"{worker_run}/fleet-supervisor.log",
                     "/usr/bin/python3.12",
@@ -2408,7 +2687,10 @@ def run_one(
             "OPENHANDS_SUPPRESS_BANNER": "1",
             "OPENHANDS_MODE": args.mode,
             "OPENHANDS_MAX_ITERATIONS": str(args.openhands_max_iterations),
-            "OPENHANDS_RUN_TIMEOUT_SEC": "900",
+            # Keep the worker-side runner alive at least as long as the
+            # isolated Server's 4-hour episode timeout.  A 900s local cap
+            # otherwise turns healthy long-running episodes into false failures.
+            "OPENHANDS_RUN_TIMEOUT_SEC": "14400",
             "UENV_REPO": f"{worker_run}/bundle",
             "UENV_SWE_INSTANCES": f"{worker_run}/bundle/config/swe/pro.json",
             "UENV_SWE_RUNTIME": "docker",
@@ -2585,6 +2867,8 @@ def run_one(
             "--episode-offset", str(args.episode_offset),
             "--registration-timeout", str(args.registration_timeout),
             "--batch-timeout", str(args.batch_timeout),
+            "--max-in-flight-batches", str(args.max_in_flight_batches),
+            "--progress-output", f"{server_run}/driver-progress.jsonl",
             "--run-id", run_id,
             "--driver", f"{worker_run}/bundle/integrations/openhands/run_swebenchpro_official.py",
             "--catalog", f"{worker_run}/bundle/config/swe/pro.json",
@@ -2597,18 +2881,48 @@ def run_one(
             "--llm-config", effective_llm_config if args.mode == "llm" else "",
             "--instance-ids-json", base.q(json.dumps(selected_instances)),
         ])
+        host_watchdog = CentralHostWatchdog(
+            password,
+            active_nodes,
+            worker_run,
+            server_run,
+            args.host_watchdog_interval,
+        )
+        host_watchdog.start()
+        print(
+            f"[host_watchdog] started interval_secs={args.host_watchdog_interval} "
+            f"server_path={host_watchdog.output_path}",
+            flush=True,
+        )
         client_status, client_out, client_err = base.run(
             server,
             client_command,
             timeout=args.registration_timeout + max(args.batch_timeout * ((target_episodes // resolved_episode_batch_size) + 1), 1100),
             check=False,
         )
+        host_watchdog.stop()
+        host_watchdog = None
         print("[smoke] client output")
         print(client_out)
         if client_err:
             print(client_err)
         result_text = base.get_text(server, f"{server_run}/result.json")
         result_document = json.loads(result_text)
+        watchdog_local = local_run / "host-watchdog.jsonl"
+        try:
+            watchdog_text = base.get_text(server, f"{server_run}/host-watchdog.jsonl")
+            watchdog_local.write_text(watchdog_text, encoding="utf-8")
+            result_document["host_watchdog"] = {
+                "server_path": f"{server_run}/host-watchdog.jsonl",
+                "local_artifact": str(watchdog_local),
+                "interval_secs": args.host_watchdog_interval,
+                "samples": len([line for line in watchdog_text.splitlines() if line.strip()]),
+            }
+        except OSError as exc:
+            result_document["host_watchdog"] = {
+                "server_path": f"{server_run}/host-watchdog.jsonl",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         local_observations = local_run / "episode-observations.jsonl"
         local_observations.write_text(
             base.get_text(
@@ -2631,6 +2945,17 @@ def run_one(
                     "not every SWE-bench Pro pressure SWE Worker completed an episode: "
                     f"expected={args.registered_workers} actual={coverage['unique_completed_workers']}"
                 )
+        # Core result and server events are evidence on their own. Persist them
+        # before optional simulator/trace/resource post-processing so a later
+        # post-processing failure cannot erase the completed run summary.
+        (local_run / "result.json").write_text(
+            json.dumps(result_document, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        (local_run / "server.log").write_text(
+            base.get_text(server, f"{server_run}/server.log"),
+            encoding="utf-8",
+        )
         if args.llm_kind == "simulator":
             # 每个 active 节点各有一个本机模拟器，/stats 逐节点采集后再汇总；
             # trace replay 的 hit/miss 判定基于所有节点的合计值。
@@ -2872,6 +3197,29 @@ def run_one(
         result_document["resource_observations"] = resource_observations
         result_document["fleet_resource_metrics"] = resource_observations["worker_fleet"]
         result_document["host_resource_metrics"] = resource_observations["worker_host"]
+        # Persist resource evidence as soon as it is complete. The files use
+        # the same names as Math/Code so the report collector has one contract.
+        for node in active_nodes:
+            if fleet_metrics_paths[node.host]:
+                (local_run / f"fleet-metrics-{node.host}.json").write_text(
+                    json.dumps(
+                        fleet_metrics_by_node.get(node.host, {}),
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+                (local_run / f"fleet-resources-{node.host}.csv").write_text(
+                    base.get_text(
+                        worker_clients[node.host],
+                        f"{worker_run}/fleet-resources.csv",
+                    ),
+                    encoding="utf-8",
+                )
+        (local_run / "result.json").write_text(
+            json.dumps(result_document, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         replayable_trace_docs = [
             item for item in trace_corpus_docs
             if isinstance(item, dict) and isinstance(item.get("turns"), list) and item.get("turns")
@@ -2946,6 +3294,8 @@ def run_one(
         error = f"{type(exc).__name__}: {exc}"
         print(f"[smoke] FAIL {error}")
     finally:
+        if host_watchdog:
+            host_watchdog.stop()
         # 真实 SWE episode 可能运行较久，原来的 SSH 连接可能已经空闲断开。
         # 清理时逐节点重新建立带指纹校验的 SSH 连接，再停止本次拥有的进程。
         had_worker_connections = bool(worker_clients)
@@ -3006,16 +3356,13 @@ def run_one(
                 except Exception as exc:
                     cleanup_errors.append(str(exc))
             try:
-                # 只删除本次新增的容器，并检查容器集合是否恢复到开始前状态。
-                # 基线没记录成功（None）时不做任何容器清理，避免误删存量容器。
-                baseline = before_containers_by_node[node.host]
-                if baseline is not None:
-                    new_containers = container_ids(client) - baseline
-                    if new_containers:
-                        base.run(client, "docker rm -f " + " ".join(sorted(new_containers)), timeout=120)
-                        print(f"[cleanup] {node.host} removed owned container IDs={sorted(new_containers)}")
-                    if container_ids(client) != baseline:
-                        cleanup_errors.append(f"{node.host}: container set did not return to baseline")
+                owned_containers = owned_container_ids(client, run_id)
+                if owned_containers:
+                    base.run(client, "docker rm -f " + " ".join(sorted(owned_containers)), timeout=120)
+                    print(f"[cleanup] {node.host} removed run-labeled container IDs={sorted(owned_containers)}")
+                remaining = owned_container_ids(client, run_id)
+                if remaining:
+                    cleanup_errors.append(f"{node.host}: run-labeled containers remain after cleanup: {sorted(remaining)}")
             except Exception as exc:
                 cleanup_errors.append(str(exc))
             try:
@@ -3124,6 +3471,18 @@ def main() -> int:
     parser.add_argument("--fleet-supervisor-threshold", type=int, default=16)
     parser.add_argument("--registration-timeout", type=int, default=900)
     parser.add_argument("--batch-timeout", type=int, default=1800)
+    parser.add_argument(
+        "--host-watchdog-interval",
+        type=int,
+        default=5,
+        help="Seconds between independent worker-host snapshots written to the isolated server.",
+    )
+    parser.add_argument(
+        "--max-in-flight-batches",
+        type=int,
+        default=0,
+        help="Bound concurrent synchronous ExecuteBatch RPCs; 0 derives one worker-capacity wave.",
+    )
     base.add_runtime_arguments(parser, require_code_plugin=False)
     args = parser.parse_args()
     base.configure_from_args(args)
@@ -3182,6 +3541,10 @@ def main() -> int:
             raise SystemExit("SWE-bench Pro pressure scale total episodes must be at least registered_workers * worker_capacity * min_scale_episode_waves")
     if args.total_episodes < 0 or args.episode_batch_size < 0 or args.episode_offset < 0:
         raise SystemExit("--total-episodes, --episode-batch-size and --episode-offset must be non-negative")
+    if args.max_in_flight_batches < 0:
+        raise SystemExit("--max-in-flight-batches must be non-negative")
+    if args.host_watchdog_interval <= 0:
+        raise SystemExit("--host-watchdog-interval must be positive")
     if args.fleet_supervisor_threshold < 2:
         raise SystemExit("--fleet-supervisor-threshold must be at least 2")
     if args.registration_timeout <= 0 or args.batch_timeout <= 0:
@@ -3232,6 +3595,8 @@ def main() -> int:
                 args.fleet_supervisor_threshold,
                 args.registration_timeout,
                 args.batch_timeout,
+                args.max_in_flight_batches,
+                args.host_watchdog_interval,
             )
             item = {
                 "parallel_mode": parallel_mode,

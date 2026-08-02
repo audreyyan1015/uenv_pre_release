@@ -320,9 +320,39 @@ def run(
     退出码判断，也能把失败命令和输出一起带出来，方便排查。
     """
     _, stdout, stderr = client.exec_command(command, timeout=timeout)
-    out = stdout.read().decode("utf-8", errors="replace")
-    err = stderr.read().decode("utf-8", errors="replace")
-    status = stdout.channel.recv_exit_status()
+    channel = stdout.channel
+    deadline = time.monotonic() + timeout
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+
+    # stdout.read() 后再 stderr.read() 会在大输出时死锁：远端命令先把
+    # stderr 或 SSH channel 窗口写满，进而无法退出；本地则还在等待 stdout
+    # EOF。两个流必须在命令运行期间交替排空。
+    status: int | None = None
+    while True:
+        while channel.recv_ready():
+            stdout_chunks.append(channel.recv(65536))
+        while channel.recv_stderr_ready():
+            stderr_chunks.append(channel.recv_stderr(65536))
+
+        if status is None and channel.exit_status_ready():
+            status = channel.recv_exit_status()
+        # Paramiko 可能先收到退出状态、再收到 channel 里的最后一段输出；
+        # 必须等到 channel 关闭且两个接收缓冲均排空后才能返回。
+        if (
+            status is not None
+            and channel.closed
+            and not channel.recv_ready()
+            and not channel.recv_stderr_ready()
+        ):
+            break
+        if time.monotonic() >= deadline:
+            channel.close()
+            raise TimeoutError(f"remote command timed out after {timeout}s: {command}")
+        time.sleep(0.01)
+
+    out = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+    err = b"".join(stderr_chunks).decode("utf-8", errors="replace")
     if check and status != 0:
         raise RuntimeError(
             f"remote command failed status={status}: {command}\nstdout={out}\nstderr={err}"
