@@ -16,6 +16,7 @@ export LOG_FILE=${LOG_FILE:-${REPO_DIR}/temp/logs/verl_layer4_agent_loop/${RUN_I
 
 # VeRL/wandb 日志。默认只输出 console；开启 wandb 时传入：
 #   TRAINER_LOGGER="['console','wandb']" WANDB_MODE=online WANDB_API_KEY=...
+# 也可以写入 /data/ronghao/uenv/secrets/wandb.env，由通用入口自动读取。
 TRAINER_LOGGER=${TRAINER_LOGGER:-"['console']"}
 TRAINER_PROJECT_NAME=${TRAINER_PROJECT_NAME:-uenv_bridge_layer4}
 export TRAINER_LOGGER TRAINER_PROJECT_NAME
