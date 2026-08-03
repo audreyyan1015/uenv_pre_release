@@ -149,6 +149,41 @@ class ReorderedEpisodeClient(BatchRecordingEpisodeClient):
         yield from reversed(results)
 
 
+class MixedFailureEpisodeClient(BatchRecordingEpisodeClient):
+    def submit_episode_stream(self, requests):
+        request_list = list(requests)
+        self.stream_calls.append(request_list)
+        for index, request in enumerate(request_list):
+            if index == 1:
+                yield EpisodeResult(
+                    request_id=request.request_id,
+                    status="failed",
+                    trajectory=Trajectory(steps=[], total_reward=0.0, total_steps=0),
+                    summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="failed"),
+                    error_message="context window exceeded",
+                )
+                continue
+            yield EpisodeResult(
+                request_id=request.request_id,
+                status="completed",
+                trajectory=Trajectory(
+                    steps=[
+                        StepRecord(
+                            step_index=0,
+                            action=b"ok",
+                            reward=1.0,
+                            terminated=True,
+                            response_ids=[500 + index],
+                            response_mask=[1],
+                        )
+                    ],
+                    total_reward=1.0,
+                    total_steps=1,
+                ),
+                summary=EpisodeSummary(total_reward=1.0, total_steps=1, terminate_reason="done"),
+            )
+
+
 class FakeServerManager:
     def __init__(self, addresses):
         self.server_addresses = addresses
@@ -391,6 +426,41 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.extra_fields["uenv_status"], "completed")
         self.assertIsNotNone(client.last_request)
 
+    def test_run_raises_failed_episode_by_default(self) -> None:
+        client = RecordingEpisodeClient(self._failed_result("context window exceeded"))
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+
+        with self.assertRaisesRegex(RuntimeError, "context window exceeded"):
+            asyncio.run(
+                loop.run(
+                    {},
+                    raw_prompt=[{"role": "user", "content": "fix issue"}],
+                    data_source="swebenchpro",
+                    reward_model={},
+                )
+            )
+
+    def test_run_zero_rewards_failed_episode_when_configured(self) -> None:
+        client = RecordingEpisodeClient(self._failed_result("context window exceeded"))
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client, failed_episode_policy="zero_reward")
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "fix issue"}],
+                data_source="swebenchpro",
+                reward_model={},
+            )
+        )
+
+        self.assertEqual(output.prompt_ids, [10, 11, 12])
+        self.assertEqual(output.response_ids, [0])
+        self.assertEqual(output.response_mask, [0])
+        self.assertEqual(output.reward_score, 0.0)
+        self.assertEqual(output.extra_fields["uenv_status"], "failed")
+        self.assertEqual(output.extra_fields["uenv_failed_episode_policy"], "zero_reward")
+        self.assertIn("context window exceeded", output.extra_fields["uenv_error_message"])
+
     def test_run_accepts_chat_template_input_ids_mapping(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
         loop = UEnvAgentLoop(tokenizer=DictInputIdsTokenizer(), client=client)
@@ -477,6 +547,29 @@ class UEnvAgentLoopTest(unittest.TestCase):
 
         self.assertEqual([output.response_ids for output in outputs], [[300], [301], [302]])
         self.assertEqual([output.reward_score for output in outputs], [0.0, 1.0, 2.0])
+
+    def test_run_batch_zero_rewards_failed_episode_when_configured(self) -> None:
+        client = MixedFailureEpisodeClient()
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client, failed_episode_policy="zero_reward")
+
+        outputs = asyncio.run(
+            loop.run_batch(
+                [{}, {}, {}],
+                [
+                    {"raw_prompt": "a", "data_source": "swesmith"},
+                    {"raw_prompt": "b", "data_source": "swesmith"},
+                    {"raw_prompt": "c", "data_source": "swesmith"},
+                ],
+                batch_id="batch-failed",
+            )
+        )
+
+        self.assertEqual(len(outputs), 3)
+        self.assertEqual([output.response_ids for output in outputs], [[500], [0], [502]])
+        self.assertEqual([output.response_mask for output in outputs], [[1], [0], [1]])
+        self.assertEqual([output.reward_score for output in outputs], [1.0, 0.0, 1.0])
+        self.assertEqual(outputs[1].extra_fields["uenv_status"], "failed")
+        self.assertEqual(outputs[1].extra_fields["uenv_failed_episode_policy"], "zero_reward")
 
     def test_build_episode_request_defaults_to_sync_parallel_mode(self) -> None:
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(self._result_with_token_ids()))
@@ -1170,6 +1263,15 @@ class UEnvAgentLoopTest(unittest.TestCase):
             status="completed",
             trajectory=Trajectory(steps=[step], total_reward=2.0, total_steps=1),
             summary=EpisodeSummary(total_reward=2.0, total_steps=1, terminate_reason="done"),
+        )
+
+    def _failed_result(self, message: str) -> EpisodeResult:
+        return EpisodeResult(
+            request_id="failed-result",
+            status="failed",
+            trajectory=Trajectory(steps=[], total_reward=0.0, total_steps=0),
+            summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="failed"),
+            error_message=message,
         )
 
 
