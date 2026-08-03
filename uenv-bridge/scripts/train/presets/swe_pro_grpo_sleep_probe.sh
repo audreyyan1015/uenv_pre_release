@@ -6,15 +6,30 @@ set -euo pipefail
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"}
 cd "${REPO_DIR}"
 
+# 同步模式
+export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
+
 # 运行 ID 与日志
 RUN_TS=${RUN_TS:-$(date +%Y%m%d_%H%M%S)}
 export RUN_ID=${RUN_ID:-verl_sleep_reuse_probe_${RUN_TS}}
 export LOG_FILE=${LOG_FILE:-${REPO_DIR}/temp/logs/verl_layer4_agent_loop/${RUN_ID}.log}
 
+# VeRL/wandb 日志。默认只输出 console；开启 wandb 时传入：
+#   TRAINER_LOGGER="['console','wandb']" WANDB_MODE=online WANDB_API_KEY=...
+TRAINER_LOGGER=${TRAINER_LOGGER:-"['console']"}
+TRAINER_PROJECT_NAME=${TRAINER_PROJECT_NAME:-uenv_bridge_layer4}
+export TRAINER_LOGGER TRAINER_PROJECT_NAME
+
+# Server Obs / 前端可视化。默认通过前端机器的 /obs 反代上报事件。
+export UENV_OBS_URL=${UENV_OBS_URL-http://8.130.75.157:8888/obs}
+export UENV_OBS_TOKEN=${UENV_OBS_TOKEN:-}
+export UENV_TRAINING_RUN_ID=${UENV_TRAINING_RUN_ID:-${RUN_ID}}
+
 # Adapter model gateway。Worker/OpenHands 访问该地址，gateway 再转发到 VeRL 内部 vLLM
 export UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED:-1}
 export UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18088}
 export UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL:-http://10.10.20.142:${UENV_MODEL_GATEWAY_PORT}/v1}
+export UENV_MODEL_GATEWAY_MAX_TOKENS=${UENV_MODEL_GATEWAY_MAX_TOKENS:-4096}
 
 # 模型与数据挂载。宿主机路径挂到容器内固定路径，供 VeRL Hydra 参数引用
 export MODEL_PATH=${MODEL_PATH:-/data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B}
@@ -28,7 +43,7 @@ export SWE_SAMPLE_LIMIT=${SWE_SAMPLE_LIMIT:-10}
 export SWE_SAMPLE_OFFSET=${SWE_SAMPLE_OFFSET:-0}
 export SWE_WORKSPACE_DIR=${SWE_WORKSPACE_DIR:-/app}
 export SWE_LLM_CONFIG_PATH=${SWE_LLM_CONFIG_PATH:-/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json}
-export SWE_TRAJECTORY_MAX_STEPS=${SWE_TRAJECTORY_MAX_STEPS:-50}
+export SWE_TRAJECTORY_MAX_STEPS=${SWE_TRAJECTORY_MAX_STEPS:-10}
 export SWE_ENV_PACKAGE_VERSION=${SWE_ENV_PACKAGE_VERSION:-0.3.4}
 export SWE_AGENT_MODE=${SWE_AGENT_MODE:-llm}
 
@@ -55,9 +70,11 @@ export DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-8192}
 export ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.70}
 export ROLLOUT_FREE_CACHE_ENGINE=${ROLLOUT_FREE_CACHE_ENGINE:-True}
 export ROLLOUT_ENABLE_SLEEP_MODE=${ROLLOUT_ENABLE_SLEEP_MODE:-True}
+
 # SWE/OpenHands 训练需要 response token trace；当前 worker 通过 OpenAI logprobs
 # 恢复 token_id，所以这里即使是同步 GRPO 也默认要求 rollout 返回 logprobs。
 export ROLLOUT_CALCULATE_LOG_PROBS=${ROLLOUT_CALCULATE_LOG_PROBS:-True}
+export UENV_AGENT_LOOP_FAILED_EPISODE_POLICY=${UENV_AGENT_LOOP_FAILED_EPISODE_POLICY:-zero_reward}
 export UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR:-1}
 
 # smoke/probe 默认不做验证和保存 checkpoint
