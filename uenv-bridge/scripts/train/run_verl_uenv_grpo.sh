@@ -39,6 +39,7 @@ Common environment overrides:
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
   TRAINER_LOGGER                VeRL logger backends. Use "['console','wandb']" to enable wandb. Default: "['console']"
   TRAINER_PROJECT_NAME          VeRL/wandb project name. Default: uenv_bridge_layer4
+  WANDB_ENV_FILE                Optional host env file loaded before wandb setup. Default: <repo>/../secrets/wandb.env
   WANDB_API_KEY                 Optional wandb API key; passed through to the container when set.
   WANDB_MODE                    Optional wandb mode, for example online or offline.
   WANDB_ENTITY                  Optional wandb entity.
@@ -207,6 +208,11 @@ KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
 SAVE_FREQ=${SAVE_FREQ:--1}
 TEST_FREQ=${TEST_FREQ:-5}
+WANDB_ENV_FILE=${WANDB_ENV_FILE:-${REPO_DIR}/../secrets/wandb.env}
+if [ -f "${WANDB_ENV_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${WANDB_ENV_FILE}"
+fi
 TRAINER_LOGGER=${TRAINER_LOGGER:-"['console']"}
 TRAINER_PROJECT_NAME=${TRAINER_PROJECT_NAME:-uenv_bridge_layer4}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-uenv_layer4_grpo_$(date +%Y%m%d_%H%M)}
