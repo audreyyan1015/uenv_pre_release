@@ -1,0 +1,52 @@
+{
+  "input_paths": [
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00000-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00001-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00002-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00003-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00004-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00005-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00006-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00007-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00008-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00009-of-00011.parquet",
+    "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data/train-00010-of-00011.parquet"
+  ],
+  "output_dir": "/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith_train_limit10_offset0",
+  "rows": 10,
+  "limit": 10,
+  "offset": 0,
+  "source_indices": [
+    0,
+    1,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "instance_ids": [
+    "oauthlib__oauthlib.1fd52536.combine_file__09vlzwgc",
+    "oauthlib__oauthlib.1fd52536.combine_file__0fceycuu",
+    "oauthlib__oauthlib.1fd52536.combine_file__0hkl0pea",
+    "oauthlib__oauthlib.1fd52536.combine_file__0mvyid7d",
+    "oauthlib__oauthlib.1fd52536.combine_file__0q5tya4o",
+    "oauthlib__oauthlib.1fd52536.combine_file__0qgnxkrq",
+    "oauthlib__oauthlib.1fd52536.combine_file__0y673oox",
+    "oauthlib__oauthlib.1fd52536.combine_file__1bsv3m8l",
+    "oauthlib__oauthlib.1fd52536.combine_file__1gnd4ecz",
+    "oauthlib__oauthlib.1fd52536.combine_file__1o3hm5l5"
+  ],
+  "workspace_dir": "/testbed",
+  "llm_config_path": "/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json",
+  "max_iterations": 50,
+  "max_steps": 50,
+  "env_package_id": "swe-bench-smith",
+  "env_package_version": "0.1.0-local",
+  "benchmark_variant": "smith",
+  "agent_mode": "llm",
+  "note": "SWE-smith training data; selected rows exclude empty problem_statement."
+}
