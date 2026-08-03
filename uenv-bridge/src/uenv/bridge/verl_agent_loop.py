@@ -141,6 +141,15 @@ def _bool_value(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def _failed_episode_policy(value: Any) -> str:
+    text = (_optional_string(value) or "raise").strip().lower().replace("-", "_")
+    if text in {"raise", "fail", "fail_fast"}:
+        return "raise"
+    if text in {"zero", "zero_reward", "zero_score"}:
+        return "zero_reward"
+    raise ValueError(f"Unsupported UEnv failed episode policy: {value!r}. Expected 'raise' or 'zero_reward'.")
+
+
 @dataclass(slots=True)
 class UEnvAgentLoopConfig:
     client_mode: str = "fake"
@@ -172,6 +181,7 @@ class UEnvAgentLoopConfig:
     model_gateway_stop_on_close: bool = True
     require_swe_response_trace: bool = True
     parallel_mode: str = "sync"
+    failed_episode_policy: str = "raise"
 
 
 @register("uenv_agent")
@@ -218,6 +228,7 @@ class UEnvAgentLoop(AgentLoopBase):
         model_gateway_stop_on_close: bool | None = None,
         require_swe_response_trace: bool | None = None,
         parallel_mode: str = "sync",
+        failed_episode_policy: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -252,6 +263,7 @@ class UEnvAgentLoop(AgentLoopBase):
             model_gateway_stop_on_close=_bool_value(model_gateway_stop_on_close, True),
             require_swe_response_trace=_bool_value(require_swe_response_trace, True),
             parallel_mode=_optional_string(parallel_mode) or "sync",
+            failed_episode_policy=_failed_episode_policy(failed_episode_policy),
         )
         self.model_gateway = ModelGateway(
             ModelGatewayConfig(
@@ -308,10 +320,8 @@ class UEnvAgentLoop(AgentLoopBase):
             self._record_episode_results([result], [request], phase="result_single")
 
         if result.status not in {"completed", "recorded"}:
-            raise RuntimeError(
-                f"UEnv pre-rollout episode failed: request_id={result.request_id} "
-                f"status={result.status} error={result.error_message}"
-            )
+            self._raise_if_failed([result])
+            return self._failed_output_from_result(request, result, prompt_ids=prompt_ids, metrics=metrics)
 
         response_ids = self._response_ids_from_result(result)
         self._raise_if_missing_required_response_trace(request, result, response_ids)
@@ -496,6 +506,8 @@ class UEnvAgentLoop(AgentLoopBase):
         return False
 
     def _raise_if_failed(self, results: list[EpisodeResult]) -> None:
+        if self.config_for_uenv.failed_episode_policy == "zero_reward":
+            return
         for result in results:
             if result.status not in {"completed", "recorded"}:
                 raise RuntimeError(
@@ -511,10 +523,8 @@ class UEnvAgentLoop(AgentLoopBase):
 
     def _output_from_result(self, request: EpisodeRequest, result: EpisodeResult) -> AgentLoopOutput:
         if result.status not in {"completed", "recorded"}:
-            raise RuntimeError(
-                f"UEnv pre-rollout episode failed: request_id={result.request_id} "
-                f"status={result.status} error={result.error_message}"
-            )
+            self._raise_if_failed([result])
+            return self._failed_output_from_result(request, result)
 
         response_ids = self._response_ids_from_result(result)
         self._raise_if_missing_required_response_trace(request, result, response_ids)
@@ -542,6 +552,45 @@ class UEnvAgentLoop(AgentLoopBase):
                 "uenv_trajectory_id": result.trajectory_id,
                 "uenv_trajectory": self._trajectory_to_jsonable(result),
                 "uenv_response_source": self._response_source_from_result(result),
+                "turn_scores": [],
+                "tool_rewards": [],
+            },
+        )
+
+    def _failed_output_from_result(
+        self,
+        request: EpisodeRequest,
+        result: EpisodeResult,
+        *,
+        prompt_ids: list[int] | None = None,
+        metrics: dict[str, float] | None = None,
+    ) -> AgentLoopOutput:
+        prompt_ids = prompt_ids if prompt_ids is not None else self._payload_prompt_ids(request)
+        termination_reason = result.summary.terminate_reason or result.status
+        error_message = result.error_message or ""
+        return AgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=[self._pad_token_id()],
+            response_mask=[0],
+            reward_score=0.0,
+            num_turns=max(result.trajectory.total_steps + 1, 1),
+            metrics=AgentLoopMetrics(
+                generate_sequences=float((metrics or {}).get("generate_sequences", 0.0)),
+                tool_calls=0.0,
+                compute_score=0.0,
+                num_preempted=-1,
+            ),
+            extra_fields={
+                **self._fully_async_extra_fields_from_result(request, result),
+                "uenv_request_id": result.request_id,
+                "uenv_status": result.status,
+                "uenv_termination_reason": termination_reason,
+                "uenv_trajectory_id": result.trajectory_id,
+                "uenv_trajectory": self._trajectory_to_jsonable(result),
+                "uenv_response_source": self._response_source_from_result(result),
+                "uenv_failed_episode_policy": self.config_for_uenv.failed_episode_policy,
+                "uenv_error_code": result.error_code,
+                "uenv_error_message": error_message[:4000],
                 "turn_scores": [],
                 "tool_rewards": [],
             },
@@ -809,7 +858,10 @@ class UEnvAgentLoop(AgentLoopBase):
                 verl_response_ids = response_ids[:max_response_length] if max_response_length else response_ids
                 if not verl_response_ids:
                     verl_response_ids = [self._pad_token_id()]
-                verl_response_mask = self._response_mask_from_result(result, len(verl_response_ids))
+                if result.status not in {"completed", "recorded"} and self.config_for_uenv.failed_episode_policy == "zero_reward":
+                    verl_response_mask = [0] * len(verl_response_ids)
+                else:
+                    verl_response_mask = self._response_mask_from_result(result, len(verl_response_ids))
                 verl_response_mask = verl_response_mask[: len(verl_response_ids)]
                 if len(verl_response_mask) < len(verl_response_ids):
                     verl_response_mask.extend([1] * (len(verl_response_ids) - len(verl_response_mask)))
@@ -836,6 +888,7 @@ class UEnvAgentLoop(AgentLoopBase):
                     "response_text": self._response_text_from_result(result),
                     "response_source": self._response_source_from_result(result),
                     "used_pad_fallback": not response_ids,
+                    "failed_episode_policy": self.config_for_uenv.failed_episode_policy,
                     "response_ids": response_ids,
                     "verl_response_ids": verl_response_ids,
                     "verl_response_mask": verl_response_mask,
