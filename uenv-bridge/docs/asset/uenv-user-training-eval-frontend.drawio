@@ -1,0 +1,184 @@
+<mxfile host="65bd71144e" scale="10" border="0">
+    <diagram id="10000" name="UEnv 用户训练评测前端">
+        <mxGraphModel dx="866" dy="296" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1640" pageHeight="1040" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="2" value="UEnv 面向用户的训练 / 评测发起页面构想" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=26;fontStyle=1;fontColor=#172033" parent="1" vertex="1">
+                    <mxGeometry x="250" y="24" width="1140" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="3" value="用户在前端选择模型、任务、数据与训练参数，或上传脚本配置；点击开始后由 Server 侧承接调度、状态流转与观测。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#94a3b8;fontSize=15;fontColor=#334155" parent="1" vertex="1">
+                    <mxGeometry x="260" y="76" width="1120" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="4" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#334155;strokeWidth=2" parent="1" vertex="1">
+                    <mxGeometry x="70" y="150" width="1500" height="760" as="geometry"/>
+                </mxCell>
+                <mxCell id="5" value="UEnv Console" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e2e8f0;strokeColor=#334155;fontSize=16;fontStyle=1;fontColor=#0f172a;align=left;spacingLeft=18" parent="1" vertex="1">
+                    <mxGeometry x="70" y="150" width="1500" height="54" as="geometry"/>
+                </mxCell>
+                <mxCell id="6" value="用户 / 项目 / 集群" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#94a3b8;fontSize=13;fontColor=#334155" parent="1" vertex="1">
+                    <mxGeometry x="1325" y="164" width="190" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="7" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f1f5f9;strokeColor=#cbd5e1" parent="1" vertex="1">
+                    <mxGeometry x="70" y="204" width="210" height="706" as="geometry"/>
+                </mxCell>
+                <mxCell id="8" value="功能入口" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontSize=15;fontStyle=1;fontColor=#334155" parent="1" vertex="1">
+                    <mxGeometry x="95" y="228" width="150" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="9" value="训练任务" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=15;fontStyle=1;fontColor=#1e3a8a;align=left;spacingLeft=18" parent="1" vertex="1">
+                    <mxGeometry x="90" y="270" width="170" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="10" value="Benchmark 评测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cbd5e1;fontSize=15;fontColor=#334155;align=left;spacingLeft=18" parent="1" vertex="1">
+                    <mxGeometry x="90" y="328" width="170" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="11" value="运行记录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cbd5e1;fontSize=15;fontColor=#334155;align=left;spacingLeft=18" parent="1" vertex="1">
+                    <mxGeometry x="90" y="386" width="170" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="12" value="模型 / 数据集" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cbd5e1;fontSize=15;fontColor=#334155;align=left;spacingLeft=18" parent="1" vertex="1">
+                    <mxGeometry x="90" y="444" width="170" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="13" value="脚本模板" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cbd5e1;fontSize=15;fontColor=#334155;align=left;spacingLeft=18" parent="1" vertex="1">
+                    <mxGeometry x="90" y="502" width="170" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="14" value="新建运行任务" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontSize=22;fontStyle=1;fontColor=#172033" parent="1" vertex="1">
+                    <mxGeometry x="315" y="225" width="240" height="34" as="geometry"/>
+                </mxCell>
+                <mxCell id="15" value="RL 训练" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2563eb;strokeColor=#1d4ed8;fontSize=15;fontStyle=1;fontColor=#ffffff" parent="1" vertex="1">
+                    <mxGeometry x="315" y="272" width="100" height="36" as="geometry"/>
+                </mxCell>
+                <mxCell id="16" value="仅评测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#94a3b8;fontSize=15;fontColor=#334155" parent="1" vertex="1">
+                    <mxGeometry x="425" y="272" width="100" height="36" as="geometry"/>
+                </mxCell>
+                <mxCell id="17" value="上传脚本 / YAML" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#94a3b8;fontSize=15;fontColor=#334155" parent="1" vertex="1">
+                    <mxGeometry x="535" y="272" width="150" height="36" as="geometry"/>
+                </mxCell>
+                <mxCell id="18" value="基础信息" style="swimlane;html=1;rounded=1;startSize=34;fillColor=#ffffff;swimlaneFillColor=#e0f2fe;strokeColor=#0284c7;fontStyle=1;fontSize=16;fontColor=#0c4a6e" parent="1" vertex="1">
+                    <mxGeometry x="315" y="330" width="390" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="19" value="任务名称&#xa;Qwen3.6-35B-A3B SWE-smith GRPO" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="18" vertex="1">
+                    <mxGeometry x="22" y="54" width="346" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="20" value="项目 / 实验组&#xa;uenv-swe-training" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="18" vertex="1">
+                    <mxGeometry x="22" y="122" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="21" value="集群 / 队列&#xa;8x A100" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="18" vertex="1">
+                    <mxGeometry x="202" y="122" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="22" value="模型与任务" style="swimlane;html=1;rounded=1;startSize=34;fillColor=#ffffff;swimlaneFillColor=#dcfce7;strokeColor=#16a34a;fontStyle=1;fontSize=16;fontColor=#14532d" parent="1" vertex="1">
+                    <mxGeometry x="735" y="330" width="390" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="23" value="基座模型&#xa;/models/Qwen3.6-35B-A3B" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="22" vertex="1">
+                    <mxGeometry x="22" y="54" width="346" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="24" value="任务类型&#xa;SWE / OpenHands" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="22" vertex="1">
+                    <mxGeometry x="22" y="122" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="25" value="数据来源&#xa;SWE-smith" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="22" vertex="1">
+                    <mxGeometry x="202" y="122" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="26" value="训练参数" style="swimlane;html=1;rounded=1;startSize=34;fillColor=#ffffff;swimlaneFillColor=#fef3c7;strokeColor=#d97706;fontStyle=1;fontSize=16;fontColor=#78350f" parent="1" vertex="1">
+                    <mxGeometry x="315" y="565" width="390" height="245" as="geometry"/>
+                </mxCell>
+                <mxCell id="27" value="样本数 limit&#xa;1000" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="26" vertex="1">
+                    <mxGeometry x="22" y="54" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="28" value="training steps&#xa;512" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="26" vertex="1">
+                    <mxGeometry x="202" y="54" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="29" value="batch / rollout n&#xa;1 / 8" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="26" vertex="1">
+                    <mxGeometry x="22" y="122" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="30" value="prompt / response length&#xa;8192 / 8192" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="26" vertex="1">
+                    <mxGeometry x="202" y="122" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="31" value="agent max steps / workers&#xa;10 / 1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="26" vertex="1">
+                    <mxGeometry x="22" y="190" width="346" height="38" as="geometry"/>
+                </mxCell>
+                <mxCell id="32" value="资源与高级配置" style="swimlane;html=1;rounded=1;startSize=34;fillColor=#ffffff;swimlaneFillColor=#e9d5ff;strokeColor=#9333ea;fontStyle=1;fontSize=16;fontColor=#581c87" parent="1" vertex="1">
+                    <mxGeometry x="735" y="565" width="390" height="245" as="geometry"/>
+                </mxCell>
+                <mxCell id="33" value="GPU 数 / TP&#xa;8 / 8" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="32" vertex="1">
+                    <mxGeometry x="22" y="54" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="34" value="推理后端&#xa;vLLM + Gateway" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="32" vertex="1">
+                    <mxGeometry x="202" y="54" width="166" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="35" value="必需 trace&#xa;response_ids / mask / logprobs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff7ed;strokeColor=#fb923c;fontSize=13;fontColor=#7c2d12;align=left;spacingLeft=12" parent="32" vertex="1">
+                    <mxGeometry x="22" y="122" width="346" height="52" as="geometry"/>
+                </mxCell>
+                <mxCell id="36" value="可选：上传 shell / YAML&#xa;系统解析参数并生成预览" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eef2ff;strokeColor=#6366f1;fontSize=13;fontColor=#312e81;align=left;spacingLeft=12" parent="32" vertex="1">
+                    <mxGeometry x="22" y="190" width="346" height="38" as="geometry"/>
+                </mxCell>
+                <mxCell id="37" value="启动前预览与检查" style="swimlane;html=1;rounded=1;startSize=34;fillColor=#ffffff;swimlaneFillColor=#fee2e2;strokeColor=#dc2626;fontStyle=1;fontSize=16;fontColor=#7f1d1d" parent="1" vertex="1">
+                    <mxGeometry x="1155" y="330" width="365" height="310" as="geometry"/>
+                </mxCell>
+                <mxCell id="38" value="命令预览&#xa;LIMIT=1000 TRAINING_STEPS=512 ...&#xa;./scripts/train/presets/swe_smith_grpo_train.sh" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0f172a;strokeColor=#334155;fontSize=13;fontColor=#e2e8f0;align=left;spacingLeft=12" parent="37" vertex="1">
+                    <mxGeometry x="20" y="52" width="325" height="82" as="geometry"/>
+                </mxCell>
+                <mxCell id="39" value="检查项&#xa;数据路径存在&#xa;模型路径存在&#xa;batch 可整除&#xa;worker 支持 trace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#cbd5e1;fontSize=13;fontColor=#334155;align=left;spacingLeft=12" parent="37" vertex="1">
+                    <mxGeometry x="20" y="152" width="155" height="122" as="geometry"/>
+                </mxCell>
+                <mxCell id="40" value="风险提示&#xa;长上下文可能慢&#xa;worker 超时需调大&#xa;保存日志与 run id" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff7ed;strokeColor=#fb923c;fontSize=13;fontColor=#7c2d12;align=left;spacingLeft=12" parent="37" vertex="1">
+                    <mxGeometry x="190" y="152" width="155" height="122" as="geometry"/>
+                </mxCell>
+                <mxCell id="41" value="运行操作" style="swimlane;html=1;rounded=1;startSize=34;fillColor=#ffffff;swimlaneFillColor=#dbeafe;strokeColor=#2563eb;fontStyle=1;fontSize=16;fontColor=#1e3a8a" parent="1" vertex="1">
+                    <mxGeometry x="1155" y="665" width="365" height="145" as="geometry"/>
+                </mxCell>
+                <mxCell id="42" value="保存配置" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#94a3b8;fontSize=15;fontColor=#334155" parent="41" vertex="1">
+                    <mxGeometry x="24" y="56" width="100" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="43" value="开始训练" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2563eb;strokeColor=#1d4ed8;fontSize=15;fontStyle=1;fontColor=#ffffff" parent="41" vertex="1">
+                    <mxGeometry x="138" y="56" width="100" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="44" value="开始评测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#16a34a;strokeColor=#15803d;fontSize=15;fontStyle=1;fontColor=#ffffff" parent="41" vertex="1">
+                    <mxGeometry x="252" y="56" width="90" height="42" as="geometry"/>
+                </mxCell>
+                <mxCell id="45" value="点击开始后的职责边界" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontSize=15;fontStyle=1;fontColor=#334155" parent="1" vertex="1">
+                    <mxGeometry x="315" y="840" width="220" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="46" value="Frontend&#xa;收集配置 / 上传脚本" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=13;fontColor=#1e3a8a" parent="1" vertex="1">
+                    <mxGeometry x="520" y="830" width="150" height="58" as="geometry"/>
+                </mxCell>
+                <mxCell id="47" value="Server API&#xa;创建 run / 校验 / 调度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontSize=13;fontColor=#14532d" parent="1" vertex="1">
+                    <mxGeometry x="735" y="830" width="150" height="58" as="geometry"/>
+                </mxCell>
+                <mxCell id="48" value="Adapter / Driver&#xa;训练或评测入口" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;fontSize=13;fontColor=#78350f" parent="1" vertex="1">
+                    <mxGeometry x="950" y="830" width="150" height="58" as="geometry"/>
+                </mxCell>
+                <mxCell id="49" value="Worker / Env&#xa;执行 rollout / reward" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e9d5ff;strokeColor=#9333ea;fontSize=13;fontColor=#581c87" parent="1" vertex="1">
+                    <mxGeometry x="1165" y="830" width="150" height="58" as="geometry"/>
+                </mxCell>
+                <mxCell id="50" value="观测页面&#xa;状态 / 日志 / 指标" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontSize=13;fontColor=#7f1d1d" parent="1" vertex="1">
+                    <mxGeometry x="1380" y="830" width="150" height="58" as="geometry"/>
+                </mxCell>
+                <mxCell id="51" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748b" parent="1" source="15" target="18" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="52" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748b" parent="1" source="18" target="22" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="53" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748b" parent="1" source="22" target="37" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="54" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748b" parent="1" source="26" target="32" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="55" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#64748b" parent="1" source="32" target="41" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="56" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#2563eb" parent="1" source="46" target="47" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="57" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#16a34a" parent="1" source="47" target="48" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="58" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#d97706" parent="1" source="48" target="49" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="59" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;strokeColor=#9333ea" parent="1" source="49" target="50" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

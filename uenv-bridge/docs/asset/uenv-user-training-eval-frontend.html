@@ -1,0 +1,1524 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UEnv 训练与评测控制台 Demo</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --surface: #ffffff;
+      --surface-soft: #f7fafc;
+      --line: #d7e0ea;
+      --line-strong: #8da2b8;
+      --text: #182334;
+      --muted: #64748b;
+      --blue: #2563eb;
+      --blue-soft: #e6f0ff;
+      --green: #15945b;
+      --green-soft: #e6f6ee;
+      --amber: #b87503;
+      --amber-soft: #fff3d6;
+      --red: #c2413a;
+      --red-soft: #ffebe9;
+      --violet: #7c3aed;
+      --violet-soft: #f0e8ff;
+      --code: #111827;
+      --shadow: 0 18px 50px rgba(17, 24, 39, 0.09);
+      --radius: 8px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Microsoft YaHei", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 1180px;
+      background: var(--bg);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+      letter-spacing: 0;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .page {
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-rows: 56px minmax(720px, 1fr);
+      max-width: 1540px;
+      min-height: calc(100vh - 48px);
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 0 22px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fbff;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 280px;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 7px;
+      background: var(--blue);
+      color: white;
+      font-weight: 800;
+      font-size: 15px;
+    }
+
+    .brand-title {
+      font-weight: 800;
+      font-size: 17px;
+    }
+
+    .brand-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .cluster-pill {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 290px;
+      justify-content: flex-end;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 99px;
+      background: var(--green);
+      box-shadow: 0 0 0 4px var(--green-soft);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 218px minmax(640px, 1fr) 380px;
+      min-height: 0;
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: #f4f7fb;
+      padding: 20px 14px;
+    }
+
+    .side-title {
+      margin: 4px 10px 16px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .nav-button {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      height: 42px;
+      padding: 0 12px;
+      margin-bottom: 8px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: #405166;
+      text-align: left;
+      font-weight: 650;
+    }
+
+    .nav-button svg {
+      width: 17px;
+      height: 17px;
+      stroke-width: 2;
+    }
+
+    .nav-button.active {
+      border-color: #9ac0ff;
+      background: var(--blue-soft);
+      color: #164193;
+    }
+
+    .nav-button:hover {
+      background: #ffffff;
+      border-color: var(--line);
+    }
+
+    .main {
+      min-width: 0;
+      overflow: auto;
+      padding: 22px 24px 26px;
+      background: #fbfdff;
+    }
+
+    .main-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.25;
+    }
+
+    .mode-tabs {
+      display: inline-flex;
+      height: 38px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .mode-tab {
+      min-width: 94px;
+      height: 30px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .mode-tab.active {
+      background: var(--blue);
+      color: white;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    .page-panel {
+      display: none;
+    }
+
+    .page-panel.active {
+      display: block;
+    }
+
+    .sub-panel {
+      display: none;
+    }
+
+    .sub-panel.active {
+      display: block;
+    }
+
+    .section {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      overflow: hidden;
+    }
+
+    .section.wide {
+      grid-column: 1 / -1;
+    }
+
+    .compact-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 42px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .section-header.blue {
+      background: #eaf3ff;
+      color: #153e75;
+    }
+
+    .section-header.green {
+      background: var(--green-soft);
+      color: #135334;
+    }
+
+    .section-header.amber {
+      background: var(--amber-soft);
+      color: #704706;
+    }
+
+    .section-header.violet {
+      background: var(--violet-soft);
+      color: #4c1d95;
+    }
+
+    .section-body {
+      padding: 16px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field.full {
+      grid-column: 1 / -1;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 7px;
+      color: #435369;
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-soft);
+      color: var(--text);
+      padding: 8px 10px;
+      outline: none;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 82px;
+      line-height: 1.45;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: #75a7ff;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    }
+
+    .switch-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 38px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-soft);
+    }
+
+    .switch-line span {
+      font-size: 13px;
+      font-weight: 700;
+      color: #34455a;
+    }
+
+    .switch-line input {
+      width: auto;
+      min-height: auto;
+    }
+
+    .upload-box {
+      display: grid;
+      gap: 10px;
+      min-height: 112px;
+      padding: 14px;
+      border: 1px dashed var(--line-strong);
+      border-radius: var(--radius);
+      background: #f8fbff;
+    }
+
+    .upload-box input {
+      padding: 7px;
+      background: #ffffff;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .summary-item {
+      min-height: 72px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-soft);
+    }
+
+    .summary-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      margin-bottom: 8px;
+    }
+
+    .summary-value {
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+
+    .advanced-upload {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfdff;
+    }
+
+    .advanced-upload summary {
+      padding: 11px 12px;
+      color: #34455a;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .advanced-upload textarea {
+      min-height: 96px;
+      border: 0;
+      border-top: 1px solid var(--line);
+      border-radius: 0;
+      background: #ffffff;
+    }
+
+    .table {
+      display: grid;
+      gap: 8px;
+    }
+
+    .table-row {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr 0.8fr 0.8fr 0.9fr;
+      gap: 10px;
+      align-items: center;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfdff;
+      color: #34455a;
+      font-size: 13px;
+    }
+
+    .table-row.header {
+      min-height: 34px;
+      background: #edf3f9;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .tag.green {
+      background: var(--green-soft);
+      color: #0b6a3c;
+    }
+
+    .tag.amber {
+      background: var(--amber-soft);
+      color: #704706;
+    }
+
+    .template-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .template-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfdff;
+    }
+
+    .template-title {
+      font-weight: 800;
+      margin-bottom: 5px;
+    }
+
+    .template-desc {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .preview-panel {
+      border-left: 1px solid var(--line);
+      background: var(--surface);
+      padding: 22px;
+      overflow: auto;
+      min-width: 0;
+    }
+
+    .preview-panel.blank > * {
+      display: none;
+    }
+
+    .preview-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .preview-title h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: var(--green-soft);
+      color: #0b6a3c;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .checks {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .check-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 36px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfdff;
+      color: #34455a;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .check-row strong {
+      color: var(--green);
+      font-size: 12px;
+    }
+
+    .code-preview {
+      display: block;
+      overflow-x: auto;
+      min-height: 150px;
+      margin: 0 0 16px;
+      padding: 14px;
+      border-radius: var(--radius);
+      background: var(--code);
+      color: #dbeafe;
+      line-height: 1.55;
+      font-size: 12px;
+      white-space: pre;
+    }
+
+    .workflow {
+      display: grid;
+      gap: 9px;
+      margin-bottom: 16px;
+    }
+
+    .workflow-row {
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      min-height: 42px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfdff;
+    }
+
+    .workflow-index {
+      display: grid;
+      width: 24px;
+      height: 24px;
+      place-items: center;
+      border-radius: 999px;
+      background: #dbeafe;
+      color: #1d4ed8;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .workflow-name {
+      min-width: 0;
+      font-weight: 800;
+      font-size: 13px;
+    }
+
+    .workflow-desc {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .workflow-state {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .workflow-row.done .workflow-index {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .workflow-row.running .workflow-index {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .workflow-row.failed .workflow-index {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #ffffff;
+      color: #34455a;
+      font-weight: 800;
+    }
+
+    .action.primary {
+      border-color: #1d4ed8;
+      background: var(--blue);
+      color: white;
+    }
+
+    .action.success {
+      border-color: #117a49;
+      background: var(--green);
+      color: white;
+    }
+
+    .action svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .activity {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .activity-title {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fbff;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .activity-log {
+      display: grid;
+      gap: 8px;
+      min-height: 108px;
+      max-height: 142px;
+      overflow: auto;
+      padding: 10px 12px;
+      font-size: 12px;
+      color: #4b5c72;
+    }
+
+    .log-line {
+      display: grid;
+      grid-template-columns: 62px 1fr;
+      gap: 10px;
+    }
+
+    .log-line time {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    @media (max-width: 1280px) {
+      body {
+        min-width: 980px;
+      }
+
+      .workspace {
+        grid-template-columns: 190px minmax(520px, 1fr) 340px;
+      }
+
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">UE</div>
+          <div>
+            <div class="brand-title">UEnv Console</div>
+            <div class="brand-subtitle">训练与 Benchmark 评测发起 Demo</div>
+          </div>
+        </div>
+        <div class="cluster-pill">
+          <span class="dot" aria-hidden="true"></span>
+          <span>adapter-core: 8.130.75.157:8088</span>
+          <span>8x A100</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="side-title">功能入口</div>
+          <button class="nav-button active" type="button" data-view="train">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+            训练任务
+          </button>
+          <button class="nav-button" type="button" data-view="eval">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 5h16v14H4z"/><path d="m8 13 2 2 5-6"/></svg>
+            Benchmark 评测
+          </button>
+          <button class="nav-button" type="button" data-view="history">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 8v5l3 2"/><path d="M21 12a9 9 0 1 1-3-6.7"/></svg>
+            运行记录
+          </button>
+          <button class="nav-button" type="button" data-view="assets">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 6h16M4 12h16M4 18h16"/><path d="M8 4v4M16 10v4M11 16v4"/></svg>
+            模型 / 数据集
+          </button>
+          <button class="nav-button" type="button" data-view="template">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 3h9l3 3v15H6z"/><path d="M9 13h6M9 17h4M14 3v4h4"/></svg>
+            脚本模板
+          </button>
+        </aside>
+
+        <section class="main" id="mainPanel">
+          <div class="main-header">
+            <h1 id="pageTitle">训练任务</h1>
+            <div class="mode-tabs" id="subTabs" role="tablist" aria-label="页面子模式">
+              <button class="mode-tab active" type="button" data-sub="params">按参数配置</button>
+              <button class="mode-tab" type="button" data-sub="upload">上传脚本</button>
+            </div>
+          </div>
+
+          <div class="page-panel active" id="page-train">
+            <div class="sub-panel active" data-view-panel="train" data-sub-panel="params">
+              <div class="form-grid">
+                <section class="section">
+                  <div class="section-header blue">基础信息</div>
+                  <div class="section-body field-grid">
+                    <div class="field full">
+                      <label for="taskName">任务名称</label>
+                      <input id="taskName" value="Qwen3.6-35B-A3B SWE-smith GRPO">
+                    </div>
+                    <div class="field">
+                      <label for="projectName">项目 / 实验组</label>
+                      <input id="projectName" value="uenv-swe-training">
+                    </div>
+                    <div class="field">
+                      <label for="clusterName">集群 / 队列</label>
+                      <select id="clusterName">
+                        <option>8x A100</option>
+                        <option>8x H100</option>
+                        <option>CPU smoke</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="section">
+                  <div class="section-header green">模型与任务</div>
+                  <div class="section-body field-grid">
+                    <div class="field full">
+                      <label for="modelPath">基座模型</label>
+                      <input id="modelPath" value="/models/Qwen3.6-35B-A3B">
+                    </div>
+                    <div class="field">
+                      <label for="taskType">任务类型</label>
+                      <select id="taskType">
+                        <option value="swe">SWE / OpenHands</option>
+                        <option value="qa">QA 验证型任务</option>
+                        <option value="code">DSCodeBench</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="datasetName">数据来源</label>
+                      <select id="datasetName">
+                        <option value="swesmith">SWE-smith</option>
+                        <option value="swebenchpro">SWE-bench-Pro</option>
+                        <option value="pubmedqa">PubMedQA</option>
+                        <option value="scitab">SciTab</option>
+                        <option value="olymmath">OlymMATH</option>
+                        <option value="dscodebench">DSCodeBench</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="section">
+                  <div class="section-header amber">训练参数</div>
+                  <div class="section-body field-grid">
+                    <div class="field">
+                      <label for="limit">样本数 limit</label>
+                      <input id="limit" type="number" min="1" value="1000">
+                    </div>
+                    <div class="field">
+                      <label for="trainingSteps">training steps</label>
+                      <input id="trainingSteps" type="number" min="1" value="512">
+                    </div>
+                    <div class="field">
+                      <label for="trainBatch">batch size</label>
+                      <input id="trainBatch" type="number" min="1" value="1">
+                    </div>
+                    <div class="field">
+                      <label for="rolloutN">rollout n</label>
+                      <input id="rolloutN" type="number" min="1" value="8">
+                    </div>
+                    <div class="field">
+                      <label for="promptLength">prompt length</label>
+                      <input id="promptLength" type="number" min="128" value="8192">
+                    </div>
+                    <div class="field">
+                      <label for="responseLength">response length</label>
+                      <input id="responseLength" type="number" min="128" value="8192">
+                    </div>
+                    <div class="field">
+                      <label for="agentSteps">agent max steps</label>
+                      <input id="agentSteps" type="number" min="1" value="10">
+                    </div>
+                    <div class="field">
+                      <label for="agentWorkers">agent workers</label>
+                      <input id="agentWorkers" type="number" min="1" value="1">
+                    </div>
+                  </div>
+                </section>
+
+                <section class="section">
+                  <div class="section-header violet">资源与高级配置</div>
+                  <div class="section-body field-grid">
+                    <div class="field">
+                      <label for="gpuCount">GPU 数</label>
+                      <input id="gpuCount" type="number" min="1" value="8">
+                    </div>
+                    <div class="field">
+                      <label for="rolloutTp">rollout TP</label>
+                      <select id="rolloutTp">
+                        <option>8</option>
+                        <option>4</option>
+                        <option>2</option>
+                        <option>1</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="runtimeBackend">推理后端</label>
+                      <select id="runtimeBackend">
+                        <option>vLLM + Gateway</option>
+                        <option>SGLang + Gateway</option>
+                        <option>外部 OpenAI API</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="parallelMode">并行模式</label>
+                      <select id="parallelMode">
+                        <option value="sync">sync GRPO</option>
+                        <option value="one_step_off_policy">one-step off-policy</option>
+                        <option value="fully_async">fully async</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            <div class="sub-panel" data-view-panel="train" data-sub-panel="upload">
+              <section class="section">
+                <div class="section-header violet">上传训练脚本 / YAML</div>
+                <div class="section-body">
+                  <div class="upload-box">
+                    <input id="trainConfigUpload" type="file" accept=".sh,.yaml,.yml,.json">
+                    <textarea id="trainScriptNotes" placeholder="上传训练脚本或 YAML 后，由后端解析模型、数据集、训练参数和资源配置。"></textarea>
+                  </div>
+                  <div class="summary-grid">
+                    <div class="summary-item">
+                      <div class="summary-label">解析状态</div>
+                      <div class="summary-value" id="trainUploadParseState">等待上传</div>
+                    </div>
+                    <div class="summary-item">
+                      <div class="summary-label">运行类型</div>
+                      <div class="summary-value">训练任务</div>
+                    </div>
+                    <div class="summary-item">
+                      <div class="summary-label">配置来源</div>
+                      <div class="summary-value">用户脚本</div>
+                    </div>
+                  </div>
+                  <details class="advanced-upload">
+                    <summary>高级覆盖参数</summary>
+                    <textarea placeholder="例如：
+LIMIT=100
+TRAINING_STEPS=16
+ROLLOUT_N=8"></textarea>
+                  </details>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <div class="page-panel" id="page-eval">
+            <div class="sub-panel active" data-view-panel="eval" data-sub-panel="params">
+              <div class="form-grid">
+                <section class="section">
+                  <div class="section-header green">评测对象</div>
+                  <div class="section-body field-grid">
+                    <div class="field full">
+                      <label for="evalModelPath">模型路径</label>
+                      <input id="evalModelPath" value="/models/Qwen3.6-35B-A3B">
+                    </div>
+                    <div class="field">
+                      <label for="benchmarkName">Benchmark</label>
+                      <select id="benchmarkName">
+                        <option value="pubmedqa">PubMedQA</option>
+                        <option value="scitab">SciTab</option>
+                        <option value="olymmath">OlymMATH</option>
+                        <option value="dscodebench">DSCodeBench</option>
+                        <option value="swebenchpro">SWE-bench-Pro</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="evalSplit">数据划分</label>
+                      <select id="evalSplit">
+                        <option>test</option>
+                        <option>validation</option>
+                        <option>dev</option>
+                      </select>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="section">
+                  <div class="section-header amber">生成配置</div>
+                  <div class="section-body field-grid">
+                    <div class="field">
+                      <label for="evalLimit">样本数 limit</label>
+                      <input id="evalLimit" type="number" min="1" value="500">
+                    </div>
+                    <div class="field">
+                      <label for="evalBatchSize">batch size</label>
+                      <input id="evalBatchSize" type="number" min="1" value="1">
+                    </div>
+                    <div class="field">
+                      <label for="evalMaxTokens">max tokens</label>
+                      <input id="evalMaxTokens" type="number" min="128" value="32768">
+                    </div>
+                    <div class="field">
+                      <label for="evalThinkingBudget">thinking token budget</label>
+                      <input id="evalThinkingBudget" type="number" min="0" value="16384">
+                    </div>
+                  </div>
+                </section>
+
+                <section class="section wide">
+                  <div class="section-header blue">UEnv 接入</div>
+                  <div class="section-body field-grid">
+                    <div class="field">
+                      <label for="adapterEndpoint">Adapter Core endpoint</label>
+                      <input id="adapterEndpoint" value="8.130.75.157:8088">
+                    </div>
+                    <div class="field">
+                      <label for="modelEndpoint">Model Gateway</label>
+                      <input id="modelEndpoint" value="http://10.10.20.142:18094/v1">
+                    </div>
+                    <div class="field full">
+                      <label for="evalOutputDir">输出目录</label>
+                      <input id="evalOutputDir" value="temp/benchmarks/pubmedqa/uenv_full">
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            <div class="sub-panel" data-view-panel="eval" data-sub-panel="upload">
+              <section class="section">
+                <div class="section-header violet">上传评测脚本 / YAML</div>
+                <div class="section-body">
+                  <div class="upload-box">
+                    <input id="evalConfigUpload" type="file" accept=".sh,.yaml,.yml,.json">
+                    <textarea id="evalScriptNotes" placeholder="上传评测脚本或 YAML 后，由后端解析 benchmark、模型 endpoint、数据划分和输出目录。"></textarea>
+                  </div>
+                  <div class="summary-grid">
+                    <div class="summary-item">
+                      <div class="summary-label">解析状态</div>
+                      <div class="summary-value" id="evalUploadParseState">等待上传</div>
+                    </div>
+                    <div class="summary-item">
+                      <div class="summary-label">运行类型</div>
+                      <div class="summary-value">Benchmark 评测</div>
+                    </div>
+                    <div class="summary-item">
+                      <div class="summary-label">配置来源</div>
+                      <div class="summary-value">用户脚本</div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <div class="page-panel" id="page-history">
+            <section class="section wide">
+              <div class="section-header blue">运行记录</div>
+              <div class="section-body">
+                <div class="table">
+                  <div class="table-row header"><span>run id</span><span>类型</span><span>状态</span><span>进度</span><span>更新时间</span></div>
+                  <div class="table-row"><span>swe-smith-train-0803</span><span>训练</span><span class="tag amber">运行中</span><span>step 1 / 512</span><span>刚刚</span></div>
+                  <div class="table-row"><span>pubmedqa-uenv-full</span><span>评测</span><span class="tag green">已完成</span><span>500 / 500</span><span>昨天</span></div>
+                  <div class="table-row"><span>olymmath-retry-failed</span><span>评测</span><span class="tag green">已完成</span><span>22 / 22</span><span>2 天前</span></div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <div class="page-panel" id="page-assets">
+            <section class="section wide">
+              <div class="section-header green">模型 / 数据集</div>
+              <div class="section-body compact-grid">
+                <div class="summary-item">
+                  <div class="summary-label">基座模型</div>
+                  <div class="summary-value">Qwen3.6-35B-A3B</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">训练数据</div>
+                  <div class="summary-value">SWE-smith</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">评测集</div>
+                  <div class="summary-value">5 类 Benchmark</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">模型 endpoint</div>
+                  <div class="summary-value">vLLM + Gateway</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">环境类型</div>
+                  <div class="summary-value">qa / code / swe</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">资源队列</div>
+                  <div class="summary-value">8x A100</div>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <div class="page-panel" id="page-template">
+            <section class="section wide">
+              <div class="section-header amber">脚本模板</div>
+              <div class="section-body template-list">
+                <div class="template-item">
+                  <div>
+                    <div class="template-title">SWE-smith GRPO 训练</div>
+                    <div class="template-desc">用于启动 SWE-smith 同步 GRPO 训练，支持 limit 控制数据规模。</div>
+                  </div>
+                  <span class="tag">train</span>
+                </div>
+                <div class="template-item">
+                  <div>
+                    <div class="template-title">PubMedQA UEnv 全量评测</div>
+                    <div class="template-desc">用于通过 UEnv 链路执行文本阅读理解基线评测。</div>
+                  </div>
+                  <span class="tag green">eval</span>
+                </div>
+                <div class="template-item">
+                  <div>
+                    <div class="template-title">SWE-bench-Pro OpenHands 评测</div>
+                    <div class="template-desc">用于 agentic 程序修复任务，保留 OpenHands 运行轨迹。</div>
+                  </div>
+                  <span class="tag green">eval</span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <aside class="preview-panel" id="previewPanel">
+          <div class="preview-title">
+            <h2>启动前预览</h2>
+            <span class="status"><span class="dot" aria-hidden="true"></span><span id="runState">待启动</span></span>
+          </div>
+
+          <div class="checks">
+            <div class="check-row"><span>数据路径存在</span><strong>通过</strong></div>
+            <div class="check-row"><span>模型路径存在</span><strong>通过</strong></div>
+            <div class="check-row"><span>batch 可整除</span><strong>通过</strong></div>
+          </div>
+
+          <pre class="code-preview" id="commandPreview"></pre>
+
+          <div class="workflow" id="workflow">
+            <div class="workflow-row" data-step="0">
+              <div class="workflow-index">1</div>
+              <div>
+                <div class="workflow-name">Frontend</div>
+                <div class="workflow-desc">收集配置 / 上传脚本</div>
+              </div>
+              <div class="workflow-state">待启动</div>
+            </div>
+            <div class="workflow-row" data-step="1">
+              <div class="workflow-index">2</div>
+              <div>
+                <div class="workflow-name">Server API</div>
+                <div class="workflow-desc">创建 run / 校验 / 调度</div>
+              </div>
+              <div class="workflow-state">待启动</div>
+            </div>
+            <div class="workflow-row" data-step="2">
+              <div class="workflow-index">3</div>
+              <div>
+                <div class="workflow-name">Adapter / Driver</div>
+                <div class="workflow-desc">训练或评测入口</div>
+              </div>
+              <div class="workflow-state">待启动</div>
+            </div>
+            <div class="workflow-row" data-step="3">
+              <div class="workflow-index">4</div>
+              <div>
+                <div class="workflow-name">Worker / Env</div>
+                <div class="workflow-desc">执行 rollout / reward</div>
+              </div>
+              <div class="workflow-state">待启动</div>
+            </div>
+            <div class="workflow-row" data-step="4">
+              <div class="workflow-index">5</div>
+              <div>
+                <div class="workflow-name">观测页面</div>
+                <div class="workflow-desc">状态 / 日志 / 指标</div>
+              </div>
+              <div class="workflow-state">待启动</div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="action" type="button" id="saveButton">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M5 4h12l2 2v14H5z"/><path d="M8 4v6h8"/><path d="M8 17h8"/></svg>
+              保存
+            </button>
+            <button class="action primary" type="button" id="trainButton">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 5 11 7-11 7z"/></svg>
+              训练
+            </button>
+            <button class="action success" type="button" id="evalButton">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 12h16"/><path d="m14 6 6 6-6 6"/></svg>
+              评测
+            </button>
+          </div>
+
+          <div class="activity">
+            <div class="activity-title">事件流</div>
+            <div class="activity-log" id="activityLog">
+              <div class="log-line"><time>--:--:--</time><span>等待用户创建运行任务。</span></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const fields = [
+      "taskName", "projectName", "clusterName", "modelPath", "taskType", "datasetName",
+      "limit", "trainingSteps", "trainBatch", "rolloutN", "promptLength", "responseLength",
+      "agentSteps", "agentWorkers", "gpuCount", "rolloutTp", "runtimeBackend", "parallelMode",
+      "evalModelPath", "benchmarkName", "evalSplit", "evalLimit", "evalBatchSize",
+      "evalMaxTokens", "evalThinkingBudget", "adapterEndpoint", "modelEndpoint", "evalOutputDir"
+    ];
+
+    const viewTitles = {
+      train: "训练任务",
+      eval: "Benchmark 评测",
+      history: "运行记录",
+      assets: "模型 / 数据集",
+      template: "脚本模板"
+    };
+    const subTabsByView = {
+      train: [
+        ["params", "按参数配置"],
+        ["upload", "上传脚本"]
+      ],
+      eval: [
+        ["params", "按参数配置"],
+        ["upload", "上传脚本"]
+      ]
+    };
+    const activeSubByView = {
+      train: "params",
+      eval: "params"
+    };
+    let activeView = "train";
+
+    function value(id) {
+      const element = $(id);
+      return element ? element.value : "";
+    }
+
+    function updatePreview() {
+      const activeSub = activeSubByView[activeView] || "params";
+      if (activeView === "train" && activeSub === "upload") {
+        const file = $("trainConfigUpload") && $("trainConfigUpload").files[0];
+        const fileName = file ? file.name : "<待上传的训练脚本 / YAML / JSON>";
+        const lines = [
+          "# 上传训练配置模式",
+          "# 前端只提交配置文件；训练参数由后端解析并生成最终运行计划。",
+          "curl -X POST http://<server-host>/api/runs \\",
+          "  -F run_type=train \\",
+          "  -F config=@" + fileName + " \\",
+          "  -F project=" + value("projectName"),
+          "",
+          "# 后端返回 run_id 后，观测页面订阅该 run 的状态、日志和指标。"
+        ];
+        $("commandPreview").textContent = lines.join("\n");
+        return;
+      }
+
+      if (activeView === "eval" && activeSub === "upload") {
+        const file = $("evalConfigUpload") && $("evalConfigUpload").files[0];
+        const fileName = file ? file.name : "<待上传的评测脚本 / YAML / JSON>";
+        const lines = [
+          "# 上传评测配置模式",
+          "# 前端只提交配置文件；benchmark、模型 endpoint 与输出目录由后端解析。",
+          "curl -X POST http://<server-host>/api/runs \\",
+          "  -F run_type=benchmark_eval \\",
+          "  -F config=@" + fileName,
+          "",
+          "# 后端返回 run_id 后，观测页面订阅该 run 的状态、日志和指标。"
+        ];
+        $("commandPreview").textContent = lines.join("\n");
+        return;
+      }
+
+      if (activeView === "eval") {
+        const script = "./scripts/benchmark/run_" + value("benchmarkName") + "_uenv_baseline.sh";
+        const lines = [
+          "cd /data/ronghao/uenv/uenv-bridge",
+          "UENV_ADAPTER_CORE_ENDPOINT=" + value("adapterEndpoint") + " \\",
+          "MODEL_ENDPOINT=" + value("modelEndpoint") + " \\",
+          "MODEL_PATH=\"" + value("evalModelPath") + "\" \\",
+          "BENCHMARK=" + value("benchmarkName") + " \\",
+          "SPLIT=" + value("evalSplit") + " \\",
+          "LIMIT=" + value("evalLimit") + " \\",
+          "BATCH_SIZE=" + value("evalBatchSize") + " \\",
+          "MAX_TOKENS=" + value("evalMaxTokens") + " \\",
+          "THINKING_TOKEN_BUDGET=" + value("evalThinkingBudget") + " \\",
+          "OUTPUT_DIR=\"" + value("evalOutputDir") + "\" \\",
+          script
+        ];
+        $("commandPreview").textContent = lines.join("\n");
+        return;
+      }
+
+      if (activeView === "history") {
+        $("commandPreview").textContent = [
+          "# 运行记录页面",
+          "# 展示 Server 已创建 run 的状态、进度、指标和日志入口。",
+          "GET /api/runs?project=" + value("projectName")
+        ].join("\n");
+        return;
+      }
+
+      if (activeView === "assets") {
+        $("commandPreview").textContent = [
+          "# 模型 / 数据集页面",
+          "# 展示已登记模型、数据集、环境包和 endpoint 可用性。",
+          "GET /api/assets"
+        ].join("\n");
+        return;
+      }
+
+      if (activeView === "template") {
+        $("commandPreview").textContent = [
+          "# 脚本模板页面",
+          "# 选择模板后可进入训练或评测发起页，并预填参数。",
+          "GET /api/templates"
+        ].join("\n");
+        return;
+      }
+
+      const script = value("datasetName") === "swesmith"
+        ? "./scripts/train/presets/swe_smith_grpo_train.sh"
+        : "./scripts/benchmark/run_" + value("datasetName") + "_uenv_baseline.sh";
+      const lines = [
+        "cd /data/ronghao/uenv/uenv-bridge",
+        "RUN_MODE=train \\",
+        "TASK_NAME=\"" + value("taskName") + "\" \\",
+        "MODEL_PATH=\"" + value("modelPath") + "\" \\",
+        "DATASET=" + value("datasetName") + " \\",
+        "LIMIT=" + value("limit") + " \\",
+        "TRAINING_STEPS=" + value("trainingSteps") + " \\",
+        "TRAIN_BATCH_SIZE=" + value("trainBatch") + " \\",
+        "ROLLOUT_N=" + value("rolloutN") + " \\",
+        "DATA_MAX_PROMPT_LENGTH=" + value("promptLength") + " \\",
+        "DATA_MAX_RESPONSE_LENGTH=" + value("responseLength") + " \\",
+        "UENV_AGENT_LOOP_MAX_STEPS=" + value("agentSteps") + " \\",
+        "UENV_AGENT_LOOP_NUM_WORKERS=" + value("agentWorkers") + " \\",
+        "NGPUS_PER_NODE=" + value("gpuCount") + " \\",
+        "ROLLOUT_TP=" + value("rolloutTp") + " \\",
+        "UENV_AGENT_LOOP_PARALLEL_MODE=" + value("parallelMode") + " \\",
+        script
+      ];
+      $("commandPreview").textContent = lines.join("\n");
+    }
+
+    function renderSubTabs() {
+      const tabs = subTabsByView[activeView] || [];
+      const container = $("subTabs");
+      if (tabs.length === 0) {
+        container.style.display = "none";
+        container.innerHTML = "";
+        return;
+      }
+      container.style.display = "inline-flex";
+      const activeSub = activeSubByView[activeView] || tabs[0][0];
+      container.innerHTML = tabs
+        .map(([key, label]) => (
+          '<button class="mode-tab ' + (key === activeSub ? "active" : "") +
+          '" type="button" data-sub="' + key + '">' + label + '</button>'
+        ))
+        .join("");
+    }
+
+    function setSub(sub) {
+      activeSubByView[activeView] = sub;
+      document.querySelectorAll(".mode-tab").forEach((item) => {
+        item.classList.toggle("active", item.dataset.sub === sub);
+      });
+      document.querySelectorAll(".sub-panel").forEach((panel) => {
+        const matched = panel.dataset.viewPanel === activeView && panel.dataset.subPanel === sub;
+        panel.classList.toggle("active", matched);
+      });
+      updatePreview();
+    }
+
+    function setView(view) {
+      activeView = view;
+      document.querySelectorAll(".nav-button").forEach((item) => {
+        item.classList.toggle("active", item.dataset.view === view);
+      });
+      document.querySelectorAll(".page-panel").forEach((panel) => {
+        panel.classList.toggle("active", panel.id === "page-" + view);
+      });
+      $("previewPanel").classList.toggle("blank", view !== "train" && view !== "eval");
+      $("pageTitle").textContent = viewTitles[view] || "UEnv Console";
+      renderSubTabs();
+      const firstSub = (subTabsByView[view] && subTabsByView[view][0][0]) || "";
+      if (firstSub) {
+        setSub(activeSubByView[view] || firstSub);
+      } else {
+        updatePreview();
+      }
+    }
+
+    function log(message) {
+      const row = document.createElement("div");
+      row.className = "log-line";
+      const now = new Date();
+      const time = document.createElement("time");
+      time.textContent = now.toTimeString().slice(0, 8);
+      const text = document.createElement("span");
+      text.textContent = message;
+      row.append(time, text);
+      const activity = $("activityLog");
+      activity.prepend(row);
+    }
+
+    function resetWorkflow() {
+      document.querySelectorAll(".workflow-row").forEach((row) => {
+        row.classList.remove("done", "running", "failed");
+        row.querySelector(".workflow-state").textContent = "待启动";
+      });
+    }
+
+    function runDemo(kind) {
+      resetWorkflow();
+      $("runState").textContent = "运行中";
+      log((kind === "eval" ? "评测" : "训练") + "任务已提交，开始创建 run。");
+      const rows = [...document.querySelectorAll(".workflow-row")];
+      rows.forEach((row, index) => {
+        setTimeout(() => {
+          rows.forEach((item, itemIndex) => {
+            if (itemIndex < index) {
+              item.classList.add("done");
+              item.classList.remove("running");
+              item.querySelector(".workflow-state").textContent = "已完成";
+            }
+          });
+          row.classList.add(index === rows.length - 1 ? "done" : "running");
+          row.querySelector(".workflow-state").textContent = index === rows.length - 1 ? "已完成" : "进行中";
+          log(row.querySelector(".workflow-name").textContent + " 阶段更新。");
+          if (index === rows.length - 1) {
+            $("runState").textContent = "已完成";
+          }
+        }, 520 * (index + 1));
+      });
+    }
+
+    $("subTabs").addEventListener("click", (event) => {
+      const button = event.target.closest(".mode-tab");
+      if (button) {
+        setSub(button.dataset.sub);
+      }
+    });
+    document.querySelectorAll(".nav-button").forEach((button) => {
+      button.addEventListener("click", () => {
+        setView(button.dataset.view);
+        log("切换到「" + button.textContent.trim() + "」入口。");
+      });
+    });
+    $("saveButton").addEventListener("click", () => log("配置已保存为草稿。"));
+    $("trainButton").addEventListener("click", () => {
+      setView("train");
+      runDemo("train");
+    });
+    $("evalButton").addEventListener("click", () => {
+      setView("eval");
+      runDemo("eval");
+    });
+
+    function bindUpload(inputId, stateId) {
+      $(inputId).addEventListener("change", (event) => {
+        const file = event.target.files[0];
+        if (file) {
+          $(stateId).textContent = "已选择：" + file.name;
+          log("已选择配置文件：" + file.name);
+          updatePreview();
+        }
+      });
+    }
+
+    bindUpload("trainConfigUpload", "trainUploadParseState");
+    bindUpload("evalConfigUpload", "evalUploadParseState");
+
+    fields.forEach((id) => {
+      if ($(id)) {
+        $(id).addEventListener("input", updatePreview);
+        $(id).addEventListener("change", updatePreview);
+      }
+    });
+
+    document.querySelectorAll(".template-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        const title = item.querySelector(".template-title").textContent;
+        log("选择模板：" + title);
+        if (title.includes("训练")) {
+          setView("train");
+        } else {
+          setView("eval");
+        }
+        updatePreview();
+      });
+    });
+
+    setView("train");
+  </script>
+</body>
+</html>
