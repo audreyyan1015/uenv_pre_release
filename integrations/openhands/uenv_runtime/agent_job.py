@@ -84,6 +84,9 @@ class AgentJob:
     llm_config_path: str = ""
     mode: str = "llm"
     instances_catalog: str = ""
+    # SWE：Server/Worker 注入的单样本 catalog JSON（`{instance_id: row}`）。
+    # driver 优先写盘并加载，避免依赖 Agent 主机本地 fixture / 全量 EnvPackage。
+    instance_catalog_json: str = ""
     # 非 SWE 任务的完整 JSON 载荷（code/ToolEnv 用）；SWE 路径留空。
     task_payload_json: str = ""
 
@@ -116,6 +119,9 @@ class AgentJob:
             llm_config_path=str(data.get("llm_config_path") or data.get("llmConfigPath") or ""),
             mode=str(data.get("mode") or "llm"),
             instances_catalog=str(data.get("instances_catalog") or data.get("instancesCatalog") or ""),
+            instance_catalog_json=str(
+                data.get("instance_catalog_json") or data.get("instanceCatalogJson") or ""
+            ),
             task_payload_json=str(data.get("task_payload_json") or data.get("taskPayloadJson") or ""),
         )
 
@@ -154,6 +160,7 @@ def write_agent_job_template(path: Path, **overrides: Any) -> AgentJob:
         workspace_dir=resolve_workspace_dir(variant, overrides.get("workspace_dir")),
         llm_config_path=str(overrides.get("llm_config_path", "")),
         instances_catalog=str(overrides.get("instances_catalog", "")),
+        instance_catalog_json=str(overrides.get("instance_catalog_json", "")),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(job.__dict__, indent=2) + "\n", encoding="utf-8")

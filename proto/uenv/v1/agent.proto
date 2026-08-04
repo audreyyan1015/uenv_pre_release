@@ -33,6 +33,14 @@ message AgentJob {
     // code/ToolEnv 需要携带题面与判分参数（problem_id / prompt / num_tests / seed …），
     // 这些字段无法塞进上面的固定槽位，因此统一走一个 JSON 载荷。
     string task_payload_json = 22;
+    // SWE：可选本地 catalog 路径提示（Agent 主机上若存在且含 instance 则可用）。
+    // 全量 Smith catalog 可达数 GB，Agent 主机通常没有该路径；正式路径见下一字段。
+    string instances_catalog = 23;
+    // SWE：单样本（或极小）catalog JSON，形状与 Worker catalog.json 一致：
+    //   { "<instance_id>": { ...SweInstance fields... } }
+    // 由 Server 在 for-episode 后从 Worker 回包写入，OpenHands driver 应优先消费本字段，
+    // 避免依赖 208.77 上的 smoke fixture 或整包 EnvPackage。
+    string instance_catalog_json = 24;
 }
 
 // ─── Agent pool registration (symmetric with RegisterWorker; design 260701 §2.0.6) ─

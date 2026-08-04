@@ -181,7 +181,7 @@ async fn get_instance(
             )
         })?;
     Ok(Json(AgentCatalogInstance {
-        instance_id: instance.instance_id,
+        instance_id: instance.instance_id.clone(),
         repo: instance.repo,
         version: instance.version,
         base_commit: instance.base_commit,
@@ -295,6 +295,42 @@ struct ForEpisodeResp {
     benchmark_variant: String,
     command_mode: String,
     observation: ResetObservation,
+    /// Mini catalog JSON: `{ "<instance_id>": { ...agent catalog row... } }`.
+    /// Server copies this into AgentJob.instance_catalog_json for OpenHands drivers.
+    #[serde(default)]
+    instance_catalog_json: String,
+}
+
+fn agent_catalog_instance_from(instance: crate::swe::dataset::SweInstance) -> AgentCatalogInstance {
+    AgentCatalogInstance {
+        instance_id: instance.instance_id,
+        repo: instance.repo,
+        version: instance.version,
+        base_commit: instance.base_commit,
+        environment_setup_commit: instance.environment_setup_commit,
+        problem_statement: instance.problem_statement,
+        patch: instance.patch,
+        test_patch: instance.test_patch,
+        fail_to_pass: instance.fail_to_pass,
+        pass_to_pass: Vec::new(),
+        benchmark_variant: instance.benchmark_variant,
+        image_cache_key: instance.image_cache_key,
+        test_cmd: instance.test_cmd,
+        install_cmd: instance.install_cmd,
+    }
+}
+
+fn mini_catalog_json(instance: crate::swe::dataset::SweInstance) -> String {
+    let id = instance.instance_id.clone();
+    let row = agent_catalog_instance_from(instance);
+    let mut map = serde_json::Map::new();
+    match serde_json::to_value(row) {
+        Ok(v) => {
+            map.insert(id, v);
+        }
+        Err(_) => return String::new(),
+    }
+    serde_json::Value::Object(map).to_string()
 }
 
 async fn create_session_for_episode(
@@ -318,14 +354,21 @@ async fn create_session_for_episode(
     let pool = st.pool.clone();
     let gateway_url = st.gateway_public_url.clone();
 
-    let result = tokio::task::spawn_blocking(move || pool.create_session(&instance_id, variant, policy))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
+    let result = tokio::task::spawn_blocking(move || {
+        let catalog_row = pool.get_instance(&instance_id);
+        let created = pool.create_session(&instance_id, variant, policy)?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((created, catalog_row))
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
 
     match result {
-        Ok((session_id, observation)) => {
+        Ok(((session_id, observation), catalog_row)) => {
             st.pool.set_session_run_id(&session_id, &run_id);
             st.pool.set_session_episode_id(&session_id, &episode_id);
+            let instance_catalog_json = catalog_row
+                .map(mini_catalog_json)
+                .unwrap_or_default();
             Ok(Json(ForEpisodeResp {
                 session_id,
                 gateway_url,
@@ -333,6 +376,7 @@ async fn create_session_for_episode(
                 benchmark_variant: variant.as_str().to_string(),
                 command_mode: format!("{mode:?}"),
                 observation,
+                instance_catalog_json,
             }))
         }
         Err(e) => {

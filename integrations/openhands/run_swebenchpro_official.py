@@ -491,11 +491,46 @@ def main() -> int:
     # CLI/default instances may still point at Pro smoke; resolve after AgentJob variant override.
     from uenv_runtime.agent_job import normalize_benchmark_variant
 
-    catalog_path = Path(args.instances)
-    if not catalog_path.is_absolute():
+    catalog_path = Path(args.instances) if args.instances else Path()
+    if args.instances and not catalog_path.is_absolute():
         catalog_path = repo_root / catalog_path
 
-    if normalize_benchmark_variant(args.benchmark_variant) == "smith" and not (
+    catalog_source = str(catalog_path) if args.instances else ""
+    row: dict[str, Any] | None = None
+
+    # 1) Official path: AgentJob.instance_catalog_json from Server/Worker for-episode.
+    if agent_job and (agent_job.instance_catalog_json or "").strip():
+        try:
+            payload = json.loads(agent_job.instance_catalog_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"AgentJob.instance_catalog_json is not valid JSON: {exc}"
+            ) from exc
+        if isinstance(payload, dict) and args.instance in payload and isinstance(
+            payload[args.instance], dict
+        ):
+            row = payload[args.instance]
+            mini = _write_mini_catalog(out, args.instance, row)
+            catalog_path = mini
+            args.instances = str(mini)
+            catalog_source = f"agent_job.instance_catalog_json -> {mini}"
+            print(f"[catalog] using AgentJob.instance_catalog_json -> {mini}", flush=True)
+        elif isinstance(payload, dict) and payload.get("instance_id") == args.instance:
+            # Allow a bare SweInstance object as well as a mini catalog map.
+            row = payload
+            mini = _write_mini_catalog(out, args.instance, row)
+            catalog_path = mini
+            args.instances = str(mini)
+            catalog_source = f"agent_job.instance_catalog_json(row) -> {mini}"
+            print(f"[catalog] using AgentJob.instance_catalog_json row -> {mini}", flush=True)
+        else:
+            print(
+                f"[catalog] AgentJob.instance_catalog_json missing {args.instance}; "
+                "falling back to local/gateway",
+                flush=True,
+            )
+
+    if row is None and normalize_benchmark_variant(args.benchmark_variant) == "smith" and not (
         agent_job and agent_job.instances_catalog
     ):
         catalog_path = _resolve_instances_catalog(
@@ -505,36 +540,37 @@ def main() -> int:
             instance_id=args.instance,
         )
         args.instances = str(catalog_path)
+        catalog_source = str(catalog_path)
 
-    row: dict[str, Any] | None = None
-    catalog_source = str(catalog_path)
-    if _catalog_contains(catalog_path, args.instance):
-        row = _load_catalog(catalog_path, args.instance)
-    else:
-        # Agent hosts (e.g. 208.77) often only have smoke fixtures; fetch one row
-        # from Worker Gateway which already loaded the full EnvPackage catalog.
-        gw = (args.gateway or (agent_job.gateway_url if agent_job else "") or "").strip()
-        if not gw:
-            raise SystemExit(
-                f"instance {args.instance!r} not in {catalog_path} and no gateway "
-                "available to fetch Worker catalog row"
+    if row is None:
+        if args.instances and _catalog_contains(catalog_path, args.instance):
+            row = _load_catalog(catalog_path, args.instance)
+            catalog_source = str(catalog_path)
+        else:
+            # Agent hosts (e.g. 208.77) often only have smoke fixtures; fetch one row
+            # from Worker Gateway which already loaded the full EnvPackage catalog.
+            gw = (args.gateway or (agent_job.gateway_url if agent_job else "") or "").strip()
+            if not gw:
+                raise SystemExit(
+                    f"instance {args.instance!r} not in {catalog_path or '(no local catalog)'} "
+                    "and no gateway / AgentJob.instance_catalog_json available"
+                )
+            print(
+                f"[catalog] local miss for {args.instance} in {catalog_path or '(empty)'}; "
+                f"fetching via gateway {gw}",
+                flush=True,
             )
-        print(
-            f"[catalog] local miss for {args.instance} in {catalog_path}; "
-            f"fetching via gateway {gw}",
-            flush=True,
-        )
-        row = _fetch_instance_via_gateway(
-            gateway=gw,
-            api_key=args.api_key,
-            instance_id=args.instance,
-            run_id=run_id,
-        )
-        mini = _write_mini_catalog(out, args.instance, row)
-        catalog_path = mini
-        args.instances = str(mini)
-        catalog_source = f"gateway:{gw} -> {mini}"
-        print(f"[catalog] wrote mini catalog {mini}", flush=True)
+            row = _fetch_instance_via_gateway(
+                gateway=gw,
+                api_key=args.api_key,
+                instance_id=args.instance,
+                run_id=run_id,
+            )
+            mini = _write_mini_catalog(out, args.instance, row)
+            catalog_path = mini
+            args.instances = str(mini)
+            catalog_source = f"gateway:{gw} -> {mini}"
+            print(f"[catalog] wrote mini catalog {mini}", flush=True)
 
     _save_json(
         out / "catalog_resolve.json",
@@ -544,6 +580,9 @@ def main() -> int:
             "catalog_source": catalog_source,
             "env_package_id": getattr(agent_job, "env_package_id", "") if agent_job else "",
             "benchmark_variant": args.benchmark_variant,
+            "has_agent_job_catalog_json": bool(
+                agent_job and (agent_job.instance_catalog_json or "").strip()
+            ),
         },
     )
 
