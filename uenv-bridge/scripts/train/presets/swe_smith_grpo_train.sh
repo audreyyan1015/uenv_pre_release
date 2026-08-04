@@ -74,7 +74,7 @@ cd "${REPO_DIR}"
 RUN_TS=${RUN_TS:-$(date +%Y%m%d_%H%M%S)}
 export RUN_ID=${RUN_ID:-verl_swesmith_grpo_train_${RUN_TS}}
 export LOG_FILE=${LOG_FILE:-${REPO_DIR}/temp/logs/verl_layer4_agent_loop/${RUN_ID}.log}
-export WANDB_ENV_FILE=${WANDB_ENV_FILE:-${REPO_DIR}/../../secrets/wandb.env}
+export WANDB_ENV_FILE=${WANDB_ENV_FILE:-${REPO_DIR}/../secrets/wandb.env}
 
 
 # VeRL/wandb 日志。默认只输出 console；开启 wandb 时传入：
