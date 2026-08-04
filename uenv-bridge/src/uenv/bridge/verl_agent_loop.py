@@ -164,6 +164,7 @@ class UEnvAgentLoopConfig:
     default_model_endpoint: str = "https://openrouter.ai/api/v1"
     default_model_name: str = "qwen/qwen-2.5-7b-instruct"
     default_max_steps: int = 10
+    episode_max_steps_override: int | None = None
     default_max_turns: int = 1
     seed_base: int = 42
     request_record_path: str = ""
@@ -211,6 +212,7 @@ class UEnvAgentLoop(AgentLoopBase):
         default_model_endpoint: str = "https://openrouter.ai/api/v1",
         default_model_name: str = "qwen/qwen-2.5-7b-instruct",
         default_max_steps: int = 10,
+        episode_max_steps_override: int | None = None,
         default_max_turns: int = 1,
         seed_base: int = 42,
         request_record_path: str = "",
@@ -246,6 +248,7 @@ class UEnvAgentLoop(AgentLoopBase):
             default_model_endpoint=default_model_endpoint,
             default_model_name=default_model_name,
             default_max_steps=_int_value(default_max_steps, 10),
+            episode_max_steps_override=_optional_int_value(episode_max_steps_override),
             default_max_turns=_int_value(default_max_turns, 1),
             seed_base=_int_value(seed_base, 42),
             request_record_path=_optional_string(request_record_path) or "",
@@ -697,7 +700,7 @@ class UEnvAgentLoop(AgentLoopBase):
     ) -> EpisodeRequest:
         request_id = str(uuid.uuid4())
         env_type = self._env_type(sample_kwargs)
-        max_steps = int(self._value_from_extra_info(sample_kwargs, "max_steps", self.config_for_uenv.default_max_steps))
+        max_steps, max_steps_source = self._effective_max_steps(sample_kwargs)
         sample_index = self._sample_index(sample_kwargs)
         seed = int(self._value_from_extra_info(sample_kwargs, "seed", self.config_for_uenv.seed_base + sample_index))
         batch_id = str(self._value_from_extra_info(sample_kwargs, "batch_id", f"verl-agent-loop-{uuid.uuid4().hex[:8]}"))
@@ -709,6 +712,14 @@ class UEnvAgentLoop(AgentLoopBase):
         model_endpoint = model_endpoint_override or self._model_endpoint(sample_kwargs, sampling_params)
         model_name = model_name_override or self._model_name(sample_kwargs, sampling_params)
 
+        metadata_extra_info = self._metadata_extra_info(sample_kwargs, prompt_as_text)
+        metadata_extra_info.update(
+            {
+                "effective_max_steps": max_steps,
+                "effective_max_iterations": max_steps,
+                "max_steps_source": max_steps_source,
+            }
+        )
         metadata = {
             "batch_id": batch_id,
             "sample_index": sample_index,
@@ -717,7 +728,7 @@ class UEnvAgentLoop(AgentLoopBase):
             "task_name": task_name,
             "data_source": data_source,
             "ability": self._string_or_none(sample_kwargs.get("ability")),
-            "extra_info": self._metadata_extra_info(sample_kwargs, prompt_as_text),
+            "extra_info": metadata_extra_info,
             "rollout_n": self._value_from_extra_info(sample_kwargs, "rollout_n", None),
             "global_steps": self._value_from_extra_info(sample_kwargs, "global_steps", None),
             "model_gateway_upstreams": model_upstream_overrides or [],
@@ -1076,7 +1087,8 @@ class UEnvAgentLoop(AgentLoopBase):
                     "llm_config_path",
                     "/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json",
                 ),
-                "max_iterations": value("max_iterations", max_steps),
+                "max_steps": max_steps,
+                "max_iterations": max_steps,
                 "repo": value("repo"),
                 "repo_language": value("repo_language"),
                 "base_commit": value("base_commit"),
@@ -1404,6 +1416,23 @@ class UEnvAgentLoop(AgentLoopBase):
         if key in sample_kwargs:
             return sample_kwargs[key]
         return default
+
+    def _effective_max_steps(self, sample_kwargs: dict[str, Any]) -> tuple[int, str]:
+        override = self.config_for_uenv.episode_max_steps_override
+        if override is not None:
+            return self._validated_max_steps(override), "config.episode_max_steps_override"
+        for key in ("max_steps", "max_iterations"):
+            value = self._value_from_extra_info(sample_kwargs, key, None)
+            if value in (None, ""):
+                continue
+            return self._validated_max_steps(value), f"extra_info.{key}"
+        return self._validated_max_steps(self.config_for_uenv.default_max_steps), "config.default_max_steps"
+
+    def _validated_max_steps(self, value: Any) -> int:
+        parsed = int(self._python_value(value))
+        if parsed <= 0:
+            raise ValueError(f"max_steps must be positive, got {value!r}")
+        return parsed
 
     def _metadata_extra_info(self, sample_kwargs: dict[str, Any], prompt_as_text: str) -> dict[str, Any]:
         extra_info = self._python_value(sample_kwargs.get("extra_info") or {})
