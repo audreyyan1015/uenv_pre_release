@@ -45,8 +45,15 @@ secrets/*
 !/scripts/uenv-llm-gateway.py
 !/scripts/openhands/
 !/scripts/openhands/**
+# 上面的 !/scripts/openhands/** 会反忽略该目录下一切文件，需重新屏蔽缓存
+/scripts/openhands/__pycache__/
+/scripts/openhands/**/__pycache__/
+/scripts/openhands/**/*.pyc
 !/scripts/uenv-llm-gateway/
 !/scripts/uenv-llm-gateway/**
+/scripts/uenv-llm-gateway/__pycache__/
+/scripts/uenv-llm-gateway/**/__pycache__/
+/scripts/uenv-llm-gateway/**/*.pyc
 /logs
 /Docs/scripts
 /tmp
