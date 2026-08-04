@@ -94,36 +94,27 @@ Server  AgentJob.instance_catalog_json = session.instance_catalog_json
 
 ## 4. 部署与验收
 
-### 已完成
+### 已完成（2026-08-04 续）
 
-- 7143：重编并重启 Worker；`for-episode` 返回非空 `instance_catalog_json`
-- 208.77：proto / agent_job / agent_client / driver / pb2 已 put
+| 项 | 结果 |
+|---|---|
+| Server 75.157 | ✅ 已同步 `uenv-server`/`proto`/`uenv-bridge/core`，`cargo build -p uenv-adapter-core --release`，经 **`systemctl restart uenv-server`** 换上新二进制 |
+| Worker Register | ✅ `worker-7143-pro` 已注册（`server_epoch` 对齐）；`server.endpoint` 已恢复 `8.130.75.157:8088` |
+| for-episode（7143 本机） | ✅ `instance_catalog_json` 非空（~3108B） |
+| for-episode（Server 经 `:28097` 隧道） | ✅ 同字段可达，Server 可写入 AgentJob |
+| OpenHands Agent | ✅ admin `/agents` 见 `openhands-default` 在线 |
+| 208.77 driver/stubs | ✅ 此前已 put |
 
-### 阻塞：Server `8.130.75.157`
+正式 episode 跑完后，在 Agent 产物看 `catalog_resolve.json`：`catalog_source` 应以 `agent_job.instance_catalog_json` 开头。
 
-当前从开发机与 A100 跳板：**SSH banner / admin:50052 超时**；Worker→`:8088` 可建连但 Register 无响应。  
-正统端到端（Poll 到带 catalog JSON 的 AgentJob）必须在 Server 恢复后：
+### 运维备注
 
-```bash
-# 在 8.130.75.157 上
-cd /home/uenv/UEnv   # 或实际 repo 根
-# 同步含本改动的 uenv-server + proto 后：
-bash scripts/deploy-adapter-core-75157.sh
-```
-
-然后恢复 Worker `server.endpoint: "8.130.75.157:8088"`（若曾临时改为黑洞口），并带：
-
-```bash
-export UENV_WORKER_ALLOW_DEGRADED_START=1
-export UENV_WORKER_REGISTER_TIMEOUT_SECS=10
-```
-
-E2E 检查：`catalog_resolve.json` 的 `catalog_source` 以 `agent_job.instance_catalog_json` 开头。
-
-### 运维备注（7143）
-
-- `hub.enabled: false` 仍为临时项（Hub 不可用）；勿用本仓库 yaml 的 `true` 覆盖现场。
-- 重启脚本里勿对含 `uenv-worker.*serve` 的整段 SSH 命令行 `pkill -f`（会误杀会话）；按 PID 杀或写独立 start 脚本。
+- **Repo 根目录**：Server 上为 **`/home/uenv`**（不是 `/home/uenv/UEnv`）；进程由 **`uenv-server.service`** 托管，二进制 **`/usr/local/bin/uenv-adapter-core`**。
+- **Obs 临时关闭**：启动曾卡在 Obs 初始化（`:8088` 迟迟不 bind）。已加  
+  `/etc/systemd/system/uenv-server.service.d/override.conf`：`UENV_OBS_ENABLED=0`。需要前端观测时再打开并排查 `obs.db`。
+- **Gateway 隧道**：`uenv-gateway-tunnel-7143.service`（Server `127.0.0.1:28097` → 7143）。
+- 7143：`hub.enabled: false` 仍为现场临时项；勿用本仓库 yaml 的 `true` 盲目覆盖。
+- 重启 Worker 勿对含 `uenv-worker` 字样的整段 SSH 命令 `pkill -f`；按 `/proc/PID/exe` 匹配二进制。
 
 ---
 
