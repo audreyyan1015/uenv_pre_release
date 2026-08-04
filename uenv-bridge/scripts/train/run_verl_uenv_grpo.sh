@@ -331,6 +331,7 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.model.path=${CONTAINER_MODEL_PATH} \\
   actor_rollout_ref.model.use_remove_padding=True \\
   actor_rollout_ref.model.enable_gradient_checkpointing=True \\
+  actor_rollout_ref.model.enable_activation_offload=True \\
   actor_rollout_ref.actor.strategy=fsdp \\
   actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \\
   actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \\
@@ -341,11 +342,12 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \\
   actor_rollout_ref.actor.entropy_coeff=0 \\
   actor_rollout_ref.actor.use_torch_compile=False \\
-  actor_rollout_ref.actor.fsdp_config.param_offload=False \\
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \\
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \\
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \\
   actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \\
   actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \\
   actor_rollout_ref.rollout.name=${INFER_BACKEND} \\
+  actor_rollout_ref.rollout.disable_log_stats=False \\
   actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \\
   actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION} \\
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \\
@@ -361,7 +363,7 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.max_num_batched_tokens=2048 \\
   actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
-  actor_rollout_ref.ref.fsdp_config.param_offload=False \\
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \\
   actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \\
   actor_rollout_ref.ref.use_torch_compile=False \\
   reward.reward_manager.name=naive \\
