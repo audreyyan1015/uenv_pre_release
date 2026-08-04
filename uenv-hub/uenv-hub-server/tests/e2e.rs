@@ -1101,3 +1101,214 @@ async fn swe_smith_package_and_episode_stack_are_seeded() {
     );
     assert!(stack.runtime_gateway.required);
 }
+
+// ---------------------------------------------------------------------------
+// Operator console: aggregated overview + the self-hosted static assets
+// ---------------------------------------------------------------------------
+
+/// The overview is the console's only "what is this Hub" call. It has to report
+/// what the registry actually holds, not a constant — so publish something and
+/// check the counters move with it.
+#[tokio::test]
+async fn system_overview_reports_live_registry_inventory() {
+    let (addr, _tmp) = spawn_server_with_seed_examples(true).await;
+    let base = format!("http://{addr}");
+    let http = reqwest::Client::new();
+
+    let before: serde_json::Value = http
+        .get(format!("{base}/api/v1/system/overview"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(before["service"]["name"], "uenv-hub");
+    assert_eq!(before["db_up"], true);
+    assert!(before["server_time"].as_i64().unwrap() >= before["started_at"].as_i64().unwrap());
+    assert!(before["uptime_seconds"].as_i64().unwrap() >= 0);
+
+    // Seeding put environments, packages, stacks, bridges and templates in
+    // place; every one of those has to be visible here or the console's landing
+    // page silently under-reports the catalog.
+    let reg = &before["registry"];
+    for key in ["envs", "env_versions", "packages", "stacks", "templates"] {
+        assert!(
+            reg[key].as_i64().unwrap() > 0,
+            "registry.{key} should be non-zero after seeding, got {}",
+            reg[key]
+        );
+    }
+    assert!(reg["package_artifacts"].as_i64().unwrap() > 0);
+    assert!(reg["agent_bridges"].as_i64().unwrap() > 0);
+
+    // Posture mirrors the config this server was built with.
+    assert_eq!(before["posture"]["require_token"], false);
+    assert_eq!(before["posture"]["seed_examples"], true);
+
+    // Storage points at the configured artifact dir and sizes the real files.
+    assert_eq!(before["storage"]["artifact_dir_exists"], true);
+    assert!(before["storage"]["artifact_bytes"].as_u64().unwrap() > 0);
+    assert!(before["storage"]["database_bytes"].as_u64().unwrap() > 0);
+
+    // Host facts are always present in shape; the /proc-derived ones are
+    // allowed to be absent off Linux but must never be nonsense when present.
+    assert!(!before["host"]["os"].as_str().unwrap().is_empty());
+    if let Some(pct) = before["host"]["cpu_usage_percent"].as_f64() {
+        assert!((0.0..=100.0).contains(&pct));
+    }
+
+    // Publishing one env version must move exactly the counters it touches.
+    let env_type = format!("overview-{}", std::process::id());
+    let client = HttpClient::new(base.clone(), None);
+    client
+        .create_env(&uenv_hub_types::CreateEnvRequest {
+            env_type: env_type.clone(),
+            namespace: None,
+            description: Some("overview counter probe".into()),
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            tags: vec![],
+            lifecycle: Default::default(),
+            superseded_by: None,
+            compat_aliases: vec![],
+        })
+        .await
+        .unwrap();
+    client
+        .publish_version(&env_type, &manifest("1.0.0"))
+        .await
+        .unwrap();
+
+    let after: serde_json::Value = http
+        .get(format!("{base}/api/v1/system/overview"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after["registry"]["envs"].as_i64().unwrap(),
+        reg["envs"].as_i64().unwrap() + 1
+    );
+    assert_eq!(
+        after["registry"]["env_versions"].as_i64().unwrap(),
+        reg["env_versions"].as_i64().unwrap() + 1
+    );
+    assert_eq!(
+        after["registry"]["packages"].as_i64().unwrap(),
+        reg["packages"].as_i64().unwrap(),
+        "publishing an env must not change the package count"
+    );
+}
+
+/// A yanked version stays in the catalog and has to be counted as yanked, not
+/// dropped: an operator needs to see how much of the registry is in that state.
+#[tokio::test]
+async fn system_overview_counts_yanked_versions_separately() {
+    let (addr, _tmp) = spawn_server().await;
+    let base = format!("http://{addr}");
+    let client = HttpClient::new(base.clone(), None);
+    let http = reqwest::Client::new();
+
+    let overview = || async {
+        let value: serde_json::Value = http
+            .get(format!("{base}/api/v1/system/overview"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        value
+    };
+
+    // The base seed already publishes environments, so compare deltas rather
+    // than absolute counts.
+    let before = overview().await;
+    let versions_before = before["registry"]["env_versions"].as_i64().unwrap();
+    let yanked_before = before["registry"]["yanked_env_versions"].as_i64().unwrap();
+
+    let env_type = format!("yank-count-{}", std::process::id());
+    client
+        .create_env(&uenv_hub_types::CreateEnvRequest {
+            env_type: env_type.clone(),
+            namespace: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            tags: vec![],
+            lifecycle: Default::default(),
+            superseded_by: None,
+            compat_aliases: vec![],
+        })
+        .await
+        .unwrap();
+    client
+        .publish_version(&env_type, &manifest("1.0.0"))
+        .await
+        .unwrap();
+    client
+        .publish_version(&env_type, &manifest("1.1.0"))
+        .await
+        .unwrap();
+    client
+        .yank_version(&env_type, "1.1.0", "broken release")
+        .await
+        .unwrap();
+
+    let after = overview().await;
+    assert_eq!(
+        after["registry"]["env_versions"].as_i64().unwrap(),
+        versions_before + 2,
+        "a yanked version is still a published version and must stay counted"
+    );
+    assert_eq!(
+        after["registry"]["yanked_env_versions"].as_i64().unwrap(),
+        yanked_before + 1
+    );
+}
+
+/// The console is part of the binary, not a separate deployment artifact.
+#[tokio::test]
+async fn console_is_served_by_the_hub_itself() {
+    let (addr, _tmp) = spawn_server().await;
+    let base = format!("http://{addr}");
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Root redirects to the console so an operator can just open the Hub URL.
+    let root = http.get(format!("{base}/")).send().await.unwrap();
+    assert!(root.status().is_redirection());
+    assert_eq!(root.headers()["location"], "/console");
+
+    let shell = http.get(format!("{base}/console")).send().await.unwrap();
+    assert!(shell.status().is_success());
+    assert!(shell.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let html = shell.text().await.unwrap();
+    assert!(html.contains("/console/app.js"));
+
+    for (path, content_type) in [
+        ("/console/app.css", "text/css"),
+        ("/console/app.js", "application/javascript"),
+    ] {
+        let resp = http.get(format!("{base}{path}")).send().await.unwrap();
+        assert!(resp.status().is_success(), "{path} must be served");
+        assert!(resp.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with(content_type));
+        assert!(!resp.text().await.unwrap().is_empty());
+    }
+}

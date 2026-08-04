@@ -13,6 +13,8 @@ pub mod ratelimit;
 pub mod routes;
 pub mod service;
 pub mod state;
+pub mod sysinfo;
+pub mod ui;
 
 use crate::config::Config;
 use crate::ratelimit::RateLimiter;
@@ -102,5 +104,7 @@ pub async fn build_state(config: Config) -> Result<AppState, Box<dyn std::error:
         config: Arc::new(config),
         metrics: Arc::new(metrics_handle()),
         rate_limiter: Arc::new(rate_limiter),
+        started_at: uenv_hub_core::models::now(),
+        cpu_meter: Arc::new(crate::sysinfo::CpuMeter::new()),
     })
 }

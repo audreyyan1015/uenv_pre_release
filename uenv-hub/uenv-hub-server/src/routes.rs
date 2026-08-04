@@ -26,6 +26,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/version", get(version));
 
     let api = Router::new()
+        // Aggregated console/operator view: identity + inventory + footprint.
+        .route("/system/overview", get(system_overview))
         // queries
         .route("/envs", get(list_envs).post(create_env))
         .route("/envs/:env_type", get(get_env).patch(update_env).delete(delete_env))
@@ -77,6 +79,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .merge(public)
+        .merge(crate::ui::router())
         .nest("/api/v1", api)
         .layer(axum::middleware::from_fn(crate::middleware::request_context))
         .layer(build_cors(&state.config.cors))
@@ -147,6 +150,55 @@ async fn version() -> Json<dto::VersionInfo> {
         version: env!("CARGO_PKG_VERSION").into(),
         git_sha: option_env!("UENV_HUB_GIT_SHA").map(|s| s.to_string()),
     })
+}
+
+// ---------------------------------------------------------------------------
+// overview
+// ---------------------------------------------------------------------------
+
+/// One-shot projection of the Hub: identity, registry inventory, on-disk
+/// footprint, host resources and startup posture.
+///
+/// Reader role, not admin: everything here is either already derivable from the
+/// public list endpoints or is coarse host telemetry. The only sensitive-ish
+/// fields are paths and the posture flags, and an operator console that needed
+/// an admin token just to draw a dashboard would push people to hand out admin
+/// tokens for read-only work.
+async fn system_overview(
+    State(state): State<AppState>,
+    _principal: Principal,
+) -> ApiResult<Json<dto::HubOverview>> {
+    let db_up = uenv_hub_core::db::health_check(state.store.pool())
+        .await
+        .is_ok();
+    let now = uenv_hub_core::models::now();
+
+    Ok(Json(dto::HubOverview {
+        service: dto::VersionInfo {
+            name: "uenv-hub".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            git_sha: option_env!("UENV_HUB_GIT_SHA").map(|s| s.to_string()),
+        },
+        started_at: state.started_at,
+        uptime_seconds: (now - state.started_at).max(0),
+        server_time: now,
+        db_up,
+        registry: state.store.registry_stats().await?,
+        storage: crate::sysinfo::storage_stats(
+            &state.config.packages.artifact_dir,
+            &state.config.database.url,
+        ),
+        host: crate::sysinfo::host_stats(&state.cpu_meter),
+        posture: dto::HubPosture {
+            require_token: state.config.auth.require_token,
+            rate_limit_enabled: state.config.rate_limit.enabled,
+            requests_per_second: state.config.rate_limit.requests_per_second,
+            burst: state.config.rate_limit.burst,
+            cors_allow_origins: state.config.cors.allow_origins.clone(),
+            seed_examples: state.config.packages.seed_examples,
+            catalog_seed_dir: state.config.packages.catalog_seed_dir.clone(),
+        },
+    }))
 }
 
 // ---------------------------------------------------------------------------
