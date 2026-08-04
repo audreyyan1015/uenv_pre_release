@@ -14,7 +14,7 @@
 |---|---|
 | Adapter 字段 | ✅ 已正确传 `env_package_id=swe-bench-smith`、`benchmark_variant=smith` |
 | Worker 内存 catalog | ✅ 已加载 Smith **59136**（合并 Gateway **59867**） |
-| AgentJob 是否注入 catalog 路径 | ❌ **否**。proto `AgentJob` 无 `instances_catalog` 字段；`_job_from_proto` 亦不填 |
+| AgentJob 是否注入 catalog 路径 | ⏳ 正统字段已落地，见 [AgentJob 正统 catalog 注入](./AgentJob正统catalog注入契约固定.md)；Server 部署前仍靠 Gateway 回退 |
 | OpenHands driver 实际读谁 | ❌ 优先 `/root/UEnv/fixtures/swe/smith_catalog.json`（**5** 条 smoke） |
 | 208.77 是否有全量 EnvPackage | ❌ 无 `/var/lib/uenv/envs/swe-bench-smith/...` |
 | 修复 | ✅ Gateway 新增单样本查询 + driver/脚本 Gateway 回退；已部署 7143/208.77 |

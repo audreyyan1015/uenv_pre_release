@@ -194,9 +194,15 @@ impl GatewaySessionPort for ReqwestGatewaySessionClient {
                 // 没有 session_id 时 service 层无法在结束时清理资源，因此直接失败。
                 anyhow::bail!("for-episode returned empty session_id");
             }
+            let instance_catalog_json = value
+                .get("instance_catalog_json")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
             Ok(ForEpisodeSession {
                 session_id,
                 gateway_url,
+                instance_catalog_json,
             })
         })
     }
