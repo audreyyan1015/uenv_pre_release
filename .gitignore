@@ -77,3 +77,6 @@ secrets/*
 /swe-wal/
 swe-worker.log
 /temp
+
+# Local server runtime state
+server-state/
