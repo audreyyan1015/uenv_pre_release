@@ -74,13 +74,15 @@ cd "${REPO_DIR}"
 RUN_TS=${RUN_TS:-$(date +%Y%m%d_%H%M%S)}
 export RUN_ID=${RUN_ID:-verl_swesmith_grpo_train_${RUN_TS}}
 export LOG_FILE=${LOG_FILE:-${REPO_DIR}/temp/logs/verl_layer4_agent_loop/${RUN_ID}.log}
+export WANDB_ENV_FILE=${WANDB_ENV_FILE:-${REPO_DIR}/../../secrets/wandb.env}
+
 
 # VeRL/wandb 日志。默认只输出 console；开启 wandb 时传入：
 #   TRAINER_LOGGER="['console','wandb']" WANDB_MODE=online WANDB_API_KEY=...
 # 也可以写入 /data/ronghao/uenv/secrets/wandb.env，由通用入口自动读取。
-export TRAINER_LOGGER=${TRAINER_LOGGER:-"['console']"}
-export TRAINER_PROJECT_NAME=${TRAINER_PROJECT_NAME:-uenv_swe_grpo_train}
-export WANDB_MODE=${WANDB_MODE:-}
+export TRAINER_LOGGER=${TRAINER_LOGGER:-"['console','wandb']"}
+export TRAINER_PROJECT_NAME=${TRAINER_PROJECT_NAME:-uenv_swesmith_grpo_train}
+export WANDB_MODE=${WANDB_MODE:-online}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_6_35b_a3b_swesmith_grpo_limit${LIMIT}_${RUN_TS}}
 
 # Server Obs / 前端可视化。默认通过前端机器的 /obs 反代上报事件。
@@ -156,6 +158,7 @@ if [ -z "${EXTRA_VERL_ARGS:-}" ]; then
     "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL=INFO"
     "+actor_rollout_ref.rollout.max_model_len=65536"
     "actor_rollout_ref.rollout.max_num_batched_tokens=65536"
+    "actor_rollout_ref.rollout.multi_stage_wake_up=True"
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True"
     "+actor_rollout_ref.model.override_config.attn_implementation=sdpa"
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=True"
