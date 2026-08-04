@@ -40,13 +40,19 @@ export CONTAINER_MODEL_PATH=${CONTAINER_MODEL_PATH:-/models/modelscope/Qwen/Qwen
 export DATA_DIR=${DATA_DIR:-${REPO_DIR}/data/benchmarks/swebenchpro_train_smoke_10}
 export CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/swebenchpro_train_smoke_10}
 
-# SWE/OpenHands 数据准备参数。SWE_TRAJECTORY_MAX_STEPS 会同时写入 max_steps 和 max_iterations
+# SWE/OpenHands 数据准备参数。
+# SWE_TRAJECTORY_MAX_STEPS 既用于生成数据，也默认作为运行时 episode 步数覆盖值；
+# 如需完全使用数据集 extra_info 中的 max_steps/max_iterations，可显式传入：
+#   UENV_EPISODE_MAX_STEPS_OVERRIDE=
 export SWE_PREPARE_DATA=${SWE_PREPARE_DATA:-1}
 export SWE_SAMPLE_LIMIT=${SWE_SAMPLE_LIMIT:-10}
 export SWE_SAMPLE_OFFSET=${SWE_SAMPLE_OFFSET:-0}
 export SWE_WORKSPACE_DIR=${SWE_WORKSPACE_DIR:-/app}
 export SWE_LLM_CONFIG_PATH=${SWE_LLM_CONFIG_PATH:-/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json}
 export SWE_TRAJECTORY_MAX_STEPS=${SWE_TRAJECTORY_MAX_STEPS:-10}
+if [ -z "${UENV_EPISODE_MAX_STEPS_OVERRIDE+x}" ]; then
+  export UENV_EPISODE_MAX_STEPS_OVERRIDE=${SWE_TRAJECTORY_MAX_STEPS}
+fi
 export SWE_ENV_PACKAGE_VERSION=${SWE_ENV_PACKAGE_VERSION:-0.3.4}
 export SWE_AGENT_MODE=${SWE_AGENT_MODE:-llm}
 

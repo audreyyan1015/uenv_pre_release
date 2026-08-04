@@ -13,6 +13,7 @@
   default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,}
   default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,}
   default_max_steps: 10
+  episode_max_steps_override: ${oc.env:UENV_EPISODE_MAX_STEPS_OVERRIDE,""}
   default_max_turns: 1
   seed_base: 42
   result_record_path: ${oc.env:UENV_AGENT_LOOP_RESULT_RECORD_PATH,""}
