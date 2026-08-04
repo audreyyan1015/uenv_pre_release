@@ -80,3 +80,20 @@ swe-worker.log
 
 # Local server runtime state
 server-state/
+
+# Local runtime state
+/server-state/
+
+# Generated stress-test artifacts
+/uenv-server/stress_test_refactored/distributed-gate-artifacts/
+
+# Rust build outputs
+**/target/
+
+# Runtime logs
+*.log
+
+# Large benchmark datasets
+/uenv-bridge/data/benchmarks/swesmith/raw/
+/uenv-bridge/data/benchmarks/swebenchpro/test.jsonl
+/uenv-bridge/data/benchmarks/swebenchpro/swe_bench_pro_full.csv
