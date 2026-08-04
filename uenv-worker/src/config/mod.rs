@@ -236,7 +236,7 @@ impl Default for WorkerConfig {
             },
             worker: WorkerSection {
                 id: "auto".to_string(),
-                listen: "0.0.0.0:50052".to_string(),
+                listen: "0.0.0.0:50054".to_string(),
                 advertise_endpoint: None,
                 max_concurrent: 4,
             },
@@ -297,11 +297,65 @@ impl WorkerConfig {
         load_env_file_if_exists(&llm_env_path)?;
         cfg.apply_env();
         cfg.apply_cli(overrides);
+        cfg.validate()?;
         cfg.export_trajectory_env();
         Ok(LoadedWorkerConfig {
             llm: LlmConfig::from_env(),
             worker: cfg,
         })
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.server.endpoint.trim().is_empty() {
+            return Err("server.endpoint must not be empty".to_string());
+        }
+        if self.worker.listen.parse::<std::net::SocketAddr>().is_err() {
+            return Err(format!(
+                "worker.listen is not a valid socket address: {}",
+                self.worker.listen
+            ));
+        }
+        if self.worker.max_concurrent == 0 {
+            return Err("worker.max_concurrent must be greater than 0".to_string());
+        }
+        if !matches!(self.scheduler.mode.as_str(), "remote" | "mock") {
+            return Err(format!(
+                "scheduler.mode must be remote or mock, got {}",
+                self.scheduler.mode
+            ));
+        }
+        if self.env.types.is_empty() {
+            return Err("env.types must contain at least one environment type".to_string());
+        }
+        if self.observability.metrics_listen != self.observability.health_listen {
+            return Err(
+                "observability.metrics_listen and health_listen must be identical in this release"
+                    .to_string(),
+            );
+        }
+        if self
+            .observability
+            .health_listen
+            .parse::<std::net::SocketAddr>()
+            .is_err()
+        {
+            return Err(format!(
+                "observability.health_listen is not a valid socket address: {}",
+                self.observability.health_listen
+            ));
+        }
+        if self.hub.enabled
+            && self
+                .hub
+                .endpoint
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            return Err("hub.endpoint is required when hub.enabled is true".to_string());
+        }
+        Ok(())
     }
 
     fn apply_cli(&mut self, overrides: &CliOverrides) {

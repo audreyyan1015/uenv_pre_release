@@ -1,0 +1,21 @@
+[Unit]
+Description=UEnv Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uenv
+Group=uenv
+WorkingDirectory=/var/lib/uenv/worker
+EnvironmentFile=-/etc/uenv/worker.env
+EnvironmentFile=-/etc/uenv/secrets/worker-llm.env
+ExecStartPre=/opt/uenv/current/bin/uenv-worker --config /etc/uenv/worker.yaml validate-config
+ExecStart=/opt/uenv/current/bin/uenv-worker --config /etc/uenv/worker.yaml serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=60
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

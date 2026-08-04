@@ -81,10 +81,17 @@ async fn main() {
             }
         }
         Commands::Version => {
-            println!("uenv-worker 0.1.0 protocol_version=v1");
+            println!("uenv-worker {} protocol_version=v1", env!("CARGO_PKG_VERSION"));
         }
         Commands::Health => {
+            if let Err(err) = check_health(&cfg.observability.health_listen).await {
+                eprintln!("worker health check failed: {err}");
+                std::process::exit(1);
+            }
             println!("ok");
+        }
+        Commands::ValidateConfig => {
+            println!("worker config is valid");
         }
         Commands::SweRun(args) => {
             if let Err(err) = run_swe(args).await {
@@ -99,6 +106,31 @@ async fn main() {
             }
         }
     }
+}
+
+async fn check_health(listen: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let addr: std::net::SocketAddr = listen.parse()?;
+    let host = if addr.ip().is_unspecified() {
+        if addr.is_ipv6() {
+            "[::1]".to_string()
+        } else {
+            "127.0.0.1".to_string()
+        }
+    } else if addr.is_ipv6() {
+        format!("[{}]", addr.ip())
+    } else {
+        addr.ip().to_string()
+    };
+    let url = format!("http://{host}:{}/health", addr.port());
+    let response = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(format!("{url} returned {}", response.status()).into());
+    }
+    Ok(())
 }
 
 async fn dispatch_swe(

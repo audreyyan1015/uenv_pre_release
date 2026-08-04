@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""UEnv unified operations CLI.
+
+The environment authoring commands are delegated to the Hub client binary;
+service inspection stays dependency-free so it also works on worker-only nodes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+
+DEFAULT_ROOT = Path(os.environ.get("UENV_INSTALL_ROOT", "/opt/uenv/current"))
+DEFAULT_CONFIG = Path(os.environ.get("UENV_CONFIG_DIR", "/etc/uenv"))
+DEFAULT_ADMIN_URL = os.environ.get("UENV_ADMIN_URL", "http://127.0.0.1:50052")
+DEFAULT_WORKER_URL = os.environ.get("UENV_WORKER_HEALTH_URL", "http://127.0.0.1:19090")
+SERVICES = {
+    "server": "uenv-adapter-core.service",
+    "worker": "uenv-worker.service",
+    "hub": "uenv-hub.service",
+}
+
+
+class CliError(RuntimeError):
+    pass
+
+
+def http_json(url: str, timeout: float = 4.0) -> dict:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read()
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise CliError(f"无法访问 {url}: {exc}") from exc
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"{url} 返回的不是有效 JSON") from exc
+
+
+def http_ok(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read(200).decode("utf-8", "replace").strip()
+            return 200 <= response.status < 300, body
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return False, str(exc)
+
+
+def fmt_secs(value: object) -> str:
+    if value is None:
+        return "-"
+    seconds = int(value)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
+
+
+def fetch_status(args: argparse.Namespace) -> dict:
+    return http_json(f"{args.admin_url.rstrip('/')}/status")
+
+
+def print_status(data: dict) -> None:
+    active = data.get("active_episodes", 0)
+    capacity = data.get("total_capacity", "?")
+    print(
+        f"控制面 epoch={data.get('server_epoch', '?')}  "
+        f"Worker={data.get('worker_count', 0)}  "
+        f"Episode={active}/{capacity}  pending={data.get('pending_results', 0)}"
+    )
+    workers = data.get("workers", [])
+    if not workers:
+        print("尚无 Worker 注册。")
+        return
+    print()
+    print(f"{'WORKER':<30} {'STATUS':<10} {'LOAD':>7} {'HEARTBEAT':>10} ENDPOINT")
+    for worker in sorted(workers, key=lambda item: item.get("worker_id", "")):
+        print(
+            f"{worker.get('worker_id', '-'):<30} "
+            f"{worker.get('status', '-'):<10} "
+            f"{worker.get('load', 0)}/{worker.get('capacity', '?'):>5} "
+            f"{fmt_secs(worker.get('last_heartbeat_secs')):>10} "
+            f"{worker.get('endpoint', '-')}"
+        )
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    print_status(fetch_status(args))
+
+
+def cmd_workers(args: argparse.Namespace) -> None:
+    data = fetch_status(args)
+    workers = data.get("workers", [])
+    if not workers:
+        print("尚无 Worker 注册。")
+        return
+    for worker in sorted(workers, key=lambda item: item.get("worker_id", "")):
+        print(
+            f"[{worker.get('status', 'unknown').upper()}] {worker.get('worker_id', '-')} "
+            f"({worker.get('endpoint', '-')}) load={worker.get('load', 0)}/"
+            f"{worker.get('capacity', '?')}"
+        )
+        episodes = worker.get("episodes", [])
+        if not episodes:
+            print("  无运行中的 Episode")
+        for episode in episodes:
+            print(
+                f"  episode={episode.get('episode_id', '-')} "
+                f"batch={episode.get('batch_id', '-')} "
+                f"elapsed={fmt_secs(episode.get('elapsed_secs'))}"
+            )
+
+
+def cmd_watch(args: argparse.Namespace) -> None:
+    while True:
+        print("\033[2J\033[H", end="")
+        print(f"UEnv 状态  {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        try:
+            cmd_status(args)
+        except CliError as exc:
+            print(exc, file=sys.stderr)
+        time.sleep(args.interval)
+
+
+def systemd_state(unit: str) -> str:
+    if not shutil.which("systemctl"):
+        return "未安装 systemd"
+    result = subprocess.run(
+        ["systemctl", "is-active", unit],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.stdout.strip() or "未安装"
+
+
+def doctor_line(ok: bool, name: str, detail: str) -> bool:
+    print(f"[{'通过' if ok else '失败'}] {name}: {detail}")
+    return ok
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    checks: list[bool] = []
+    manifest = args.install_root / "manifest.json"
+    checks.append(doctor_line(manifest.is_file(), "安装清单", str(manifest)))
+
+    configured = []
+    for name in ("server.yaml", "worker.yaml", "hub.toml"):
+        path = args.config_dir / name
+        if path.is_file():
+            configured.append(name)
+    checks.append(
+        doctor_line(bool(configured), "配置文件", ", ".join(configured) or f"{args.config_dir} 为空")
+    )
+
+    for role, unit in SERVICES.items():
+        if (args.config_dir / f"{role}.yaml").exists() or (
+            role == "hub" and (args.config_dir / "hub.toml").exists()
+        ):
+            state = systemd_state(unit)
+            checks.append(doctor_line(state == "active", unit, state))
+
+    admin_ok, admin_detail = http_ok(f"{args.admin_url.rstrip('/')}/health")
+    if (args.config_dir / "server.yaml").exists():
+        checks.append(doctor_line(admin_ok, "控制面健康检查", admin_detail or args.admin_url))
+
+    worker_ok, worker_detail = http_ok(f"{args.worker_url.rstrip('/')}/health")
+    if (args.config_dir / "worker.yaml").exists():
+        checks.append(doctor_line(worker_ok, "Worker 健康检查", worker_detail or args.worker_url))
+
+    hub_url = os.environ.get("UENV_HUB_URL", "http://127.0.0.1:8080")
+    hub_ok, hub_detail = http_ok(f"{hub_url.rstrip('/')}/healthz")
+    if (args.config_dir / "hub.toml").exists():
+        checks.append(doctor_line(hub_ok, "Hub 健康检查", hub_detail or hub_url))
+
+    failed = sum(not result for result in checks)
+    print(f"\n{len(checks) - failed}/{len(checks)} 项通过。")
+    if failed:
+        raise CliError(f"有 {failed} 项需要处理；可运行 `uenv logs <组件>` 查看日志")
+
+
+def cmd_logs(args: argparse.Namespace) -> None:
+    if not shutil.which("journalctl"):
+        raise CliError("当前系统没有 journalctl")
+    command = ["journalctl", "-u", SERVICES[args.component], "-n", str(args.lines)]
+    if args.follow:
+        command.append("-f")
+    os.execvp(command[0], command)
+
+
+def find_hub_cli(args: argparse.Namespace) -> Path:
+    configured = os.environ.get("UENV_HUB_CLI")
+    candidates = [
+        Path(configured) if configured else None,
+        args.install_root / "bin" / "uenv-hub-cli",
+        Path("/usr/local/libexec/uenv/uenv-hub-cli"),
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise CliError("未找到 Hub CLI；请安装包含 Hub client 的 UEnv 发布包")
+
+
+def cmd_env(args: argparse.Namespace) -> None:
+    binary = find_hub_cli(args)
+    os.execv(str(binary), [str(binary), "env", *args.hub_args])
+
+
+def cmd_hub(args: argparse.Namespace) -> None:
+    binary = find_hub_cli(args)
+    os.execv(str(binary), [str(binary), "hub", *args.hub_args])
+
+
+def cmd_version(args: argparse.Namespace) -> None:
+    version_file = args.install_root / "VERSION"
+    version = version_file.read_text(encoding="utf-8").strip() if version_file.is_file() else "development"
+    print(f"uenv {version}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="UEnv 安装、运行与环境管理的统一入口")
+    parser.add_argument("--admin-url", default=DEFAULT_ADMIN_URL, help="控制面 Admin HTTP 地址")
+    parser.add_argument("--worker-url", default=DEFAULT_WORKER_URL, help="Worker 健康检查地址")
+    parser.add_argument("--install-root", type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
+    parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG, help=argparse.SUPPRESS)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("status", help="查看控制面、Worker 和 Episode 状态").set_defaults(func=cmd_status)
+    sub.add_parser("workers", help="查看 Worker 上运行的 Episode").set_defaults(func=cmd_workers)
+    watch = sub.add_parser("watch", help="持续刷新运行状态")
+    watch.add_argument("--interval", type=float, default=2.0, help="刷新间隔（秒）")
+    watch.set_defaults(func=cmd_watch)
+    sub.add_parser("doctor", help="检查配置、服务和健康端点").set_defaults(func=cmd_doctor)
+
+    logs = sub.add_parser("logs", help="查看组件日志")
+    logs.add_argument("component", choices=sorted(SERVICES))
+    logs.add_argument("-f", "--follow", action="store_true")
+    logs.add_argument("-n", "--lines", type=int, default=100)
+    logs.set_defaults(func=cmd_logs)
+
+    env = sub.add_parser("env", help="创建、验证、发布或同步环境")
+    env.add_argument("hub_args", nargs=argparse.REMAINDER)
+    env.set_defaults(func=cmd_env)
+    hub = sub.add_parser("hub", help="登录或查看 Hub 配置")
+    hub.add_argument("hub_args", nargs=argparse.REMAINDER)
+    hub.set_defaults(func=cmd_hub)
+    sub.add_parser("version", help="显示已安装版本").set_defaults(func=cmd_version)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        args.func(args)
+        return 0
+    except CliError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

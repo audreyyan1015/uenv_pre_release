@@ -1,0 +1,25 @@
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[database]
+url = "sqlite:///var/lib/uenv/hub/hub.db"
+max_connections = 16
+
+[auth]
+# The default local-only Hub is intentionally easy to start. Enable token auth
+# before changing server.host to a non-loopback address.
+require_token = false
+
+[rate_limit]
+enabled = true
+requests_per_second = 100
+burst = 200
+
+[cors]
+allow_origins = ["*"]
+
+[packages]
+artifact_dir = "/var/lib/uenv/hub/artifacts"
+catalog_seed_dir = "/opt/uenv/current/share/hub-config/swe"
+seed_examples = true

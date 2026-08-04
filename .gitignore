@@ -26,6 +26,7 @@ secrets/*
 !/scripts/gen-worker-proto.sh
 !/scripts/proto-gen.sh
 !/scripts/gen-gsm8k-fixture.sh
+!/scripts/build-release.sh
 !/scripts/gen-math-fixture.sh
 !/scripts/export_swe_instances.py
 !/scripts/export_swe_pro_instances.py
@@ -97,3 +98,9 @@ server-state/
 /uenv-bridge/data/benchmarks/swesmith/raw/
 /uenv-bridge/data/benchmarks/swebenchpro/test.jsonl
 /uenv-bridge/data/benchmarks/swebenchpro/swe_bench_pro_full.csv
+
+# runtime data (production service state)
+/obs-data/
+/server-state/
+/trajectory-data/
+/logs/

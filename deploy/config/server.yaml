@@ -1,0 +1,38 @@
+# Generated paths use the standard UEnv layout. Keep Admin HTTP on loopback;
+# use `uenv status` locally or an SSH tunnel for remote administration.
+port: 50051
+admin_http_port: 50052
+admin_http_bind: "127.0.0.1"
+admin_http_token: ""
+
+scheduler:
+  strategy: round_robin
+  worker_degraded_threshold_secs: 400
+  schedule_retry_interval_ms: 500
+  heartbeat_interval_ms: 5000
+  heartbeat_timeout_secs: 30
+  worker_offline_timeout_secs: 90
+
+episode:
+  default_timeout_secs: 300
+  stale_warning_secs: 150
+  max_attempts: 3
+  broadcast_capacity: 1024
+  queue_dynamic: true
+  completed_async_ttl_secs: 3600
+  completed_async_max_entries: 10000
+
+persistence:
+  enabled: true
+  db_path: /var/lib/uenv/server/server-state.db
+  busy_timeout_ms: 5000
+  terminal_ttl_secs: 86400
+  idempotency_ttl_secs: 3600
+  recovery_grace_secs: 30
+  max_completed_entries: 100000
+  max_result_bytes: 16777216
+  max_database_bytes: 107374182400
+  max_wal_bytes: 1073741824
+  min_free_space_bytes: 1073741824
+  writer_queue_capacity: 4096
+  shutdown_grace_secs: 45
