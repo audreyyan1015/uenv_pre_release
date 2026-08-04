@@ -102,9 +102,9 @@ function normalizeTree(raw: unknown, runId: string, fallback: TreeGraph): TreeGr
   const nodes: TreeNode[] = nodesRaw.map((n, i) => {
     const r = asRecord(n) ?? {};
     const kindRaw = asString(r.kind, "episode");
-    const kind = (["run", "worker", "env_instance", "episode", "step"].includes(kindRaw)
-      ? kindRaw
-      : "episode") as TreeNode["kind"];
+    const kind = (
+      ["run", "worker", "env_instance", "episode", "step"].includes(kindRaw) ? kindRaw : "episode"
+    ) as TreeNode["kind"];
     return {
       node_id: asString(r.node_id, `tree-${i}`),
       parent_id: asString(r.parent_id) || undefined,
@@ -154,8 +154,10 @@ function normalizeEpisodes(raw: unknown): Record<string, EpisodeView> {
       correlation_id: asString(r.correlation_id, episodeId),
       attempt_id: asNumber(r.attempt_id, 1) || undefined,
       worker_id: asString(r.worker_id) || undefined,
+      env_type: asString(r.env_type) || undefined,
       step_index: typeof r.step_index === "number" ? r.step_index : undefined,
       status: asNodeStatus(r.status, "ACTIVE"),
+      stage: typeof r.stage === "string" ? asStage(r.stage) : undefined,
       event_seq: asNumber(r.event_seq, 0),
       last_source_ts: asNumber(r.last_source_ts, Date.now()),
     };
@@ -174,8 +176,14 @@ function normalizeWorkers(raw: unknown): Record<string, WorkerView> {
       worker_id: workerId,
       active_episodes: normalizeStringList(r.active_episodes),
       env_instances: normalizeStringList(r.env_instances),
-      last_heartbeat_ts: asNumber(r.last_heartbeat_ts, Date.now()),
+      last_heartbeat_ts: asNumber(r.last_heartbeat_ts, 0),
       status: asString(r.status) || undefined,
+      status_reason: asString(r.status_reason) || undefined,
+      status_changed_ts: typeof r.status_changed_ts === "number" ? r.status_changed_ts : undefined,
+      current_load: typeof r.current_load === "number" ? r.current_load : undefined,
+      capacity: typeof r.capacity === "number" ? r.capacity : undefined,
+      endpoint: asString(r.endpoint) || undefined,
+      supported_env_types: normalizeStringList(r.supported_env_types),
     };
   }
   return out;
@@ -187,11 +195,7 @@ function normalizeCursor(raw: unknown): EventCursor {
     last_event_id: asString(r.last_event_id) || asString(r.event_id) || undefined,
     last_source_id: asString(r.last_source_id) || asString(r.source_id) || undefined,
     last_seq:
-      typeof r.last_seq === "number"
-        ? r.last_seq
-        : typeof r.seq === "number"
-          ? r.seq
-          : undefined,
+      typeof r.last_seq === "number" ? r.last_seq : typeof r.seq === "number" ? r.seq : undefined,
     last_ingest_ts: typeof r.last_ingest_ts === "number" ? r.last_ingest_ts : undefined,
   };
 }

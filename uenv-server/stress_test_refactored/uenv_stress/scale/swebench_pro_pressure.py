@@ -2104,6 +2104,10 @@ def run_one(
 
     run_id = f"swebench-pro-pressure-{args.parallel_mode}-a{args.agents_per_node}-c{args.concurrency}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     server_run = f"/tmp/uenv-{run_id}"
+    # The pressure Server is isolated from production, including its Obs store.
+    # Keep the HTTP endpoint on server loopback so the test frontend can proxy it
+    # without exposing or sharing the production :50053 endpoint.
+    server_obs_http_listen = "127.0.0.1:18503"
     worker_run = f"/opt/uenv-stress/runs/{run_id}"
     worker_prefix = f"stress-{run_id}-worker-"
     worker_id = f"{worker_prefix}0000"
@@ -2517,7 +2521,21 @@ def run_one(
                 f"install -m 0644 {base.q(worker_run)}/agent_pb2_grpc.py {base.q(worker_run)}/generated/uenv/v1/agent_pb2_grpc.py && "
                 f"touch {base.q(worker_run)}/generated/uenv/__init__.py {base.q(worker_run)}/generated/uenv/v1/__init__.py",
             )
-        agent_pythonpath = f"{worker_run}/generated:{worker_run}/bundle/integrations/openhands"
+        # /usr/bin/protoc can be newer than the shared OpenHands virtualenv's
+        # protobuf runtime. Keep a matching wheel in this run directory rather
+        # than modifying the shared /opt/openhands environment.
+        isolated_pydeps = f"{worker_run}/pydeps"
+        for node in active_nodes:
+            base.run(
+                worker_clients[node.host],
+                " ".join([
+                    base.q(OPENHANDS_PYTHON), "-m", "pip", "install",
+                    "--disable-pip-version-check", "--target", base.q(isolated_pydeps),
+                    "protobuf==7.35.1", "grpcio==1.83.0",
+                ]),
+                timeout=180,
+            )
+        agent_pythonpath = f"{isolated_pydeps}:{worker_run}/generated:{worker_run}/bundle/integrations/openhands"
         for node in active_nodes:
             _, grpc_import_output, _ = base.run(
                 worker_clients[node.host],
@@ -2543,7 +2561,8 @@ def run_one(
         server_log_filter = "info" if args.registered_workers > 1 or scale_purpose.startswith("single_worker") else "warn"
         server_command = " ".join([
             "env", "UENV_SERVER_CONFIG_STRICT=1", "UENV_TRAJECTORY_ENABLED=0",
-            "UENV_OBS_ENABLED=0", "UENV_LOG_ANSI=0",
+            "UENV_OBS_ENABLED=1", f"UENV_OBS_HTTP_LISTEN={server_obs_http_listen}",
+            f"UENV_OBS_DATA_DIR={server_run}/obs-data", "UENV_LOG_ANSI=0",
             f"UENV_ADDR={base.SERVER_PRIVATE_IP}:{base.SERVER_PORT}",
             f"UENV_SWE_GATEWAY_API_KEY=stress-gateway-{run_id}",
             f"UENV_CONFIG_PATH={server_run}/server.yaml", f"RUST_LOG={server_log_filter}", base.SERVER_BIN,
@@ -2804,6 +2823,7 @@ def run_one(
             "worker_ports": worker_ports,
             "gateway_ports": gateway_ports,
             "obs_ports": obs_ports,
+            "server_obs_http_listen": server_obs_http_listen,
             "agent_id": (
                 agent_id
                 if single_node and args.agents_per_node == 1

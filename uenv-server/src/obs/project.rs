@@ -1,6 +1,6 @@
 //! 将控制面 / StreamReport 转译为 ObservabilityEvent。
 
-use super::event::{now_ms, resolve_training_run_id, ObservabilityEvent};
+use super::event::{ObservabilityEvent, now_ms, resolve_training_run_id};
 use crate::proto::v1::{EpisodeRequest, EpisodeResult, StreamReport};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,6 +21,9 @@ fn training_run_from_req(req: &EpisodeRequest) -> String {
         .metadata
         .get("training_run_id")
         .or_else(|| req.metadata.get("run_id"))
+        // Scale drivers use a run-scoped stress identifier rather than the
+        // training API's field. Keep it observable as a first-class run.
+        .or_else(|| req.metadata.get("stress_run_id"))
     {
         if !v.is_empty() {
             return resolve_training_run_id(Some(v.as_str()));
@@ -31,14 +34,14 @@ fn training_run_from_req(req: &EpisodeRequest) -> String {
         if let Some(v) = payload
             .pointer("/metadata/training_run_id")
             .or_else(|| payload.pointer("/metadata/run_id"))
+            .or_else(|| payload.pointer("/metadata/stress_run_id"))
+            .or_else(|| payload.pointer("/sample_context/training_run_id"))
+            .or_else(|| payload.pointer("/sample_context/stress_run_id"))
             .and_then(|x| x.as_str())
         {
             return resolve_training_run_id(Some(v));
         }
-        if let Some(v) = payload
-            .get("training_run_id")
-            .and_then(|x| x.as_str())
-        {
+        if let Some(v) = payload.get("training_run_id").and_then(|x| x.as_str()) {
             return resolve_training_run_id(Some(v));
         }
     }
@@ -95,6 +98,13 @@ pub fn episode_submitted(req: &EpisodeRequest, epoch: u64) -> ObservabilityEvent
     }
 }
 
+/// Episode 已通过 admission，开始为其选择执行资源。
+pub fn episode_scheduling(req: &EpisodeRequest, epoch: u64) -> ObservabilityEvent {
+    let mut event = episode_submitted(req, epoch);
+    event.event_type = "EPISODE_SCHEDULING".into();
+    event
+}
+
 pub fn episode_dispatched(
     req: &EpisodeRequest,
     worker_id: &str,
@@ -134,7 +144,11 @@ pub fn episode_dispatched(
     vec![dispatched, attempt]
 }
 
-pub fn from_stream_report(report: &StreamReport, req: Option<&EpisodeRequest>, epoch: u64) -> Option<ObservabilityEvent> {
+pub fn from_stream_report(
+    report: &StreamReport,
+    req: Option<&EpisodeRequest>,
+    epoch: u64,
+) -> Option<ObservabilityEvent> {
     let event_type = match report.report_type {
         2 => "STEP_COMPLETE", // STEP_COMPLETE
         _ => {
@@ -189,19 +203,18 @@ pub fn from_stream_report(report: &StreamReport, req: Option<&EpisodeRequest>, e
     })
 }
 
-pub fn episode_terminal(req: &EpisodeRequest, result: &EpisodeResult, epoch: u64) -> Vec<ObservabilityEvent> {
+fn episode_result_event(
+    req: &EpisodeRequest,
+    result: &EpisodeResult,
+    epoch: u64,
+    event_type: &str,
+) -> ObservabilityEvent {
     let run_id = training_run_from_req(req);
-    let status = result.status.to_ascii_lowercase();
-    let completed_type = if status == "completed" || status == "success" {
-        "EPISODE_COMPLETED"
-    } else {
-        "EPISODE_FAILED"
-    };
-    let mk = |event_type: &str| ObservabilityEvent {
+    ObservabilityEvent {
         event_id: Uuid::new_v4().to_string(),
         schema_version: "1".into(),
         correlation_id: req.correlation_id.clone(),
-        training_run_id: Some(run_id.clone()),
+        training_run_id: Some(run_id),
         adapter_run_id: None,
         batch_id: batch_from_req(req),
         episode_id: Some(result.episode_id.clone()),
@@ -224,8 +237,33 @@ pub fn episode_terminal(req: &EpisodeRequest, result: &EpisodeResult, epoch: u64
             "trajectory_id": result.trajectory_id,
             "error_message": result.error_message,
         })),
+    }
+}
+
+/// Worker/Agent 的结果已到达，Server 正在校验并保存结果。
+pub fn episode_reporting(
+    req: &EpisodeRequest,
+    result: &EpisodeResult,
+    epoch: u64,
+) -> ObservabilityEvent {
+    episode_result_event(req, result, epoch, "EPISODE_REPORTING")
+}
+
+pub fn episode_terminal(
+    req: &EpisodeRequest,
+    result: &EpisodeResult,
+    epoch: u64,
+) -> Vec<ObservabilityEvent> {
+    let status = result.status.to_ascii_lowercase();
+    let completed_type = if status == "completed" || status == "success" {
+        "EPISODE_COMPLETED"
+    } else {
+        "EPISODE_FAILED"
     };
-    vec![mk(completed_type), mk("EPISODE_CLOSED")]
+    vec![
+        episode_result_event(req, result, epoch, completed_type),
+        episode_result_event(req, result, epoch, "EPISODE_CLOSED"),
+    ]
 }
 
 pub fn attempt_closed(req: &EpisodeRequest, epoch: u64, reason: &str) -> ObservabilityEvent {
@@ -290,4 +328,35 @@ pub fn worker_heartbeat(worker_id: &str, epoch: u64) -> ObservabilityEvent {
     ev.seq = next_server_seq();
     ev.source_ts = now_ms();
     ev
+}
+
+pub fn worker_status_snapshot(
+    workers: Vec<super::event::WorkerStatusObservation>,
+    epoch: u64,
+    replace: bool,
+) -> ObservabilityEvent {
+    ObservabilityEvent {
+        event_id: Uuid::new_v4().to_string(),
+        schema_version: "1".into(),
+        correlation_id: format!("worker-status:{epoch}"),
+        training_run_id: Some(resolve_training_run_id(None)),
+        adapter_run_id: None,
+        batch_id: None,
+        episode_id: None,
+        attempt_id: None,
+        worker_id: None,
+        env_instance_id: None,
+        step_index: None,
+        dispatch_lease_id: None,
+        scheduler_epoch: Some(epoch),
+        env_type: None,
+        source_id: server_source_id(epoch),
+        module: "server".into(),
+        entity_type: "worker_fleet".into(),
+        entity_id: "worker-fleet".into(),
+        event_type: "WORKER_STATUS_SNAPSHOT".into(),
+        seq: next_server_seq(),
+        source_ts: now_ms(),
+        payload: Some(json!({ "workers": workers, "replace": replace })),
+    }
 }

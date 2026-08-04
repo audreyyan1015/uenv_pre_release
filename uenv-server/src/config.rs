@@ -36,8 +36,11 @@ pub struct SchedulerConfig {
     pub schedule_retry_interval_ms: u64,
     /// Server 建议 Worker 的心跳间隔（默认 5000ms）
     pub heartbeat_interval_ms: u64,
-    /// Worker 超过此秒数无心跳则认为连接断开（默认 30s，约 6 个心跳周期）
+    /// Worker 超过此秒数无心跳则标记为需要关注（默认 30s，约 6 个心跳周期）
     pub heartbeat_timeout_secs: u64,
+    /// Worker 持续无心跳超过此秒数后，在 Obs 中从“需要关注”转为“已离线”。
+    /// 必须大于 heartbeat_timeout_secs，默认 90s。
+    pub worker_offline_timeout_secs: u64,
     /// AgentJob 在 Agent 心跳超时后额外等待的秒数；超过后会回收旧 lease 并重入队。
     pub agent_job_reclaim_grace_secs: u64,
     /// 多池路由：benchmark 变体 → Agent 池 的映射（如 {pro: openhands-pro}）。
@@ -115,6 +118,7 @@ impl Default for SchedulerConfig {
             schedule_retry_interval_ms: 500,
             heartbeat_interval_ms: 5000,
             heartbeat_timeout_secs: 30,
+            worker_offline_timeout_secs: 90,
             agent_job_reclaim_grace_secs: 15,
             agent_pool_routing: HashMap::new(),
         }
@@ -223,6 +227,12 @@ impl ServerConfig {
         if self.scheduler.heartbeat_timeout_secs == 0 {
             return Err("scheduler.heartbeat_timeout_secs must be greater than 0".to_string());
         }
+        if self.scheduler.worker_offline_timeout_secs <= self.scheduler.heartbeat_timeout_secs {
+            return Err(
+                "scheduler.worker_offline_timeout_secs must be greater than heartbeat_timeout_secs"
+                    .to_string(),
+            );
+        }
         if self.episode.default_timeout_secs == 0 {
             return Err("episode.default_timeout_secs must be greater than 0".to_string());
         }
@@ -308,6 +318,7 @@ episode:
         assert_eq!(cfg.scheduler.schedule_retry_interval_ms, 500);
         assert_eq!(cfg.scheduler.heartbeat_interval_ms, 5000);
         assert_eq!(cfg.scheduler.heartbeat_timeout_secs, 30);
+        assert_eq!(cfg.scheduler.worker_offline_timeout_secs, 90);
         assert_eq!(cfg.scheduler.agent_job_reclaim_grace_secs, 15);
         assert_eq!(cfg.episode.default_timeout_secs, 300);
         assert_eq!(cfg.episode.stale_warning_secs, 150);
@@ -332,6 +343,7 @@ episode:
         assert_eq!(cfg.scheduler.schedule_retry_interval_ms, 250);
         assert_eq!(cfg.scheduler.heartbeat_interval_ms, 3000);
         assert_eq!(cfg.scheduler.heartbeat_timeout_secs, 30); // 未在 YAML 中设置，应为默认值
+        assert_eq!(cfg.scheduler.worker_offline_timeout_secs, 90);
         assert_eq!(cfg.scheduler.agent_job_reclaim_grace_secs, 15);
         assert_eq!(cfg.episode.default_timeout_secs, 180);
         assert_eq!(cfg.episode.stale_warning_secs, 400);
@@ -410,6 +422,18 @@ episode:
         let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
         let err = cfg.validate().expect_err("timeout should fail");
         assert!(err.contains("default_timeout_secs"));
+    }
+
+    #[test]
+    fn config_offline_timeout_must_exceed_attention_timeout() {
+        let yaml = r#"
+scheduler:
+  heartbeat_timeout_secs: 30
+  worker_offline_timeout_secs: 30
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let err = cfg.validate().expect_err("offline timeout should fail");
+        assert!(err.contains("worker_offline_timeout_secs"));
     }
 
     #[test]

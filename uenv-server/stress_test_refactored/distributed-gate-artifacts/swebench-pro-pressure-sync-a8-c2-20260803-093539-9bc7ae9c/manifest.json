@@ -1,0 +1,1642 @@
+{
+  "agent_api_ports": [
+    24000,
+    24001,
+    24002,
+    24003,
+    24004,
+    24005,
+    24006,
+    24007
+  ],
+  "agent_count_per_node": 8,
+  "agent_count_total": 16,
+  "agent_health_ports": [
+    24100,
+    24101,
+    24102,
+    24103,
+    24104,
+    24105,
+    24106,
+    24107
+  ],
+  "agent_id": {
+    "8.130.65.20": [
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-00",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-01",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-02",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-03",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-04",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-05",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-06",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-07"
+    ],
+    "8.145.51.129": [
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-00",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-01",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-02",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-03",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-04",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-05",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-06",
+      "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-07"
+    ]
+  },
+  "agent_max_concurrent": 2,
+  "agent_slots": {
+    "8.130.65.20": [
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-00",
+        "agent_index": 0,
+        "api_port": 24000,
+        "health_port": 24100,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-00.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-00"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-01",
+        "agent_index": 1,
+        "api_port": 24001,
+        "health_port": 24101,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-01.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-01"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-02",
+        "agent_index": 2,
+        "api_port": 24002,
+        "health_port": 24102,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-02.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-02"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-03",
+        "agent_index": 3,
+        "api_port": 24003,
+        "health_port": 24103,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-03.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-03"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-04",
+        "agent_index": 4,
+        "api_port": 24004,
+        "health_port": 24104,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-04.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-04"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-05",
+        "agent_index": 5,
+        "api_port": 24005,
+        "health_port": 24105,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-05.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-05"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-06",
+        "agent_index": 6,
+        "api_port": 24006,
+        "health_port": 24106,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-06.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-06"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0000-07",
+        "agent_index": 7,
+        "api_port": 24007,
+        "health_port": 24107,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-07.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-07"
+      }
+    ],
+    "8.145.51.129": [
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-00",
+        "agent_index": 0,
+        "api_port": 24000,
+        "health_port": 24100,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-00.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-00"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-01",
+        "agent_index": 1,
+        "api_port": 24001,
+        "health_port": 24101,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-01.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-01"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-02",
+        "agent_index": 2,
+        "api_port": 24002,
+        "health_port": 24102,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-02.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-02"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-03",
+        "agent_index": 3,
+        "api_port": 24003,
+        "health_port": 24103,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-03.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-03"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-04",
+        "agent_index": 4,
+        "api_port": 24004,
+        "health_port": 24104,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-04.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-04"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-05",
+        "agent_index": 5,
+        "api_port": 24005,
+        "health_port": 24105,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-05.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-05"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-06",
+        "agent_index": 6,
+        "api_port": 24006,
+        "health_port": 24106,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-06.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-06"
+      },
+      {
+        "agent_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-agent-0001-07",
+        "agent_index": 7,
+        "api_port": 24007,
+        "health_port": 24107,
+        "log_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/agent-07.log",
+        "runs_dir": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands/agent-07"
+      }
+    ]
+  },
+  "container_concurrency": 32,
+  "dataset": {
+    "name": "SWE-bench Pro",
+    "sampling": {
+      "catalog_has_image_fields": false,
+      "catalog_path": "/opt/uenv-stress/datasets/swebench_pro/catalog.json",
+      "catalog_size": 731,
+      "instance_list_path": "/opt/uenv-stress/datasets/swebench_pro/swebench_pro_instances.json",
+      "requested_episodes": 50,
+      "reused_instances": false,
+      "selected_instance_ids": [
+        "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+        "instance_element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8-vnan",
+        "instance_navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+        "instance_ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+        "instance_tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+        "instance_flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+        "instance_internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+        "instance_qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+        "instance_NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+        "instance_protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+        "instance_future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+        "instance_gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+        "instance_element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc-vnan",
+        "instance_navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+        "instance_ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+        "instance_tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+        "instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+        "instance_internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+        "instance_qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+        "instance_NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+        "instance_protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+        "instance_future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+        "instance_gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+        "instance_element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e-vnan",
+        "instance_navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+        "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+        "instance_tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+        "instance_flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+        "instance_internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d34c41e76fe7a",
+        "instance_qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+        "instance_NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+        "instance_protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+        "instance_future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+        "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037",
+        "instance_element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b-vnan",
+        "instance_navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+        "instance_ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+        "instance_tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+        "instance_flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+        "instance_internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+        "instance_qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b367",
+        "instance_NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+        "instance_protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+        "instance_future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+        "instance_gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+        "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+        "instance_navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+        "instance_ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+        "instance_tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+        "instance_flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874"
+      ],
+      "unique_instance_count": 50
+    }
+  },
+  "docker_image_inventory": {
+    "per_node": {
+      "8.130.65.20": {
+        "cached_images": [
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf81299 8559cfe5ab3f 3.94GB",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d3 e9b34a0d5e6d 4.27GB",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf81299 6633c789c115 3.06GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac780366 651cef1f2463 2.05GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b 0d0a22254971 3.4GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2 c2bc1bfb2a57 1.94GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a 09ae56de9830 1.83GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113 6a4d8fcb81ac 10GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1 764917812cfd 3.85GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da d204c65febef 4.37GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504 e827f6e6bcd1 4.79GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08 7bd4519d0859 3.98GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef 0da6f59abd4c 1.98GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c eaba5599a5cc 2.33GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7 b4b2ba271d6b 3.97GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113 da110960553b 7.29GB",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda 83c81e3fe3de 3.89GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc a281f2742fff 10GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f 402fc54d44f7 7.13GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff03 786a2345d8c9 7.13GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5 b34d740ddf0e 6.64GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c b151cfd1bdb2 4.92GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587 3db4e5ee7455 6.07GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af 12f296580784 6.21GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1 f355fc6bd16e 5.82GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8 950d2d09762f 6.85GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa 444c3b27e85c 8.08GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5 a03c9b71e88a 6.79GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874 d3a8244c35e2 2.08GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2 773abdfb55ed 1.64GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86 e69f780dc5f1 1.53GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59 e51742c4afb0 1.66GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6 cd3ee43590dd 20.2GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902 476320aaefd1 16.5GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858 39b648921c0e 15GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18 8e05e1bb0d91 14.3GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b 595194b5e652 3.81GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf f5cd1b819975 4.23GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf 3166fafce525 4.13GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf 2121c847c6e4 4.1GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029 25a356916cd3 4.11GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516 dd648b24741b 3.35GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e 4442371f7703 3.28GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e 4926115a930a 2.88GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed f7b1c1ba06e3 3.34GB",
+          "jefzda/sweap-images:element-hq.element-web-element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan 1f52ac938fa1 3.47GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8 531997732064 3.84GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc acbaefedb42f 3.87GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e 930c4ba0d157 3.79GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b ae3932151d19 3.94GB"
+        ],
+        "known_astropy_image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest",
+        "known_astropy_image_id": "",
+        "known_astropy_image_id_matches_prior": false,
+        "known_astropy_image_present": false,
+        "note": "Catalog entries do not carry docker image names here; the real OpenHands/official runner resolves environments at runtime."
+      },
+      "8.145.51.129": {
+        "cached_images": [
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf81299 8559cfe5ab3f 3.94GB",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d3 e9b34a0d5e6d 4.27GB",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf81299 6633c789c115 3.06GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac780366 651cef1f2463 2.05GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b 0d0a22254971 3.4GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2 c2bc1bfb2a57 1.94GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a 09ae56de9830 1.83GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113 6a4d8fcb81ac 10GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1 764917812cfd 3.85GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da d204c65febef 4.37GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504 e827f6e6bcd1 4.79GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08 7bd4519d0859 3.98GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef 0da6f59abd4c 1.98GB",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c eaba5599a5cc 2.33GB",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7 b4b2ba271d6b 3.97GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113 da110960553b 7.29GB",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda 83c81e3fe3de 3.89GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc a281f2742fff 10GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f 402fc54d44f7 7.13GB",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff03 786a2345d8c9 7.13GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5 b34d740ddf0e 6.64GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c b151cfd1bdb2 4.92GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587 3db4e5ee7455 6.07GB",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af 12f296580784 6.21GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1 f355fc6bd16e 5.82GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8 950d2d09762f 6.85GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa 444c3b27e85c 8.08GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5 a03c9b71e88a 6.79GB",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874 d3a8244c35e2 2.08GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2 773abdfb55ed 1.64GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86 e69f780dc5f1 1.53GB",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59 e51742c4afb0 1.66GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6 cd3ee43590dd 20.2GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902 476320aaefd1 16.5GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858 39b648921c0e 15GB",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18 8e05e1bb0d91 14.3GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b 595194b5e652 3.81GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf f5cd1b819975 4.23GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf 3166fafce525 4.13GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf 2121c847c6e4 4.1GB",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029 25a356916cd3 4.11GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516 dd648b24741b 3.35GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e 4442371f7703 3.28GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e 4926115a930a 2.88GB",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed f7b1c1ba06e3 3.34GB",
+          "jefzda/sweap-images:element-hq.element-web-element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan 1f52ac938fa1 3.47GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8 531997732064 3.84GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc acbaefedb42f 3.87GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e 930c4ba0d157 3.79GB",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b ae3932151d19 3.94GB"
+        ],
+        "known_astropy_image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest",
+        "known_astropy_image_id": "",
+        "known_astropy_image_id_matches_prior": false,
+        "known_astropy_image_present": false,
+        "note": "Catalog entries do not carry docker image names here; the real OpenHands/official runner resolves environments at runtime."
+      }
+    }
+  },
+  "environment": "swe_openhands",
+  "episode_batch_size": 128,
+  "episode_offset": 0,
+  "episode_ordinal_end_exclusive": 2560,
+  "episode_ordinal_start": 0,
+  "execution_boundary": "real OpenHands runner + real UEnv AgentControl/runtime gateway/container path; only the LLM endpoint is simulated when llm_kind=simulator",
+  "expected_container_concurrency": 32,
+  "fleet_metrics_path": {
+    "8.130.65.20": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/fleet-metrics.json",
+    "8.145.51.129": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/fleet-metrics.json"
+  },
+  "gate": 4,
+  "gateway_ports": [
+    22000,
+    22001,
+    22002,
+    22003,
+    22004,
+    22005,
+    22006,
+    22007,
+    22008,
+    22009,
+    22010,
+    22011,
+    22012,
+    22013,
+    22014,
+    22015,
+    22016,
+    22017,
+    22018,
+    22019,
+    22020,
+    22021,
+    22022,
+    22023,
+    22024,
+    22025,
+    22026,
+    22027,
+    22028,
+    22029,
+    22030,
+    22031,
+    22032,
+    22033,
+    22034,
+    22035,
+    22036,
+    22037,
+    22038,
+    22039,
+    22040,
+    22041,
+    22042,
+    22043,
+    22044,
+    22045,
+    22046,
+    22047,
+    22048,
+    22049,
+    22050,
+    22051,
+    22052,
+    22053,
+    22054,
+    22055,
+    22056,
+    22057,
+    22058,
+    22059,
+    22060,
+    22061,
+    22062,
+    22063
+  ],
+  "llm_config": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/openhands-llm-simulator.json",
+  "llm_config_sha256": "8acbf0ea15d3c0f2b7c5d13acd6f4f8519fdb8b275c12284904f1448cc6e09d4",
+  "llm_kind": "simulator",
+  "llm_preflight": {
+    "auth_and_minimal_call_valid": true,
+    "base_url": "http://127.0.0.1:8888/v1",
+    "model": "openai/uenv-swe-simulator",
+    "response_id_present": true,
+    "schema_valid": true,
+    "transport": "openhands.sdk.LLM.completion"
+  },
+  "llm_simulator": {
+    "effective_trace_corpus_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c/trace-corpus",
+    "enabled": true,
+    "mode": "trace_replay",
+    "replay_wait_ms": {
+      "miss_policy": "trace replay miss fails the run",
+      "source": "frozen trace turn replay_wait_ms",
+      "zero_latency": false
+    },
+    "seed": 20260720,
+    "trace_corpus_path": "/home/uenv-stress/trace-corpora-mixed-20260726/swebench_pro/swebench_pro.jsonl",
+    "trace_sampling_strategy": "round_robin_episode"
+  },
+  "max_steps": 50,
+  "min_episode_waves": 10,
+  "mode": "llm",
+  "node_worker_indexes": {
+    "8.130.65.20": [
+      0,
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      22,
+      24,
+      26,
+      28,
+      30,
+      32,
+      34,
+      36,
+      38,
+      40,
+      42,
+      44,
+      46,
+      48,
+      50,
+      52,
+      54,
+      56,
+      58,
+      60,
+      62
+    ],
+    "8.145.51.129": [
+      1,
+      3,
+      5,
+      7,
+      9,
+      11,
+      13,
+      15,
+      17,
+      19,
+      21,
+      23,
+      25,
+      27,
+      29,
+      31,
+      33,
+      35,
+      37,
+      39,
+      41,
+      43,
+      45,
+      47,
+      49,
+      51,
+      53,
+      55,
+      57,
+      59,
+      61,
+      63
+    ]
+  },
+  "obs_ports": [
+    18002,
+    18003,
+    18004,
+    18005,
+    18006,
+    18007,
+    18008,
+    18009,
+    18010,
+    18011,
+    18012,
+    18013,
+    18014,
+    18015,
+    18016,
+    18017,
+    18018,
+    18019,
+    18020,
+    18021,
+    18022,
+    18023,
+    18024,
+    18025,
+    18026,
+    18027,
+    18028,
+    18029,
+    18030,
+    18031,
+    18032,
+    18033,
+    18034,
+    18035,
+    18036,
+    18037,
+    18038,
+    18039,
+    18040,
+    18041,
+    18042,
+    18043,
+    18044,
+    18045,
+    18046,
+    18047,
+    18048,
+    18049,
+    18050,
+    18051,
+    18052,
+    18053,
+    18054,
+    18055,
+    18056,
+    18057,
+    18058,
+    18059,
+    18060,
+    18061,
+    18062,
+    18063,
+    18064,
+    18065
+  ],
+  "openhands_max_iterations": 50,
+  "owned_pids": {
+    "per_node": {
+      "8.130.65.20": {
+        "agent": 1455029,
+        "agents": [
+          1455029,
+          1455049,
+          1455070,
+          1455091,
+          1455112,
+          1455133,
+          1455154,
+          1455175
+        ],
+        "fleet_supervisor": 1454734,
+        "llm_simulator": 1454684,
+        "monitor": 1455197,
+        "worker": 1454735,
+        "workers": [
+          1454735,
+          1454736,
+          1454737,
+          1454738,
+          1454739,
+          1454740,
+          1454741,
+          1454793,
+          1454799,
+          1454800,
+          1454801,
+          1454820,
+          1454843,
+          1454852,
+          1454853,
+          1454862,
+          1454871,
+          1454888,
+          1454897,
+          1454901,
+          1454902,
+          1454911,
+          1454925,
+          1454934,
+          1454943,
+          1454960,
+          1454961,
+          1454978,
+          1454987,
+          1454988,
+          1454997,
+          1455014
+        ]
+      },
+      "8.145.51.129": {
+        "agent": 890618,
+        "agents": [
+          890618,
+          890639,
+          890660,
+          890681,
+          890702,
+          890725,
+          890746,
+          890766
+        ],
+        "fleet_supervisor": 890323,
+        "llm_simulator": 890273,
+        "monitor": 890787,
+        "worker": 890324,
+        "workers": [
+          890324,
+          890325,
+          890326,
+          890327,
+          890328,
+          890329,
+          890330,
+          890339,
+          890364,
+          890396,
+          890397,
+          890413,
+          890415,
+          890421,
+          890444,
+          890454,
+          890463,
+          890469,
+          890481,
+          890483,
+          890496,
+          890513,
+          890514,
+          890523,
+          890536,
+          890549,
+          890558,
+          890567,
+          890568,
+          890585,
+          890594,
+          890603
+        ]
+      }
+    },
+    "server": 398191
+  },
+  "parallel_mode": "sync",
+  "protected_server": {
+    "cmdline": "/usr/local/bin/uenv-adapter-core",
+    "exe": "/usr/local/bin/uenv-adapter-core",
+    "listener_records": {
+      "50052": "LISTEN 0      128        127.0.0.1:50052 0.0.0.0:* users:((\"uenv-adapter-co\",pid=239618,fd=19))             ",
+      "50053": "LISTEN 0      128        127.0.0.1:50053 0.0.0.0:* users:((\"uenv-adapter-co\",pid=239618,fd=21))             ",
+      "8077": "LISTEN 0      128          0.0.0.0:8077  0.0.0.0:* users:((\"uenv-adapter-co\",pid=239618,fd=18))             ",
+      "8088": "LISTEN 0      128          0.0.0.0:8088  0.0.0.0:* users:((\"uenv-adapter-co\",pid=239618,fd=20))             "
+    },
+    "pid": 239618,
+    "ports": [
+      50052,
+      50053,
+      8077,
+      8088
+    ],
+    "starttime_ticks": 300614949
+  },
+  "registered_workers": 64,
+  "run_id": "swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c",
+  "scale_purpose": "worker_scale",
+  "selected_image_presence": {
+    "per_node": {
+      "8.130.65.20": {
+        "all_present": true,
+        "image_pull_policy": "local_only",
+        "missing": [],
+        "records": [
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+            "image_id": "sha256:402fc54d44f7cd6d9e08c693abc830a44bcbdd676ec8b533131df3f8558e5750",
+            "instance_id": "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8",
+            "image_id": "sha256:531997732064fe5255442065183115c0a440d0809ea0738f55e4e056c1e55f00",
+            "instance_id": "instance_element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+            "image_id": "sha256:d204c65febef2703c23b9ed208891e89a09d14a0be850db6b3e1cbdb37b187f4",
+            "instance_id": "instance_navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+            "image_id": "sha256:773abdfb55ede48c1128d26ed2a945d864971c564581b991f6278a2934056ba7",
+            "instance_id": "instance_ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "image_id": "sha256:3166fafce52591210fb2216301e6a406bb04eaf96f51432a041907cbaee4da32",
+            "instance_id": "instance_tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+            "image_id": "sha256:950d2d09762feb513ef9708aca93c15ac148e1aed54444e1fadd3049821281a1",
+            "instance_id": "instance_flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf81299",
+            "image_id": "sha256:6633c789c115f9ffdfef84d11a9719de61b1fa6f52df73b3dee0294eca1b02e8",
+            "instance_id": "instance_internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac780366",
+            "image_id": "sha256:651cef1f2463f88247b5bfc9bc94a8fd230b5fbea37bf0f9765fb313d8171fb9",
+            "instance_id": "instance_qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "image_id": "sha256:4926115a930a309f50d8859a1bc154ea27b9b9d84374b06ac2a328f334d4c813",
+            "instance_id": "instance_NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+            "image_id": "sha256:39b648921c0e997c18e403022d7f32380f7fb780b4efa5bcc18b3e7efd004410",
+            "instance_id": "instance_protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+            "image_id": "sha256:3db4e5ee74556a8fdbf048ff11e2c8d7166e6031c1b57a863c4c0b09ce12fa04",
+            "instance_id": "instance_future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+            "image_id": "sha256:da110960553b88767472ce02015296c1ec0a02ef7538d17862e38fafc2e4954f",
+            "instance_id": "instance_gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc",
+            "image_id": "sha256:acbaefedb42f446ac017ddc4bce67d1506105bb49822ba31618c1074f0250c41",
+            "instance_id": "instance_element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+            "image_id": "sha256:7bd4519d0859893f1a0c7f3d562ca57c325d53df7ac956e2a1e09419e16405fb",
+            "instance_id": "instance_navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+            "image_id": "sha256:e51742c4afb02aeb3a9d7f625a599d79001d4147b8dff5cc0e137efaf5789f34",
+            "instance_id": "instance_ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "image_id": "sha256:f5cd1b8199757cabfc23b2a8470f3bc68ab82fd587c25b24b5a37a476276b110",
+            "instance_id": "instance_tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+            "image_id": "sha256:a03c9b71e88aac24320e670a991d74cd882488cb98f64d3a2f4f4201b97db2fe",
+            "instance_id": "instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda",
+            "image_id": "sha256:83c81e3fe3dee12e322043ff3f652a0d42344309f254f365aa96e63fa623fd07",
+            "instance_id": "instance_internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c",
+            "image_id": "sha256:eaba5599a5ccabff47392f8d1a5af26df9385774e2940efc185914376ddf866b",
+            "instance_id": "instance_qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+            "image_id": "sha256:dd648b24741b70e25f46f577950d5966984d44e2591fcd767c1ce0c18785897b",
+            "instance_id": "instance_NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+            "image_id": "sha256:8e05e1bb0d9138d7c763132165dd39759719e82607e6d1f27f9f8eaeecfb1e46",
+            "instance_id": "instance_protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+            "image_id": "sha256:b151cfd1bdb2ed7646ab8eae19258d927359d65ff9d4f8e7c6246dd5d3004c7a",
+            "instance_id": "instance_future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+            "image_id": "sha256:6a4d8fcb81acead3c1281cd619c883f2e01b1454fa819ed89c90e5d3e8a5aa49",
+            "instance_id": "instance_gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e",
+            "image_id": "sha256:930c4ba0d157d726e92a5977150f85cd0e4b94c3c33816ace45309b635968b69",
+            "instance_id": "instance_element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+            "image_id": "sha256:b4b2ba271d6b3bd81b40c4791a45a29c4cd2d6d0930567377ffffba5f4176862",
+            "instance_id": "instance_navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+            "image_id": "sha256:09ae56de983001253dbbcb2453bbfd41fc789ee642190e02de6dd84a314c508a",
+            "instance_id": "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+            "image_id": "sha256:25a356916cd3a8128d3451c687f4e997ccb1e86e368756868d96308f2015b54b",
+            "instance_id": "instance_tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+            "image_id": "sha256:f355fc6bd16ea2cbd12295b7c74bcaf4618220fe95f2498a90b8f0a8c617fb39",
+            "instance_id": "instance_flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d3",
+            "image_id": "sha256:e9b34a0d5e6dadcc796b6787b51b82bada94176bcf37212c951bdc080e4bc7ba",
+            "instance_id": "instance_internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d34c41e76fe7a",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef",
+            "image_id": "sha256:0da6f59abd4c66f15f805c4bb50007121ae5a1158780edd2fc743d03a736dde7",
+            "instance_id": "instance_qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "image_id": "sha256:4442371f7703af5f5b0436939eca14a6f8f261dfc47c1a3acc20e88cc876bfda",
+            "instance_id": "instance_NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+            "image_id": "sha256:476320aaefd1897235e2a994be8aedca0b5aca89adcdfc5f5bfc452e3c5da407",
+            "instance_id": "instance_protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+            "image_id": "sha256:b34d740ddf0ec1a6fd3598bf320a0fe02c0ca5e0893a2a5ce1e4ea33a8dcd174",
+            "instance_id": "instance_future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff03",
+            "image_id": "sha256:786a2345d8c9f73a29172e0c51e8abaaa4c6c459c597403c88112b2651ffc63d",
+            "instance_id": "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b",
+            "image_id": "sha256:ae3932151d19d364fbafbca8bde0460ffe3ae6f8c6ef8fa4075debc0daae1665",
+            "instance_id": "instance_element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+            "image_id": "sha256:e827f6e6bcd1cca14ac91513311b008b5478e592ea932c4053463c79587b6916",
+            "instance_id": "instance_navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+            "image_id": "sha256:e69f780dc5f12bb6c329ac68b9d2098105cc3258fe24251b8537cd42735d465c",
+            "instance_id": "instance_ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+            "image_id": "sha256:595194b5e652276b5cc0eef4c559f33e5b52f7367408de8e646c1e6e6b687330",
+            "instance_id": "instance_tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+            "image_id": "sha256:444c3b27e85c583faea430551f729f40a6712686da129d9e8f1d2a4dbcf2d1bf",
+            "instance_id": "instance_flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf81299",
+            "image_id": "sha256:8559cfe5ab3fe73e258ab7823bb9d2566e06f9d8ca9827919504178fcd24e153",
+            "instance_id": "instance_internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b",
+            "image_id": "sha256:0d0a222549711e53d008a0c445f9ad0ced25733cc0b4c7b6925c8e397cce4b2c",
+            "instance_id": "instance_qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b367",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+            "image_id": "sha256:f7b1c1ba06e3ae1574ab798345e64e16e3947e9d0ffc9b0e9f49961525878dd1",
+            "instance_id": "instance_NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+            "image_id": "sha256:cd3ee43590dda877b3f8ab40a3c39222c031977e6aa33245be5b8da363e49d44",
+            "instance_id": "instance_protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+            "image_id": "sha256:12f2965807845bfcfb0ffce1cb74116439abd5c57954cf94d27cebd882f70bf6",
+            "instance_id": "instance_future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc",
+            "image_id": "sha256:a281f2742fff00c8292103f7fe0b25e5a2da1f606a25c2068df5442ddb40de2f",
+            "instance_id": "instance_gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-web-element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+            "image_id": "sha256:1f52ac938fa1ded3c0f4927bc439e8e3898d33e19be7bdae955321ff8868079f",
+            "instance_id": "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+            "image_id": "sha256:764917812cfd5a9b7bb1f5bf5cceb231c4cebfecaaf3ae1510cf804f07f7f9f7",
+            "instance_id": "instance_navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+            "image_id": "sha256:c2bc1bfb2a570c371b2714fd848e353586587fcda5a53a957340344546733c69",
+            "instance_id": "instance_ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "image_id": "sha256:2121c847c6e417836a5c74e55780adc357143d0d24e92e9cb62f21d272158786",
+            "instance_id": "instance_tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874",
+            "image_id": "sha256:d3a8244c35e28a95362d3d4760fad54ca28388cc895d3e043ea3922b4d385eb4",
+            "instance_id": "instance_flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874",
+            "present": true
+          }
+        ],
+        "unique_image_count": 50,
+        "unique_images": [
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b",
+          "jefzda/sweap-images:element-hq.element-web-element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff03",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf81299",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d3",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf81299",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac780366",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf"
+        ]
+      },
+      "8.145.51.129": {
+        "all_present": true,
+        "image_pull_policy": "local_only",
+        "missing": [],
+        "records": [
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+            "image_id": "sha256:402fc54d44f7cd6d9e08c693abc830a44bcbdd676ec8b533131df3f8558e5750",
+            "instance_id": "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8",
+            "image_id": "sha256:531997732064fe5255442065183115c0a440d0809ea0738f55e4e056c1e55f00",
+            "instance_id": "instance_element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+            "image_id": "sha256:d204c65febef2703c23b9ed208891e89a09d14a0be850db6b3e1cbdb37b187f4",
+            "instance_id": "instance_navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+            "image_id": "sha256:773abdfb55ede48c1128d26ed2a945d864971c564581b991f6278a2934056ba7",
+            "instance_id": "instance_ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "image_id": "sha256:3166fafce52591210fb2216301e6a406bb04eaf96f51432a041907cbaee4da32",
+            "instance_id": "instance_tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+            "image_id": "sha256:950d2d09762feb513ef9708aca93c15ac148e1aed54444e1fadd3049821281a1",
+            "instance_id": "instance_flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf81299",
+            "image_id": "sha256:6633c789c115f9ffdfef84d11a9719de61b1fa6f52df73b3dee0294eca1b02e8",
+            "instance_id": "instance_internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac780366",
+            "image_id": "sha256:651cef1f2463f88247b5bfc9bc94a8fd230b5fbea37bf0f9765fb313d8171fb9",
+            "instance_id": "instance_qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "image_id": "sha256:4926115a930a309f50d8859a1bc154ea27b9b9d84374b06ac2a328f334d4c813",
+            "instance_id": "instance_NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+            "image_id": "sha256:39b648921c0e997c18e403022d7f32380f7fb780b4efa5bcc18b3e7efd004410",
+            "instance_id": "instance_protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+            "image_id": "sha256:3db4e5ee74556a8fdbf048ff11e2c8d7166e6031c1b57a863c4c0b09ce12fa04",
+            "instance_id": "instance_future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+            "image_id": "sha256:da110960553b88767472ce02015296c1ec0a02ef7538d17862e38fafc2e4954f",
+            "instance_id": "instance_gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc",
+            "image_id": "sha256:acbaefedb42f446ac017ddc4bce67d1506105bb49822ba31618c1074f0250c41",
+            "instance_id": "instance_element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+            "image_id": "sha256:7bd4519d0859893f1a0c7f3d562ca57c325d53df7ac956e2a1e09419e16405fb",
+            "instance_id": "instance_navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+            "image_id": "sha256:e51742c4afb02aeb3a9d7f625a599d79001d4147b8dff5cc0e137efaf5789f34",
+            "instance_id": "instance_ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "image_id": "sha256:f5cd1b8199757cabfc23b2a8470f3bc68ab82fd587c25b24b5a37a476276b110",
+            "instance_id": "instance_tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+            "image_id": "sha256:a03c9b71e88aac24320e670a991d74cd882488cb98f64d3a2f4f4201b97db2fe",
+            "instance_id": "instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda",
+            "image_id": "sha256:83c81e3fe3dee12e322043ff3f652a0d42344309f254f365aa96e63fa623fd07",
+            "instance_id": "instance_internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c",
+            "image_id": "sha256:eaba5599a5ccabff47392f8d1a5af26df9385774e2940efc185914376ddf866b",
+            "instance_id": "instance_qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+            "image_id": "sha256:dd648b24741b70e25f46f577950d5966984d44e2591fcd767c1ce0c18785897b",
+            "instance_id": "instance_NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+            "image_id": "sha256:8e05e1bb0d9138d7c763132165dd39759719e82607e6d1f27f9f8eaeecfb1e46",
+            "instance_id": "instance_protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+            "image_id": "sha256:b151cfd1bdb2ed7646ab8eae19258d927359d65ff9d4f8e7c6246dd5d3004c7a",
+            "instance_id": "instance_future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+            "image_id": "sha256:6a4d8fcb81acead3c1281cd619c883f2e01b1454fa819ed89c90e5d3e8a5aa49",
+            "instance_id": "instance_gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e",
+            "image_id": "sha256:930c4ba0d157d726e92a5977150f85cd0e4b94c3c33816ace45309b635968b69",
+            "instance_id": "instance_element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+            "image_id": "sha256:b4b2ba271d6b3bd81b40c4791a45a29c4cd2d6d0930567377ffffba5f4176862",
+            "instance_id": "instance_navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+            "image_id": "sha256:09ae56de983001253dbbcb2453bbfd41fc789ee642190e02de6dd84a314c508a",
+            "instance_id": "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+            "image_id": "sha256:25a356916cd3a8128d3451c687f4e997ccb1e86e368756868d96308f2015b54b",
+            "instance_id": "instance_tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+            "image_id": "sha256:f355fc6bd16ea2cbd12295b7c74bcaf4618220fe95f2498a90b8f0a8c617fb39",
+            "instance_id": "instance_flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d3",
+            "image_id": "sha256:e9b34a0d5e6dadcc796b6787b51b82bada94176bcf37212c951bdc080e4bc7ba",
+            "instance_id": "instance_internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d34c41e76fe7a",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef",
+            "image_id": "sha256:0da6f59abd4c66f15f805c4bb50007121ae5a1158780edd2fc743d03a736dde7",
+            "instance_id": "instance_qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "image_id": "sha256:4442371f7703af5f5b0436939eca14a6f8f261dfc47c1a3acc20e88cc876bfda",
+            "instance_id": "instance_NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+            "image_id": "sha256:476320aaefd1897235e2a994be8aedca0b5aca89adcdfc5f5bfc452e3c5da407",
+            "instance_id": "instance_protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+            "image_id": "sha256:b34d740ddf0ec1a6fd3598bf320a0fe02c0ca5e0893a2a5ce1e4ea33a8dcd174",
+            "instance_id": "instance_future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff03",
+            "image_id": "sha256:786a2345d8c9f73a29172e0c51e8abaaa4c6c459c597403c88112b2651ffc63d",
+            "instance_id": "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b",
+            "image_id": "sha256:ae3932151d19d364fbafbca8bde0460ffe3ae6f8c6ef8fa4075debc0daae1665",
+            "instance_id": "instance_element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+            "image_id": "sha256:e827f6e6bcd1cca14ac91513311b008b5478e592ea932c4053463c79587b6916",
+            "instance_id": "instance_navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+            "image_id": "sha256:e69f780dc5f12bb6c329ac68b9d2098105cc3258fe24251b8537cd42735d465c",
+            "instance_id": "instance_ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+            "image_id": "sha256:595194b5e652276b5cc0eef4c559f33e5b52f7367408de8e646c1e6e6b687330",
+            "instance_id": "instance_tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+            "image_id": "sha256:444c3b27e85c583faea430551f729f40a6712686da129d9e8f1d2a4dbcf2d1bf",
+            "instance_id": "instance_flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf81299",
+            "image_id": "sha256:8559cfe5ab3fe73e258ab7823bb9d2566e06f9d8ca9827919504178fcd24e153",
+            "instance_id": "instance_internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b",
+            "image_id": "sha256:0d0a222549711e53d008a0c445f9ad0ced25733cc0b4c7b6925c8e397cce4b2c",
+            "instance_id": "instance_qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b367",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+            "image_id": "sha256:f7b1c1ba06e3ae1574ab798345e64e16e3947e9d0ffc9b0e9f49961525878dd1",
+            "instance_id": "instance_NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+            "image_id": "sha256:cd3ee43590dda877b3f8ab40a3c39222c031977e6aa33245be5b8da363e49d44",
+            "instance_id": "instance_protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+            "image_id": "sha256:12f2965807845bfcfb0ffce1cb74116439abd5c57954cf94d27cebd882f70bf6",
+            "instance_id": "instance_future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc",
+            "image_id": "sha256:a281f2742fff00c8292103f7fe0b25e5a2da1f606a25c2068df5442ddb40de2f",
+            "instance_id": "instance_gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:element-hq.element-web-element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+            "image_id": "sha256:1f52ac938fa1ded3c0f4927bc439e8e3898d33e19be7bdae955321ff8868079f",
+            "instance_id": "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+            "image_id": "sha256:764917812cfd5a9b7bb1f5bf5cceb231c4cebfecaaf3ae1510cf804f07f7f9f7",
+            "instance_id": "instance_navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:ansible.ansible-ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+            "image_id": "sha256:c2bc1bfb2a570c371b2714fd848e353586587fcda5a53a957340344546733c69",
+            "instance_id": "instance_ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "image_id": "sha256:2121c847c6e417836a5c74e55780adc357143d0d24e92e9cb62f21d272158786",
+            "instance_id": "instance_tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+            "present": true
+          },
+          {
+            "image": "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874",
+            "image_id": "sha256:d3a8244c35e28a95362d3d4760fad54ca28388cc895d3e043ea3922b4d385eb4",
+            "instance_id": "instance_flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874",
+            "present": true
+          }
+        ],
+        "unique_image_count": 50,
+        "unique_images": [
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+          "jefzda/sweap-images:ansible.ansible-ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e",
+          "jefzda/sweap-images:element-hq.element-element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b",
+          "jefzda/sweap-images:element-hq.element-web-element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+          "jefzda/sweap-images:flipt-io.flipt-flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+          "jefzda/sweap-images:future-architect.vuls-future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff03",
+          "jefzda/sweap-images:gravitational.teleport-gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf81299",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d3",
+          "jefzda/sweap-images:internetarchive.openlibrary-internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf81299",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+          "jefzda/sweap-images:navidrome.navidrome-navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+          "jefzda/sweap-images:nodebb.nodebb-NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+          "jefzda/sweap-images:protonmail.webclients-protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac780366",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef",
+          "jefzda/sweap-images:qutebrowser.qutebrowser-qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+          "jefzda/sweap-images:tutao.tutanota-tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf"
+        ]
+      }
+    }
+  },
+  "selected_instance_ids": [
+    "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+    "instance_element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8-vnan",
+    "instance_navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+    "instance_ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+    "instance_tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+    "instance_flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+    "instance_internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+    "instance_qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+    "instance_NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+    "instance_protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+    "instance_future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+    "instance_gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+    "instance_element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc-vnan",
+    "instance_navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+    "instance_ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+    "instance_tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+    "instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+    "instance_internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+    "instance_qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+    "instance_NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+    "instance_protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+    "instance_future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+    "instance_gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+    "instance_element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e-vnan",
+    "instance_navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+    "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+    "instance_tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+    "instance_flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+    "instance_internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d34c41e76fe7a",
+    "instance_qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+    "instance_NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+    "instance_protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+    "instance_future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+    "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037",
+    "instance_element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b-vnan",
+    "instance_navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+    "instance_ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+    "instance_tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+    "instance_flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+    "instance_internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+    "instance_qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b367",
+    "instance_NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+    "instance_protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+    "instance_future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+    "instance_gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+    "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+    "instance_navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+    "instance_ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+    "instance_tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+    "instance_flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874"
+  ],
+  "server_addr": "192.168.0.136:8099",
+  "server_obs_http_listen": "127.0.0.1:18503",
+  "source_and_binaries": {
+    "binaries": {
+      "server": {
+        "path": "/home/uenv-frontend-add/target/release/uenv-adapter-core",
+        "sha256": "091eabae7271f1fca9ed49d2bc21579b771c41358b589a47c683b3dddd4fab94",
+        "size_bytes": 15182864
+      },
+      "worker": {
+        "path": "/home/uenv-scale-bench-merge/target/release/uenv-worker",
+        "sha256": "7f071fa8d06059e9839397ce4fc048cf5644c63c339482a084efa630b8d578f0",
+        "size_bytes": 14003128
+      }
+    },
+    "git_clean": false,
+    "git_sha": "3295dc4c3687cb342c733a2e4b65837ec7375ce1",
+    "git_status": [
+      " M frontend/src/components/training-console.tsx",
+      " M frontend/src/hooks/use-run-stream.ts",
+      " M frontend/src/lib/api/aggregation-client.ts",
+      " M frontend/src/lib/store/normalize-chain-state.ts",
+      " M frontend/src/lib/types/chain-state.ts",
+      " M frontend/src/routeTree.gen.ts",
+      " M frontend/src/routes/index.tsx",
+      " M frontend/vite.config.ts",
+      " M uenv-server/src/obs/event.rs",
+      " M uenv-server/src/obs/merge.rs",
+      " M uenv-server/src/obs/mod.rs",
+      " M uenv-server/src/obs/project.rs",
+      " M uenv-server/src/obs/tests.rs",
+      " M uenv-server/src/result_finalizer.rs",
+      " M uenv-server/src/service/episode.rs",
+      " M uenv-server/stress_test_refactored/uenv_stress/scale/swebench_pro_pressure.py",
+      "?? frontend/src/components/episode-journey.tsx",
+      "?? frontend/src/routes/server.tsx",
+      "?? obs-data/",
+      "?? trajectory-data/",
+      "?? uenv-server/stress_test_refactored/distributed-gate-artifacts/"
+    ],
+    "source_repo": "/home/uenv-frontend-add"
+  },
+  "total_episodes": 2560,
+  "worker_addr": {
+    "8.130.65.20": "192.168.0.139:8000",
+    "8.145.51.129": "192.168.0.138:8001"
+  },
+  "worker_capacity": 1,
+  "worker_id": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-worker-0000",
+  "worker_nodes": [
+    {
+      "host": "8.130.65.20",
+      "private_ip": "192.168.0.139"
+    },
+    {
+      "host": "8.145.51.129",
+      "private_ip": "192.168.0.138"
+    }
+  ],
+  "worker_ports": [
+    8000,
+    8001,
+    8002,
+    8003,
+    8004,
+    8005,
+    8006,
+    8007,
+    8008,
+    8009,
+    8010,
+    8011,
+    8012,
+    8013,
+    8014,
+    8015,
+    8016,
+    8017,
+    8018,
+    8019,
+    8020,
+    8021,
+    8022,
+    8023,
+    8024,
+    8025,
+    8026,
+    8027,
+    8028,
+    8029,
+    8030,
+    8031,
+    8032,
+    8033,
+    8034,
+    8035,
+    8036,
+    8037,
+    8038,
+    8039,
+    8040,
+    8041,
+    8042,
+    8043,
+    8044,
+    8045,
+    8046,
+    8047,
+    8048,
+    8049,
+    8050,
+    8051,
+    8052,
+    8053,
+    8054,
+    8055,
+    8056,
+    8057,
+    8058,
+    8059,
+    8060,
+    8061,
+    8062,
+    8063
+  ],
+  "worker_prefix": "stress-swebench-pro-pressure-sync-a8-c2-20260803-093539-9bc7ae9c-worker-",
+  "worker_slots": 64
+}
