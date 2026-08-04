@@ -406,6 +406,62 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["extra_info"]["question"], "What is 2 + 2?")
         self.assertIn("response_ids", payload["metadata"]["required_result_fields"])
 
+    def test_build_episode_request_allows_runtime_max_steps_override(self) -> None:
+        sample_kwargs = {
+            "data_source": "swesmith",
+            "ability": "swe",
+            "extra_info": {
+                "batch_id": "batch-swe",
+                "sample_index": 2,
+                "dataset": "swesmith",
+                "instance_id": "repo__project.issue__abc",
+                "benchmark_variant": "smith",
+                "max_steps": 30,
+                "max_iterations": 31,
+            },
+        }
+
+        dataset_loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+        dataset_request = dataset_loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt=[{"role": "user", "content": "Fix it"}],
+            sample_kwargs=sample_kwargs,
+        )
+        dataset_payload = json.loads(dataset_request.payload.decode("utf-8"))
+
+        self.assertEqual(dataset_request.max_steps, 30)
+        self.assertEqual(dataset_payload["episode_config"]["max_steps"], 30)
+        self.assertEqual(dataset_payload["env_config"]["max_steps"], 30)
+        self.assertEqual(dataset_payload["env_config"]["max_iterations"], 30)
+        self.assertEqual(dataset_payload["metadata"]["extra_info"]["max_steps_source"], "extra_info.max_steps")
+
+        override_loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+            episode_max_steps_override=12,
+        )
+        override_request = override_loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt=[{"role": "user", "content": "Fix it"}],
+            sample_kwargs=sample_kwargs,
+        )
+        override_payload = json.loads(override_request.payload.decode("utf-8"))
+
+        self.assertEqual(override_request.max_steps, 12)
+        self.assertEqual(override_payload["episode_config"]["max_steps"], 12)
+        self.assertEqual(override_payload["env_config"]["max_steps"], 12)
+        self.assertEqual(override_payload["env_config"]["max_iterations"], 12)
+        self.assertEqual(
+            override_payload["metadata"]["extra_info"]["max_steps_source"],
+            "config.episode_max_steps_override",
+        )
+        self.assertEqual(override_payload["metadata"]["extra_info"]["effective_max_steps"], 12)
+
     def test_run_returns_agent_loop_output_from_episode_result(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
