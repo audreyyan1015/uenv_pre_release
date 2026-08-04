@@ -37,6 +37,17 @@ Common environment overrides:
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
   UENV_AGENT_LOOP_PARALLEL_MODE Adapter metadata parallel mode. Default: sync
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
+  TRAINER_LOGGER                VeRL logger backends. Use "['console','wandb']" to enable wandb. Default: "['console']"
+  TRAINER_PROJECT_NAME          VeRL/wandb project name. Default: uenv_bridge_layer4
+  WANDB_ENV_FILE                Optional host env file loaded before wandb setup. Default: <repo>/../secrets/wandb.env
+  WANDB_API_KEY                 Optional wandb API key; passed through to the container when set.
+  WANDB_MODE                    Optional wandb mode, for example online or offline.
+  WANDB_ENTITY                  Optional wandb entity.
+  WANDB_DIR                     Optional wandb run directory inside the container.
+  WANDB_BASE_URL                Optional wandb server URL for private deployments.
+  UENV_OBS_URL                   Server Obs base URL for frontend visualization. Default: empty.
+  UENV_OBS_TOKEN                 Optional Server Obs auth token. Default: empty.
+  UENV_TRAINING_RUN_ID           Frontend/Obs run id. Default: RUN_ID.
   UENV_MODEL_GATEWAY_ENABLED    Start adapter-side model gateway and send its URL to Worker. Default: 0
   UENV_MODEL_GATEWAY_PORT       Adapter-side model gateway port. Default: 18080
   UENV_MODEL_GATEWAY_PUBLIC_URL Worker-visible gateway URL. Default: http://10.10.20.142:<port>/v1
@@ -47,6 +58,8 @@ Common environment overrides:
                                   Stop adapter gateway when each AgentLoop instance closes. Default: 0 for multi-worker, 1 otherwise
   UENV_REQUIRE_SWE_RESPONSE_TRACE
                                   Refuse SWE training results without typed response_ids. Default: 1
+  UENV_AGENT_LOOP_FAILED_EPISODE_POLICY
+                                  Failed episode handling: raise or zero_reward. Default: raise
   UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR
                                   Treat known text-only MoE checkpoints as having no multimodal processor. Default: 0
   EXTRA_VERL_ARGS               Extra Hydra overrides appended to the VeRL command. Default: empty
@@ -171,6 +184,8 @@ UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
 UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
 UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
 UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-3600}
+UENV_OBS_URL=${UENV_OBS_URL:-}
+UENV_OBS_TOKEN=${UENV_OBS_TOKEN:-}
 UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED:-0}
 UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST:-0.0.0.0}
 UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18080}
@@ -178,6 +193,7 @@ UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL:-http://10.10.20.1
 UENV_MODEL_GATEWAY_DISABLE_THINKING=${UENV_MODEL_GATEWAY_DISABLE_THINKING:-0}
 UENV_MODEL_GATEWAY_MAX_TOKENS=${UENV_MODEL_GATEWAY_MAX_TOKENS:-}
 UENV_REQUIRE_SWE_RESPONSE_TRACE=${UENV_REQUIRE_SWE_RESPONSE_TRACE:-1}
+UENV_AGENT_LOOP_FAILED_EPISODE_POLICY=${UENV_AGENT_LOOP_FAILED_EPISODE_POLICY:-raise}
 if [ -z "${UENV_MODEL_GATEWAY_STOP_ON_CLOSE+x}" ]; then
   if [ "${AGENT_NUM_WORKERS}" -gt 1 ]; then
     UENV_MODEL_GATEWAY_STOP_ON_CLOSE=0
@@ -192,10 +208,28 @@ KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
 SAVE_FREQ=${SAVE_FREQ:--1}
 TEST_FREQ=${TEST_FREQ:-5}
+WANDB_ENV_FILE=${WANDB_ENV_FILE:-${REPO_DIR}/../secrets/wandb.env}
+if [ -f "${WANDB_ENV_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${WANDB_ENV_FILE}"
+fi
+TRAINER_LOGGER=${TRAINER_LOGGER:-"['console']"}
+TRAINER_PROJECT_NAME=${TRAINER_PROJECT_NAME:-uenv_bridge_layer4}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-uenv_layer4_grpo_$(date +%Y%m%d_%H%M)}
+WANDB_ENV_ARGS=()
+for wandb_var in WANDB_API_KEY WANDB_MODE WANDB_ENTITY WANDB_DIR WANDB_BASE_URL; do
+  wandb_value=${!wandb_var:-}
+  if [ -n "${wandb_value}" ]; then
+    export "${wandb_var}=${wandb_value}"
+    WANDB_ENV_ARGS+=("-e" "${wandb_var}")
+  else
+    unset "${wandb_var}" || true
+  fi
+done
 
 # 日志目录。
 RUN_ID=${RUN_ID:-layer4_distributed_$(date +%Y%m%d_%H%M%S)}
+UENV_TRAINING_RUN_ID=${UENV_TRAINING_RUN_ID:-${RUN_ID}}
 LOG_ROOT=${LOG_ROOT:-${REPO_DIR}/temp/logs}
 SERVICE_DIR=${SERVICE_DIR:-${LOG_ROOT}/layer4_distributed/${RUN_ID}}
 LOG_DIR=${LOG_DIR:-${LOG_ROOT}/verl_layer4_agent_loop}
@@ -218,6 +252,9 @@ run_verl_training() {
   fi
   echo "AgentLoop request records: ${SERVICE_DIR}/agent-loop-requests.jsonl"
   echo "AgentLoop result records: ${SERVICE_DIR}/agent-loop-results.jsonl"
+  if [ -n "${UENV_OBS_URL}" ]; then
+    echo "Frontend run: ${UENV_OBS_URL%/obs}/?run=${UENV_TRAINING_RUN_ID}"
+  fi
   podman run --rm \
     ${PODMAN_NETWORK_ARGS} \
     ${PODMAN_GPU_RUN_ARGS} \
@@ -225,6 +262,7 @@ run_verl_training() {
     --entrypoint bash \
     --pids-limit=65536 \
     --workdir /workspace/verl \
+    "${WANDB_ENV_ARGS[@]}" \
     -v "${VERL_WORKSPACE}:/workspace" \
     -v "${REPO_DIR}:/uenv/uenv-bridge" \
     -v "${MODEL_PATH}:${CONTAINER_MODEL_PATH}:ro" \
@@ -255,6 +293,9 @@ export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMP
 export UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS}
 export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE}
 export UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS}
+export UENV_OBS_URL=\"${UENV_OBS_URL}\"
+export UENV_OBS_TOKEN=\"${UENV_OBS_TOKEN}\"
+export UENV_TRAINING_RUN_ID=\"${UENV_TRAINING_RUN_ID}\"
 export UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED}
 export UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST}
 export UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT}
@@ -264,6 +305,7 @@ export UENV_MODEL_GATEWAY_DISABLE_THINKING=${UENV_MODEL_GATEWAY_DISABLE_THINKING
 export UENV_MODEL_GATEWAY_MAX_TOKENS=${UENV_MODEL_GATEWAY_MAX_TOKENS}
 export UENV_MODEL_GATEWAY_STOP_ON_CLOSE=${UENV_MODEL_GATEWAY_STOP_ON_CLOSE}
 export UENV_REQUIRE_SWE_RESPONSE_TRACE=${UENV_REQUIRE_SWE_RESPONSE_TRACE}
+export UENV_AGENT_LOOP_FAILED_EPISODE_POLICY=${UENV_AGENT_LOOP_FAILED_EPISODE_POLICY}
 pip install -q 'grpcio>=1.80' --break-system-packages 2>/dev/null || pip install -q 'grpcio>=1.80'
 export UENV_AGENT_LOOP_CLIENT=rust_core
 export UENV_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT}
@@ -289,6 +331,7 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.model.path=${CONTAINER_MODEL_PATH} \\
   actor_rollout_ref.model.use_remove_padding=True \\
   actor_rollout_ref.model.enable_gradient_checkpointing=True \\
+  actor_rollout_ref.model.enable_activation_offload=True \\
   actor_rollout_ref.actor.strategy=fsdp \\
   actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \\
   actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \\
@@ -299,11 +342,12 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \\
   actor_rollout_ref.actor.entropy_coeff=0 \\
   actor_rollout_ref.actor.use_torch_compile=False \\
-  actor_rollout_ref.actor.fsdp_config.param_offload=False \\
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \\
+  actor_rollout_ref.actor.fsdp_config.param_offload=True \\
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \\
   actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \\
   actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \\
   actor_rollout_ref.rollout.name=${INFER_BACKEND} \\
+  actor_rollout_ref.rollout.disable_log_stats=False \\
   actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \\
   actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION} \\
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \\
@@ -319,15 +363,15 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.max_num_batched_tokens=2048 \\
   actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
-  actor_rollout_ref.ref.fsdp_config.param_offload=False \\
+  actor_rollout_ref.ref.fsdp_config.param_offload=True \\
   actor_rollout_ref.ref.fsdp_config.use_torch_compile=False \\
   actor_rollout_ref.ref.use_torch_compile=False \\
   reward.reward_manager.name=naive \\
   reward.num_workers=1 \\
   trainer.critic_warmup=0 \\
   trainer.balance_batch=True \\
-  \"trainer.logger=['console']\" \\
-  trainer.project_name=uenv_bridge_layer4 \\
+  \"trainer.logger=${TRAINER_LOGGER}\" \\
+  trainer.project_name=${TRAINER_PROJECT_NAME} \\
   trainer.experiment_name=${EXPERIMENT_NAME} \\
   trainer.n_gpus_per_node=${NGPUS_PER_NODE} \\
   trainer.nnodes=1 \\
