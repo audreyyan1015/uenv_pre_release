@@ -245,8 +245,15 @@ AENV 的安装脚本一条命令装完 server + CLI + systemd。同样的思路�
 实现约束：
 
 - **零构建步骤。** 原生 ES 模块级 JS + 单文件 CSS，`include_str!` 编入二进制。
-- **设计沿用现有前端。** 色板与圆角直接取自 `frontend/src/styles.css` 的 oklch 设计令牌，
-  与训练观测台同属一套视觉体系。
+- **设计沿用现有前端。** 色板与圆角直接取自 `frontend/src/styles.css` 的 oklch 设计令牌
+  （其 `:root` **浅色**主题，逐条对齐 `--background` / `--card` / `--border` / `--primary` /
+  `--success` / `--warning` / `--info` / `--pending`），与训练观测台同属一套视觉体系。
+  控制台自身只额外定义三类令牌：`--card-2` / `--border-strong` 这类面层细分、
+  `--shadow-sm|md` 两级投影，以及下面这组文字专用色。
+- **状态色区分「填充用」与「文字用」。** 浅底上 `--warning`（L=0.7）当文字只有约 2.2:1 对比度，
+  远低于可读阈值，但它当徽章底色是合适的。因此另立 `--success-ink` / `--warning-ink` /
+  `--danger-ink` / `--info-ink`（L≈0.46–0.48，对白底约 5:1），徽章文字与 JSON 语法高亮走 ink 变体，
+  描边与底色仍走基色。深浅主题的差别不只是把颜色取反，这一层必须单独处理。
 - **同源，无端点配置。** 控制台由 Hub 自身提供，不存在跨源问题；HTML 外壳是公开的（不含任何数据），
   数据请求一律带 Token，由与其它 API 客户端完全相同的中间件鉴权。
 
