@@ -115,6 +115,38 @@ class ModelGatewayTest(unittest.TestCase):
                 upstream_a.close()
                 upstream_b.close()
 
+    def test_health_endpoint_reports_gateway_upstreams(self) -> None:
+        upstream = MockOpenAIServer("upstream")
+        gateway = ModelGateway(ModelGatewayConfig(enabled=True, bind_host="127.0.0.1", port=0))
+        try:
+            gateway_url = gateway.start([upstream.url])
+            with urllib.request.urlopen(f"{gateway_url.removesuffix('/v1')}/uenv/gateway/health", timeout=5) as response:
+                payload = json.loads(response.read())
+
+            self.assertEqual(payload, {"ok": True, "upstreams": [upstream.url]})
+        finally:
+            gateway.stop()
+            upstream.close()
+
+    def test_start_reuses_compatible_gateway_when_port_is_already_bound(self) -> None:
+        upstream = MockOpenAIServer("upstream")
+        first = ModelGateway(ModelGatewayConfig(enabled=True, bind_host="127.0.0.1", port=0))
+        second = None
+        try:
+            first_url = first.start([upstream.url])
+            port = first._server.server_port
+            second = ModelGateway(ModelGatewayConfig(enabled=True, bind_host="127.0.0.1", port=port))
+
+            second_url = second.start([upstream.url])
+
+            self.assertEqual(second_url, first_url)
+            self.assertIsNone(second._server)
+        finally:
+            if second is not None:
+                second.stop()
+            first.stop()
+            upstream.close()
+
     def test_disable_thinking_injects_qwen_chat_template_kwargs(self) -> None:
         upstream = MockOpenAIServer("upstream")
         gateway = ModelGateway(
@@ -186,6 +218,70 @@ class ModelGatewayTest(unittest.TestCase):
                 {"foo": "bar", "enable_thinking": True, "preserve_thinking": True},
             )
             self.assertEqual(forwarded["thinking_token_budget"], 16384)
+        finally:
+            gateway.stop()
+            upstream.close()
+
+    def test_clamps_chat_completion_token_budget(self) -> None:
+        upstream = MockOpenAIServer("upstream")
+        gateway = ModelGateway(
+            ModelGatewayConfig(
+                enabled=True,
+                bind_host="127.0.0.1",
+                port=0,
+                max_tokens=6144,
+            )
+        )
+        try:
+            gateway_url = gateway.start([upstream.url])
+            request = urllib.request.Request(
+                f"{gateway_url}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": "policy",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_tokens": 8192,
+                        "max_new_tokens": "8192",
+                        "max_completion_tokens": 4096,
+                        "max_output_tokens": None,
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                json.loads(response.read())
+
+            forwarded = json.loads(upstream.requests[0]["body"])
+            self.assertEqual(forwarded["max_tokens"], 6144)
+            self.assertEqual(forwarded["max_new_tokens"], 6144)
+            self.assertEqual(forwarded["max_completion_tokens"], 4096)
+            self.assertEqual(forwarded["max_output_tokens"], 6144)
+        finally:
+            gateway.stop()
+            upstream.close()
+
+    def test_rewrites_chat_model_to_single_upstream_model(self) -> None:
+        upstream = MockOpenAIServer("/models/modelscope/Qwen/Qwen3___6-35B-A3B")
+        gateway = ModelGateway(ModelGatewayConfig(enabled=True, bind_host="127.0.0.1", port=0))
+        try:
+            gateway_url = gateway.start([upstream.url])
+            request = urllib.request.Request(
+                f"{gateway_url}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": "Qwen/Qwen3.6-35B-A3B",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                json.loads(response.read())
+
+            forwarded = json.loads(upstream.requests[0]["body"])
+            self.assertEqual(forwarded["model"], "/models/modelscope/Qwen/Qwen3___6-35B-A3B")
         finally:
             gateway.stop()
             upstream.close()

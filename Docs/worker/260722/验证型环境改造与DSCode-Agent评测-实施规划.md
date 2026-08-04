@@ -1,9 +1,9 @@
 # 验证型环境改造与 DSCode Agent 评测 — 实施规划
 
-> 日期：2026-07-22（2026-07-25 修订：联调目标路径）  
-> 状态：规划（待实施 → 准备实机联调改造）  
-> 前置结论：[Math环境与术语规范-可证明性与DSCode-Agent选型](./Math环境与术语规范-可证明性与DSCode-Agent选型.md)  
-> **跨模块勾选清单**：[跨模块调整清单-qa改造与ToolEnv-Agent](./跨模块调整清单-qa改造与ToolEnv-Agent.md)  
+> 日期：2026-07-22（2026-07-25 修订：联调目标路径）
+> 状态：规划（待实施 → 准备实机联调改造）
+> 前置结论：[Math环境与术语规范-可证明性与DSCode-Agent选型](./Math环境与术语规范-可证明性与DSCode-Agent选型.md)
+> **跨模块勾选清单**：[跨模块调整清单-qa改造与ToolEnv-Agent](./跨模块调整清单-qa改造与ToolEnv-Agent.md)
 > 关联：[五类 Benchmark Worker 支持现状](../260709/五类Benchmark-Worker支持现状与跨层调整.md)、[Hub 环境标准化指南](../../hub/uenv-hub环境标准化指南.md)
 
 ---
@@ -58,7 +58,7 @@ Phase A  验证型环境改造            Phase B  DSCode ToolEnv Agent
 
 产品表述：
 
-> `env_type=qa`：基于可验证 Rubric 的**单轮问答 / 分类评测**任务环境（Task Environment）。  
+> `env_type=qa`：基于可验证 Rubric 的**单轮问答 / 分类评测**任务环境（Task Environment）。
 > 历史名 `math` 仅作兼容 alias，不再作为新文档主称谓。
 
 插件目录 / 二进制建议同步：
@@ -150,9 +150,9 @@ Phase A  验证型环境改造            Phase B  DSCode ToolEnv Agent
 
 **每个 Rubric 必须交付：**
 
-1. `score(completion: str, answer: str) -> float`（0.0 / 1.0）；  
-2. `extract(completion: str) -> Optional[str]`（可测）；  
-3. 与当前 Rust `answers_match` 的 **diff 报告**（一致率、不一致样例表）；  
+1. `score(completion: str, answer: str) -> float`（0.0 / 1.0）；
+2. `extract(completion: str) -> Optional[str]`（可测）；
+3. 与当前 Rust `answers_match` 的 **diff 报告**（一致率、不一致样例表）；
 4. 不一致时的 **裁决规则**：以 Rubric 为准 → 改 Rust；或文档化「保留 UEnv 别名扩展」并写入 Rubric。
 
 #### A2 — Rust 判分改造与 golden 门禁（约 3–5 天）
@@ -225,7 +225,7 @@ def _env_type(...):
 
 因此：
 
-- **是否可以结合 Agent 测 DSCodeBench？** → **可以，作为扩展轨。**  
+- **是否可以结合 Agent 测 DSCodeBench？** → **可以，作为扩展轨。**
 - **是否应用 Agent 替代官方基线？** → **不可以。**
 
 ### 4.2 推荐 Agent 与集成方式
@@ -412,9 +412,9 @@ REPL 步骤不得调用 dscodebench 官方 200-case 全量测试（成本过高�
 
 ## 9. 下一步（实施入口）
 
-1. **按[跨模块清单](./跨模块调整清单-qa改造与ToolEnv-Agent.md)评审 Hub/208.77 注册项**，确认 D1–D9。  
-2. **开 M0/M1**：冻结命名 → 拉 verifiers 依赖 → 先做 gsm8k + pubmedqa Rubric diff。  
-3. **并行准备 ToolEnv@208.77**：Hub `uenv-agent-toolenv` 包骨架 + poller 模板（不必等 qa 全量完成）。  
+1. **按[跨模块清单](./跨模块调整清单-qa改造与ToolEnv-Agent.md)评审 Hub/208.77 注册项**，确认 D1–D9。
+2. **开 M0/M1**：冻结命名 → 拉 verifiers 依赖 → 先做 gsm8k + pubmedqa Rubric diff。
+3. **并行准备 ToolEnv@208.77**：Hub `uenv-agent-toolenv` 包骨架 + poller 模板（不必等 qa 全量完成）。
 4. 实机联调顺序见跨模块清单 §8；过程记录另存本目录，决策变更走修订记录。
 
 ### 修订记录

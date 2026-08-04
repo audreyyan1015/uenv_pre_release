@@ -1,9 +1,9 @@
 # SWE-smith 7143 环境支持与联调记录
 
-> 日期：2026-08-01
-> 状态：**Phase 1–3 已跑通**；真实 LLM Agent 正式轨迹已产出（DeepSeek-V3 AWQ @7142）
-> 规划：[SWE-smith环境支持与OpenHands-Rollout联调规划](./SWE-smith环境支持与OpenHands-Rollout联调规划.md)
-> 变更与联调报告：[SWE-smith变更与联调报告](./SWE-smith变更与联调报告.md)
+> 日期：2026-08-01  
+> 状态：**Phase 1–3 已跑通**；真实 LLM Agent 正式轨迹已产出（DeepSeek-V3 AWQ @7142）  
+> 规划：[SWE-smith环境支持与OpenHands-Rollout联调规划](./SWE-smith环境支持与OpenHands-Rollout联调规划.md)  
+> 变更与联调报告：[SWE-smith变更与联调报告](./SWE-smith变更与联调报告.md)  
 > 拓扑：[secrets/README.md](../../../secrets/README.md)
 
 ---
@@ -26,7 +26,7 @@
 | 7142 DeepSeek vLLM 拉起 | ✅ `vllm-dsv3-awq` + gateway `:18888` ready |
 | 真实 LLM Agent 正式轨迹 | ✅ `…00045` variant=smith seal+server_verified（resolved=false） |
 | 7142 训练可读 smoke | ✅ `schema_ok=true`（chat_sft.jsonl） |
-| Hub 注册 | ⏳ 按规划后续交接 |
+| Hub 注册 | ✅ `swe-bench-smith@0.1.0` EnvPackage + `swe-bench-smith-openhands@1.0.0` Episode Stack |
 
 ---
 
@@ -123,7 +123,7 @@ trajectory_id=trj-worker-7143-pro-1785570520367-00004
 elapsed≈18.7s
 ```
 
-脚本：`uenv-bridge/scripts/benchmark/evaluate_swesmith_uenv.py`（默认 `smith` / `/testbed` / `swe-bench-smith`）。
+脚本：`uenv-bridge/scripts/benchmark/evaluate_swesmith_uenv.py`（默认 `smith` / `/testbed` / `swe-bench-smith`）。  
 Driver：`run_swebenchpro_official.py`（smith 分支 reverse-gold）+ `run_swesmith_official.py` 薄封装。
 
 
@@ -165,7 +165,7 @@ pre_submit: remote=https://github.com/swesmith/oauthlib__oauthlib.1fd52536 @ /te
 
 修复：`run_swebenchpro_official.py` pre-submit 勿写死 `git -C /app`（Smith 为 `/testbed`）。
 
-导出：`/var/lib/uenv/rollouts/swesmith-llm-dsv3-smoke/`；仓库样例 `Docs/worker/260801/artifacts/swesmith-llm-dsv3-smoke/`。
+导出：`/var/lib/uenv/rollouts/swesmith-llm-dsv3-smoke/`；仓库样例 `Docs/worker/260801/artifacts/swesmith-llm-dsv3-smoke/`。  
 7142 训练可读 smoke：`train_smoke_rollout_jsonl.py` → `schema_ok=true`。
 
 ### 5.5 Phase 3 Rollout 导出
@@ -178,7 +178,7 @@ python3 scripts/export_swe_rollout_jsonl.py \
   --output-dir /var/lib/uenv/rollouts/swesmith-phase3-smoke
 ```
 
-实机产物（208.77）：`/var/lib/uenv/rollouts/swesmith-phase3-smoke/`
+实机产物（208.77）：`/var/lib/uenv/rollouts/swesmith-phase3-smoke/`  
 仓库样例：`Docs/worker/260801/artifacts/swesmith-rollout-smoke/`
 
 ```text

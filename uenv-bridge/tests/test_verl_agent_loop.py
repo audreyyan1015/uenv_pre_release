@@ -24,6 +24,12 @@ class FakeTokenizer:
         return [ord(char) for char in text]
 
 
+class DictInputIdsTokenizer(FakeTokenizer):
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+        self.last_messages = messages
+        return {"input_ids": [[10, 11, 12]]}
+
+
 class RecordingEpisodeClient:
     def __init__(self, result: EpisodeResult) -> None:
         self.result = result
@@ -141,6 +147,41 @@ class ReorderedEpisodeClient(BatchRecordingEpisodeClient):
                 )
             )
         yield from reversed(results)
+
+
+class MixedFailureEpisodeClient(BatchRecordingEpisodeClient):
+    def submit_episode_stream(self, requests):
+        request_list = list(requests)
+        self.stream_calls.append(request_list)
+        for index, request in enumerate(request_list):
+            if index == 1:
+                yield EpisodeResult(
+                    request_id=request.request_id,
+                    status="failed",
+                    trajectory=Trajectory(steps=[], total_reward=0.0, total_steps=0),
+                    summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="failed"),
+                    error_message="context window exceeded",
+                )
+                continue
+            yield EpisodeResult(
+                request_id=request.request_id,
+                status="completed",
+                trajectory=Trajectory(
+                    steps=[
+                        StepRecord(
+                            step_index=0,
+                            action=b"ok",
+                            reward=1.0,
+                            terminated=True,
+                            response_ids=[500 + index],
+                            response_mask=[1],
+                        )
+                    ],
+                    total_reward=1.0,
+                    total_steps=1,
+                ),
+                summary=EpisodeSummary(total_reward=1.0, total_steps=1, terminate_reason="done"),
+            )
 
 
 class FakeServerManager:
@@ -365,6 +406,62 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["extra_info"]["question"], "What is 2 + 2?")
         self.assertIn("response_ids", payload["metadata"]["required_result_fields"])
 
+    def test_build_episode_request_allows_runtime_max_steps_override(self) -> None:
+        sample_kwargs = {
+            "data_source": "swesmith",
+            "ability": "swe",
+            "extra_info": {
+                "batch_id": "batch-swe",
+                "sample_index": 2,
+                "dataset": "swesmith",
+                "instance_id": "repo__project.issue__abc",
+                "benchmark_variant": "smith",
+                "max_steps": 30,
+                "max_iterations": 31,
+            },
+        }
+
+        dataset_loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+        dataset_request = dataset_loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt=[{"role": "user", "content": "Fix it"}],
+            sample_kwargs=sample_kwargs,
+        )
+        dataset_payload = json.loads(dataset_request.payload.decode("utf-8"))
+
+        self.assertEqual(dataset_request.max_steps, 30)
+        self.assertEqual(dataset_payload["episode_config"]["max_steps"], 30)
+        self.assertEqual(dataset_payload["env_config"]["max_steps"], 30)
+        self.assertEqual(dataset_payload["env_config"]["max_iterations"], 30)
+        self.assertEqual(dataset_payload["metadata"]["extra_info"]["max_steps_source"], "extra_info.max_steps")
+
+        override_loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+            episode_max_steps_override=12,
+        )
+        override_request = override_loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt=[{"role": "user", "content": "Fix it"}],
+            sample_kwargs=sample_kwargs,
+        )
+        override_payload = json.loads(override_request.payload.decode("utf-8"))
+
+        self.assertEqual(override_request.max_steps, 12)
+        self.assertEqual(override_payload["episode_config"]["max_steps"], 12)
+        self.assertEqual(override_payload["env_config"]["max_steps"], 12)
+        self.assertEqual(override_payload["env_config"]["max_iterations"], 12)
+        self.assertEqual(
+            override_payload["metadata"]["extra_info"]["max_steps_source"],
+            "config.episode_max_steps_override",
+        )
+        self.assertEqual(override_payload["metadata"]["extra_info"]["effective_max_steps"], 12)
+
     def test_run_returns_agent_loop_output_from_episode_result(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
@@ -384,6 +481,58 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.reward_score, 2.0)
         self.assertEqual(output.extra_fields["uenv_status"], "completed")
         self.assertIsNotNone(client.last_request)
+
+    def test_run_raises_failed_episode_by_default(self) -> None:
+        client = RecordingEpisodeClient(self._failed_result("context window exceeded"))
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
+
+        with self.assertRaisesRegex(RuntimeError, "context window exceeded"):
+            asyncio.run(
+                loop.run(
+                    {},
+                    raw_prompt=[{"role": "user", "content": "fix issue"}],
+                    data_source="swebenchpro",
+                    reward_model={},
+                )
+            )
+
+    def test_run_zero_rewards_failed_episode_when_configured(self) -> None:
+        client = RecordingEpisodeClient(self._failed_result("context window exceeded"))
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client, failed_episode_policy="zero_reward")
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "fix issue"}],
+                data_source="swebenchpro",
+                reward_model={},
+            )
+        )
+
+        self.assertEqual(output.prompt_ids, [10, 11, 12])
+        self.assertEqual(output.response_ids, [0])
+        self.assertEqual(output.response_mask, [0])
+        self.assertEqual(output.reward_score, 0.0)
+        self.assertEqual(output.extra_fields["uenv_status"], "failed")
+        self.assertEqual(output.extra_fields["uenv_failed_episode_policy"], "zero_reward")
+        self.assertIn("context window exceeded", output.extra_fields["uenv_error_message"])
+
+    def test_run_accepts_chat_template_input_ids_mapping(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(tokenizer=DictInputIdsTokenizer(), client=client)
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.prompt_ids, [10, 11, 12])
+        payload = json.loads(client.last_request.payload.decode("utf-8"))
+        self.assertEqual(payload["episode_config"]["initial_observation"]["prompt_ids"], [10, 11, 12])
 
     def test_run_batch_submits_one_core_batch(self) -> None:
         client = BatchRecordingEpisodeClient()
@@ -411,6 +560,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(len(client.stream_calls), 1)
         self.assertEqual(len(client.stream_calls[0]), 2)
         self.assertEqual([output.response_ids for output in outputs], [[200], [201]])
+        self.assertEqual([output.extra_fields["uenv_response_source"] for output in outputs], ["rollout_trace", "rollout_trace"])
         self.assertEqual([output.reward_score for output in outputs], [1.0, 2.0])
         payloads = [json.loads(request.payload.decode("utf-8")) for request in client.stream_calls[0]]
         self.assertEqual([payload["metadata"]["batch_id"] for payload in payloads], ["batch-test", "batch-test"])
@@ -453,6 +603,29 @@ class UEnvAgentLoopTest(unittest.TestCase):
 
         self.assertEqual([output.response_ids for output in outputs], [[300], [301], [302]])
         self.assertEqual([output.reward_score for output in outputs], [0.0, 1.0, 2.0])
+
+    def test_run_batch_zero_rewards_failed_episode_when_configured(self) -> None:
+        client = MixedFailureEpisodeClient()
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client, failed_episode_policy="zero_reward")
+
+        outputs = asyncio.run(
+            loop.run_batch(
+                [{}, {}, {}],
+                [
+                    {"raw_prompt": "a", "data_source": "swesmith"},
+                    {"raw_prompt": "b", "data_source": "swesmith"},
+                    {"raw_prompt": "c", "data_source": "swesmith"},
+                ],
+                batch_id="batch-failed",
+            )
+        )
+
+        self.assertEqual(len(outputs), 3)
+        self.assertEqual([output.response_ids for output in outputs], [[500], [0], [502]])
+        self.assertEqual([output.response_mask for output in outputs], [[1], [0], [1]])
+        self.assertEqual([output.reward_score for output in outputs], [1.0, 0.0, 1.0])
+        self.assertEqual(outputs[1].extra_fields["uenv_status"], "failed")
+        self.assertEqual(outputs[1].extra_fields["uenv_failed_episode_policy"], "zero_reward")
 
     def test_build_episode_request_defaults_to_sync_parallel_mode(self) -> None:
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(self._result_with_token_ids()))
@@ -661,11 +834,106 @@ class UEnvAgentLoopTest(unittest.TestCase):
             self.assertEqual(records[0]["request_model_endpoint"], "https://openrouter.ai/api/v1")
             self.assertEqual(records[0]["request_model_name"], "qwen/qwen-2.5-7b-instruct")
             self.assertEqual(records[0]["reward"], 2.0)
+            self.assertEqual(records[0]["trajectory_id"], "")
+            self.assertEqual(records[0]["rollout_log_probs_len"], 0)
             self.assertEqual(records[0]["response_text"], "4")
+            self.assertEqual(records[0]["response_source"], "rollout_trace")
+            self.assertFalse(records[0]["used_pad_fallback"])
             self.assertEqual(records[0]["response_ids"], [101, 102])
             self.assertEqual(records[0]["verl_response_ids"], [101, 102])
             self.assertEqual(records[0]["verl_response_mask"], [1, 0])
             self.assertEqual(records[0]["trajectory"][0]["reward"], 2.0)
+
+    def test_run_records_empty_episode_result_fallback_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            record_path = Path(tmpdir) / "results.jsonl"
+            result = EpisodeResult(
+                request_id="result-empty",
+                status="completed",
+                trajectory=Trajectory(total_reward=0.0, total_steps=0),
+                summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="swe_evaluated"),
+                trajectory_id="traj-empty",
+                metadata={"resolved": "false", "git_diff_bytes": "0"},
+            )
+            loop = UEnvAgentLoop(
+                tokenizer=FakeTokenizer(),
+                client=RecordingEpisodeClient(result),
+                result_record_path=str(record_path),
+            )
+
+            output = asyncio.run(
+                loop.run(
+                    {},
+                    raw_prompt=[{"role": "user", "content": "fix issue"}],
+                    data_source="gsm8k",
+                    reward_model={},
+                    extra_info={"batch_id": "batch-empty", "sample_index": 1},
+                )
+            )
+
+            records = [json.loads(line) for line in record_path.read_text().splitlines()]
+            self.assertEqual(output.response_ids, [0])
+            self.assertEqual(output.extra_fields["uenv_trajectory_id"], "traj-empty")
+            self.assertEqual(output.extra_fields["uenv_response_source"], "empty")
+            self.assertEqual(records[0]["trajectory_id"], "traj-empty")
+            self.assertEqual(records[0]["result_metadata"]["git_diff_bytes"], "0")
+            self.assertEqual(records[0]["response_source"], "empty")
+            self.assertTrue(records[0]["used_pad_fallback"])
+            self.assertEqual(records[0]["response_ids"], [])
+            self.assertEqual(records[0]["verl_response_ids"], [0])
+
+    def test_run_rejects_swe_episode_without_response_trace(self) -> None:
+        result = EpisodeResult(
+            request_id="result-empty-swe",
+            status="completed",
+            trajectory=Trajectory(total_reward=0.0, total_steps=0),
+            summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="swe_evaluated"),
+            trajectory_id="traj-empty-swe",
+            metadata={"resolved": "false", "git_diff_bytes": "0"},
+        )
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(result),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "without response token trace"):
+            asyncio.run(
+                loop.run(
+                    {},
+                    raw_prompt=[{"role": "user", "content": "fix issue"}],
+                    data_source="swe-bench-pro",
+                    reward_model={},
+                    extra_info={"batch_id": "batch-empty", "sample_index": 1},
+                )
+            )
+
+    def test_run_can_disable_swe_response_trace_guard_for_connectivity_smoke(self) -> None:
+        result = EpisodeResult(
+            request_id="result-empty-swe",
+            status="completed",
+            trajectory=Trajectory(total_reward=0.0, total_steps=0),
+            summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="swe_evaluated"),
+            trajectory_id="traj-empty-swe",
+            metadata={"resolved": "false", "git_diff_bytes": "0"},
+        )
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(result),
+            require_swe_response_trace=False,
+        )
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "fix issue"}],
+                data_source="swe-bench-pro",
+                reward_model={},
+                extra_info={"batch_id": "batch-empty", "sample_index": 1},
+            )
+        )
+
+        self.assertEqual(output.response_ids, [0])
+        self.assertEqual(output.extra_fields["uenv_response_source"], "empty")
 
     def test_run_records_episode_request_jsonl_before_submit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -781,6 +1049,18 @@ class UEnvAgentLoopTest(unittest.TestCase):
             self.assertEqual(loop.model_gateway.upstreams, ["http://10.10.20.142:40203/v1", "http://10.10.20.142:39755/v1"])
         finally:
             loop.close()
+
+    def test_close_can_leave_model_gateway_running_for_multi_worker_reuse(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+            model_gateway_enabled=True,
+            model_gateway_stop_on_close=False,
+        )
+        with unittest.mock.patch.object(type(loop.model_gateway), "stop") as stop:
+            loop.close()
+
+        stop.assert_not_called()
 
     def test_run_keeps_explicit_model_endpoint_override(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
@@ -1039,6 +1319,15 @@ class UEnvAgentLoopTest(unittest.TestCase):
             status="completed",
             trajectory=Trajectory(steps=[step], total_reward=2.0, total_steps=1),
             summary=EpisodeSummary(total_reward=2.0, total_steps=1, terminate_reason="done"),
+        )
+
+    def _failed_result(self, message: str) -> EpisodeResult:
+        return EpisodeResult(
+            request_id="failed-result",
+            status="failed",
+            trajectory=Trajectory(steps=[], total_reward=0.0, total_steps=0),
+            summary=EpisodeSummary(total_reward=0.0, total_steps=0, terminate_reason="failed"),
+            error_message=message,
         )
 
 

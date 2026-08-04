@@ -1,0 +1,63 @@
+{
+  "total_rows": 59136,
+  "empty_problem_statement": 18033,
+  "empty_patch": 0,
+  "zero_fail_to_pass": 0,
+  "zero_pass_to_pass": 476,
+  "unique_images": 222,
+  "unique_repos": 222,
+  "fail_to_pass_count_stats": {
+    "min": 1,
+    "p50": 5,
+    "p90": 94,
+    "max": 10936
+  },
+  "pass_to_pass_count_stats": {
+    "min": 0,
+    "p50": 376,
+    "p90": 2503,
+    "max": 22010
+  },
+  "top_images": [
+    [
+      "jyangballin/swesmith.x86_64.scanny_1776_python-pptx.278b47b1",
+      2389
+    ],
+    [
+      "jyangballin/swesmith.x86_64.pandas-dev_1776_pandas.95280573",
+      2354
+    ],
+    [
+      "jyangballin/swesmith.x86_64.pylint-dev_1776_astroid.b114f6b5",
+      1770
+    ],
+    [
+      "jyangballin/swesmith.x86_64.python-openxml_1776_python-docx.0cf6d71f",
+      1686
+    ],
+    [
+      "jyangballin/swesmith.x86_64.cantools_1776_cantools.0c6a7871",
+      1440
+    ],
+    [
+      "jyangballin/swesmith.x86_64.pygments_1776_pygments.27649ebb",
+      1430
+    ],
+    [
+      "jyangballin/swesmith.x86_64.pydicom_1776_pydicom.7d361b3d",
+      1328
+    ],
+    [
+      "jyangballin/swesmith.x86_64.sqlfluff_1776_sqlfluff.50a1c4b6",
+      1293
+    ],
+    [
+      "jyangballin/swesmith.x86_64.conan-io_1776_conan.86f29e13",
+      978
+    ],
+    [
+      "jyangballin/swesmith.x86_64.seperman_1776_deepdiff.ed252022",
+      964
+    ]
+  ]
+}

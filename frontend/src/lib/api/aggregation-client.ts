@@ -82,7 +82,11 @@ export class AggregationClient {
     handlers: StreamHandlers,
     opts: SubscribeStreamOptions = {},
   ): void {
-    const url = new URL(`${this.baseUrl}/api/v1/runs/${encodeURIComponent(runId)}/stream`);
+    const streamUrl = `${this.baseUrl}/api/v1/runs/${encodeURIComponent(runId)}/stream`;
+    // The local frontend uses the same-origin `/obs` proxy. `new URL("/obs/...")`
+    // without a base throws in browsers, while an absolute configured base URL is
+    // already valid. Supplying the current origin supports both forms.
+    const url = new URL(streamUrl, window.location.origin);
     if (this.token) url.searchParams.set("token", this.token);
     if (opts.lastEventId) url.searchParams.set("last_event_id", opts.lastEventId);
 

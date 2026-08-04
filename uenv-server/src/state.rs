@@ -63,6 +63,8 @@ pub struct ServerState {
     pub agent_job_pickup_timeout_secs: u64,
     /// agent 掉线 reaper 的扫描周期秒数。
     pub agent_job_reap_interval_secs: u64,
+    /// AgentJob stale lease 在后台回收前的额外宽限秒数。
+    pub agent_job_reclaim_grace_secs: u64,
     /// episode 进入执行区前的并发/排队控制器。
     pub admission: AdmissionController,
     /// trajectory 持久化存储。未配置时结果仍会返回，只是不写入该存储。
@@ -264,6 +266,7 @@ impl ServerState {
             ),
             agent_job_pickup_timeout_secs: config.episode.agent_job_pickup_timeout_secs,
             agent_job_reap_interval_secs: config.episode.agent_job_reap_interval_secs,
+            agent_job_reclaim_grace_secs: config.scheduler.agent_job_reclaim_grace_secs,
             admission: AdmissionController::new(&config.episode),
             trajectory_store: std::sync::OnceLock::new(),
             persistence: std::sync::OnceLock::new(),
@@ -394,9 +397,9 @@ pub fn spawn_agent_job_reaper(state: Arc<ServerState>) {
             ));
             loop {
                 interval.tick().await;
-                let reaped = state.agent_job_queue.reap_stale_agent_jobs();
-                if !reaped.is_empty() {
-                    tracing::warn!(reaped_jobs = ?reaped, "agent_job_reaper_reaped");
+                let reclaimed = state.agent_job_queue.reclaim_stale_jobs(state.agent_job_reclaim_grace_secs).await;
+                if reclaimed > 0 {
+                    tracing::warn!(reclaimed_jobs = reclaimed, "agent_job_reaper_reaped");
                 }
             }
         });

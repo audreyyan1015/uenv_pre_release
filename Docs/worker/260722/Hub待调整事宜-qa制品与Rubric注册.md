@@ -1,8 +1,8 @@
 # Hub 待调整事宜：qa 制品、Rubric 契约与 Agent 侧分发
 
-> 日期：2026-07-25  
-> 背景：本轮将 `math` 收敛为 `qa`，并引入 **verifiers Rubric 金标对齐** 与 **ToolEnv Agent 编排**。  
-> 判断：Hub 侧需要同步更新「提供的制品」与「注册方式」——下文逐项确认需求、现状与建议动作。  
+> 日期：2026-07-25
+> 背景：本轮将 `math` 收敛为 `qa`，并引入 **verifiers Rubric 金标对齐** 与 **ToolEnv Agent 编排**。
+> 判断：Hub 侧需要同步更新「提供的制品」与「注册方式」——下文逐项确认需求、现状与建议动作。
 > 总报告：[综合报告-验证型环境与ToolEnv-B3联调](./综合报告-验证型环境与ToolEnv-B3联调.md)
 
 ---
@@ -11,9 +11,9 @@
 
 **确认：Hub 需要更新。** 不止版本号 bump，还包括：
 
-1. **环境身份与兼容策略**（`qa` 正式、`math` deprecate）；  
-2. **Rubric / 判分契约进入制品元数据**（否则 Agent / 训练侧无法声明「对齐哪一版金标」）；  
-3. **Agent 机沙箱制品分发**（ToolEnv 与 Worker 官方 env 应对齐同一 digest，不能长期靠手工 scp）；  
+1. **环境身份与兼容策略**（`qa` 正式、`math` deprecate）；
+2. **Rubric / 判分契约进入制品元数据**（否则 Agent / 训练侧无法声明「对齐哪一版金标」）；
+3. **Agent 机沙箱制品分发**（ToolEnv 与 Worker 官方 env 应对齐同一 digest，不能长期靠手工 scp）；
 4. **注册标签扩展**（Worker `env.types` vs Agent `agent_bridge` 的双轨注册）。
 
 当前实机：Hub `8.130.95.176` 已有 `qa@0.2.0`（由 `math` 镜像发布），**尚未**携带 Rubric 契约字段，也**尚未**提供面向 Agent 机的独立制品通道。
@@ -43,7 +43,7 @@
 
 本轮金标结论：
 
-- 生产判分（Rust `score_action`）对齐 `verifiers` + `math_verify`：**96.55%**，**过宽 0**；  
+- 生产判分（Rust `score_action`）对齐 `verifiers` + `math_verify`：**96.55%**，**过宽 0**；
 - olympmath 曾存在「子串包含 → 空输出/错误答案满分」洞，已修。
 
 若 Hub 只发「能跑的 plugin 二进制/镜像」，训练与评测无法声明：
@@ -96,8 +96,8 @@ rubric:
 
 ### 4.1 问题
 
-- Worker 上的官方 `code`/`dscodebench` env 与 208.77 沙箱依赖（numpy/pandas/torch/…）必须一致，否则 Agent 迭代通过、官方 harness 失败。  
-- 当前：bootstrap + 手工同步 `DSCodeBench.json`（md5 对齐）+ sandbox-venv heavy requirements。  
+- Worker 上的官方 `code`/`dscodebench` env 与 208.77 沙箱依赖（numpy/pandas/torch/…）必须一致，否则 Agent 迭代通过、官方 harness 失败。
+- 当前：bootstrap + 手工同步 `DSCodeBench.json`（md5 对齐）+ sandbox-venv heavy requirements。
 - **Hub 尚未**向 Agent 机提供「与 Worker 同 digest 的 code 环境包」。
 
 ### 4.2 建议
@@ -110,19 +110,19 @@ rubric:
 
 Agent 注册（已落地）使用 `agent_bridge_id=uenv-agent-toolenv`；Hub 宜增加：
 
-- AgentBridge 包注册（版本、入口、所需 env digest）；  
+- AgentBridge 包注册（版本、入口、所需 env digest）；
 - 与 `RegisterAgent.synced_agent_bridges` 字段对齐的查询 API。
 
 ---
 
 ## 5. 注册方式变更清单（给 Hub 实现同学）
 
-1. **Seed**：`qa` 正式 seed；`math` deprecated。  
-2. **Template**：控制台/CLI 创建环境默认 `qa`。  
-3. **Publish API**：支持 `rubric` metadata + 附属 artifact 上传。  
-4. **Promote 闸门**：金标 `too_lenient=0`（可开关）。  
-5. **AgentBridge 目录**：注册 `uenv-agent-toolenv` / `uenv-agent-openhands` 及兼容的 env digest。  
-6. **文档**：对外说明「验证型单轮用 `qa`；code Agent 编排用 `execution_mode=agent` + ToolEnv bridge」。  
+1. **Seed**：`qa` 正式 seed；`math` deprecated。
+2. **Template**：控制台/CLI 创建环境默认 `qa`。
+3. **Publish API**：支持 `rubric` metadata + 附属 artifact 上传。
+4. **Promote 闸门**：金标 `too_lenient=0`（可开关）。
+5. **AgentBridge 目录**：注册 `uenv-agent-toolenv` / `uenv-agent-openhands` 及兼容的 env digest。
+6. **文档**：对外说明「验证型单轮用 `qa`；code Agent 编排用 `execution_mode=agent` + ToolEnv bridge」。
 7. **Yank 策略**：错误 Rubric 版本可 yank，但保留 digest 可追溯。
 
 ---
@@ -152,6 +152,6 @@ Agent 注册（已落地）使用 `agent_bridge_id=uenv-agent-toolenv`；Hub 宜
 
 ## 8. 不在 Hub 范围（避免误派）
 
-- Server `CodeAgentBackend` / poller 常驻 —— 属 Server + Agent 机。  
-- olympmath Rust 判分修复 —— 属 Worker 插件；Hub 只负责**声明**该修复落在哪个 version。  
+- Server `CodeAgentBackend` / poller 常驻 —— 属 Server + Agent 机。
+- olympmath Rust 判分修复 —— 属 Worker 插件；Hub 只负责**声明**该修复落在哪个 version。
 - 7142 临时 vLLM —— 已释放，与 Hub 无关。

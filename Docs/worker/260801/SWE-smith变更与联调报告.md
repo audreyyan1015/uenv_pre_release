@@ -1,9 +1,9 @@
 # SWE-smith 变更与联调报告（2026-08-01）
 
-> 日期：2026-08-01～2026-08-02
-> 范围：Worker 支持 SWE-smith → OpenHands / Adapter 全链路 → Rollout 导出 → 7142 DeepSeek vLLM 真实 LLM Agent 正式轨迹
-> 规划：[SWE-smith环境支持与OpenHands-Rollout联调规划](./SWE-smith环境支持与OpenHands-Rollout联调规划.md)
-> 过程记录：[SWE-smith-7143联调记录](./SWE-smith-7143联调记录.md)
+> 日期：2026-08-01～2026-08-02  
+> 范围：Worker 支持 SWE-smith → OpenHands / Adapter 全链路 → Rollout 导出 → 7142 DeepSeek vLLM 真实 LLM Agent 正式轨迹  
+> 规划：[SWE-smith环境支持与OpenHands-Rollout联调规划](./SWE-smith环境支持与OpenHands-Rollout联调规划.md)  
+> 过程记录：[SWE-smith-7143联调记录](./SWE-smith-7143联调记录.md)  
 > 拓扑：[secrets/README.md](../../../secrets/README.md)
 
 ---
@@ -70,11 +70,12 @@
 | `fixtures/swe/smith_smoke_sample.json` | 缩略 instance fixture |
 | `Docs/worker/260801/*` | 规划、联调记录、本报告、artifacts |
 
-### 2.5 Hub（后续补齐）
+### 2.5 Hub
 
 | 文件 | 变更摘要 |
 |------|----------|
 | `uenv-hub/uenv-hub-core/src/seed.rs` | 注册 `swe-bench-smith@0.1.0`，声明 Smith overlay、grader、OpenHands 驱动和 `/testbed`；将 Smith 加入 `swe` Task Environment；注册 `swe-bench-smith-openhands@1.0.0` |
+| `uenv-hub/uenv-hub-server/src/routes.rs` | `GET /api/v1/swe/{variant}/instances` 放行 `smith`，按 `smith-smoke.json` → `smith.json` 顺序取目录 |
 | `uenv-hub/uenv-hub-server/tests/e2e.rs` | 验证 Smith EnvPackage 制品、环境声明与 Episode Stack 可解析 |
 | `scripts/test-hub-swesmith-e2e.sh` | 独立数据库/回环端口启动 Hub，校验 HTTP、sync-plan、CLI sync、bundle digest、catalog、镜像索引和 eval spec |
 
@@ -84,9 +85,9 @@
 
 1. **调度键**：`env_type=swe` + `benchmark_variant=smith`（别名：`swe-smith` / `swesmith` / `swe-bench-smith`）。
 2. **工作区**：`/testbed`（禁止硬编码 Pro 的 `/app`）。
-3. **Smith `patch`**：数据集字段 = **造 bug 补丁**。
-   - provision：`git apply`（正向）+ `pip install -e .`
-   - gold：`git apply -R` + 常需 reinstall
+3. **Smith `patch`**：数据集字段 = **造 bug 补丁**。  
+   - provision：`git apply`（正向）+ `pip install -e .`  
+   - gold：`git apply -R` + 常需 reinstall  
 4. **grader**：`swesmith`（勿误用 `swebench_pro`）。
 5. **Phase 1–3 不经 Hub**：本地 EnvPackage `/var/lib/uenv/envs/swe-bench-smith/0.1.0-local`。
 
@@ -151,7 +152,7 @@ python3 scripts/export_swe_rollout_jsonl.py \
   --output-dir /var/lib/uenv/rollouts/swesmith-phase3-smoke
 ```
 
-仓库样例：[`artifacts/swesmith-rollout-smoke/`](./artifacts/swesmith-rollout-smoke/)
+仓库样例：[`artifacts/swesmith-rollout-smoke/`](./artifacts/swesmith-rollout-smoke/)  
 （gold 轨迹 `trj-…00004` → `chat_sft.resolved.jsonl`，`reward=1.0`）
 
 7142：

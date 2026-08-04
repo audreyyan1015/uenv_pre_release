@@ -221,31 +221,20 @@ function buildRecentEntries(state: ChainState): RecentEntry[] {
       time: w.last_heartbeat_ts ?? 0,
       type: "worker.heartbeat",
       target: w.worker_id,
-      status: (Array.isArray(w.active_episodes) ? w.active_episodes.length : 0) > 0
-        ? "ACTIVE"
-        : "PENDING",
+      status:
+        (Array.isArray(w.active_episodes) ? w.active_episodes.length : 0) > 0
+          ? "ACTIVE"
+          : "PENDING",
     });
   }
   return entries.sort((a, b) => b.time - a.time).slice(0, 30);
 }
 
-function resolveRunIdFromLocation(): string | null {
-  if (typeof window === "undefined") return null;
-  const param = new URLSearchParams(window.location.search).get("run");
-  const trimmed = param?.trim();
-  return trimmed ? trimmed : null;
-}
-
 // ---------- Component ----------
 
-export function TrainingConsole() {
+export function TrainingConsole({ initialRunId = null }: { initialRunId?: string | null }) {
   const envDefaultRunId = import.meta.env.VITE_DEFAULT_RUN_ID?.trim() || null;
-  const [runId, setRunId] = useState<string | null>(envDefaultRunId);
-
-  useEffect(() => {
-    const fromUrl = resolveRunIdFromLocation();
-    if (fromUrl) setRunId(fromUrl);
-  }, []);
+  const runId = initialRunId ?? envDefaultRunId;
 
   const {
     connection,
@@ -269,7 +258,23 @@ export function TrainingConsole() {
     "logs" | "metrics" | "events" | "snapshots" | "search"
   >("events");
 
-  const workflowNodes = useMemo(() => chainState?.workflow.nodes ?? [], [chainState]);
+  const workflowNodes = useMemo(() => {
+    const nodes = chainState?.workflow.nodes ?? [];
+    const dispatchCount = nodes.find((node) => node.node_id === "dispatch")?.payload_summary?.count;
+
+    // Older/current Obs processes may omit EXECUTE.count because Agent/SWE runs
+    // do not emit STEP_* events. Their dispatch transition is also the entry into
+    // EXECUTE, so use that distinct-Episode count only when the field is absent.
+    if (typeof dispatchCount !== "number") return nodes;
+    return nodes.map((node) =>
+      node.node_id === "execute" && typeof node.payload_summary?.count !== "number"
+        ? {
+            ...node,
+            payload_summary: { ...node.payload_summary, count: dispatchCount },
+          }
+        : node,
+    );
+  }, [chainState]);
   const resolvedStageId = useMemo(() => {
     if (selectedStageId && workflowNodes.some((n) => n.node_id === selectedStageId))
       return selectedStageId;
@@ -305,8 +310,9 @@ export function TrainingConsole() {
     const list = chainState ? Object.values(chainState.workers) : [];
     return {
       total: list.length,
-      active: list.filter((w) => (Array.isArray(w.active_episodes) ? w.active_episodes.length : 0) > 0)
-        .length,
+      active: list.filter(
+        (w) => (Array.isArray(w.active_episodes) ? w.active_episodes.length : 0) > 0,
+      ).length,
     };
   }, [chainState]);
 
@@ -424,7 +430,15 @@ function TopBar({
   episodeStats: { total: number; done: number; failed: number; active: number };
   workerStats: { total: number; active: number };
 }) {
-  const runStyle = runStateStyles[chainState.run_state] ?? runStateStyles.PENDING;
+  // Some pressure drivers publish Episode lifecycle events without a separate
+  // run_status transition. Do not label such an actively progressing run as
+  // "待启动" merely because its raw run_state is still PENDING.
+  const displayedRunState: RunState =
+    chainState.run_state === "PENDING" &&
+    (episodeStats.active > 0 || episodeStats.done > 0 || episodeStats.failed > 0)
+      ? "RUNNING"
+      : chainState.run_state;
+  const runStyle = runStateStyles[displayedRunState] ?? runStateStyles.PENDING;
   const conn = connectionMeta[connection];
   const canViewSnapshot = snapshotCount > 0;
 

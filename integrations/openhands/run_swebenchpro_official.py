@@ -38,6 +38,7 @@ from uenv_runtime.gateway_tools import (  # noqa: E402
     collect_tool_patch_status,
     patch_openhands_tools_for_uenv,
 )
+from uenv_runtime.llm_rollout import RolloutTraceCollector  # noqa: E402
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
 from uenv_runtime.workspace_probe import (  # noqa: E402
     merge_reset_observation,
@@ -275,7 +276,10 @@ def _fetch_trajectory_bundle(client: UEnvGatewayClient, ref: dict, out: Path) ->
         return None
 
 
-def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
+def _run_conversation_loop(
+    conversation,
+    max_fake_responses: int = 5,
+) -> dict[str, Any]:
     """Like benchmarks fake_user_response helper but compatible with LocalConversation."""
     from benchmarks.utils.fake_user_response import (
         _agent_finished_with_finish_action,
@@ -284,24 +288,40 @@ def _run_conversation_loop(conversation, max_fake_responses: int = 5) -> None:
     )
     from openhands.sdk.conversation.state import ConversationExecutionStatus
 
+    if max_fake_responses < 0:
+        raise ValueError("max_fake_responses must be non-negative")
     fake_count = 0
+    termination_reason = "unknown"
     while True:
         conversation.run()
         status = conversation.state.execution_status
         if status != ConversationExecutionStatus.FINISHED:
+            termination_reason = (
+                "execution_status_"
+                + str(getattr(status, "value", status)).lower()
+            )
             break
         events = list(conversation.state.events)
         if _agent_finished_with_finish_action(events):
+            termination_reason = "finish_action"
             break
         if not _agent_sent_message(events):
+            termination_reason = "no_agent_message"
             break
         if fake_count >= max_fake_responses:
+            termination_reason = "fake_response_limit"
             break
         msg = fake_user_response(conversation)
         if msg == "/exit":
+            termination_reason = "fake_user_exit"
             break
         conversation.send_message(msg)
         fake_count += 1
+    return {
+        "termination_reason": termination_reason,
+        "fake_user_responses": fake_count,
+        "max_fake_responses": max_fake_responses,
+    }
 
 
 def main() -> int:
@@ -439,11 +459,21 @@ def main() -> int:
         client = UEnvGatewayClient("http://127.0.0.1:1", api_key=args.api_key, run_id=run_id)
 
     llm = None
+    rollout_collector = None
+    rollout_fields: dict[str, Any] = {}
     if args.mode == "llm":
         if not args.llm_config:
             print("--llm-config required for llm mode", file=sys.stderr)
             return 1
         llm = load_llm_config(args.llm_config)
+        rollout_collector = RolloutTraceCollector(args.llm_config)
+        episode_id = str(agent_job.episode_id) if agent_job and agent_job.episode_id else run_id
+        dataset = (
+            "swesmith"
+            if str(args.benchmark_variant).lower() in {"smith", "swesmith", "swe-smith"}
+            else "swebench_pro"
+        )
+        rollout_collector.install(llm, episode_id=episode_id, dataset=dataset)
         logger.info("LLM model=%s", llm.model)
 
     session_id = agent_job.session_id if agent_job else None
@@ -570,11 +600,21 @@ def main() -> int:
                 instruction = _build_instruction(row, workspace_dir)
                 _save_json(out / "instruction.txt", {"text": instruction})
                 conversation.send_message(instruction)
-                _run_conversation_loop(conversation, max_fake_responses=5)
+                loop_summary = _run_conversation_loop(
+                    conversation, max_fake_responses=max(args.max_iterations - 1, 0)
+                )
+                if rollout_collector is None:
+                    raise RuntimeError("LLM rollout collector was not initialized")
+                rollout_fields = rollout_collector.finalize()
                 _save_json(
                     out / "conversation_events.json",
-                    {"count": len(list(conversation.state.events))},
+                    {
+                        "count": len(list(conversation.state.events)),
+                        "model_response_count": len(rollout_fields.get("turns", [])),
+                        **loop_summary,
+                    },
                 )
+                _save_json(out / "llm_rollout_trace.json", rollout_fields)
                 # Pre-submit: confirm agent stayed in the right repo.
                 # Pro=/app；Verified/Lite/Smith=/testbed — 勿写死 /app。
                 pre = ws.execute_command(
@@ -616,6 +656,7 @@ def main() -> int:
             "trajectory_ref": result.trajectory_ref,
             "elapsed_sec": elapsed,
         }
+        submit_doc.update(rollout_fields)
         _save_json(out / "submit_result.json", submit_doc)
 
         ref = result.trajectory_ref

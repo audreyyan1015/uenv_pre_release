@@ -118,6 +118,17 @@ impl UEnvEpisodeService {
         let async_context = ensure_async_request_context(&mut req)?;
 
         let episode_id = req.episode_id.clone();
+        let received_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        tracing::info!(
+            episode_id = %episode_id,
+            batch_id = %req.correlation_id,
+            env_type = %req.env_type,
+            received_ts,
+            "episode_received"
+        );
         // 同一个 episode_id 重新进入时，清掉上一次取消留下的短期标记，避免新请求被旧状态影响。
         self.state.cancelled_episodes.remove(&episode_id);
         let handle = Arc::new(EpisodeHandle::new(episode_id.clone(), req.attempt_id));
@@ -145,6 +156,10 @@ impl UEnvEpisodeService {
                 }
             }
         };
+        crate::obs::try_emit(
+            &self.state,
+            crate::obs::episode_submitted(&req, self.state.epoch()),
+        );
         let timeout_secs = if req.timeout_seconds > 0 {
             req.timeout_seconds as u64
         } else {
@@ -190,7 +205,7 @@ impl UEnvEpisodeService {
         let backend = select_execution_backend(&req);
         crate::obs::try_emit(
             &self.state,
-            crate::obs::episode_submitted(&req, self.state.epoch()),
+            crate::obs::episode_scheduling(&req, self.state.epoch()),
         );
         // 后端选择只决定执行路径，不改变前面建立的 active/cancel/deadline 约束。
         backend
@@ -919,6 +934,17 @@ impl UEnvEpisodeService {
             session_id = %session.session_id,
             "swe_agent_job_dispatched"
         );
+
+        // SWE Agent jobs do not pass through the native worker dispatch loop. Emit the
+        // same dispatch/attempt observations here so the per-Episode user view advances
+        // from DISPATCH to EXECUTE while the Agent is actually processing the job.
+        for ev in crate::obs::episode_dispatched(
+            &req,
+            &assignment.worker_id,
+            self.state.epoch(),
+        ) {
+            crate::obs::try_emit(&self.state, ev);
+        }
 
         let mut deadline_sleep = Box::pin(tokio::time::sleep_until(
             tokio::time::Instant::from_std(deadline),
