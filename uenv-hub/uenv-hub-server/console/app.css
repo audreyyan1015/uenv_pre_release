@@ -47,6 +47,7 @@
   --warning-ink: oklch(0.48 0.12 70);
   --danger-ink: oklch(0.48 0.19 28);
   --info-ink: oklch(0.46 0.15 235);
+  --primary-ink: oklch(0.40 0.17 255);
 
   --shadow-sm: 0 1px 2px oklch(0.18 0.02 250 / 5%);
   --shadow-md: 0 1px 3px oklch(0.18 0.02 250 / 7%), 0 4px 12px oklch(0.18 0.02 250 / 5%);
@@ -190,7 +191,11 @@ a {
 }
 
 .nav-item.active .ico {
-  color: var(--primary);
+  color: var(--primary-ink);
+}
+
+.nav-item.active em {
+  color: color-mix(in oklab, var(--foreground) 72%, transparent);
 }
 
 .sidebar-foot {

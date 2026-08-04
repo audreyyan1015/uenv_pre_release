@@ -18,6 +18,7 @@ HUB_SERVER_BIN="${UENV_HUB_SERVER_BIN:-$REPO_ROOT/uenv-hub/target/debug/uenv-hub
 PORT="${UENV_HUB_TEST_PORT:-18091}"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/uenv-hub-console-e2e.XXXXXX")"
 SERVER_PID=""
+CHROME_AUDIT_PID=""
 BASE_URL="${UENV_HUB_BASE_URL:-}"
 TOKEN="${UENV_HUB_TOKEN:-}"
 
@@ -25,6 +26,12 @@ cleanup() {
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  # 审计用的 Chrome 会一直往 user-data-dir 里写，没退干净就删目录会报
+  # "Directory not empty"，所以先等它落地。
+  if [[ -n "$CHROME_AUDIT_PID" ]]; then
+    kill "$CHROME_AUDIT_PID" 2>/dev/null || true
+    wait "$CHROME_AUDIT_PID" 2>/dev/null || true
   fi
   rm -rf "$RUN_DIR"
 }
@@ -351,6 +358,38 @@ PY
   done
   [[ $render_failed -eq 0 ]] || { echo "无头渲染回归失败"; exit 1; }
   echo "ok   无头渲染回归：${#ROUTES[@]} 条路由全部画出且无错误块"
+
+  # --------------------------------------------------------------- 对比度审计
+  #
+  # 浅色主题下配色是否可读，肉眼看截图判断不了——把颜色实测出来算。连上 Chrome
+  # 的调试端口，在页面里取每个可见文字节点 getComputedStyle 的实际前景色、沿祖先
+  # 链合成出实际背景色，按 WCAG 2.1 算对比度。浏览器已经把 oklch / color-mix 全部
+  # 解析完，量到的就是用户真正看到的颜色。
+  echo
+  if ! command -v node > /dev/null 2>&1; then
+    echo "skip 对比度审计：未找到 node"
+  else
+    CDP_PORT="${UENV_HUB_CONSOLE_CDP_PORT:-9222}"
+    "$CHROME_BIN" --headless --disable-gpu --no-sandbox \
+      --remote-debugging-port="$CDP_PORT" \
+      --user-data-dir="$RUN_DIR/chrome-audit" \
+      --window-size=1600,1200 about:blank > "$RUN_DIR/chrome-audit.log" 2>&1 &
+    CHROME_AUDIT_PID=$!
+    for _ in $(seq 1 20); do
+      curl -sf "http://127.0.0.1:$CDP_PORT/json/version" > /dev/null && break
+      sleep 1
+    done
+
+    audit_rc=0
+    CDP_PORT="$CDP_PORT" BASE="$BASE_URL" \
+      ROUTES="$(IFS=,; echo "${ROUTES[*]}")" \
+      node --experimental-websocket "$REPO_ROOT/scripts/hub-console-contrast-audit.mjs" \
+      || audit_rc=$?
+    kill "$CHROME_AUDIT_PID" 2> /dev/null || true
+    wait "$CHROME_AUDIT_PID" 2> /dev/null || true
+    CHROME_AUDIT_PID=""
+    [[ $audit_rc -eq 0 ]] || { echo "对比度审计未通过"; exit 1; }
+  fi
 fi
 
 echo
