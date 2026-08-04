@@ -6,14 +6,17 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+// Keep the normal development proxy on the production read endpoint. Isolated
+// pressure runs can override this process-local target without changing .env.
+const obsProxyTarget = process.env.VITE_OBS_PROXY_TARGET ?? "http://127.0.0.1:50053";
+
 export default defineConfig({
   vite: {
     server: {
-      // 远端联调：浏览器同源访问 /obs/*，由 Vite 反代到本机 Obs :50053
-      // （公网未放行 50053 时，前端用 VITE_AGGREGATION_BASE_URL=/obs）
+      // 浏览器同源访问 /obs/*；压测可用 VITE_OBS_PROXY_TARGET 指向隔离 Obs。
       proxy: {
         "/obs": {
-          target: "http://127.0.0.1:50053",
+          target: obsProxyTarget,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/obs/, ""),
         },

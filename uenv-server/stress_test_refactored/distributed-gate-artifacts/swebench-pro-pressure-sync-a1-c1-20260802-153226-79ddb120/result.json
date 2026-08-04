@@ -1,0 +1,372 @@
+{
+  "average_reward": 1.0,
+  "batch_latency_ms": {
+    "count": 1,
+    "max": 9522.822288796306,
+    "mean": 9522.822288796306,
+    "min": 9522.822288796306,
+    "p50": 9522.822288796306,
+    "p95": 9522.822288796306,
+    "p99": 9522.822288796306
+  },
+  "batch_size": 1,
+  "benchmark_variant": "pro",
+  "capacity_waves": 1.0,
+  "client_submit_rate_eps": 1086.6127520480086,
+  "client_submit_seconds": 0.0009202910587191582,
+  "completed": 1,
+  "completed_throughput_eps": 0.10499453773651082,
+  "completion_rate": 1.0,
+  "concurrency": 1,
+  "concurrent_batches": 1,
+  "configured_workers": 1,
+  "dataset": {
+    "instance_usage_top20": {
+      "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f": 1
+    },
+    "loaded_items": 50,
+    "name": "SWE-bench Pro",
+    "reuse_factor": 0.02,
+    "sampling_unit": "episode",
+    "selected_instance_ids": [
+      "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+      "instance_element-hq__element-web-53b42e321777a598aaf2bb3eab22d710569f83a8-vnan",
+      "instance_navidrome__navidrome-fa85e2a7816a6fe3829a4c0d8e893e982b0985da",
+      "instance_ansible__ansible-e0c91af45fa9af575d10fd3e724ebc59d2b2d6ac-v30a923fb5c164d6cd18280c02422f75e611e8fb2",
+      "instance_tutao__tutanota-db90ac26ab78addf72a8efaff3c7acc0fbd6d000-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+      "instance_flipt-io__flipt-cd2f3b0a9d4d8b8a6d3d56afab65851ecdc408e8",
+      "instance_internetarchive__openlibrary-7f7e53aa4cf74a4f8549a5bcd4810c527e2f6d7e-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+      "instance_qutebrowser__qutebrowser-77c3557995704a683cdb67e2a3055f7547fa22c3-v363c8a7e5ccdf6968fc7ab84a2053ac78036691d",
+      "instance_NodeBB__NodeBB-05f2236193f407cf8e2072757fbd6bb170bc13f0-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+      "instance_protonmail__webclients-0200ce0fc1d4dbd35178c10d440a284c82ecc858",
+      "instance_future-architect__vuls-61c39637f2f3809e1b5dad05f0c57c799dce1587",
+      "instance_gravitational__teleport-ad41b3c15414b28a6cec8c25424a19bfa7abd0e9-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+      "instance_element-hq__element-web-27139ca68eb075a4438c18fca184887002a4ffbc-vnan",
+      "instance_navidrome__navidrome-8e640bb8580affb7e0ea6225c0bbe240186b6b08",
+      "instance_ansible__ansible-b8025ac160146319d2b875be3366b60c852dd35d-v0f01c69f1e2528b935359cfe578530722bca2c59",
+      "instance_tutao__tutanota-1e516e989b3c0221f4af6b297d9c0e4c43e4adc3-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+      "instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+      "instance_internetarchive__openlibrary-62d2243131a9c7e6aee00d1e9c5660fd5b594e89-v0f5aece3601a5b4419f7ccec1dbda2071be28ee4",
+      "instance_qutebrowser__qutebrowser-fd6790fe8c02b144ab2464f1fc8ab3d02ce3c476-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+      "instance_NodeBB__NodeBB-b398321a5eb913666f903a794219833926881a8f-vd59a5728dfc977f44533186ace531248c2917516",
+      "instance_protonmail__webclients-f161c10cf7d31abf82e8d64d7a99c9fac5acfa18",
+      "instance_future-architect__vuls-c11ba27509f733d7d280bdf661cbbe2e7a99df4c",
+      "instance_gravitational__teleport-47530e1fd8bfb84ec096ebcbbc29990f30829655-vee9b09fb20c43af7e520f57e9239bbcf46b7113d",
+      "instance_element-hq__element-web-9bf77963ee5e036d54b2a3ca202fbf6378464a5e-vnan",
+      "instance_navidrome__navidrome-10108c63c9b5bdf2966ffb3239bbfd89683e37b7",
+      "instance_ansible__ansible-d72025be751c894673ba85caa063d835a0ad3a8c-v390e508d27db7a51eece36bb6d9698b63a5b638a",
+      "instance_tutao__tutanota-1ff82aa365763cee2d609c9d19360ad87fdf2ec7-vc4e41fd0029957297843cb9dec4a25c7c756f029",
+      "instance_flipt-io__flipt-cd18e54a0371fa222304742c6312e9ac37ea86c1",
+      "instance_internetarchive__openlibrary-798a582540019363d14b2090755cc7b89a350788-v430f20c722405e462d9ef44dee7d34c41e76fe7a",
+      "instance_qutebrowser__qutebrowser-ec2dcfce9eee9f808efc17a1b99e227fc4421dea-v5149fcda2a9a6fe1d35dfed1bade1444a11ef271",
+      "instance_NodeBB__NodeBB-f9ce92df988db7c1ae55d9ef96d247d27478bc70-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+      "instance_protonmail__webclients-cba6ebbd0707caa524ffee51c62b197f6122c902",
+      "instance_future-architect__vuls-e1fab805afcfc92a2a615371d0ec1e667503c254-v264a82e2f4818e30f5a25e4da53b27ba119f62b5",
+      "instance_gravitational__teleport-82185f232ae8974258397e121b3bc2ed0c3729ed-v626ec2a48416b10a88641359a169d99e935ff037",
+      "instance_element-hq__element-web-ca58617cee8aa91c93553449bfdf9b3465a5119b-vnan",
+      "instance_navidrome__navidrome-97434c1789a6444b30aae5ff5aa124a96a88f504",
+      "instance_ansible__ansible-984216f52e76b904e5b0fa0fb956ab4f1e0a7751-v1055803c3a812189a1133297f7f5468579283f86",
+      "instance_tutao__tutanota-befce4b146002b9abc86aa95f4d57581771815ce-vee878bb72091875e912c52fc32bc60ec3760227b",
+      "instance_flipt-io__flipt-c1fd7a81ef9f23e742501bfb26d914eb683262aa",
+      "instance_internetarchive__openlibrary-798055d1a19b8fa0983153b709f460be97e33064-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+      "instance_qutebrowser__qutebrowser-cc360cd4a34a126274c7b51f3b63afbaf3e05a02-v5fc38aaf22415ab0b70567368332beee7955b367",
+      "instance_NodeBB__NodeBB-f1a80d48cc45877fcbadf34c2345dd9709722c7f-v4fbcfae8b15e4ce5d132c408bca69ebb9cf146ed",
+      "instance_protonmail__webclients-b530a3db50cb33e5064464addbcbef1465856ce6",
+      "instance_future-architect__vuls-a76302c11174ca081f656c63a000ffa746e350af",
+      "instance_gravitational__teleport-2be514d3c33b0ae9188e11ac9975485c853d98bb-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+      "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan",
+      "instance_navidrome__navidrome-d613b1930688422122796b43acb3caf2538c8fd1",
+      "instance_ansible__ansible-622a493ae03bd5e5cf517d336fc426e9d12208c7-v906c969b551b346ef54a2c0b41e04f632b7b73c2",
+      "instance_tutao__tutanota-d1aa0ecec288bfc800cfb9133b087c4f81ad8b38-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf",
+      "instance_flipt-io__flipt-292fdaca9be39e6a921aaa8874c011d0fdd3e874"
+    ],
+    "submitted_episodes": 1,
+    "unique_instance_count": 50,
+    "unique_items": 50
+  },
+  "elapsed_seconds": 9.52430499298498,
+  "episode_observations": {
+    "artifact_path": "/tmp/uenv-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120/result.json.episode-observations.jsonl",
+    "complete": true,
+    "local_artifact": "/home/uenv-frontend-add/uenv-server/stress_test_refactored/distributed-gate-artifacts/swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120/episode-observations.jsonl",
+    "row_count": 1,
+    "schema_version": 1,
+    "submitted_count": 1,
+    "worker_attribution": "unavailable_in_adapter_result"
+  },
+  "failed": 0,
+  "fleet_resource_metrics": {
+    "available": false,
+    "observation_only": true
+  },
+  "host_resource_metrics": {
+    "per_node": {
+      "8.130.65.20": {
+        "duration_seconds": 11.067352533340454,
+        "final_mem_available_kib": 30141636,
+        "initial_mem_available_kib": 30327028,
+        "max_load1": 0.31,
+        "max_load15": 0.02,
+        "max_load5": 0.08,
+        "max_mem_available_drop_kib": 438432,
+        "mem_total_kib": 31921256,
+        "min_mem_available_kib": 29888596,
+        "observation_only": true,
+        "peak_running_containers": 1,
+        "sample_period_seconds": 0.1,
+        "samples": 101
+      }
+    }
+  },
+  "host_watchdog": {
+    "interval_secs": 5,
+    "local_artifact": "/home/uenv-frontend-add/uenv-server/stress_test_refactored/distributed-gate-artifacts/swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120/host-watchdog.jsonl",
+    "samples": 2,
+    "server_path": "/tmp/uenv-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120/host-watchdog.jsonl"
+  },
+  "infrastructure": {
+    "passed": true,
+    "status": "passed",
+    "statuses_valid": true,
+    "training_traces_valid": true
+  },
+  "instance_id": "instance_gravitational__teleport-3ff75e29fb2153a2637fe7f83e49dc04b1c99c9f",
+  "max_steps": 10,
+  "mode": "llm",
+  "model_quality": {
+    "average_reward": 1.0,
+    "sample_count": 1,
+    "successful_rewards": 1
+  },
+  "openhands_max_iterations": 10,
+  "parallel_mode": "sync",
+  "planned_batches": 1,
+  "pressure_metrics_schema_version": 1,
+  "protocol_errors": 0,
+  "registered_workers": [
+    "stress-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120-worker-0000"
+  ],
+  "requested_episode_concurrency": 1,
+  "resolved_throughput_eps": 0.10499453773651082,
+  "resource_observations": {
+    "container_concurrency": {
+      "agent_capacity": 1,
+      "agent_count_per_node": 1,
+      "agent_count_total": 1,
+      "agent_max_concurrent": 1,
+      "observed_requested_concurrency": true,
+      "peak_per_node": {
+        "8.130.65.20": 1
+      },
+      "peak_running_containers": 1,
+      "requested": 1
+    },
+    "observation_only": true,
+    "worker_fleet": {
+      "available": false,
+      "observation_only": true
+    },
+    "worker_host": {
+      "per_node": {
+        "8.130.65.20": {
+          "duration_seconds": 11.067352533340454,
+          "final_mem_available_kib": 30141636,
+          "initial_mem_available_kib": 30327028,
+          "max_load1": 0.31,
+          "max_load15": 0.02,
+          "max_load5": 0.08,
+          "max_mem_available_drop_kib": 438432,
+          "mem_total_kib": 31921256,
+          "min_mem_available_kib": 29888596,
+          "observation_only": true,
+          "peak_running_containers": 1,
+          "sample_period_seconds": 0.1,
+          "samples": 101
+        }
+      }
+    }
+  },
+  "results": [
+    {
+      "actual_steps": 1,
+      "batch_id": "a02a6d93-8320-46fc-be62-56c7741101ce",
+      "done": true,
+      "error_code": "",
+      "error_message": "",
+      "request_id": "22f703ce-c4d6-4431-a728-2dba980fb3cc",
+      "response_ids": [
+        1001,
+        1002,
+        1003,
+        1004,
+        1005,
+        1006,
+        1007,
+        1008,
+        1009,
+        1010
+      ],
+      "response_mask": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "reward": 1.0,
+      "rollout_log_probs": [
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612,
+        -0.10000000149011612
+      ],
+      "rollout_param_version": 0,
+      "rollout_policy_version": "openai/uenv-swe-simulator",
+      "sample_index": 0,
+      "status": "completed",
+      "termination_reason": "",
+      "training_trace_errors": [],
+      "training_trace_valid": true,
+      "trajectory": {
+        "metadata": {
+          "batch_id": "a02a6d93-8320-46fc-be62-56c7741101ce",
+          "git_diff_bytes": "3713",
+          "git_diff_nonempty": "1",
+          "resolved": "True",
+          "tests_passed": "0",
+          "tests_total": "0"
+        },
+        "steps": [
+          {
+            "action": "",
+            "duration_ms": 0,
+            "info": {},
+            "observation": "",
+            "reward": 0.0,
+            "rollout_trace": {
+              "response_ids": [
+                1001,
+                1002,
+                1003,
+                1004,
+                1005,
+                1006,
+                1007,
+                1008,
+                1009,
+                1010
+              ],
+              "response_mask": [
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1
+              ]
+            },
+            "step_index": 1,
+            "terminated": false,
+            "truncated": false
+          }
+        ],
+        "total_reward": 1.0,
+        "total_steps": 1,
+        "trajectory_id": "trj-stress-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120-worker-0000-1785656084783-00001"
+      }
+    }
+  ],
+  "rpc_error_episodes": 0,
+  "run_id": "swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120",
+  "scale": {
+    "batch_count": 1,
+    "batch_latency_ms": {
+      "count": 1,
+      "max": 9522.822288796306,
+      "mean": 9522.822288796306,
+      "min": 9522.822288796306
+    },
+    "client_submit_rate_eps": 1086.6127520480086,
+    "client_submit_seconds": 0.0009202910587191582,
+    "completed": 1,
+    "completed_throughput_eps": 0.10499453773651082,
+    "driver_progress_path": "/tmp/uenv-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120/driver-progress.jsonl",
+    "duplicate_result_ids": [],
+    "episode_batch_size": 1,
+    "episode_offset": 0,
+    "episode_ordinal_end_exclusive": 1,
+    "episode_ordinal_start": 0,
+    "expected_workers": 1,
+    "failed": 0,
+    "max_in_flight_batches": 1,
+    "missing_result_ids": [],
+    "parallel_mode": "sync",
+    "planned_batches": 1,
+    "protocol_errors": 0,
+    "registered_worker_count": 1,
+    "resolved_batches": 1,
+    "resolved_episodes": 1,
+    "resolved_throughput_eps": 0.10499453773651082,
+    "rpc_dispatched_batches": 1,
+    "rpc_dispatched_episodes": 1,
+    "rpc_error_details": [],
+    "rpc_error_episodes": 0,
+    "server_accepted_episodes": null,
+    "server_accepted_note": "ExecuteBatch has no accept-only acknowledgement; use server metrics/admin snapshot for authoritative pending/in-flight counts.",
+    "submission_strategy": "submit_all_batches_then_collect",
+    "submitted": 1,
+    "submitted_throughput_eps": 0.10499453773651082,
+    "submitted_to_uenv": 1,
+    "target_backlog_ratio": 1.0,
+    "total_episodes": 1,
+    "unknown_result_ids": [],
+    "worker_capacity": 1,
+    "worker_prefix": "stress-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120-worker-",
+    "worker_slots": 1
+  },
+  "schema_version": 2,
+  "server": "192.168.0.136:8099",
+  "status": "completed",
+  "submission_strategy": "submit_all_batches_then_collect",
+  "submitted": 1,
+  "submitted_batches": 1,
+  "submitted_throughput_eps": 0.10499453773651082,
+  "test_name": "SWE-bench Pro pressure",
+  "trace_corpus_collection": {
+    "complete_for_configured_requirement": false,
+    "explicit_episode_files": 0,
+    "note": "Real-LLM trace collection may preserve replayable documents even when the batch fails due to provider rate limits.",
+    "partial_corpus_preserved": true,
+    "replayable_documents": 1,
+    "required_valid_episodes": 50,
+    "rollout_trace_files": 1,
+    "valid_training_trace_results": 1
+  },
+  "trace_replay": {
+    "assigned_episodes": 0,
+    "calls": 0,
+    "distinct_traces_used": 0,
+    "hits": 0,
+    "misses": 0,
+    "required": false,
+    "sampling_strategy": "round_robin_episode"
+  },
+  "worker_capacity": 1,
+  "worker_id": "stress-swebench-pro-pressure-sync-a1-c1-20260802-153226-79ddb120-worker-0000",
+  "worker_slots": 1
+}

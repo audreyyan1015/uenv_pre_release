@@ -1,0 +1,19 @@
+{
+  "per_node": {
+    "8.130.65.20": {
+      "duration_seconds": 120.97852849960327,
+      "final_mem_available_kib": 30309204,
+      "initial_mem_available_kib": 30328784,
+      "max_load1": 0.83,
+      "max_load15": 0.11,
+      "max_load5": 0.31,
+      "max_mem_available_drop_kib": 449068,
+      "mem_total_kib": 31921256,
+      "min_mem_available_kib": 29879716,
+      "observation_only": true,
+      "peak_running_containers": 1,
+      "sample_period_seconds": 0.1,
+      "samples": 1091
+    }
+  }
+}

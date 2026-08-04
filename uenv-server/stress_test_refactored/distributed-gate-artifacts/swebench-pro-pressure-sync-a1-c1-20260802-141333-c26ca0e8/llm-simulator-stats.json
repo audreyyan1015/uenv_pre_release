@@ -1,0 +1,90 @@
+{
+  "aggregate": {
+    "assigned_episodes": 0,
+    "completed_cycles": 0,
+    "distinct_traces_used": 0,
+    "sampling_strategies": [
+      "round_robin_episode"
+    ],
+    "trace_replay_hits": 0,
+    "trace_replay_misses": 0
+  },
+  "per_node": {
+    "8.130.65.20": {
+      "attempts": {
+        "episode:00b9ff3b-b741-4028-ab85-213e24494d86": 10,
+        "episode:162b219a-ce8b-473d-804c-295a0f15cc0b": 10,
+        "episode:509d7a51-e06e-43f3-8d37-41dcccf4d753": 10,
+        "episode:731e49d3-8c9b-4210-959a-01ca00b4e435": 10,
+        "episode:813bb3e7-86f0-4add-b1ee-380e21287143": 10,
+        "episode:94a844a9-329c-42ef-82e7-01aad8e367c9": 10,
+        "episode:d9b197d3-f796-4936-a043-b84fb509bb56": 10,
+        "episode:e42bcbcf-c9f9-4120-9afa-90880b58c6e4": 10,
+        "episode:eacefd38-0ab5-4911-ac7a-f62c66461ba5": 10,
+        "episode:ecf22f95-5287-4f95-aa51-dedd420be24b": 10,
+        "fallback:unknown-instance:43ec2ed7e4a0": 1
+      },
+      "calls": 101,
+      "model": "openai/uenv-swe-simulator",
+      "observed_replay_wait_ms": {
+        "count": 101,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0
+      },
+      "profiles": {
+        "episode:00b9ff3b-b741-4028-ab85-213e24494d86": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:162b219a-ce8b-473d-804c-295a0f15cc0b": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:509d7a51-e06e-43f3-8d37-41dcccf4d753": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:731e49d3-8c9b-4210-959a-01ca00b4e435": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:813bb3e7-86f0-4add-b1ee-380e21287143": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:94a844a9-329c-42ef-82e7-01aad8e367c9": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:d9b197d3-f796-4936-a043-b84fb509bb56": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:e42bcbcf-c9f9-4120-9afa-90880b58c6e4": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:eacefd38-0ab5-4911-ac7a-f62c66461ba5": {
+          "instance_id": "unknown-instance"
+        },
+        "episode:ecf22f95-5287-4f95-aa51-dedd420be24b": {
+          "instance_id": "unknown-instance"
+        },
+        "fallback:unknown-instance:43ec2ed7e4a0": {
+          "instance_id": "unknown-instance"
+        }
+      },
+      "simulator": {
+        "assigned_episodes": 0,
+        "completed_cycles": 0,
+        "episode_binding": "one assigned trajectory for the Episode lifetime",
+        "exhausted_turn_reuses": 0,
+        "kind": "swebench-template-compatibility",
+        "mode": "template",
+        "next_trace_slot": 0,
+        "seed": 20260720,
+        "trace_corpus_path": "",
+        "trace_episode_count": 0,
+        "trace_sampling_strategy": "round_robin_episode",
+        "trace_selection_counts": {},
+        "zero_latency": false
+      },
+      "tokenization_calls": 10,
+      "trace_replay_hits": 0,
+      "trace_replay_misses": 0
+    }
+  }
+}

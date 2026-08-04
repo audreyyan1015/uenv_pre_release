@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 
 import { AggregationClient, getAggregationConfig } from "@/lib/api/aggregation-client";
 import { buildFixtureDeltas, buildFixtureState, FIXTURE_RUN_ID } from "@/lib/api/fixture";
@@ -13,8 +13,8 @@ import type { ChainState, ClientSnapshot } from "@/lib/types/chain-state";
 
 const FIXTURE_DELTA_INTERVAL_MS = 1800;
 const RECONNECT_DELAY_MS = 2000;
-/** 连续 SSE/bootstrap 失败达到该次数后回落 fixture，避免空白报错页。 */
-const MAX_FAILURES_BEFORE_FIXTURE = 3;
+/** SSE 之外的权威状态校准，覆盖浏览器/代理丢失命名 SSE 事件的情形。 */
+const STATE_RECONCILE_INTERVAL_MS = 2000;
 const DEFAULT_LIVE_RUN_ID = "_orphan";
 
 export interface UseRunStreamResult {
@@ -29,12 +29,19 @@ export interface UseRunStreamResult {
   error: string | null;
   /** 未配置 Obs URL：纯离线 fixture。 */
   usingFixture: boolean;
-  /** 配置了 Obs 但不可达/无业务数据时，已回落到本地占位模拟数据。 */
+  /** 兼容既有 UI；实时模式永远不会回落到本地模拟数据。 */
   usingMockFallback: boolean;
   captureSnapshot: (label?: string) => void;
   selectSnapshot: (id: string | null) => void;
   removeSnapshot: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
+}
+
+export interface UseRunStreamOptions {
+  /** 大状态页面可只用权威 REST 轮询，避免消费异常膨胀的 SSE 增量。 */
+  transport?: "stream" | "poll";
+  /** REST 权威状态校准周期。 */
+  reconcileIntervalMs?: number;
 }
 
 function noopSubscribe(): () => void {
@@ -86,21 +93,20 @@ function startFixturePlayback(
  * 订阅某个 training_run_id 的观测状态。
  *
  * - 未配置 Obs URL：本地 fixture 演示。
- * - 已配置但 Obs 不可达 / 多次失败：回落 fixture 占位，UI 不空白报错。
+ * - 已配置但 Obs 不可达：保留最后一次真实状态并持续重连，绝不混入 fixture。
  * - 已配置且可达但业务侧尚未上报：使用 Server 空 ChainState（含默认工作流），不抛错。
  */
-export function useRunStream(runId: string | null): UseRunStreamResult {
+export function useRunStream(
+  runId: string | null,
+  options: UseRunStreamOptions = {},
+): UseRunStreamResult {
   const config = useMemo(() => getAggregationConfig(), []);
+  const transport = options.transport ?? "stream";
+  const reconcileIntervalMs = options.reconcileIntervalMs ?? STATE_RECONCILE_INTERVAL_MS;
   const envDefault = import.meta.env.VITE_DEFAULT_RUN_ID?.trim() || null;
   const effectiveRunId = resolveEffectiveRunId(runId, config.useFixture, envDefault);
   const store = useMemo(() => getOrCreateChainStore(effectiveRunId), [effectiveRunId]);
-  const [usingMockFallback, setUsingMockFallback] = useState(false);
-
-  const storeState = useSyncExternalStore(
-    store.subscribe,
-    store.getState,
-    store.getState,
-  );
+  const storeState = useSyncExternalStore(store.subscribe, store.getState, store.getState);
 
   useEffect(() => {
     const chainStore = store;
@@ -108,9 +114,8 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
     let stopFixture: (() => void) | null = null;
     let currentAbort: AbortController | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconcileTimer: ReturnType<typeof setInterval> | null = null;
     let failures = 0;
-
-    setUsingMockFallback(false);
 
     if (config.useFixture) {
       stopFixture = startFixturePlayback(chainStore, effectiveRunId, cancelledRef);
@@ -124,27 +129,29 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
 
     const client = new AggregationClient(config.baseUrl as string, config.token);
     let lastEventId: string | undefined;
-    let mockFallbackActive = false;
-    /** 防止 EventSource 原生重连与手动重连叠加，导致 error 连发立刻打满失败阈值。 */
+    /** 防止 EventSource 原生重连与手动重连叠加，导致并发重连。 */
     let reconnectScheduled = false;
 
-    function fallBackToFixture(reason: string): void {
-      if (cancelledRef.cancelled || mockFallbackActive) return;
-      mockFallbackActive = true;
-      setUsingMockFallback(true);
-      currentAbort?.abort();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectScheduled = false;
-      stopFixture?.();
-      stopFixture = startFixturePlayback(chainStore, effectiveRunId, cancelledRef);
-      chainStore.setError(`${reason}；已切换为本地占位模拟数据`);
+    function applyLiveState(state: ChainState): void {
+      chainStore.applyFullState(state);
+      if (isSparseChainState(chainStore.getState().chainState)) {
+        chainStore.setError("Obs 已连接，但各模块尚未上报业务事件；显示空工作流占位（非报错）");
+      } else {
+        chainStore.setError(null);
+      }
     }
 
     function openStream(): void {
-      if (cancelledRef.cancelled || mockFallbackActive) return;
+      if (cancelledRef.cancelled) return;
       reconnectScheduled = false;
       currentAbort = new AbortController();
-      chainStore.setConnection(lastEventId ? "reconnecting" : "connecting");
+      // A successful REST bootstrap already proves the Server is reachable and
+      // gives us an authoritative state. Keep that truthful "connected" state
+      // while EventSource is opening; SSE errors below still switch to the
+      // explicit reconnecting state.
+      if (chainStore.getState().connection !== "connected") {
+        chainStore.setConnection(lastEventId ? "reconnecting" : "connecting");
+      }
       client.subscribeStream(
         effectiveRunId,
         {
@@ -157,14 +164,8 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
           },
           onFullState: (state) => {
             if (cancelledRef.cancelled) return;
-            chainStore.applyFullState(state);
-            if (isSparseChainState(chainStore.getState().chainState)) {
-              chainStore.setError(
-                "Obs 已连接，但各模块尚未上报业务事件；显示空工作流占位（非报错）",
-              );
-            } else {
-              chainStore.setError(null);
-            }
+            failures = 0;
+            applyLiveState(state);
           },
           onStateDelta: (delta) => {
             if (cancelledRef.cancelled) return;
@@ -176,18 +177,12 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
           },
           onPing: () => {},
           onError: () => {
-            if (cancelledRef.cancelled || mockFallbackActive || reconnectScheduled) return;
+            if (cancelledRef.cancelled || reconnectScheduled) return;
             // 关闭当前连接，关掉浏览器原生自动重连，改由下方唯一重连定时器驱动。
             reconnectScheduled = true;
             currentAbort?.abort();
             failures += 1;
-            if (failures >= MAX_FAILURES_BEFORE_FIXTURE) {
-              fallBackToFixture("无法稳定连接 Server Obs");
-              return;
-            }
-            chainStore.setError(
-              `与 Server Obs 的连接中断，正在重连（${failures}/${MAX_FAILURES_BEFORE_FIXTURE}）…`,
-            );
+            chainStore.setError(`与 Server Obs 的连接中断，正在重连（第 ${failures} 次）…`);
             chainStore.setConnection("reconnecting");
             if (reconnectTimer) clearTimeout(reconnectTimer);
             reconnectTimer = setTimeout(openStream, RECONNECT_DELAY_MS);
@@ -205,39 +200,56 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
         const state = await client.getState(effectiveRunId);
         if (cancelledRef.cancelled) return;
         failures = 0;
-        chainStore.applyFullState(state);
-        if (isSparseChainState(chainStore.getState().chainState)) {
-          chainStore.setError(
-            "Obs 已连接，但各模块尚未上报业务事件；显示空工作流占位（非报错）",
-          );
-        } else {
-          chainStore.setError(null);
-        }
+        applyLiveState(state);
+        chainStore.setConnection("connected");
       } catch (err) {
         if (cancelledRef.cancelled) return;
         failures += 1;
         const msg = err instanceof Error ? err.message : "获取初始状态失败";
-        if (failures >= MAX_FAILURES_BEFORE_FIXTURE) {
-          fallBackToFixture(msg);
-          return;
-        }
-        chainStore.setError(`${msg}；将尝试 SSE 并保留本地占位工作流`);
+        chainStore.setError(`${msg}；正在连接 Server Obs（第 ${failures} 次）…`);
       }
-      openStream();
+      if (transport === "stream") openStream();
+    }
+
+    async function reconcileState(): Promise<void> {
+      if (cancelledRef.cancelled) return;
+      try {
+        const state = await client.getState(effectiveRunId);
+        if (cancelledRef.cancelled) return;
+        failures = 0;
+        applyLiveState(state);
+        if (transport === "poll") chainStore.setConnection("connected");
+      } catch (err) {
+        if (transport === "poll" && !cancelledRef.cancelled) {
+          failures += 1;
+          const msg = err instanceof Error ? err.message : "获取状态失败";
+          chainStore.setError(`${msg}；正在重连 Server Obs（第 ${failures} 次）…`);
+          chainStore.setConnection("reconnecting");
+        }
+        // stream 模式由 SSE 负责连接状态；校准失败不覆盖实时流的错误信息。
+      }
     }
 
     void bootstrap();
+    reconcileTimer = setInterval(() => void reconcileState(), reconcileIntervalMs);
 
     return () => {
       cancelledRef.cancelled = true;
       currentAbort?.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconcileTimer) clearInterval(reconcileTimer);
       stopFixture?.();
       chainStore.setConnection("disconnected");
     };
-    // usingMockFallback 不放进 deps：回落由 effect 内部状态机触发，避免重入。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, effectiveRunId, config.baseUrl, config.token, config.useFixture]);
+  }, [
+    store,
+    effectiveRunId,
+    config.baseUrl,
+    config.token,
+    config.useFixture,
+    transport,
+    reconcileIntervalMs,
+  ]);
 
   return {
     runId: effectiveRunId,
@@ -248,7 +260,7 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
     selectedSnapshotId: storeState.selectedSnapshotId,
     error: storeState.error,
     usingFixture: config.useFixture,
-    usingMockFallback,
+    usingMockFallback: false,
     captureSnapshot: (label) => store.captureSnapshot(label),
     selectSnapshot: (id) => store.selectSnapshot(id ?? null),
     removeSnapshot: (id) => store.removeSnapshot(id),

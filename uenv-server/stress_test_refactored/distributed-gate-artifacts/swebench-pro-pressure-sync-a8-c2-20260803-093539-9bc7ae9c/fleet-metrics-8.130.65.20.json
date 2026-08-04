@@ -1,0 +1,16 @@
+{
+  "initial_mem_available_bytes": 31190917120,
+  "max_load1": 4.21,
+  "max_load15": 2.62,
+  "max_load5": 3.15,
+  "mem_total_bytes": 32687366144,
+  "min_mem_available_bytes": 21413187584,
+  "peak_open_fds": 613,
+  "peak_processes": 49,
+  "peak_rss_bytes": 1593212928,
+  "peak_threads": 454,
+  "sample_count": 19976,
+  "started_unix": 1785721110.7583146,
+  "updated_unix": 1785731251.565175,
+  "worker_exit_count": 0
+}

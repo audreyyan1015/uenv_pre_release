@@ -5,22 +5,25 @@ mod http;
 mod merge;
 mod project;
 mod store;
+mod worker_status;
 
 pub use event::{
-    now_ms, orphan_run_id, resolve_training_run_id, ChainState, Disposition, ObservabilityEvent,
-    SsePayload,
+    ChainState, Disposition, ObservabilityEvent, SsePayload, WorkerStatusObservation, now_ms,
+    orphan_run_id, resolve_training_run_id,
 };
 pub use project::{
-    attempt_closed, episode_dispatched, episode_submitted, episode_terminal, from_stream_report,
-    worker_heartbeat, worker_registered,
+    attempt_closed, episode_dispatched, episode_reporting, episode_scheduling, episode_submitted,
+    episode_terminal, from_stream_report, worker_heartbeat, worker_registered,
+    worker_status_snapshot,
 };
+pub use worker_status::{WorkerStatusSyncConfig, spawn_worker_status_sync};
 
 use event::RunStatusPayload;
-use merge::{ensure_seed_run, MergeEngine};
+use merge::{MergeEngine, ensure_seed_run};
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use store::ObsStore;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
@@ -41,7 +44,12 @@ pub struct ObsConfig {
 impl ObsConfig {
     pub fn from_env() -> Self {
         let enabled = std::env::var("UENV_OBS_ENABLED")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(true);
         let data_dir = PathBuf::from(
             std::env::var("UENV_OBS_DATA_DIR").unwrap_or_else(|_| "./obs-data".to_string()),
@@ -62,10 +70,20 @@ impl ObsConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8192),
             seed_on_start: std::env::var("UENV_OBS_SEED_ON_START")
-                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .map(|v| {
+                    matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
                 .unwrap_or(false),
             auto_mock_empty_run: std::env::var("UENV_OBS_AUTO_MOCK")
-                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .map(|v| {
+                    matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
                 .unwrap_or(false),
         }
     }
@@ -118,12 +136,15 @@ impl ObsHandle {
     }
 
     pub fn chain_state(&self, run_id: &str) -> Option<ChainState> {
-        self.inner.engine.read().get(run_id).cloned()
+        let eng = self.inner.engine.read();
+        let state = eng.get(run_id).cloned()?;
+        Some(overlay_global_workers(&eng, run_id, state))
     }
 
     pub fn ensure_run(&self, run_id: &str) -> ChainState {
         let mut eng = self.inner.engine.write();
-        eng.get_or_create(run_id).clone()
+        let state = eng.get_or_create(run_id).clone();
+        overlay_global_workers(&eng, run_id, state)
     }
 
     /// 若 run 几乎为空且开启 auto_mock，则注入 seed 占位数据。
@@ -131,7 +152,7 @@ impl ObsHandle {
         let existing = self.chain_state(run_id);
         let sparse = existing
             .as_ref()
-            .map(|s| s.episodes.is_empty() && s.workers.is_empty() && s.global_event_seq <= 1)
+            .map(|s| s.episodes.is_empty() && s.global_event_seq <= 1)
             .unwrap_or(true);
         if self.inner.cfg.auto_mock_empty_run && sparse {
             return self.seed_demo_run(run_id);
@@ -281,11 +302,27 @@ impl ObsHandle {
                 }
                 if outcome.full_hint {
                     if let Some(state) = self.chain_state(&run_id) {
-                        let _ = self.inner.fanout.send(SsePayload::RunStatus(RunStatusPayload {
-                            training_run_id: run_id.clone(),
-                            run_state: state.run_state.clone(),
-                            updated_at: state.updated_at,
-                        }));
+                        let _ = self
+                            .inner
+                            .fanout
+                            .send(SsePayload::RunStatus(RunStatusPayload {
+                                training_run_id: run_id.clone(),
+                                run_state: state.run_state.clone(),
+                                updated_at: state.updated_at,
+                            }));
+                    }
+                }
+                if run_id == orphan_run_id() && ev.event_type == "WORKER_STATUS_SNAPSHOT" {
+                    // Fleet 状态属于 Server 全局资源。向每个业务 run 推送叠加后的 full_state，
+                    // 让 SSE 客户端无需等待下一次轮询就能看到 BUSY/IDLE/OFFLINE/ATTENTION。
+                    for target_run_id in self
+                        .list_run_ids()
+                        .into_iter()
+                        .filter(|target| target != orphan_run_id())
+                    {
+                        if let Some(state) = self.chain_state(&target_run_id) {
+                            let _ = self.inner.fanout.send(SsePayload::FullState(state));
+                        }
                     }
                 }
                 Ok(Disposition::Accepted)
@@ -314,6 +351,56 @@ impl ObsHandle {
             }
         }
     }
+}
+
+fn overlay_global_workers(engine: &MergeEngine, run_id: &str, mut state: ChainState) -> ChainState {
+    if run_id == orphan_run_id() {
+        return state;
+    }
+    let Some(global) = engine.get(orphan_run_id()) else {
+        for worker in state.workers.values_mut() {
+            worker.status = "OFFLINE".into();
+            worker.status_reason = "NOT_REGISTERED".into();
+            worker.current_load = 0;
+        }
+        return state;
+    };
+    // run 历史仍会保留曾参与过的 Worker；若它不在当前 Server fleet 中，就不能继续沿用
+    // 历史 ACTIVE。显式投影为 OFFLINE，避免 Server 重启后出现“幽灵在线 Worker”。
+    for (worker_id, worker) in &mut state.workers {
+        if !global.workers.contains_key(worker_id) {
+            worker.status = "OFFLINE".into();
+            worker.status_reason = "NOT_REGISTERED".into();
+            worker.current_load = 0;
+        }
+    }
+    for (worker_id, runtime) in &global.workers {
+        let worker = state
+            .workers
+            .entry(worker_id.clone())
+            .or_insert_with(|| event::WorkerView {
+                worker_id: worker_id.clone(),
+                ..Default::default()
+            });
+        worker.last_heartbeat_ts = runtime.last_heartbeat_ts;
+        worker.status = runtime.status.clone();
+        worker.status_reason = runtime.status_reason.clone();
+        worker.status_changed_ts = runtime.status_changed_ts;
+        worker.current_load = runtime.current_load;
+        worker.capacity = runtime.capacity;
+        worker.endpoint = runtime.endpoint.clone();
+        worker.supported_env_types = runtime.supported_env_types.clone();
+
+        if let Some(node) = state
+            .tree
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == "worker" && node.ref_id == worker_id.as_str())
+        {
+            node.status = runtime.status.clone();
+        }
+    }
+    state
 }
 
 pub fn open(cfg: &ObsConfig) -> Option<ObsHandle> {
@@ -359,7 +446,15 @@ pub fn open(cfg: &ObsConfig) -> Option<ObsHandle> {
     let worker = handle.clone();
     tokio::spawn(async move {
         let mut rx = emit_rx;
-        while let Some(ev) = rx.recv().await {
+        while let Some(mut ev) = rx.recv().await {
+            // Server events are produced concurrently. A task can reserve a sequence and
+            // be pre-empted before try_send, so producer-side sequence order is not the
+            // same as the single consumer's receive order. Re-sequence local events here
+            // to keep the source cursor monotonic without dropping valid observations as
+            // seq_stale. HTTP-ingested events keep the sequence supplied by their source.
+            if ev.source_id.starts_with("server:") {
+                ev.seq = project::next_server_seq();
+            }
             if let Err(e) = worker.process_one(ev) {
                 warn!(error = %e, "obs_process_failed");
             }
@@ -398,4 +493,3 @@ pub fn try_emit(state: &crate::state::ServerState, ev: ObservabilityEvent) {
 
 #[cfg(test)]
 mod tests;
-

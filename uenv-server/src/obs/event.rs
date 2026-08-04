@@ -126,9 +126,15 @@ pub struct EpisodeView {
     #[serde(default)]
     pub worker_id: String,
     #[serde(default)]
+    pub env_type: String,
+    #[serde(default)]
     pub step_index: i32,
     #[serde(default)]
     pub status: String,
+    /// 当前 Episode 所处的真实工作流阶段：
+    /// SUBMIT -> DISPATCH -> EXECUTE -> REPORT -> DONE/FAILED。
+    #[serde(default)]
+    pub stage: String,
     #[serde(default)]
     pub event_seq: u64,
     #[serde(default)]
@@ -148,6 +154,36 @@ pub struct WorkerView {
     pub last_heartbeat_ts: i64,
     #[serde(default)]
     pub status: String,
+    /// 面向运维展示的稳定原因码，例如 READY / HEARTBEAT_LATE / UNREGISTERED。
+    #[serde(default)]
+    pub status_reason: String,
+    #[serde(default)]
+    pub status_changed_ts: i64,
+    #[serde(default)]
+    pub current_load: u32,
+    #[serde(default)]
+    pub capacity: u32,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub supported_env_types: Vec<String>,
+}
+
+/// Scheduler Worker 快照投影到 Obs 的稳定载荷。
+///
+/// `active_episodes` 仍由各 training run 的 Episode 事件维护；这里承载 Server 级别的
+/// 在线状态、负载和容量，随后由 Obs 在读取 run state 时叠加到对应 WorkerView。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct WorkerStatusObservation {
+    pub worker_id: String,
+    pub status: String,
+    pub status_reason: String,
+    pub status_changed_ts: i64,
+    pub current_load: u32,
+    pub capacity: u32,
+    pub endpoint: String,
+    #[serde(default)]
+    pub supported_env_types: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

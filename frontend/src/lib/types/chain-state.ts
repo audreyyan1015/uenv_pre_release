@@ -70,8 +70,11 @@ export interface EpisodeView {
   correlation_id: string;
   attempt_id?: number;
   worker_id?: string;
+  env_type?: string;
   step_index?: number;
   status: NodeStatus;
+  /** Server 明确投影的当前工作流阶段；旧快照可能没有该字段。 */
+  stage?: WorkflowStage;
   event_seq: number;
   last_source_ts: number;
 }
@@ -84,6 +87,13 @@ export interface WorkerView {
   env_instances: string[];
   last_heartbeat_ts: number;
   status?: NodeStatus | string;
+  /** Server Obs 的稳定原因码，例如 READY / HEARTBEAT_LATE / UNREGISTERED。 */
+  status_reason?: string;
+  status_changed_ts?: number;
+  current_load?: number;
+  capacity?: number;
+  endpoint?: string;
+  supported_env_types?: string[];
 }
 
 // ---------- 游标 / 增量 ----------

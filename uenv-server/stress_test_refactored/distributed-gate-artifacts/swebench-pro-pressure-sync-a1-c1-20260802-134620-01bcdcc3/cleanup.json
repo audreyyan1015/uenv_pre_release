@@ -1,0 +1,9 @@
+{
+  "attempted": true,
+  "errors": [
+    "8.130.75.157: port 8099 is already occupied: LISTEN 0      128    192.168.0.136:8099  0.0.0.0:* users:((\"uenv-adapter-co\",pid=269295,fd=13))             "
+  ],
+  "isolated_ports_released": false,
+  "passed": false,
+  "protected_process_unchanged": false
+}

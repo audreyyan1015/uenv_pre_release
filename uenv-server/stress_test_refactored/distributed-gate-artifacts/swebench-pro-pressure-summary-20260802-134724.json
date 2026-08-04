@@ -1,0 +1,24 @@
+[
+  {
+    "agent_count_per_node": 1,
+    "agent_count_total": 1,
+    "agent_max_concurrent": 1,
+    "cleanup": {
+      "attempted": true,
+      "errors": [
+        "8.130.75.157: port 8099 is already occupied: LISTEN 0      128    192.168.0.136:8099  0.0.0.0:* users:((\"uenv-adapter-co\",pid=269295,fd=13))             "
+      ],
+      "isolated_ports_released": false,
+      "passed": false,
+      "protected_process_unchanged": false
+    },
+    "container_concurrency": 1,
+    "episode_offset": 0,
+    "parallel_mode": "sync",
+    "registered_workers": 1,
+    "returncode": 1,
+    "total_episodes": 10,
+    "wall_seconds": 64.02446863986552,
+    "worker_capacity": 1
+  }
+]

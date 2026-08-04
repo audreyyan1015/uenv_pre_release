@@ -1,8 +1,8 @@
 //! ChainState 归并：lifecycle + workflow/tree 投影。
 
 use super::event::{
-    now_ms, resolve_training_run_id, ChainState, Disposition, EpisodeView, EventCursor,
-    ObservabilityEvent, StateDelta, TreeNode, WorkerView,
+    ChainState, Disposition, EpisodeView, EventCursor, ObservabilityEvent, StateDelta, TreeNode,
+    WorkerStatusObservation, WorkerView, now_ms, resolve_training_run_id,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -173,7 +173,10 @@ impl MergeEngine {
                 Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
             }
             "EPISODE_SUBMITTED" => {
-                let ep_id = ev.episode_id.clone().unwrap_or_else(|| ev.entity_id.clone());
+                let ep_id = ev
+                    .episode_id
+                    .clone()
+                    .unwrap_or_else(|| ev.entity_id.clone());
                 {
                     let state = self.get_or_create(run_id);
                     state.episodes.insert(
@@ -183,8 +186,10 @@ impl MergeEngine {
                             correlation_id: ev.correlation_id.clone(),
                             attempt_id: ev.attempt_id.unwrap_or(1),
                             worker_id: ev.worker_id.clone().unwrap_or_default(),
+                            env_type: ev.env_type.clone().unwrap_or_default(),
                             step_index: 0,
                             status: "ACTIVE".into(),
+                            stage: "SUBMIT".into(),
                             event_seq,
                             last_source_ts: ev.source_ts,
                             trajectory_id: None,
@@ -198,8 +203,31 @@ impl MergeEngine {
                 let state = self.runs.get(run_id).unwrap();
                 Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
             }
+            "EPISODE_SCHEDULING" => {
+                let ep_id = ev
+                    .episode_id
+                    .clone()
+                    .unwrap_or_else(|| ev.entity_id.clone());
+                {
+                    let state = self.get_or_create(run_id);
+                    if let Some(ep) = state.episodes.get_mut(&ep_id) {
+                        ep.status = "ACTIVE".into();
+                        ep.stage = "DISPATCH".into();
+                        ep.event_seq = event_seq;
+                        ep.last_source_ts = ev.source_ts;
+                    }
+                    set_workflow_active(state, "submit", "DONE", ev);
+                    set_workflow_active(state, "dispatch", "ACTIVE", ev);
+                    upsert_tree_episode(state, &ep_id, ev, "ACTIVE");
+                }
+                let state = self.runs.get(run_id).unwrap();
+                Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
+            }
             "EPISODE_DISPATCHED" | "ATTEMPT_STARTED" => {
-                let ep_id = ev.episode_id.clone().unwrap_or_else(|| ev.entity_id.clone());
+                let ep_id = ev
+                    .episode_id
+                    .clone()
+                    .unwrap_or_else(|| ev.entity_id.clone());
                 {
                     let state = self.get_or_create(run_id);
                     if let Some(ep) = state.episodes.get_mut(&ep_id) {
@@ -208,15 +236,19 @@ impl MergeEngine {
                             ep.worker_id = w.clone();
                         }
                         ep.status = "ACTIVE".into();
+                        ep.stage = "EXECUTE".into();
                         ep.event_seq = event_seq;
                         ep.last_source_ts = ev.source_ts;
                     }
                     if let Some(wid) = &ev.worker_id {
-                        let w = state.workers.entry(wid.clone()).or_insert_with(|| WorkerView {
-                            worker_id: wid.clone(),
-                            status: "ACTIVE".into(),
-                            ..Default::default()
-                        });
+                        let w = state
+                            .workers
+                            .entry(wid.clone())
+                            .or_insert_with(|| WorkerView {
+                                worker_id: wid.clone(),
+                                status: "ACTIVE".into(),
+                                ..Default::default()
+                            });
                         if !w.active_episodes.contains(&ep_id) {
                             w.active_episodes.push(ep_id.clone());
                         }
@@ -225,13 +257,20 @@ impl MergeEngine {
                     set_workflow_active(state, "dispatch", "DONE", ev);
                     set_workflow_active(state, "execute", "ACTIVE", ev);
                     bump_workflow_stage_count(state, "dispatch", &ep_id);
+                    // Dispatch/attempt start is the authoritative transition into
+                    // EXECUTE. Agent-based runs may not emit STEP_* events, so
+                    // waiting for a step event would leave this stage at zero.
+                    bump_workflow_stage_count(state, "execute", &ep_id);
                     upsert_tree_episode(state, &ep_id, ev, "ACTIVE");
                 }
                 let state = self.runs.get(run_id).unwrap();
                 Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
             }
             "STEP_STARTED" | "STEP_COMPLETE" => {
-                let ep_id = ev.episode_id.clone().unwrap_or_else(|| ev.entity_id.clone());
+                let ep_id = ev
+                    .episode_id
+                    .clone()
+                    .unwrap_or_else(|| ev.entity_id.clone());
                 let step = ev.step_index.unwrap_or(0);
                 {
                     let state = self.get_or_create(run_id);
@@ -240,6 +279,7 @@ impl MergeEngine {
                         ep.event_seq = event_seq;
                         ep.last_source_ts = ev.source_ts;
                         ep.status = "ACTIVE".into();
+                        ep.stage = "EXECUTE".into();
                     }
                     set_workflow_active(state, "execute", "ACTIVE", ev);
                     bump_workflow_stage_count(state, "execute", &ep_id);
@@ -248,16 +288,55 @@ impl MergeEngine {
                 let state = self.runs.get(run_id).unwrap();
                 Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
             }
-            "EPISODE_COMPLETED" | "EPISODE_FAILED" | "EPISODE_CLOSED" => {
-                let ep_id = ev.episode_id.clone().unwrap_or_else(|| ev.entity_id.clone());
-                let status = match ev.event_type.as_str() {
-                    "EPISODE_FAILED" => "FAILED",
-                    _ => "DONE",
-                };
+            "EPISODE_REPORTING" => {
+                let ep_id = ev
+                    .episode_id
+                    .clone()
+                    .unwrap_or_else(|| ev.entity_id.clone());
                 {
                     let state = self.get_or_create(run_id);
                     if let Some(ep) = state.episodes.get_mut(&ep_id) {
+                        ep.status = "ACTIVE".into();
+                        ep.stage = "REPORT".into();
+                        ep.event_seq = event_seq;
+                        ep.last_source_ts = ev.source_ts;
+                        if let Some(step) = ev.step_index {
+                            ep.step_index = step;
+                        }
+                    }
+                    set_workflow_active(state, "execute", "DONE", ev);
+                    set_workflow_active(state, "report", "ACTIVE", ev);
+                    upsert_tree_episode(state, &ep_id, ev, "ACTIVE");
+                }
+                let state = self.runs.get(run_id).unwrap();
+                Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
+            }
+            "EPISODE_COMPLETED" | "EPISODE_FAILED" | "EPISODE_CLOSED" => {
+                let ep_id = ev
+                    .episode_id
+                    .clone()
+                    .unwrap_or_else(|| ev.entity_id.clone());
+                {
+                    let state = self.get_or_create(run_id);
+                    // CLOSED 只是生命周期关闭信号，不能覆盖前一个 FAILED 终态。
+                    let status = if ev.event_type == "EPISODE_FAILED"
+                        || (ev.event_type == "EPISODE_CLOSED"
+                            && state
+                                .episodes
+                                .get(&ep_id)
+                                .is_some_and(|episode| episode.status == "FAILED"))
+                    {
+                        "FAILED"
+                    } else {
+                        "DONE"
+                    };
+                    if let Some(ep) = state.episodes.get_mut(&ep_id) {
                         ep.status = status.into();
+                        ep.stage = if status == "FAILED" {
+                            "FAILED".into()
+                        } else {
+                            "DONE".into()
+                        };
                         ep.event_seq = event_seq;
                         ep.last_source_ts = ev.source_ts;
                         if let Some(payload) = &ev.payload {
@@ -291,7 +370,10 @@ impl MergeEngine {
                 Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
             }
             "ATTEMPT_CLOSED" => {
-                let ep_id = ev.episode_id.clone().unwrap_or_else(|| ev.entity_id.clone());
+                let ep_id = ev
+                    .episode_id
+                    .clone()
+                    .unwrap_or_else(|| ev.entity_id.clone());
                 {
                     let state = self.get_or_create(run_id);
                     if let Some(ep) = state.episodes.get_mut(&ep_id) {
@@ -302,25 +384,76 @@ impl MergeEngine {
                 let state = self.runs.get(run_id).unwrap();
                 Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
             }
+            "WORKER_STATUS_SNAPSHOT" => {
+                let replace = ev
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("replace"))
+                    .and_then(|replace| replace.as_bool())
+                    .unwrap_or(false);
+                let observations = ev
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("workers"))
+                    .cloned()
+                    .and_then(|workers| {
+                        serde_json::from_value::<Vec<WorkerStatusObservation>>(workers).ok()
+                    })
+                    .unwrap_or_default();
+                {
+                    let state = self.get_or_create(run_id);
+                    if replace {
+                        state.workers.clear();
+                        state.tree.nodes.retain(|node| node.kind != "worker");
+                    }
+                    for observation in observations {
+                        let worker_id = observation.worker_id;
+                        let status = observation.status;
+                        let w =
+                            state
+                                .workers
+                                .entry(worker_id.clone())
+                                .or_insert_with(|| WorkerView {
+                                    worker_id: worker_id.clone(),
+                                    ..Default::default()
+                                });
+                        w.status = status.clone();
+                        w.status_reason = observation.status_reason;
+                        w.status_changed_ts = observation.status_changed_ts;
+                        w.current_load = observation.current_load;
+                        w.capacity = observation.capacity;
+                        w.endpoint = observation.endpoint;
+                        w.supported_env_types = observation.supported_env_types;
+                        upsert_tree_worker(state, &worker_id, &status);
+                    }
+                }
+                let state = self.runs.get(run_id).unwrap();
+                Some(chain_patch_delta(run_id, event_seq, ingest_ts, ev, state))
+            }
             "WORKER_REGISTERED" | "WORKER_HEARTBEAT" => {
-                let wid = ev
-                    .worker_id
-                    .clone()
-                    .unwrap_or_else(|| ev.entity_id.clone());
+                let wid = ev.worker_id.clone().unwrap_or_else(|| ev.entity_id.clone());
                 let is_heartbeat = ev.event_type == "WORKER_HEARTBEAT";
                 {
                     let state = self.get_or_create(run_id);
-                    let w = state.workers.entry(wid.clone()).or_insert_with(|| WorkerView {
-                        worker_id: wid.clone(),
-                        ..Default::default()
-                    });
+                    let w = state
+                        .workers
+                        .entry(wid.clone())
+                        .or_insert_with(|| WorkerView {
+                            worker_id: wid.clone(),
+                            ..Default::default()
+                        });
                     w.last_heartbeat_ts = ev.source_ts;
-                    w.status = if ev.event_type == "WORKER_REGISTERED" {
-                        "ACTIVE".into()
-                    } else {
-                        w.status.clone().or_default_active()
-                    };
-                    upsert_tree_worker(state, &wid, "ACTIVE");
+                    if ev.event_type == "WORKER_REGISTERED" {
+                        w.status = "IDLE".into();
+                        w.status_reason = "REGISTERED".into();
+                        w.status_changed_ts = ev.source_ts;
+                    } else if w.status.is_empty() {
+                        w.status = "IDLE".into();
+                        w.status_reason = "HEARTBEAT_RECEIVED".into();
+                        w.status_changed_ts = ev.source_ts;
+                    }
+                    let status = w.status.clone();
+                    upsert_tree_worker(state, &wid, &status);
                 }
                 // 心跳只更新内存态，不推 SSE，避免高频刷屏（规划：心跳不驱动 UI 主更新）。
                 if is_heartbeat {
@@ -341,19 +474,6 @@ impl MergeEngine {
                     cursor: state.cursor.clone(),
                 })
             }
-        }
-    }
-}
-
-trait OrActive {
-    fn or_default_active(self) -> String;
-}
-impl OrActive for String {
-    fn or_default_active(self) -> String {
-        if self.is_empty() {
-            "ACTIVE".into()
-        } else {
-            self
         }
     }
 }
@@ -420,19 +540,24 @@ fn bump_workflow_stage_count(state: &mut ChainState, stage: &str, ep_id: &str) {
         return;
     }
     let count = seen.len();
-    if let Some(n) = state
-        .workflow
-        .nodes
-        .iter_mut()
-        .find(|n| n.node_id == stage)
-    {
+    if let Some(n) = state.workflow.nodes.iter_mut().find(|n| n.node_id == stage) {
         n.payload_summary = json!({ "count": count });
     }
 }
 
-fn set_workflow_active(state: &mut ChainState, node_id: &str, status: &str, ev: &ObservabilityEvent) {
+fn set_workflow_active(
+    state: &mut ChainState,
+    node_id: &str,
+    status: &str,
+    ev: &ObservabilityEvent,
+) {
     set_workflow_stage_status(state, node_id, status);
-    if let Some(n) = state.workflow.nodes.iter_mut().find(|n| n.node_id == node_id) {
+    if let Some(n) = state
+        .workflow
+        .nodes
+        .iter_mut()
+        .find(|n| n.node_id == node_id)
+    {
         n.correlation_id = ev.correlation_id.clone();
         if let Some(ep) = &ev.episode_id {
             n.episode_id = ep.clone();
@@ -445,7 +570,12 @@ fn set_workflow_active(state: &mut ChainState, node_id: &str, status: &str, ev: 
 }
 
 fn set_workflow_stage_status(state: &mut ChainState, node_id: &str, status: &str) {
-    if let Some(n) = state.workflow.nodes.iter_mut().find(|n| n.node_id == node_id) {
+    if let Some(n) = state
+        .workflow
+        .nodes
+        .iter_mut()
+        .find(|n| n.node_id == node_id)
+    {
         n.status = status.to_string();
     }
 }
@@ -469,7 +599,12 @@ fn upsert_tree_worker(state: &mut ChainState, worker_id: &str, status: &str) {
     bump_children(state, &format!("run:{}", state.training_run_id));
 }
 
-fn upsert_tree_episode(state: &mut ChainState, episode_id: &str, ev: &ObservabilityEvent, status: &str) {
+fn upsert_tree_episode(
+    state: &mut ChainState,
+    episode_id: &str,
+    ev: &ObservabilityEvent,
+    status: &str,
+) {
     let node_id = format!("episode:{episode_id}");
     let parent = if let Some(wid) = &ev.worker_id {
         if !wid.is_empty() {
@@ -536,7 +671,12 @@ fn upsert_tree_step(state: &mut ChainState, episode_id: &str, step: i32, ev: &Ob
 
 fn close_tree_steps_for_episode(state: &mut ChainState, episode_id: &str, status: &str) {
     let parent = format!("episode:{episode_id}");
-    for n in state.tree.nodes.iter_mut().filter(|n| n.parent_id == parent) {
+    for n in state
+        .tree
+        .nodes
+        .iter_mut()
+        .filter(|n| n.parent_id == parent)
+    {
         if n.kind == "step" && n.status == "ACTIVE" {
             n.status = status.into();
         }
