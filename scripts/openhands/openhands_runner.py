@@ -486,6 +486,20 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
             env["UENV_RUN_ID"] = job.run_id
         # gateway 由 AgentJob 注入，显式清掉环境里可能残留的硬编码值。
         env.pop("UENV_GATEWAY", None)
+        # Smith 任务勿继承 .env 里的 Pro catalog（否则 driver 会误用 pro-full-731）。
+        variant = (getattr(job, "benchmark_variant", "") or "").strip().lower()
+        if variant in {
+            "smith",
+            "swe-smith",
+            "swe_smith",
+            "swesmith",
+            "swe-bench-smith",
+            "swe_bench_smith",
+        }:
+            env["UENV_BENCHMARK_VARIANT"] = "smith"
+            inst = (env.get("UENV_SWE_INSTANCES") or "")
+            if "smith" not in inst.lower():
+                env.pop("UENV_SWE_INSTANCES", None)
 
         mode = job.mode if job.mode in ("gold", "llm") else "llm"
         try:

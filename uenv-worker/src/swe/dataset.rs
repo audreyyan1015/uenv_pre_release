@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::swe::repo_specs::{spec_for, LogParser, RepoSpec, DEFAULT_SPEC};
 use crate::swe::spec::{EvaluationSpec, InstanceSpec, TaskSpec};
@@ -22,7 +22,7 @@ pub const SMITH_IMAGE_MARKER: &str = "swesmith";
 pub const CONDA_ACTIVATE: &str = "source /opt/miniconda3/bin/activate testbed 2>/dev/null";
 
 /// 单个 SWE-bench 实例的数据集行（含评测真值）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SweInstance {
     pub instance_id: String,
     pub repo: String,
