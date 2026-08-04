@@ -117,13 +117,16 @@ sudo bash install.sh --bundle ./uenv-linux-x86_64.tar.gz
 > 重复安装直接执行同一命令即可，会保留现有配置；**不要使用 `--force-config`**（会覆盖配置）。
 > 若目标机已有 `/etc/uenv`，先备份：`sudo cp -a /etc/uenv "/etc/uenv.backup.$(date +%Y%m%d-%H%M%S)"`
 
-## 6. 安装后必做：修 secrets 属主 bug
+## 6. 关于 secrets 属主（已在源码修复，无需手工操作）
 
-当前安装包存在已知问题：`install.sh` 把 `/etc/uenv/secrets/worker-llm.env` 创建为
+早期安装包存在过一个问题：`install.sh` 把 `/etc/uenv/secrets/worker-llm.env` 创建为
 `root:root 0600`，Worker 以 `uenv` 用户读取时报 `failed to load config: Permission denied`，
 导致 `uenv-worker.service` 启动失败循环重启。
 
-修复：
+**当前仓库的 `install.sh` 已从源头修复**：新建文件直接 `install -o uenv -g uenv`，
+且重复安装时会自动 `chown` 纠正旧属主，无需任何手工干预。
+
+如果使用的是 2026-08-04 之前构建的旧安装包，才需要手工修复：
 
 ```bash
 sudo chown uenv:uenv /etc/uenv/secrets/worker-llm.env
@@ -212,7 +215,7 @@ npm run dev -- --port 8888 --host 0.0.0.0
 
 ## 11. 已知问题与注意事项
 
-1. **secrets 属主 bug**（见第 6 节）——不修 Worker 起不来，建议修进 `install.sh`。
+1. **secrets 属主 bug**——已在 `install.sh` 源码修复（新建即 `uenv:uenv`，重装自动纠正），仅 2026-08-04 前的旧安装包需手工处理（见第 6 节）。
 2. **Obs 启动回放是同步全量的**（`uenv-server/src/obs/mod.rs` 中 `load_all_events()`）：
    服务运行久了 `obs.db` 变大后，重启会在 gRPC 绑定之前长时间卡住。
    新部署无所谓；生产上重启变慢即为此问题，根治需改为异步 / 限量回放。

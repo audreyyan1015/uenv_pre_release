@@ -182,7 +182,10 @@ if [[ "$PROFILE" == "single-node" || "$PROFILE" == "worker" || "$PROFILE" == "fu
   install_config "$TMP_DIR/worker.yaml" /etc/uenv/worker.yaml
   install_config "$RELEASE_DIR/config/worker.env" /etc/uenv/worker.env
   if [[ ! -e /etc/uenv/secrets/worker-llm.env ]]; then
-    install -m 0600 /dev/null /etc/uenv/secrets/worker-llm.env
+    install -o uenv -g uenv -m 0600 /dev/null /etc/uenv/secrets/worker-llm.env
+  else
+    # 修复旧版安装包留下的 root 属主，保证 uenv 用户可读
+    chown uenv:uenv /etc/uenv/secrets/worker-llm.env
   fi
   install -m 0644 "$RELEASE_DIR/systemd/uenv-worker.service" /etc/systemd/system/uenv-worker.service
   UNITS+=(uenv-worker.service)
