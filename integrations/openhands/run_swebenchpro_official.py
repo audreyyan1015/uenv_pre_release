@@ -396,9 +396,13 @@ def _verify_server_trajectory(
     trajectory_id: str,
     run_id: str,
     out: Path,
+    storage_url: str = "",
 ) -> dict[str, Any]:
     """Optional: GET trajectory from Server :8077 after Worker upload ack."""
-    endpoint = os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+    endpoint = (
+        os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+        or storage_url.rstrip("/")
+    )
     token = os.environ.get("UENV_TRAJECTORY_TOKEN", "").strip()
     if not endpoint or not trajectory_id:
         return {"skipped": True, "reason": "UENV_TRAJECTORY_ENDPOINT unset or no trajectory_id"}
@@ -456,7 +460,12 @@ def _fetch_trajectory_bundle(client: UEnvGatewayClient, ref: dict, out: Path) ->
     tid = ref.get("trajectory_id")
     if not tid:
         return None
-    endpoint = os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+    # 优先取显式环境变量；未设置时回退到 trajectory_ref 由 Worker 上报的
+    # storage_url（轨迹实际落库的 Server 地址），否则 Gateway 侧并无轨迹可取。
+    endpoint = (
+        os.environ.get("UENV_TRAJECTORY_ENDPOINT", "").rstrip("/")
+        or str(ref.get("storage_url") or "").rstrip("/")
+    )
     token = os.environ.get("UENV_TRAJECTORY_TOKEN", "").strip()
 
     if endpoint:
@@ -984,6 +993,7 @@ def main() -> int:
             (ref or {}).get("trajectory_id", ""),
             run_id,
             out,
+            storage_url=str((ref or {}).get("storage_url") or ""),
         )
 
         with run_log.open("a", encoding="utf-8") as f:

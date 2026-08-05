@@ -61,6 +61,8 @@ uenv train run-task \
 | 改训练规模 | `--gpus`、`--steps`、`--rollouts`、`--train-batch-size` |
 | 换容器运行时和 VeRL CUDA 镜像 | `--runtime`、`--image` |
 
+正式执行前可以先加 `--dry-run`：只准备数据和 Bridge 资产、打印将要执行的容器命令，不连接 UEnv、不校验 GPU，也不会拉取 `--image` 指定的 CUDA 镜像。无 GPU 的主机可用它检查参数与路径，确认无误后去掉该参数再真正运行。
+
 命令中的 1 个 step 用于确认训练链路可执行，不能证明模型能力提升。正式训练应根据数据量和 GPU 数重新设置步数、rollout 数和 batch size。`train-batch-size × rollouts` 必须不小于 GPU 数且能被 GPU 数整除；`rollouts` 至少为 2。
 
 ## 3. 换成 Code 或自定义环境

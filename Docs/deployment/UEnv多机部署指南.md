@@ -163,6 +163,8 @@ uenv status
 3. 每台 Worker 都能连接控制面 `50051`。
 4. 控制面都能连接每台 Worker 公告的 `50054`。
 5. `uenv status` 中的 Worker 数量、endpoint 和状态都正确。
+
+注意：Worker 配置 `id: "auto"` 时，每次重启都会以新的 Worker ID 重新注册，旧记录在心跳超时后先转为 `degraded` 再被清除。刚重启过 Worker 的几分钟内，`uenv status` 的 Worker 数量短暂多于实际节点数属于正常现象，验收应在心跳稳定后再核对数量。
 6. 所有节点的 `uenv version` 相同。
 
 完成平台部署后，再根据用途执行 [UEnv 评测指南](./UEnv评测指南.md) 或 [UEnv 训练指南](./UEnv训练指南.md) 中的单 Episode 验证。

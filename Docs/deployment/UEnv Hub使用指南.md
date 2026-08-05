@@ -152,6 +152,8 @@ curl -fsS http://127.0.0.1:8080/healthz
 sudo journalctl -u uenv-hub.service -n 100 --no-pager
 ```
 
+如果 `[server]` 的 `host` 绑定的是具体内网 IP 而不是 `0.0.0.0`，`127.0.0.1` 上不再有监听，健康检查应改用实际绑定地址，例如 `curl -fsS http://<hub-ip>:8080/healthz`。
+
 Hub 在数据库中只保存 Token 哈希。当 Token 表为空时，上述文件用来创建初始 Admin Token。配置仍引用该文件时不要删除它，否则 Hub 重启时会因为文件不存在而失败。
 
 ## 4. 创建最小权限 Token
@@ -293,7 +295,7 @@ bash /opt/uenv/current/examples/environment/plugin.sh publish \
 - 契约测试已覆盖 `HealthCheck`/`Reset`/`Step`/`Close`。
 - `requirements.txt` 中的全部依赖能否放入完整 wheelhouse。
 
-版本来自 `manifest.yaml`。行为、reward、依赖或接口变化后，先递增其中的 `version` 再重新发布。发布准备机需要访问 Python 包索引，且必须与目标 Worker 使用相同 Linux 架构和 Python 版本；Worker 激活时只使用包内 wheelhouse，不访问 PyPI。完全离线发布可在联网的匹配主机先运行一次 `publish` 生成 wheelhouse，再把目录带入内网并加 `--offline`。
+版本来自 `manifest.yaml`。行为、reward、依赖或接口变化后，先递增其中的 `version` 再重新发布。发布准备机需要访问 Python 包索引。`publish` 下载 wheelhouse 时继承系统 pip 配置：指向 HTTP 内网镜像源的配置会被 pip 以非可信主机拒绝，可用环境变量覆盖，例如 `PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/`。发布机还必须与目标 Worker 使用相同 Linux 架构和 Python 版本；Worker 激活时只使用包内 wheelhouse，不访问 PyPI。完全离线发布可在联网的匹配主机先运行一次 `publish` 生成 wheelhouse，再把目录带入内网并加 `--offline`。
 
 `publish-plugin` 不会上传开发用的 `.venv`、Git 目录、Python 缓存和 `.pyc` 文件。它会发布完整 process plugin EnvPackage，并为同一 `env_type` 幂等创建 Hub environment identity 和对应版本的契约 manifest。`uenv env publish --manifest ...` 只发布环境契约和元数据；如果目标是让 Worker 运行新插件，不能只执行元数据发布。
 
