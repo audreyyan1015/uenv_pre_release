@@ -43,13 +43,16 @@ struct ManagedInstance {
 
 struct HostState {
     manifests: HashMap<String, PluginManifest>,
+    /// Directory containing each environment's `manifest.yaml` and entrypoint.
+    /// Keeping this beside the manifest lets the Worker load built-in plugins
+    /// and Hub-activated plugins from different roots without copying either.
+    manifest_dirs: HashMap<String, PathBuf>,
     instances: HashMap<String, ManagedInstance>,
     seq: u64,
 }
 
 #[derive(Clone)]
 pub struct PluginHost {
-    plugin_dir: PathBuf,
     state: Arc<Mutex<HostState>>,
 }
 
@@ -57,12 +60,54 @@ impl PluginHost {
     pub fn load_from_dir(
         plugin_dir: impl AsRef<Path>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let plugin_dir = plugin_dir.as_ref().to_path_buf();
-        let manifests = scan_manifests(&plugin_dir)?;
+        Self::load_from_dirs([plugin_dir.as_ref()])
+    }
+
+    /// Load plugins from multiple roots. Later roots override an environment
+    /// with the same `env_type`; the deployed package root is therefore passed
+    /// after the immutable built-in root.
+    pub fn load_from_dirs<I, P>(
+        plugin_dirs: I,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut manifests = HashMap::new();
+        let mut manifest_dirs = HashMap::new();
+        let mut roots = plugin_dirs.into_iter();
+        let primary = roots
+            .next()
+            .ok_or("at least one plugin directory is required")?;
+        let primary = primary.as_ref();
+        if !primary.is_dir() {
+            return Err(format!(
+                "primary plugin directory is missing or not a directory: {}",
+                primary.display()
+            )
+            .into());
+        }
+        for (env_type, manifest) in scan_manifests(primary)? {
+            manifest_dirs.insert(env_type.clone(), primary.join(&env_type));
+            manifests.insert(env_type, manifest);
+        }
+        for root in roots {
+            let root = root.as_ref();
+            if !root.exists() {
+                // Additional roots (for example package_plugin_dir) are
+                // optional until an operator activates the first package.
+                continue;
+            }
+            let scanned = scan_manifests(root)?;
+            for (env_type, manifest) in scanned {
+                manifest_dirs.insert(env_type.clone(), root.join(&env_type));
+                manifests.insert(env_type, manifest);
+            }
+        }
         Ok(Self {
-            plugin_dir,
             state: Arc::new(Mutex::new(HostState {
                 manifests,
+                manifest_dirs,
                 instances: HashMap::new(),
                 seq: 0,
             })),
@@ -91,6 +136,31 @@ impl PluginHost {
         manifest: PluginManifest,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
+        if !state.manifest_dirs.contains_key(&manifest.env_type) {
+            return Err(format!(
+                "cannot register env_type={} without an installed plugin directory",
+                manifest.env_type
+            )
+            .into());
+        }
+        state.manifests.insert(manifest.env_type.clone(), manifest);
+        Ok(())
+    }
+
+    /// Register Hub metadata for plugin code that already exists locally but
+    /// has no local manifest. The directory and declared entry are validated
+    /// before they become spawnable.
+    pub async fn register_manifest_from_dir(
+        &self,
+        manifest: PluginManifest,
+        env_dir: impl AsRef<Path>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let env_dir = env_dir.as_ref();
+        validate_manifest_entry(env_dir, &manifest)?;
+        let mut state = self.state.lock().await;
+        state
+            .manifest_dirs
+            .insert(manifest.env_type.clone(), env_dir.to_path_buf());
         state.manifests.insert(manifest.env_type.clone(), manifest);
         Ok(())
     }
@@ -99,12 +169,17 @@ impl PluginHost {
         &self,
         env_type: &str,
     ) -> Result<PluginInstance, Box<dyn std::error::Error + Send + Sync>> {
-        let (manifest, instance_id, uds_path) = {
+        let (manifest, env_dir, instance_id, uds_path) = {
             let mut state = self.state.lock().await;
             let manifest = state
                 .manifests
                 .get(env_type)
                 .ok_or_else(|| format!("manifest not found for env_type={env_type}"))?
+                .clone();
+            let env_dir = state
+                .manifest_dirs
+                .get(env_type)
+                .ok_or_else(|| format!("plugin directory not found for env_type={env_type}"))?
                 .clone();
             if manifest.ipc != "proto-uds" {
                 return Err(format!("unsupported plugin ipc: {}", manifest.ipc).into());
@@ -126,10 +201,10 @@ impl PluginHost {
                 instance_id,
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
             ));
-            (manifest, instance_id, uds_path)
+            (manifest, env_dir, instance_id, uds_path)
         };
 
-        let entry = self.plugin_dir.join(env_type).join(manifest.entry);
+        let entry = env_dir.join(manifest.entry);
         let mut child = ProcessBackend::create(&entry, &uds_path)?;
         let pid = child.id().ok_or("failed to resolve plugin pid")?;
         let started = tokio::time::Instant::now();
@@ -366,6 +441,102 @@ mod tests {
         assert_eq!(plugin_ready_timeout(Some("301")), Duration::from_secs(2));
         assert_eq!(plugin_ready_timeout(Some("invalid")), Duration::from_secs(2));
     }
+
+    #[tokio::test]
+    async fn later_plugin_root_overrides_builtin_manifest_and_entry_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "uenv-plugin-roots-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let builtin = root.join("builtin/demo");
+        let packages = root.join("packages/demo");
+        std::fs::create_dir_all(&builtin).unwrap();
+        std::fs::create_dir_all(&packages).unwrap();
+        for (dir, version) in [(&builtin, "1.0.0"), (&packages, "2.0.0")] {
+            std::fs::write(
+                dir.join("manifest.yaml"),
+                format!(
+                    "env_type: demo\nversion: '{version}'\nsupported_backends: [process]\nipc: proto-uds\nentry: ./run.sh\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join("run.sh"), "#!/bin/sh\n").unwrap();
+        }
+
+        let host = PluginHost::load_from_dirs([root.join("builtin"), root.join("packages")])
+            .unwrap();
+        let manifest = host.get_manifest("demo").await.unwrap();
+        assert_eq!(manifest.version.as_deref(), Some("2.0.0"));
+        let state = host.state.lock().await;
+        assert_eq!(state.manifest_dirs["demo"], packages);
+        drop(state);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn primary_plugin_root_is_required_but_optional_package_root_may_be_absent() {
+        let root = std::env::temp_dir().join(format!(
+            "uenv-plugin-required-root-test-{}",
+            std::process::id()
+        ));
+        let primary = root.join("builtin");
+        let missing = root.join("not-activated-yet");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&primary).unwrap();
+
+        assert!(PluginHost::load_from_dirs([&primary, &missing]).is_ok());
+        assert!(PluginHost::load_from_dirs([&missing, &primary]).is_err());
+        assert!(PluginHost::load_from_dir(&missing).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn hub_manifest_can_bind_to_existing_manifestless_plugin_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "uenv-plugin-hub-bind-test-{}",
+            std::process::id()
+        ));
+        let env_dir = root.join("demo");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&env_dir).unwrap();
+        std::fs::write(env_dir.join("run.sh"), "#!/bin/sh\n").unwrap();
+
+        let host = PluginHost::load_from_dir(&root).unwrap();
+        assert!(!host.has_env_type("demo").await);
+        let manifest = PluginManifest {
+            env_type: "demo".into(),
+            version: Some("1.0.0".into()),
+            supported_backends: Some(vec!["process".into()]),
+            ipc: "proto-uds".into(),
+            entry: "./run.sh".into(),
+            description: None,
+        };
+        host.register_manifest_from_dir(manifest, &env_dir)
+            .await
+            .unwrap();
+        assert!(host.has_env_type("demo").await);
+        let state = host.state.lock().await;
+        assert_eq!(state.manifest_dirs["demo"], env_dir);
+        drop(state);
+
+        std::fs::create_dir_all(root.join("escape")).unwrap();
+        let escaping = PluginManifest {
+            env_type: "escape".into(),
+            version: None,
+            supported_backends: Some(vec!["process".into()]),
+            ipc: "proto-uds".into(),
+            entry: "../run.sh".into(),
+            description: None,
+        };
+        assert!(host
+            .register_manifest_from_dir(escaping, root.join("escape"))
+            .await
+            .is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 fn scan_manifests(
@@ -374,7 +545,11 @@ fn scan_manifests(
     let mut manifests = HashMap::new();
     for entry in fs::read_dir(plugin_dir)? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        // Hub activation uses an atomic `<env_type>` symlink to an immutable
+        // version directory. Follow only this top-level directory link; files
+        // inside a published package were already rejected if they were links.
+        if !file_type.is_dir() && !(file_type.is_symlink() && entry.path().is_dir()) {
             continue;
         }
         let env_dir = entry.path();
@@ -387,4 +562,82 @@ fn scan_manifests(
         manifests.insert(manifest.env_type.clone(), manifest);
     }
     Ok(manifests)
+}
+
+fn validate_manifest_entry(
+    env_dir: &Path,
+    manifest: &PluginManifest,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    use std::path::Component;
+
+    if manifest.env_type.trim().is_empty()
+        || manifest.env_type.contains('/')
+        || manifest.env_type.contains('\\')
+        || manifest.env_type.contains("..")
+    {
+        return Err(format!("invalid plugin env_type: {}", manifest.env_type).into());
+    }
+    if !env_dir.is_dir() {
+        return Err(format!(
+            "plugin directory not found for env_type={}: {}",
+            manifest.env_type,
+            env_dir.display()
+        )
+        .into());
+    }
+    if env_dir.file_name() != Some(std::ffi::OsStr::new(&manifest.env_type)) {
+        return Err(format!(
+            "plugin directory name must match env_type={}: {}",
+            manifest.env_type,
+            env_dir.display()
+        )
+        .into());
+    }
+    let entry = Path::new(&manifest.entry);
+    if entry.as_os_str().is_empty() || entry.is_absolute() {
+        return Err(format!(
+            "plugin entry must be a non-empty relative path for env_type={}: {}",
+            manifest.env_type,
+            entry.display()
+        )
+        .into());
+    }
+    let mut clean = PathBuf::new();
+    for component in entry.components() {
+        match component {
+            Component::Normal(value) => clean.push(value),
+            Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "plugin entry may not escape its environment directory for env_type={}: {}",
+                    manifest.env_type,
+                    entry.display()
+                )
+                .into());
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err(format!("plugin entry is empty for env_type={}", manifest.env_type).into());
+    }
+    let resolved = env_dir.join(clean);
+    if !resolved.is_file() {
+        return Err(format!(
+            "plugin entry not found for env_type={}: {}",
+            manifest.env_type,
+            resolved.display()
+        )
+        .into());
+    }
+    let canonical_dir = std::fs::canonicalize(env_dir)?;
+    let canonical_entry = std::fs::canonicalize(&resolved)?;
+    if !canonical_entry.starts_with(&canonical_dir) {
+        return Err(format!(
+            "plugin entry resolves outside its environment directory for env_type={}: {}",
+            manifest.env_type,
+            resolved.display()
+        )
+        .into());
+    }
+    Ok(resolved)
 }

@@ -45,6 +45,7 @@ async fn main() {
                 max_concurrent: cfg.worker.max_concurrent,
                 supported_env_types: cfg.env.types.clone(),
                 plugin_dir: cfg.env.plugin_dir.clone(),
+                package_plugin_dir: cfg.env.package_plugin_dir.clone(),
                 warmup_size: cfg.pool.warmup_size,
                 prewarm_on_startup: cfg.pool.prewarm_on_startup,
                 max_idle_time_secs: cfg.pool.max_idle_time,

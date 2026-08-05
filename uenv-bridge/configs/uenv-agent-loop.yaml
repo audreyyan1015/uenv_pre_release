@@ -8,7 +8,10 @@
   binary: ${oc.env:UENV_ADAPTER_CORE_BINARY,/tmp/uenv-bridge/core/target/debug/uenv-adapter-core}
   fake_reward: ${oc.env:UENV_AGENT_LOOP_FAKE_REWARD,1.0}
   fake_response_text: ${oc.env:UENV_AGENT_LOOP_FAKE_RESPONSE_TEXT,""}
-  default_env_type: qa
+  # 新训练数据必须在 extra_info.env_type 中显式声明环境。
+  # Public runners set this from the caller's explicit --env-type.  Empty is
+  # intentional here: the config file must not silently choose a task.
+  default_env_type: ${oc.env:UENV_DEFAULT_ENV_TYPE,""}
   # 留空时 Worker 使用 config/uenv-worker-llm.env 默认 LLM；显式 override 时再设置
   default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,}
   default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,}

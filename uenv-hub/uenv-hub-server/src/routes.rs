@@ -7,7 +7,7 @@ use crate::etag::json_with_etag;
 use crate::middleware::{ensure_role, Principal};
 use crate::service;
 use crate::state::AppState;
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -70,6 +70,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin/tokens", post(create_token))
         .route("/admin/tokens/:id", delete(revoke_token))
         .route("/admin/audit-log", get(audit_log))
+        // Process-plugin packages may include an offline Python wheelhouse.
+        // Keep the bound explicit: large container images still use streamed
+        // file artifacts rather than JSON/base64 uploads.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::auth,
@@ -403,11 +407,13 @@ async fn publish_package(
 ) -> ApiResult<(StatusCode, Json<dto::PublishPackageResponse>)> {
     ensure_role(&principal, Role::Publisher)?;
     let artifact_root = std::path::PathBuf::from(&state.config.packages.artifact_dir);
+    let import_root = std::path::PathBuf::from(&state.config.packages.import_dir);
     let manifest = service::publish_package(
         &state.store,
         &principal,
         client_ip(&connect_info),
         &artifact_root,
+        &import_root,
         &package_id,
         req,
     )

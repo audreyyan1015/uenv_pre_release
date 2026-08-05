@@ -13,3 +13,4 @@ dependencies = [
 
 [project.scripts]
 uenv-bridge = "uenv.bridge.cli:main"
+uenv-evaluate = "uenv.bridge.evaluate:main"

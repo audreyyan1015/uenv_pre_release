@@ -67,7 +67,9 @@ install -d "$PAYLOAD/bin" "$PAYLOAD/config" "$PAYLOAD/systemd" \
   "$PAYLOAD/plugins/qa" "$PAYLOAD/plugins/math" "$PAYLOAD/plugins/code" \
   "$PAYLOAD/share/hub-config" "$PAYLOAD/share/swe/openhands" \
   "$PAYLOAD/share/docs" \
+  "$PAYLOAD/share/templates/process-plugin" \
   "$PAYLOAD/share/uenv-bridge/configs" "$PAYLOAD/share/uenv-bridge/scripts" \
+  "$PAYLOAD/examples/environment" "$PAYLOAD/examples/evaluation" "$PAYLOAD/examples/hub" "$PAYLOAD/examples/training" \
   "$PAYLOAD/examples/swe" "$PAYLOAD/wheels"
 
 install -m 0755 "$ROOT/uenv" "$PAYLOAD/bin/uenv"
@@ -126,10 +128,53 @@ for example in "$ROOT/examples/swe/"*.sh "$ROOT/examples/swe/"*.py; do
   [[ -f "$example" ]] || continue
   install -m 0755 "$example" "$PAYLOAD/examples/swe/"
 done
-install -m 0644 "$ROOT/Docs/deployment/UEnv全新服务器部署指南.md" "$PAYLOAD/share/docs/"
-install -m 0644 "$ROOT/Docs/deployment/SWE评测与VeRL训练操作指南.md" "$PAYLOAD/share/docs/"
-install -m 0644 "$ROOT/Docs/deployment/SWE评测操作指南.md" "$PAYLOAD/share/docs/"
-install -m 0644 "$ROOT/Docs/deployment/VeRL-SWE训练操作指南.md" "$PAYLOAD/share/docs/"
+for example in "$ROOT/examples/evaluation/"*.sh "$ROOT/examples/evaluation/"*.py \
+  "$ROOT/examples/evaluation/"*.jsonl "$ROOT/examples/evaluation/"README.md; do
+  [[ -f "$example" ]] || continue
+  case "$example" in
+    *.sh|*.py) mode=0755 ;;
+    *) mode=0644 ;;
+  esac
+  install -m "$mode" "$example" "$PAYLOAD/examples/evaluation/"
+done
+for example in "$ROOT/examples/training/"*.sh "$ROOT/examples/training/"*.py \
+  "$ROOT/examples/training/"*.jsonl "$ROOT/examples/training/"README.md; do
+  [[ -f "$example" ]] || continue
+  case "$example" in
+    *.sh|*.py) mode=0755 ;;
+    *) mode=0644 ;;
+  esac
+  install -m "$mode" "$example" "$PAYLOAD/examples/training/"
+done
+
+install -m 0755 "$ROOT/examples/hub/image_bundle.sh" \
+  "$PAYLOAD/examples/hub/image_bundle.sh"
+
+install -m 0755 "$ROOT/examples/environment/plugin.sh" \
+  "$PAYLOAD/examples/environment/plugin.sh"
+install -m 0644 "$ROOT/examples/environment/README.md" \
+  "$PAYLOAD/examples/environment/README.md"
+
+if [[ -d "$ROOT/templates/process-plugin" ]]; then
+  # Development venvs, wheels and Python caches must never leak into a release.
+  (cd "$ROOT/templates/process-plugin" && tar \
+    --exclude='.venv' \
+    --exclude='wheelhouse' \
+    --exclude='__pycache__' \
+    --exclude='.pytest_cache' \
+    --exclude='.mypy_cache' \
+    --exclude='*.pyc' \
+    -cf - .) | (cd "$PAYLOAD/share/templates/process-plugin" && tar -xf -)
+fi
+
+for guide in \
+  UEnv基础部署指南.md \
+  UEnv多机部署指南.md \
+  'UEnv Hub使用指南.md' \
+  UEnv评测指南.md \
+  UEnv训练指南.md; do
+  install -m 0644 "$ROOT/Docs/deployment/$guide" "$PAYLOAD/share/docs/"
+done
 
 echo "==> building Python Bridge wheel"
 python3 -m pip wheel --no-deps --wheel-dir "$PAYLOAD/wheels" "$ROOT/uenv-bridge"
@@ -149,6 +194,8 @@ manifest = {
     "arch": arch,
     "components": [
         "adapter-core", "worker", "hub", "hub-cli", "bridge", "qa", "math", "code",
+        "environment-evaluation", "environment-training", "process-plugin-template",
+        "environment-authoring", "hub-image-transfer",
         "swe-runtime", "openhands-agent", "swe-examples"
     ],
     "built_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),

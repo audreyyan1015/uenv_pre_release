@@ -10,6 +10,9 @@ max_connections = 16
 # The default local-only Hub is intentionally easy to start. Enable token auth
 # before changing server.host to a non-loopback address.
 require_token = false
+# For a non-loopback Hub, set require_token=true and create this uenv-owned file
+# as 0600. The file is read on every start while this setting remains enabled.
+# bootstrap_admin_token_file = "/etc/uenv/secrets/hub-admin.token"
 
 [rate_limit]
 enabled = true
@@ -21,5 +24,8 @@ allow_origins = ["*"]
 
 [packages]
 artifact_dir = "/var/lib/uenv/hub/artifacts"
-catalog_seed_dir = "/opt/uenv/current/share/hub-config/swe"
-seed_examples = true
+import_dir = "/var/lib/uenv/hub/import"
+catalog_seed_dir = "/var/lib/uenv/hub/seed-catalogs"
+# Keep a fresh Hub environment-agnostic. Operators may enable the optional
+# example seed explicitly when they also install the corresponding catalogs.
+seed_examples = false

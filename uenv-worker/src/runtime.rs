@@ -30,6 +30,7 @@ pub struct WorkerRuntime {
     pub max_concurrent: u32,
     pub supported_env_types: Vec<String>,
     pub plugin_dir: String,
+    pub package_plugin_dir: Option<String>,
     pub warmup_size: u32,
     pub prewarm_on_startup: bool,
     pub max_idle_time_secs: u32,
@@ -68,7 +69,30 @@ impl WorkerRuntime {
                 msg = "reaped_orphan_plugins_on_startup"
             );
         }
-        let plugin_host = PluginHost::load_from_dir(&self.plugin_dir)?;
+        let mut plugin_roots = vec![PathBuf::from(&self.plugin_dir)];
+        if let Some(dir) = self
+            .package_plugin_dir
+            .as_deref()
+            .filter(|dir| !dir.trim().is_empty())
+        {
+            plugin_roots.push(PathBuf::from(dir));
+        }
+        let plugin_host = PluginHost::load_from_dirs(&plugin_roots)?;
+        // An explicitly activated package is an operator opt-in. Advertise its
+        // env_type even when the static `env.types` list predates the package;
+        // built-ins remain governed by that list because they are already
+        // present there in the shipped configuration.
+        let loaded_envs = plugin_host.supported_envs().await;
+        let mut effective_env_types = self.supported_env_types.clone();
+        for env_type in &loaded_envs {
+            let activated = self
+                .package_plugin_dir
+                .as_deref()
+                .is_some_and(|root| std::path::Path::new(root).join(env_type).exists());
+            if activated && !effective_env_types.contains(env_type) {
+                effective_env_types.push(env_type.clone());
+            }
+        }
         let hub_endpoint = if self.hub_enabled {
             self.hub_endpoint.clone()
         } else {
@@ -90,7 +114,7 @@ impl WorkerRuntime {
             if let Some(endpoint) = &hub_endpoint {
                 for result in hub::sync_env_types_from_hub(
                     endpoint,
-                    &self.supported_env_types,
+                    &effective_env_types,
                     hub_token.as_deref(),
                 )
                 .await
@@ -112,9 +136,9 @@ impl WorkerRuntime {
                                     worker_id = %self.worker_id,
                                     episode_id = "-",
                                     env_type = %summary.env_type,
-                                    version = %summary.version,
+                                    hub_version = %summary.version,
                                     backends = %summary.supported_backends.join(","),
-                                    msg = "hub_manifest_pulled"
+                                    msg = "hub_manifest_metadata_checked"
                                 );
                             }
                         }
@@ -136,12 +160,12 @@ impl WorkerRuntime {
                 );
             }
         }
-        let loaded_envs = plugin_host.supported_envs().await;
         tracing::info!(
             trace_id = "runtime",
             worker_id = %self.worker_id,
             episode_id = "-",
             plugin_dir = %self.plugin_dir,
+            package_plugin_dir = ?self.package_plugin_dir,
             loaded_envs = %loaded_envs.join(","),
             msg = "plugin_host_loaded"
         );
@@ -170,7 +194,7 @@ impl WorkerRuntime {
         );
         if self.prewarm_on_startup {
             let mut prewarm_envs = Vec::new();
-            for env_type in &self.supported_env_types {
+            for env_type in &effective_env_types {
                 if plugin_host.has_env_type(env_type).await {
                     prewarm_envs.push(env_type.clone());
                 }
@@ -197,12 +221,22 @@ impl WorkerRuntime {
         let metrics = MetricsExporter::new();
         let worker_id = self.worker_id.clone();
         let gw_public = gateway_public_url(&self.gateway_listen);
-        let synced_packages = load_synced_env_packages(&self.swe_env_package_dirs);
+        let mut synced_packages = load_synced_env_packages(&self.swe_env_package_dirs);
+        if let Some(dir) = self.package_plugin_dir.as_deref() {
+            for package in load_active_plugin_packages(std::path::Path::new(dir)) {
+                if !synced_packages.iter().any(|existing| {
+                    existing.package_id == package.package_id
+                        && existing.version == package.version
+                }) {
+                    synced_packages.push(package);
+                }
+            }
+        }
         let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
             scheduler_mode,
             self.server_endpoint.clone(),
             register_endpoint,
-            self.supported_env_types.clone(),
+            effective_env_types,
             self.max_concurrent,
             worker_id.clone(),
             detect_resource_spec(),
@@ -481,6 +515,53 @@ fn load_synced_env_packages(
             bundle_digest: marker.map(|m| m.bundle_digest).unwrap_or_default(),
         });
     }
+    out
+}
+
+/// Read package coordinates behind the activated process-plugin links created
+/// by `uenv env sync --activate`. Unlike the SWE loader this deliberately does
+/// not require `catalog.json`; a generic Proto/UDS plugin may carry only its
+/// executable, manifest and task-specific assets.
+fn load_active_plugin_packages(
+    plugin_root: &std::path::Path,
+) -> Vec<crate::proto::scheduler::v1::SyncedEnvPackage> {
+    use crate::proto::scheduler::v1::SyncedEnvPackage;
+
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(plugin_root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(plugin_dir) = std::fs::canonicalize(entry.path()) else {
+            continue;
+        };
+        if !plugin_dir.join("manifest.yaml").is_file() {
+            continue;
+        }
+        let Some(package_dir) = plugin_dir.parent() else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read_to_string(package_dir.join(".synced")) else {
+            continue;
+        };
+        let Ok(marker) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let (Some(package_id), Some(version), Some(bundle_digest)) = (
+            marker.get("package_id").and_then(|v| v.as_str()),
+            marker.get("version").and_then(|v| v.as_str()),
+            marker.get("bundle_digest").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        out.push(SyncedEnvPackage {
+            package_id: package_id.to_string(),
+            version: version.to_string(),
+            bundle_digest: bundle_digest.to_string(),
+        });
+    }
+    out.sort_by(|a, b| (&a.package_id, &a.version).cmp(&(&b.package_id, &b.version)));
+    out.dedup_by(|a, b| a.package_id == b.package_id && a.version == b.version);
     out
 }
 
@@ -783,5 +864,43 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn activated_generic_plugin_is_reported_as_a_synced_package() {
+        let root = std::env::temp_dir().join(format!(
+            "uenv-active-package-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let package = root.join("envs/demo/1.2.3");
+        let plugin = package.join("plugin");
+        let active = root.join("plugins");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(
+            plugin.join("manifest.yaml"),
+            "env_type: demo\nsupported_backends: [process]\nipc: proto-uds\nentry: ./run.sh\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join(".synced"),
+            r#"{"package_id":"demo-pkg","version":"1.2.3","bundle_digest":"sha256:abc"}"#,
+        )
+        .unwrap();
+        symlink(&plugin, active.join("demo")).unwrap();
+
+        let packages = load_active_plugin_packages(&active);
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].package_id, "demo-pkg");
+        assert_eq!(packages[0].version, "1.2.3");
+        assert_eq!(packages[0].bundle_digest, "sha256:abc");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

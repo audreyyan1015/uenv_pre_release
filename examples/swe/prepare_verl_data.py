@@ -18,15 +18,25 @@ SYSTEM_PROMPT = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare a small SWE-smith training dataset for VeRL and UEnv.")
     parser.add_argument("--catalog", type=Path, required=True, help="UEnv SWE catalog JSON.")
+    parser.add_argument(
+        "--benchmark-variant",
+        required=True,
+        choices=("smith",),
+        help="Benchmark variant. This release's VeRL data adapter supports smith.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory for train.parquet and test.parquet.")
     parser.add_argument(
         "--limit",
         type=int,
-        default=1,
         help="Maximum rows when --instance is not used; 0 selects all rows.",
     )
     parser.add_argument("--instance", action="append", default=[], help="Select an instance ID; may be repeated.")
-    parser.add_argument("--max-iterations", type=int, default=10, help="Maximum OpenHands steps for each episode.")
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        required=True,
+        help="Maximum OpenHands steps for each episode.",
+    )
     parser.add_argument(
         "--llm-config-path",
         default="/etc/uenv/openhands-llm.json",
@@ -109,7 +119,7 @@ def verl_row(row: dict[str, Any], index: int, args: argparse.Namespace) -> dict[
             "base_commit": str(row.get("base_commit") or ""),
             "dockerhub_tag": image,
             "image_cache_key": image,
-            "benchmark_variant": "smith",
+            "benchmark_variant": args.benchmark_variant,
             "command_mode": "full_shell",
             "env_package_id": "",
             "env_package_version": "",
@@ -129,7 +139,11 @@ def verl_row(row: dict[str, Any], index: int, args: argparse.Namespace) -> dict[
 
 def main() -> None:
     args = parse_args()
-    if args.limit < 0:
+    if not args.instance and args.limit is None:
+        raise SystemExit("provide --instance ID (repeatable) or --limit N")
+    if args.instance and args.limit is not None:
+        raise SystemExit("--instance and --limit are mutually exclusive")
+    if args.limit is not None and args.limit < 0:
         raise SystemExit("--limit must be 0 or greater")
     if args.max_iterations < 1:
         raise SystemExit("--max-iterations must be positive")
@@ -176,6 +190,7 @@ def main() -> None:
         "rows": len(rows),
         "instances": [str(row["instance_id"]) for row in source_rows],
         "max_iterations": args.max_iterations,
+        "benchmark_variant": args.benchmark_variant,
     }
     (args.output_dir / "dataset_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",

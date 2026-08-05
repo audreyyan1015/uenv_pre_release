@@ -4,6 +4,8 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -33,6 +35,7 @@ class SweExamplesTest(unittest.TestCase):
         args = argparse.Namespace(
             llm_config_path="/etc/uenv/openhands-llm.json",
             max_iterations=7,
+            benchmark_variant="smith",
         )
         row = self.preparer.verl_row(catalog[0], 0, args)
 
@@ -66,6 +69,32 @@ class SweExamplesTest(unittest.TestCase):
             self.assertEqual(
                 self.preparer.load_catalog(list_path)[0]["instance_id"], "case-2"
             )
+
+    def test_instance_and_limit_are_mutually_exclusive(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PREPARER_PATH),
+                "--catalog",
+                str(ROOT / "config/swe/smith-smoke.json"),
+                "--benchmark-variant",
+                "smith",
+                "--output-dir",
+                "/tmp/uenv-unused-output",
+                "--instance",
+                "repo__issue-1",
+                "--limit",
+                "1",
+                "--max-iterations",
+                "5",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mutually exclusive", result.stderr)
 
 
 if __name__ == "__main__":

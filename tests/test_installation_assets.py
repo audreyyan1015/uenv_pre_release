@@ -48,7 +48,7 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 class InstallationAssetsTest(unittest.TestCase):
     def test_shell_scripts_parse(self) -> None:
         scripts = [ROOT / "install.sh", ROOT / "scripts/build-release.sh"]
-        scripts.extend(sorted((ROOT / "examples/swe").glob("*.sh")))
+        scripts.extend(sorted((ROOT / "examples").glob("*/*.sh")))
         for path in scripts:
             subprocess.run(["bash", "-n", str(path)], check=True)
 
@@ -63,6 +63,67 @@ class InstallationAssetsTest(unittest.TestCase):
                 check=True,
             )
         self.assertEqual(result.stdout.strip(), "uenv 0.1.0")
+
+    def test_unified_cli_forwards_training_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "examples/training/train_verl.sh"
+            script.parent.mkdir(parents=True)
+            script.write_text('printf "train:%s\\n" "$*"\n', encoding="utf-8")
+            forwarded = [
+                "run-task",
+                "--env-type",
+                "warehouse",
+                "--dataset",
+                "warehouse-v1",
+                "--input",
+                "/data/cases.jsonl",
+                "--max-steps",
+                "1",
+            ]
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "uenv"),
+                    "--install-root",
+                    str(root),
+                    "train",
+                    *forwarded,
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                check=True,
+            )
+        self.assertEqual(result.stdout.strip(), f"train:{' '.join(forwarded)}")
+
+    def test_unified_cli_lists_local_environments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plugin = root / "plugins" / "example"
+            plugin.mkdir(parents=True)
+            (plugin / "manifest.yaml").write_text(
+                "env_type: example\nversion: '1.2.3'\ndatasets:\n  - demo-set\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "uenv"),
+                    "--install-root",
+                    str(root),
+                    "--config-dir",
+                    str(root / "config"),
+                    "environments",
+                    "--json",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                check=True,
+            )
+        items = json.loads(result.stdout)
+        self.assertEqual(items[0]["env_type"], "example")
+        self.assertEqual(items[0]["datasets"], ["demo-set"])
+        self.assertEqual(items[0]["status"], "ready")
 
     def test_status_uses_admin_http_api(self) -> None:
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StatusHandler)
@@ -94,6 +155,33 @@ class InstallationAssetsTest(unittest.TestCase):
         self.assertIn('listen: "0.0.0.0:50054"', worker)
         self.assertNotIn('listen: "0.0.0.0:50052"', worker)
 
+    def test_hub_plugin_and_token_paths_are_installed(self) -> None:
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        worker = (ROOT / "deploy/config/worker.yaml").read_text(encoding="utf-8")
+        self.assertIn("--hub-token-file", installer)
+        self.assertIn("/var/lib/uenv/plugins", installer)
+        self.assertIn("/var/lib/uenv/hub/import", installer)
+        self.assertIn('token_file: "@HUB_TOKEN_FILE@"', worker)
+        self.assertIn('package_plugin_dir: "/var/lib/uenv/plugins"', worker)
+        hub = (ROOT / "deploy/config/hub.toml").read_text(encoding="utf-8")
+        self.assertIn('import_dir = "/var/lib/uenv/hub/import"', hub)
+
+    def test_worker_model_secret_stays_root_owned_across_install(self) -> None:
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            "install -d -o root -g uenv -m 0750 /etc/uenv/secrets", installer
+        )
+        self.assertIn(
+            "install -o root -g uenv -m 0640 /dev/null /etc/uenv/secrets/worker-llm.env",
+            installer,
+        )
+        self.assertIn(
+            "chown root:uenv /etc/uenv/secrets/worker-llm.env", installer
+        )
+        self.assertIn(
+            "chmod 0640 /etc/uenv/secrets/worker-llm.env", installer
+        )
+
     def test_release_script_packages_every_service_binary(self) -> None:
         script = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
         for name in ("uenv-adapter-core", "uenv-worker", "uenv-hub-server", "uenv-hub-cli"):
@@ -107,6 +195,16 @@ class InstallationAssetsTest(unittest.TestCase):
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
         self.assertIn('server.env.example" "$PAYLOAD/config/server.env', release)
         self.assertIn('worker.env.example" "$PAYLOAD/config/worker.env', release)
+        worker_env = (ROOT / "deploy/config/worker.env.example").read_text(
+            encoding="utf-8"
+        )
+        for name in (
+            "UENV_QA_PLUGIN_BIN",
+            "UENV_MATH_PLUGIN_BIN",
+            "UENV_CODE_PLUGIN_BIN",
+            "UENV_CODE_EVAL_SCRIPT",
+        ):
+            self.assertIn(name, worker_env)
 
     def test_swe_release_assets_are_wired(self) -> None:
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
@@ -121,17 +219,41 @@ class InstallationAssetsTest(unittest.TestCase):
         self.assertIn("/etc/uenv/swe.env", worker_unit)
         self.assertTrue((ROOT / "deploy/systemd/uenv-swe-agent.service").is_file())
 
-    def test_swe_user_guides_are_packaged(self) -> None:
+    def test_public_user_guides_are_packaged(self) -> None:
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
         for name in (
-            "SWE评测与VeRL训练操作指南.md",
-            "SWE评测操作指南.md",
-            "VeRL-SWE训练操作指南.md",
+            "UEnv基础部署指南.md",
+            "UEnv多机部署指南.md",
+            "UEnv Hub使用指南.md",
+            "UEnv评测指南.md",
+            "UEnv训练指南.md",
         ):
             path = ROOT / "Docs/deployment" / name
             self.assertTrue(path.is_file(), name)
             self.assertIn(name, release)
             self.assertNotIn("smoke", path.read_text(encoding="utf-8").casefold())
+
+    def test_generic_examples_and_plugin_template_are_packaged(self) -> None:
+        release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
+        for token in (
+            "examples/environment",
+            "examples/evaluation",
+            "examples/hub",
+            "examples/training",
+            "templates/process-plugin",
+        ):
+            self.assertIn(token, release)
+        self.assertTrue((ROOT / "examples/environment/plugin.sh").is_file())
+        self.assertTrue((ROOT / "examples/environment/README.md").is_file())
+        self.assertTrue((ROOT / "examples/evaluation/qa-gsm8k.jsonl").is_file())
+        self.assertTrue((ROOT / "examples/evaluation/README.md").is_file())
+        self.assertTrue((ROOT / "examples/training/qa-gsm8k.jsonl").is_file())
+        self.assertTrue((ROOT / "examples/training/README.md").is_file())
+        self.assertTrue((ROOT / "examples/hub/image_bundle.sh").is_file())
+        for name in ("environment.py", "plugin.py", "uenv_plugin_api.py"):
+            self.assertTrue((ROOT / "templates/process-plugin" / name).is_file())
+        for excluded in (".venv", "wheelhouse", "__pycache__", "*.pyc"):
+            self.assertIn(f"--exclude='{excluded}'", release)
 
     def test_release_directory_is_immutable_and_staged_atomically(self) -> None:
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")

@@ -377,6 +377,42 @@ impl HttpClient {
         self.get_json("/api/v1/templates", &[], None).await
     }
 
+    /// Create an RBAC token (Admin role). The plaintext secret is returned once.
+    pub async fn create_token(
+        &self,
+        req: &uenv_hub_types::CreateTokenRequest,
+    ) -> Result<uenv_hub_types::CreateTokenResponse> {
+        // Token creation is not idempotent: retrying after a lost response can
+        // leave additional active secrets whose plaintext the caller never
+        // received. Send exactly once; the operator can safely decide whether
+        // to inspect/revoke before retrying.
+        let request = self.authed(
+            self.http
+                .request(Method::POST, self.url("/api/v1/admin/tokens")),
+        );
+        let response = request.json(req).send().await?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(serde_json::from_str(&response.text().await?)?)
+        } else {
+            Err(decode_error(status, response).await)
+        }
+    }
+
+    /// Revoke a token by numeric id (Admin role).
+    pub async fn revoke_token(&self, id: i64) -> Result<()> {
+        let path = format!("/api/v1/admin/tokens/{id}");
+        let mut request = self.http.request(Method::DELETE, self.url(&path));
+        request = self.authed(request);
+        let response = request.send().await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            Err(decode_error(status, response).await)
+        }
+    }
+
     // --- EnvPackages -------------------------------------------------------
 
     /// Publish an EnvPackage version (Publisher role).

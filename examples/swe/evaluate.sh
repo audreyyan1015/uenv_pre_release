@@ -5,47 +5,49 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OPENHANDS_DIR="${OPENHANDS_BENCHMARKS_DIR:-/opt/uenv/agent/openhands-benchmarks}"
-GATEWAY="${UENV_GATEWAY:-http://127.0.0.1:28999}"
-INSTANCE="${UENV_SWE_INSTANCE:-astropy__astropy-7166}"
-CATALOG="${UENV_SWE_INSTANCES:-}"
+GATEWAY=""
+INSTANCE=""
+CATALOG=""
 OUTPUT_DIR=""
 MODEL=""
 BASE_URL=""
 MODEL_API_KEY=""
-MAX_ITERATIONS=30
+MODEL_API_KEY_FILE=""
+BENCHMARK_VARIANT=""
+MAX_ITERATIONS=""
 OFFLINE=0
 
 usage() {
   cat <<'EOF'
 用法：
-  evaluate.sh local --model MODEL [选项]
-  evaluate.sh volcengine --model ENDPOINT_ID [选项]
+  evaluate.sh local --model MODEL --base-url URL --gateway URL \
+    --catalog FILE --benchmark-variant VARIANT --instance ID \
+    --output-dir DIR --max-iterations N
+  evaluate.sh volcengine --model ENDPOINT_ID --gateway URL \
+    --catalog FILE --benchmark-variant VARIANT --instance ID \
+    --output-dir DIR --max-iterations N
 
 示例：
-  # 本地 vLLM、SGLang 等 OpenAI-compatible 服务
-  bash evaluate.sh local --model Qwen/Qwen2.5-Coder-32B-Instruct \
-    --base-url http://127.0.0.1:8000/v1
-
-  # 火山引擎方舟；MODEL 是推理接入点 ID
-  export ARK_API_KEY='...'
-  bash evaluate.sh volcengine --model ep-xxxxxxxx
-
-公共选项：
-  --gateway URL          Worker Runtime Gateway（默认 http://127.0.0.1:28999）
-  --instance ID          评测实例（默认 astropy__astropy-7166）
-  --catalog FILE         Verified catalog；通常无需设置
-  --output-dir DIR       结果目录（默认当前目录下的 uenv-eval-results）
-  --max-iterations N     Agent 最大迭代次数（默认 30）
+任务选项（全部必填）：
+  --gateway URL          Worker Runtime Gateway
+  --catalog FILE         benchmark catalog
+  --benchmark-variant V  verified、pro 或 smith
+  --instance ID          catalog 中的评测实例
+  --output-dir DIR       结果目录
+  --max-iterations N     Agent 最大迭代次数
   --offline              只使用本地已有容器镜像，不访问镜像仓库
 
 模型选项：
   --model NAME           本地模型名或火山方舟接入点 ID（必填）
-  --base-url URL         本地默认 http://127.0.0.1:8000/v1；方舟有固定默认值
+  --base-url URL         本地模型必填；方舟未传时使用官方区域地址
+  --api-key-file FILE    从权限受控文件读取模型 API Key
 
-密钥只从环境变量读取，不会进入命令历史：
+密钥处理（不会作为命令行参数进入历史）：
   LOCAL_MODEL_API_KEY    本地模型服务密钥；未设置时使用 EMPTY
-  ARK_API_KEY            火山方舟 API Key（必填）
+  ARK_API_KEY            火山方舟 API Key；非交互运行时必填
   UENV_GATEWAY_API_KEY   Gateway 密钥；默认从 /etc/uenv/secrets/swe.env 读取
+
+交互终端未设置 ARK_API_KEY 时，脚本会隐藏地提示输入，不必先 export。
 EOF
 }
 
@@ -78,6 +80,11 @@ while [[ $# -gt 0 ]]; do
       BASE_URL="$2"
       shift 2
       ;;
+    --api-key-file)
+      [[ $# -ge 2 ]] || fail "--api-key-file 缺少参数"
+      MODEL_API_KEY_FILE="$2"
+      shift 2
+      ;;
     --gateway)
       [[ $# -ge 2 ]] || fail "--gateway 缺少参数"
       GATEWAY="$2"
@@ -91,6 +98,11 @@ while [[ $# -gt 0 ]]; do
     --catalog)
       [[ $# -ge 2 ]] || fail "--catalog 缺少参数"
       CATALOG="$2"
+      shift 2
+      ;;
+    --benchmark-variant)
+      [[ $# -ge 2 ]] || fail "--benchmark-variant 缺少参数"
+      BENCHMARK_VARIANT="$2"
       shift 2
       ;;
     --output-dir)
@@ -115,25 +127,43 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$MODEL" ]]; then
-  if [[ "$MODE" == "local" ]]; then
-    MODEL="${LOCAL_MODEL_NAME:-}"
-  else
-    MODEL="${ARK_ENDPOINT_ID:-}"
-  fi
-fi
 [[ -n "$MODEL" ]] || fail "请通过 --model 指定模型；火山模式填写方舟推理接入点 ID"
+[[ -n "$GATEWAY" ]] || fail "请通过 --gateway 指定 Worker Runtime Gateway"
+[[ -n "$CATALOG" ]] || fail "请通过 --catalog 指定 benchmark catalog"
+[[ -n "$INSTANCE" ]] || fail "请通过 --instance 指定 catalog 中的实例"
+[[ -n "$OUTPUT_DIR" ]] || fail "请通过 --output-dir 指定结果目录"
+case "$BENCHMARK_VARIANT" in
+  verified|pro|smith) ;;
+  "") fail "请通过 --benchmark-variant 指定 verified、pro 或 smith" ;;
+  *) fail "不支持的 --benchmark-variant：$BENCHMARK_VARIANT" ;;
+esac
 [[ "$MAX_ITERATIONS" =~ ^[1-9][0-9]*$ ]] || fail "--max-iterations 必须是正整数"
 [[ "$INSTANCE" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "--instance 含有不支持的字符"
 
+FILE_API_KEY=""
+if [[ -n "$MODEL_API_KEY_FILE" ]]; then
+  [[ -f "$MODEL_API_KEY_FILE" && -r "$MODEL_API_KEY_FILE" ]] \
+    || fail "无法读取 API Key 文件：$MODEL_API_KEY_FILE"
+  FILE_API_KEY="$(<"$MODEL_API_KEY_FILE")"
+  [[ "$FILE_API_KEY" != *[$'\r\n']* ]] || fail "API Key 文件只能包含一行"
+fi
+
 if [[ "$MODE" == "local" ]]; then
-  BASE_URL="${BASE_URL:-${LOCAL_MODEL_BASE_URL:-http://127.0.0.1:8000/v1}}"
-  MODEL_API_KEY="${LOCAL_MODEL_API_KEY:-EMPTY}"
+  [[ -n "$BASE_URL" ]] || fail "本地模型需要 --base-url"
+  MODEL_API_KEY="${LOCAL_MODEL_API_KEY:-${FILE_API_KEY:-EMPTY}}"
   unset LOCAL_MODEL_API_KEY
 else
   BASE_URL="${BASE_URL:-${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}}"
-  MODEL_API_KEY="${ARK_API_KEY:-}"
-  [[ -n "$MODEL_API_KEY" ]] || fail "火山模式需要先设置 ARK_API_KEY"
+  MODEL_API_KEY="${ARK_API_KEY:-$FILE_API_KEY}"
+  if [[ -z "$MODEL_API_KEY" && -t 0 ]]; then
+    if ! read -rsp '火山方舟 API Key（输入不显示）: ' MODEL_API_KEY; then
+      echo >&2
+      fail "未读到火山方舟 API Key"
+    fi
+    echo >&2
+  fi
+  [[ -n "$MODEL_API_KEY" ]] \
+    || fail "非交互运行需要设置 ARK_API_KEY；交互终端会隐藏地提示输入"
   unset ARK_API_KEY
 fi
 [[ "$BASE_URL" == http://* || "$BASE_URL" == https://* ]] \
@@ -155,12 +185,7 @@ DRIVER="$(find_first_file \
   "$RELEASE_ROOT/integrations/openhands/run_swebenchpro_official.py")" \
   || fail "找不到 UEnv OpenHands 驱动，请确认安装包包含 SWE 组件"
 
-if [[ -z "$CATALOG" ]]; then
-  CATALOG="$(find_first_file \
-    "/opt/uenv/current/share/swe/verified.json" \
-    "$RELEASE_ROOT/config/swe/verified.json" || true)"
-fi
-[[ -z "$CATALOG" || -f "$CATALOG" ]] || fail "catalog 不存在：$CATALOG"
+[[ -f "$CATALOG" ]] || fail "catalog 不存在：$CATALOG"
 
 OPENHANDS_PYTHON="$OPENHANDS_DIR/.venv/bin/python"
 [[ -x "$OPENHANDS_PYTHON" ]] \
@@ -255,9 +280,6 @@ else
   echo "==> 实例镜像已就绪"
 fi
 
-if [[ -z "$OUTPUT_DIR" ]]; then
-  OUTPUT_DIR="$(pwd)/uenv-eval-results/${INSTANCE}-$(date +%Y%m%d-%H%M%S)"
-fi
 mkdir -p "$OUTPUT_DIR"
 
 case "$MODEL" in
@@ -299,7 +321,7 @@ DRIVER_ARGS=(
   --llm-config "$LLM_CONFIG"
   --gateway "$GATEWAY"
   --instance "$INSTANCE"
-  --benchmark-variant verified
+  --benchmark-variant "$BENCHMARK_VARIANT"
   --output-dir "$OUTPUT_DIR"
   --max-iterations "$MAX_ITERATIONS"
   --mode llm

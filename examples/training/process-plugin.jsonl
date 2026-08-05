@@ -1,0 +1,1 @@
+{"id":"plugin-train-1","env_type":"my-environment","dataset":"my-dataset","question":"Reply with exactly: ok","env_config":{"expected_action":"ok"},"reward_config":{"type":"plugin","target":"ok"},"max_steps":1}

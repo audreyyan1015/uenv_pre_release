@@ -1,0 +1,15 @@
+# plugin.sh create 会自动填写以下三项；行为或 reward 改变后递增 version。
+env_type: example
+version: "0.1.0"
+supported_backends:
+  - process
+ipc: proto-uds
+# 固定通信入口，不要改成 environment.py。
+entry: ./run.sh
+description: Example UEnv process environment; edit environment.py to add task logic
+# plugin.sh create 会用 --dataset 的值替换这里。
+datasets:
+  - example
+config_contract:
+  sidecar: <uds-path>.episode.json
+  schema_version: 1

@@ -228,6 +228,109 @@ def cmd_version(args: argparse.Namespace) -> None:
     print(f"uenv {version}")
 
 
+def parse_local_manifest(path: Path) -> dict[str, object]:
+    """Read the small, stable subset shared by bundled plugin manifests.
+
+    The operations CLI intentionally has no PyYAML dependency, so this parser
+    only accepts scalar identity fields and the datasets string list. Full
+    authoring validation remains the responsibility of `uenv env validate`.
+    """
+    result: dict[str, object] = {"source": str(path.parent), "datasets": []}
+    in_datasets = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "datasets:":
+            in_datasets = True
+            continue
+        if in_datasets and stripped.startswith("- "):
+            datasets = result["datasets"]
+            assert isinstance(datasets, list)
+            datasets.append(stripped[2:].strip().strip('"\''))
+            continue
+        in_datasets = False
+        for key in ("env_type", "version", "description"):
+            prefix = f"{key}:"
+            if stripped.startswith(prefix):
+                result[key] = stripped[len(prefix) :].strip().strip('"\'')
+                break
+    return result
+
+
+def local_plugin_dirs(args: argparse.Namespace) -> list[Path]:
+    dirs = [args.install_root / "plugins", Path("/var/lib/uenv/plugins")]
+    configured = os.environ.get("UENV_PLUGIN_DIRS", "")
+    dirs.extend(Path(item) for item in configured.split(":") if item.strip())
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in dirs:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
+def cmd_environments(args: argparse.Namespace) -> None:
+    items: dict[str, dict[str, object]] = {}
+    for plugin_dir in local_plugin_dirs(args):
+        if not plugin_dir.is_dir():
+            continue
+        for manifest in sorted(plugin_dir.glob("*/manifest.yaml")):
+            try:
+                item = parse_local_manifest(manifest)
+            except (OSError, UnicodeError) as exc:
+                print(f"警告：无法读取 {manifest}: {exc}", file=sys.stderr)
+                continue
+            env_type = str(item.get("env_type") or "").strip()
+            if env_type:
+                item["status"] = "legacy" if env_type == "math" else "ready"
+                items[env_type] = item
+
+    if (args.config_dir / "swe.env").is_file():
+        items.setdefault(
+            "swe",
+            {
+                "env_type": "swe",
+                "version": "runtime",
+                "description": "repository-level software engineering environment",
+                "datasets": ["swe-bench-verified", "swe-bench-pro", "swe-smith"],
+                "source": str(args.config_dir / "swe.env"),
+                "status": "ready",
+            },
+        )
+    ordered = [items[key] for key in sorted(items)]
+    if args.json:
+        print(json.dumps(ordered, ensure_ascii=False, indent=2))
+        return
+    if not ordered:
+        print("未发现本地环境。")
+        return
+    print(f"{'ENV_TYPE':<16} {'STATUS':<10} {'VERSION':<12} DATASETS")
+    for item in ordered:
+        datasets = ",".join(str(value) for value in item.get("datasets", [])) or "-"
+        print(
+            f"{str(item.get('env_type', '-')):<16} "
+            f"{str(item.get('status', '-')):<10} "
+            f"{str(item.get('version', '-')):<12} {datasets}"
+        )
+
+
+def cmd_evaluate(args: argparse.Namespace) -> None:
+    script = args.install_root / "examples" / "evaluation" / "evaluate.sh"
+    if not script.is_file():
+        raise CliError(f"当前 release 不包含通用评测入口：{script}")
+    os.execv("/usr/bin/env", ["/usr/bin/env", "bash", str(script), *args.evaluate_args])
+
+
+def cmd_train(args: argparse.Namespace) -> None:
+    script = args.install_root / "examples" / "training" / "train_verl.sh"
+    if not script.is_file():
+        raise CliError(f"当前 release 不包含训练入口：{script}")
+    os.execv("/usr/bin/env", ["/usr/bin/env", "bash", str(script), *args.train_args])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="UEnv 安装、运行与环境管理的统一入口")
     parser.add_argument("--admin-url", default=DEFAULT_ADMIN_URL, help="控制面 Admin HTTP 地址")
@@ -243,6 +346,10 @@ def build_parser() -> argparse.ArgumentParser:
     watch.set_defaults(func=cmd_watch)
     sub.add_parser("doctor", help="检查配置、服务和健康端点").set_defaults(func=cmd_doctor)
 
+    environments = sub.add_parser("environments", help="列出当前节点已安装的环境与数据集")
+    environments.add_argument("--json", action="store_true")
+    environments.set_defaults(func=cmd_environments)
+
     logs = sub.add_parser("logs", help="查看组件日志")
     logs.add_argument("component", choices=sorted(SERVICES))
     logs.add_argument("-f", "--follow", action="store_true")
@@ -255,13 +362,33 @@ def build_parser() -> argparse.ArgumentParser:
     hub = sub.add_parser("hub", help="登录或查看 Hub 配置")
     hub.add_argument("hub_args", nargs=argparse.REMAINDER)
     hub.set_defaults(func=cmd_hub)
+    evaluate = sub.add_parser(
+        "evaluate", help="通过 Adapter Core 执行通用评测 JSONL", add_help=False
+    )
+    evaluate.add_argument("evaluate_args", nargs=argparse.REMAINDER)
+    evaluate.set_defaults(func=cmd_evaluate)
+    train = sub.add_parser(
+        "train", help="运行显式指定任务的 VeRL 训练或底层训练阶段", add_help=False
+    )
+    train.add_argument("train_args", nargs=argparse.REMAINDER)
+    train.set_defaults(func=cmd_train)
     sub.add_parser("version", help="显示已安装版本").set_defaults(func=cmd_version)
     return parser
 
 
 def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        passthrough = {
+            "env": "hub_args",
+            "hub": "hub_args",
+            "evaluate": "evaluate_args",
+            "train": "train_args",
+        }.get(args.command)
+        if passthrough is None:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        getattr(args, passthrough).extend(unknown)
     try:
         args.func(args)
         return 0

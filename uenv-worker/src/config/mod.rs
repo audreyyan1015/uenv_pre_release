@@ -171,6 +171,10 @@ pub struct EnvConfig {
     pub types: Vec<String>,
     pub backend: String,
     pub plugin_dir: String,
+    /// Root containing Hub-activated process plugins. Each entry is an
+    /// `<env_type>` symlink created by `uenv env sync --activate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_plugin_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -201,6 +205,10 @@ pub struct HubConfig {
     pub endpoint: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
+    /// Read the bearer token from a root-owned file instead of placing it in
+    /// worker.yaml. `UENV_HUB_TOKEN` still has highest precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_file: Option<String>,
 }
 
 impl Default for HubConfig {
@@ -209,6 +217,7 @@ impl Default for HubConfig {
             enabled: false,
             endpoint: None,
             token: None,
+            token_file: None,
         }
     }
 }
@@ -247,6 +256,7 @@ impl Default for WorkerConfig {
                 types: vec!["qa".to_string()],
                 backend: "process".to_string(),
                 plugin_dir: "./plugins".to_string(),
+                package_plugin_dir: None,
             },
             pool: PoolConfig {
                 warmup_size: 2,
@@ -296,6 +306,7 @@ impl WorkerConfig {
             .unwrap_or_else(|_| cfg.llm.env_file.clone());
         load_env_file_if_exists(&llm_env_path)?;
         cfg.apply_env();
+        cfg.resolve_hub_token()?;
         cfg.apply_cli(overrides);
         cfg.validate()?;
         cfg.export_trajectory_env();
@@ -398,6 +409,11 @@ impl WorkerConfig {
         if let Ok(v) = std::env::var("UENV_PLUGIN_DIR") {
             self.env.plugin_dir = v;
         }
+        if let Ok(v) = std::env::var("UENV_PACKAGE_PLUGIN_DIR") {
+            if !v.trim().is_empty() {
+                self.env.package_plugin_dir = Some(v);
+            }
+        }
         if let Ok(v) = std::env::var("UENV_BACKEND") {
             self.env.backend = v;
         }
@@ -445,7 +461,14 @@ impl WorkerConfig {
             self.hub.enabled = true;
         }
         if let Ok(v) = std::env::var("UENV_HUB_TOKEN") {
-            self.hub.token = Some(v);
+            if !v.trim().is_empty() {
+                self.hub.token = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("UENV_HUB_TOKEN_FILE") {
+            if !v.trim().is_empty() {
+                self.hub.token_file = Some(v);
+            }
         }
         if let Ok(v) = std::env::var("UENV_HUB_ENABLED") {
             self.hub.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
@@ -513,6 +536,51 @@ impl WorkerConfig {
                 self.swe.env_package_dirs = dirs;
             }
         }
+    }
+
+    /// Resolve Hub credentials with the documented precedence:
+    /// `UENV_HUB_TOKEN` > token file > inline yaml token. An empty or
+    /// unreadable configured token file is an error when no env token exists;
+    /// silently starting unauthenticated would turn a secret typo into a much
+    /// less useful series of Hub 401 responses.
+    fn resolve_hub_token(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.hub.enabled {
+            return Ok(());
+        }
+        if std::env::var("UENV_HUB_TOKEN")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            return Ok(());
+        }
+        let Some(path) = self
+            .hub
+            .token_file
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        let metadata = fs::metadata(path)
+            .map_err(|e| format!("failed to inspect hub.token_file {path}: {e}"))?;
+        if !metadata.is_file() {
+            return Err(format!("hub.token_file is not a file: {path}").into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(format!("hub.token_file {path} must have mode 0600 or stricter").into());
+            }
+        }
+        let token = fs::read_to_string(path)
+            .map_err(|e| format!("failed to read hub.token_file {path}: {e}"))?;
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(format!("hub.token_file {path} is empty").into());
+        }
+        self.hub.token = Some(token.to_string());
+        Ok(())
     }
 
     /// 把 trajectory_upload 的 yaml 解析值导出到进程环境（已设的环境变量不覆盖），
@@ -653,5 +721,27 @@ trajectory_upload:
             std::env::remove_var("UENV_MAX_CONCURRENT");
             std::env::remove_var("UENV_LOG_FILE");
         }
+    }
+
+
+    #[test]
+    fn hub_token_can_be_read_from_a_dedicated_file() {
+        let path = std::env::temp_dir().join(format!(
+            "uenv-worker-hub-token-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, "reader-secret\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut cfg = WorkerConfig::default();
+        cfg.hub.enabled = true;
+        cfg.hub.endpoint = Some("http://127.0.0.1:8080".into());
+        cfg.hub.token_file = Some(path.to_string_lossy().into_owned());
+        cfg.resolve_hub_token().unwrap();
+        assert_eq!(cfg.hub.token.as_deref(), Some("reader-secret"));
+        let _ = std::fs::remove_file(path);
     }
 }

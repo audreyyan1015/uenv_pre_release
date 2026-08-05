@@ -200,9 +200,11 @@ pub async fn publish_package(
     principal: &TokenInfo,
     source_ip: Option<String>,
     artifact_root: &Path,
+    import_root: &Path,
     package_id: &str,
-    req: dto::PublishPackageRequest,
+    mut req: dto::PublishPackageRequest,
 ) -> ApiResult<dto::EnvPackageManifest> {
+    restrict_file_artifacts_to_import_root(&mut req, import_root)?;
     let published_by = if principal.id != 0 {
         Some(principal.id)
     } else {
@@ -223,6 +225,48 @@ pub async fn publish_package(
     )
     .await;
     Ok(manifest)
+}
+
+/// A Publisher is a remote registry role, not a Hub-host filesystem role.
+/// Canonicalize every large-file import before the core opens it and only pass
+/// paths below the operator-controlled staging root. Relative paths are rooted
+/// there as a convenience; absolute paths must still resolve below it.
+fn restrict_file_artifacts_to_import_root(
+    req: &mut dto::PublishPackageRequest,
+    import_root: &Path,
+) -> ApiResult<()> {
+    if req.file_artifacts.is_empty() {
+        return Ok(());
+    }
+    let canonical_root = std::fs::canonicalize(import_root).map_err(|error| {
+        ApiError::from(HubError::Internal(format!(
+            "canonicalize package import root {}: {error}",
+            import_root.display()
+        )))
+    })?;
+    for artifact in &mut req.file_artifacts {
+        let requested = Path::new(&artifact.local_path);
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            canonical_root.join(requested)
+        };
+        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+            ApiError::from(HubError::InvalidManifest(format!(
+                "file artifact '{}' source is unavailable in packages.import_dir: {error}",
+                artifact.name
+            )))
+        })?;
+        if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+            return Err(ApiError::from(HubError::InvalidManifest(format!(
+                "file artifact '{}' must resolve to a regular file below packages.import_dir ({})",
+                artifact.name,
+                canonical_root.display()
+            ))));
+        }
+        artifact.local_path = canonical.to_string_lossy().into_owned();
+    }
+    Ok(())
 }
 
 /// Orchestrates publishing an Episode Stack version: structural validation, then

@@ -8,6 +8,7 @@ BUNDLE=""
 SERVER_ENDPOINT=""
 ADVERTISE_ENDPOINT=""
 HUB_ENDPOINT=""
+HUB_TOKEN_FILE=""
 NO_START=0
 FORCE_CONFIG=0
 FORCE_SWE_CONFIG=0
@@ -30,6 +31,7 @@ usage() {
     '  --server HOST:PORT     control-plane address for a worker' \
     '  --advertise HOST:PORT  address used to reach this Worker' \
     '  --hub URL              enable the Worker Hub connection' \
+    '  --hub-token-file FILE  Worker Reader token; copied to a protected local file' \
     '  --enable-swe           enable the local SWE runtime and gateway' \
     '  --swe-runtime NAME     container runtime: docker or podman (default: docker)' \
     '  --swe-gateway HOST:PORT  SWE gateway bind address (default: 127.0.0.1:28999)' \
@@ -59,6 +61,7 @@ while (($#)); do
     --server) SERVER_ENDPOINT="${2:-}"; shift 2 ;;
     --advertise) ADVERTISE_ENDPOINT="${2:-}"; shift 2 ;;
     --hub) HUB_ENDPOINT="${2:-}"; shift 2 ;;
+    --hub-token-file) HUB_TOKEN_FILE="${2:-}"; shift 2 ;;
     --enable-swe) ENABLE_SWE=1; shift ;;
     --swe-runtime) SWE_RUNTIME="${2:-}"; shift 2 ;;
     --swe-gateway) SWE_GATEWAY_BIND="${2:-}"; shift 2 ;;
@@ -77,6 +80,15 @@ case "$PROFILE" in
   single-node|control-plane|worker|hub|full) ;;
   *) fail "--profile 必须是 single-node、control-plane、worker、hub 或 full" ;;
 esac
+
+if [[ -n "$HUB_TOKEN_FILE" ]]; then
+  [[ -f "$HUB_TOKEN_FILE" ]] || fail "找不到 Hub token 文件：$HUB_TOKEN_FILE"
+  [[ -s "$HUB_TOKEN_FILE" ]] || fail "Hub token 文件为空：$HUB_TOKEN_FILE"
+  if [[ -z "$HUB_ENDPOINT" && "$PROFILE" != "full" ]]; then
+    fail "--hub-token-file 需要同时指定 --hub URL（full profile 除外）"
+  fi
+  HUB_TOKEN_FILE="$(cd "$(dirname "$HUB_TOKEN_FILE")" && pwd)/$(basename "$HUB_TOKEN_FILE")"
+fi
 
 if [[ "$ENABLE_SWE" -eq 1 ]]; then
   [[ "$PROFILE" == "single-node" || "$PROFILE" == "full" ]] \
@@ -175,7 +187,7 @@ fi
 
 RELEASE_DIR="/opt/uenv/releases/$RELEASE_VERSION"
 info "安装 UEnv $RELEASE_VERSION（$PROFILE）"
-install -d -m 0755 /opt/uenv/releases /etc/uenv/secrets /var/log/uenv
+install -d -m 0755 /opt/uenv/releases /var/log/uenv
 BUNDLE_DIGEST="$(sha256sum "$BUNDLE" | awk '{print $1}')"
 [[ "$BUNDLE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || fail "无法计算安装包 SHA-256"
 if [[ -e "$RELEASE_DIR" ]]; then
@@ -204,8 +216,11 @@ fi
 if ! id uenv >/dev/null 2>&1; then
   useradd --system --gid uenv --home-dir /var/lib/uenv --shell /usr/sbin/nologin uenv
 fi
+install -d -o root -g uenv -m 0750 /etc/uenv/secrets
 install -d -o uenv -g uenv -m 0750 \
   /var/lib/uenv/server /var/lib/uenv/worker /var/lib/uenv/hub \
+  /var/lib/uenv/hub/import \
+  /var/lib/uenv/plugins \
   /var/lib/uenv/server/obs /var/lib/uenv/server/trajectory \
   /var/lib/uenv/worker/wal /var/lib/uenv/hub/artifacts
 install -d -o uenv -g uenv -m 0750 /var/lib/uenv/worker/swe-artifacts
@@ -255,20 +270,31 @@ if [[ "$PROFILE" == "single-node" || "$PROFILE" == "worker" || "$PROFILE" == "fu
   else
     HUB_ENDPOINT="http://127.0.0.1:8080"
   fi
+  HUB_TOKEN_CONFIG_PATH=""
+  if [[ -n "$HUB_TOKEN_FILE" ]]; then
+    install -o uenv -g uenv -m 0600 "$HUB_TOKEN_FILE" /etc/uenv/secrets/hub.token
+    HUB_TOKEN_CONFIG_PATH="/etc/uenv/secrets/hub.token"
+  elif [[ -s /etc/uenv/secrets/hub.token ]]; then
+    chown uenv:uenv /etc/uenv/secrets/hub.token
+    chmod 0600 /etc/uenv/secrets/hub.token
+    HUB_TOKEN_CONFIG_PATH="/etc/uenv/secrets/hub.token"
+  fi
   sed \
     -e "s|@SERVER_ENDPOINT@|$SERVER_ENDPOINT|g" \
     -e "s|@ADVERTISE_ENDPOINT@|$ADVERTISE_ENDPOINT|g" \
     -e "s|@HUB_ENABLED@|$HUB_ENABLED|g" \
     -e "s|@HUB_ENDPOINT@|$HUB_ENDPOINT|g" \
+    -e "s|@HUB_TOKEN_FILE@|$HUB_TOKEN_CONFIG_PATH|g" \
     "$RELEASE_DIR/config/worker.yaml" > "$TMP_DIR/worker.yaml"
   install_config "$TMP_DIR/worker.yaml" /etc/uenv/worker.yaml
   install_config "$RELEASE_DIR/config/worker.env" /etc/uenv/worker.env
   if [[ ! -e /etc/uenv/secrets/worker-llm.env ]]; then
-    install -o uenv -g uenv -m 0600 /dev/null /etc/uenv/secrets/worker-llm.env
-  else
-    # 修复旧版安装包留下的 root 属主，保证 uenv 用户可读
-    chown uenv:uenv /etc/uenv/secrets/worker-llm.env
+    install -o root -g uenv -m 0640 /dev/null /etc/uenv/secrets/worker-llm.env
   fi
+  # Worker only needs read access.  Re-applying install/upgrade must not give
+  # the service account permission to replace its model credential file.
+  chown root:uenv /etc/uenv/secrets/worker-llm.env
+  chmod 0640 /etc/uenv/secrets/worker-llm.env
   install -m 0644 "$RELEASE_DIR/systemd/uenv-worker.service" /etc/systemd/system/uenv-worker.service
   UNITS+=(uenv-worker.service)
 fi
@@ -390,7 +416,7 @@ echo "  日志：uenv logs server（或 worker / hub）"
 if [[ "$ENABLE_SWE" -eq 1 ]]; then
   echo "  SWE：已启用；先运行评测脚本拉取所选实例镜像"
   echo "  网关：$SWE_GATEWAY_PUBLIC"
-  echo "  指南：/opt/uenv/current/share/docs/SWE评测与VeRL训练操作指南.md"
+  echo "  指南：/opt/uenv/current/share/docs/UEnv评测指南.md"
 fi
 if [[ "$NO_START" -eq 1 ]]; then
   echo "服务尚未启动；检查配置后运行：systemctl enable --now ${UNITS[*]}"

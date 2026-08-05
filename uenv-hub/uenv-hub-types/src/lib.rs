@@ -933,7 +933,9 @@ pub struct FileArtifact {
     pub media_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_rel_path: Option<String>,
-    /// Absolute (or Hub-cwd-relative) path to the source file on the Hub host.
+    /// Path to a source file staged below the Hub server's
+    /// `packages.import_dir`. Relative paths are resolved from that directory;
+    /// absolute paths are accepted only when they canonicalize below it.
     pub local_path: String,
 }
 

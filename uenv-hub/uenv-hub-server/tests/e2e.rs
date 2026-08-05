@@ -24,6 +24,7 @@ async fn spawn_server() -> (SocketAddr, tempfile::TempDir) {
         auth: AuthConfig {
             require_token: false,
             bootstrap_admin_token: None,
+            bootstrap_admin_token_file: None,
         },
         rate_limit: RateLimitConfig {
             enabled: false,
@@ -35,6 +36,7 @@ async fn spawn_server() -> (SocketAddr, tempfile::TempDir) {
         },
         packages: PackagesConfig {
             artifact_dir: tmp.path().join("artifacts").display().to_string(),
+            import_dir: tmp.path().join("import").display().to_string(),
             catalog_seed_dir: tmp.path().join("no-catalog").display().to_string(),
             // Other tests don't need example packages; the package test publishes its own.
             seed_examples: false,
@@ -458,6 +460,25 @@ async fn invalid_version_is_rejected() {
 }
 
 #[tokio::test]
+async fn admin_token_create_and_revoke_round_trip() {
+    let (addr, _tmp) = spawn_server().await;
+    let client = HttpClient::new(format!("http://{addr}"), None);
+    let created = client
+        .create_token(&uenv_hub_types::CreateTokenRequest {
+            name: "worker-reader".into(),
+            owner: Some("e2e".into()),
+            role: uenv_hub_types::Role::Reader,
+            namespaces: vec!["default".into()],
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.role, uenv_hub_types::Role::Reader);
+    assert!(created.token.starts_with("uenvh_"));
+    client.revoke_token(created.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn env_package_publish_manifest_artifact_and_sync_plan() {
     use uenv_hub_types::{
         InlineArtifact, InterfaceSchema, PackageContracts, PackagePlatform, PublishPackageRequest,
@@ -541,12 +562,11 @@ async fn hub_hosts_image_tarball_and_streams_it_to_worker() {
         FileArtifact, PackageContracts, PackagePlatform, PublishPackageRequest,
     };
 
-    let (addr, _tmp) = spawn_server().await;
+    let (addr, tmp) = spawn_server().await;
     let client = HttpClient::new(format!("http://{addr}"), None);
 
     // Simulate a `docker save …` image tarball pre-staged on the Hub host.
-    let stage = tempfile::tempdir().unwrap();
-    let tar_path = stage.path().join("django-11095.tar");
+    let tar_path = tmp.path().join("import/django-11095.tar");
     // Larger than the streaming chunk to exercise chunked stage + serve.
     let payload: Vec<u8> = (0..(1024 * 1024 + 777)).map(|i| (i % 251) as u8).collect();
     std::fs::write(&tar_path, &payload).unwrap();
@@ -577,6 +597,31 @@ async fn hub_hosts_image_tarball_and_streams_it_to_worker() {
             local_path: tar_path.to_string_lossy().into_owned(),
         }],
     };
+    // A remote Publisher is not allowed to turn the Hub into an arbitrary
+    // local-file reader. Even another path inside the Hub's data directory is
+    // rejected unless the operator staged it below packages.import_dir.
+    let outside = tmp.path().join("outside-secret");
+    std::fs::write(&outside, b"must not be published").unwrap();
+    let mut escaped = req.clone();
+    escaped.file_artifacts[0].local_path = outside.to_string_lossy().into_owned();
+    assert!(client
+        .publish_package("forbidden-host-file", &escaped)
+        .await
+        .is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let escape_link = tmp.path().join("import/escape-link");
+        symlink(&outside, &escape_link).unwrap();
+        let mut symlink_escape = req.clone();
+        symlink_escape.file_artifacts[0].local_path =
+            escape_link.to_string_lossy().into_owned();
+        assert!(client
+            .publish_package("forbidden-host-symlink", &symlink_escape)
+            .await
+            .is_err());
+    }
+
     let resp = client.publish_package("swe-images", &req).await.unwrap();
     assert_eq!(resp.version, "0.1.0");
 
