@@ -104,4 +104,5 @@ server-state/
 /server-state/
 /trajectory-data/
 /logs/
-/dist/
+/dist/uenv-bridge/build/
+*.egg-info/
