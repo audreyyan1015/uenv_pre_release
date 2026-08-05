@@ -377,6 +377,17 @@ def _write_effective_llm_config(
     generation = agent_job.generation_config or {}
     if not isinstance(generation, dict):
         raise ValueError("AgentJob generation_config must be a JSON object")
+    generation = dict(generation)
+    # verl/vLLM 用 top_k=-1（或 0）表示禁用 top_k 采样；OpenHands 的 LLM 配置
+    # 校验要求 top_k >= 0，传入哨兵值会直接报 ValidationError。省略该参数
+    # 在 OpenAI 兼容语义下等价于禁用，因此非正数值一律丢弃。
+    top_k = generation.get("top_k")
+    if top_k is not None:
+        try:
+            if int(top_k) <= 0:
+                generation.pop("top_k")
+        except (TypeError, ValueError):
+            generation.pop("top_k")
     for key in _DIRECT_LLM_GENERATION_KEYS:
         if key in generation and generation[key] is not None:
             effective[key] = generation[key]
