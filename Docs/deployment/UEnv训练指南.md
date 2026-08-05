@@ -250,6 +250,14 @@ bash "$HOME/uenv-training-client/examples/training/train_verl.sh" run-swe \
   --image 'docker.io/verlai/verl:vllm017.latest'
 ```
 
+SWE 任务的 Agent（OpenHands）使用工具调用操作环境，训练容器中的 vLLM 必须显式开启工具调用支持，否则 rollout 会因 `"auto" tool choice` 报错。在 `run-swe` 命令末尾追加：
+
+```text
+--set +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true --set +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=hermes
+```
+
+`hermes` 解析器适用于 Qwen 系列模型；换用其他模型时按其工具调用格式选择解析器。
+
 这里有两类不同的镜像：
 
 - `--image` 是 GPU 主机上运行 VeRL 的 CUDA 镜像；
