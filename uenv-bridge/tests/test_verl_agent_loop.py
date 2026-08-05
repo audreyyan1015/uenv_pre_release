@@ -189,6 +189,11 @@ class FakeServerManager:
         self.server_addresses = addresses
 
 
+class FakeVerl071ServerManager:
+    def __init__(self, addresses):
+        self._server_id_to_handle = {address: object() for address in addresses}
+
+
 class FakeRemoteMethod:
     def __init__(self, value):
         self.value = value
@@ -1017,6 +1022,83 @@ class UEnvAgentLoopTest(unittest.TestCase):
         payload = json.loads(client.last_request.payload.decode("utf-8"))
         self.assertEqual(client.last_request.model_endpoint, "http://10.0.2.100:38285/v1")
         self.assertEqual(payload["model_endpoint"]["url"], "http://10.0.2.100:38285/v1")
+
+    def test_run_discovers_verl_071_server_manager_endpoint(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=client,
+            server_manager=FakeVerl071ServerManager(["10.0.3.100:38286"]),
+            default_model_endpoint="https://openrouter.ai/api/v1",
+        )
+
+        asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        payload = json.loads(client.last_request.payload.decode("utf-8"))
+        self.assertEqual(client.last_request.model_endpoint, "http://10.0.3.100:38286/v1")
+        self.assertEqual(payload["model_endpoint"]["url"], "http://10.0.3.100:38286/v1")
+
+    def test_run_returns_rollout_log_probs_for_verl(self) -> None:
+        result = self._result_with_token_ids()
+        result.rollout_log_probs = [-0.25, -0.75]
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result))
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.response_ids, [101, 102])
+        self.assertEqual(output.response_logprobs, [-0.25, -0.75])
+
+    def test_run_truncates_response_ids_and_rollout_log_probs_together(self) -> None:
+        result = self._result_with_token_ids()
+        result.rollout_log_probs = [-0.25, -0.75]
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(result),
+            trainer_config=AttrDict(actor_rollout_ref=AttrDict(rollout=AttrDict(response_length=1))),
+        )
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.response_ids, [101])
+        self.assertEqual(output.response_logprobs, [-0.25])
+
+    def test_run_rejects_misaligned_rollout_log_probs(self) -> None:
+        for rollout_log_probs in ([-0.25], [-0.25, -0.75, -1.0]):
+            with self.subTest(rollout_log_probs=rollout_log_probs):
+                result = self._result_with_token_ids()
+                result.rollout_log_probs = rollout_log_probs
+                loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result))
+
+                with self.assertRaisesRegex(RuntimeError, "rollout token trace is inconsistent"):
+                    asyncio.run(
+                        loop.run(
+                            {},
+                            raw_prompt=[{"role": "user", "content": "2+2?"}],
+                            data_source="gsm8k",
+                            reward_model={"ground_truth": "4"},
+                        )
+                    )
 
     def test_run_uses_model_gateway_for_multiple_verl_runtime_endpoints(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())

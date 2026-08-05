@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
-"""OpenHands official SDK + SWE-bench Pro via UEnv Gateway (208.77 → 7143).
+"""Run an OpenHands SWE agent through the UEnv Worker Runtime Gateway.
 
-Requires OpenHands/benchmarks on 208.77 (see scripts/deploy-openhands-20877.sh).
-
-Example:
-  bash /root/UEnv/scripts/run-openhands-pro-20877.sh gold
-  # or manually:
-  cd /opt/openhands/benchmarks/vendor/software-agent-sdk
-  uv run python /root/UEnv/integrations/openhands/run_swebenchpro_official.py \\
-      --llm-config /root/UEnv/config/openhands-llm-20877.json \\
-      --gateway http://127.0.0.1:28097 --api-key swe-pro-secret \\
-      --instance instance_qutebrowser__... \\
-      --instances /root/UEnv/config/swe/pro-python-smoke.json \\
-      --output-dir /var/log/uenv/openhands-runs/run1 \\
-      --max-iterations 30
+End users should normally call ``examples/swe/evaluate.sh`` for evaluation or
+``examples/swe/train_verl.sh`` for VeRL training. This module is their shared
+low-level driver.
 """
 
 from __future__ import annotations
@@ -22,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -38,7 +29,11 @@ from uenv_runtime.gateway_tools import (  # noqa: E402
     collect_tool_patch_status,
     patch_openhands_tools_for_uenv,
 )
-from uenv_runtime.llm_rollout import RolloutTraceCollector  # noqa: E402
+from uenv_runtime.llm_rollout import (  # noqa: E402
+    ROLLOUT_TRACE_MODES,
+    finish_rollout_trace,
+    start_rollout_trace,
+)
 from uenv_runtime.workspace import UEnvWorkspace  # noqa: E402
 from uenv_runtime.workspace_probe import (  # noqa: E402
     merge_reset_observation,
@@ -49,6 +44,11 @@ from uenv_runtime.workspace_probe import (  # noqa: E402
 
 class WorkspaceProbeError(RuntimeError):
     """Container workspace does not match instance catalog (infrastructure error)."""
+
+
+def _log_rollout_trace_warnings(logger: Any, status: dict[str, Any]) -> None:
+    for warning in status.get("warnings") or []:
+        logger.warning("%s", warning)
 
 
 def _ensure_benchmarks_path() -> None:
@@ -258,6 +258,140 @@ def _save_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+_LLM_PROVIDER_PREFIXES = frozenset(
+    {
+        "anthropic",
+        "ark",
+        "azure",
+        "bedrock",
+        "deepseek",
+        "gemini",
+        "huggingface",
+        "ollama",
+        "openai",
+        "together_ai",
+        "vertex_ai",
+        "vllm",
+        "volcengine",
+    }
+)
+_DIRECT_LLM_GENERATION_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "seed",
+    "thinking_token_budget",
+)
+_MAX_OUTPUT_TOKEN_KEYS = (
+    "max_output_tokens",
+    "max_new_tokens",
+    "max_tokens",
+    "max_completion_tokens",
+)
+
+
+def _effective_model_name(
+    template_model: str,
+    requested_model: str,
+    endpoint_type: str,
+) -> str:
+    """Keep the template's LiteLLM provider prefix for a dynamic model name."""
+
+    requested = requested_model.strip()
+    if not requested:
+        return template_model
+    requested_prefix = requested.partition("/")[0].lower()
+    if requested_prefix in _LLM_PROVIDER_PREFIXES:
+        return requested
+
+    template_prefix = template_model.partition("/")[0].lower()
+    if template_prefix in _LLM_PROVIDER_PREFIXES:
+        return f"{template_prefix}/{requested}"
+    if endpoint_type.strip().lower() in {
+        "http",
+        "openai",
+        "openai-compatible",
+        "openai_compatible",
+    }:
+        return f"openai/{requested}"
+    return requested
+
+
+def _write_private_json(path: Path, value: dict[str, Any]) -> None:
+    """Atomically write a secret-bearing JSON file with mode 0600."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _write_effective_llm_config(
+    *,
+    agent_job: Any,
+    template_path: str | Path,
+    output_dir: Path,
+) -> Path:
+    """Overlay an AgentJob model endpoint onto an existing OpenHands config.
+
+    The template remains the authority for credentials and provider-specific
+    settings.  Only typed endpoint fields and generation options understood by
+    the OpenHands LLM config are replaced.
+    """
+
+    source = Path(template_path)
+    try:
+        template = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"LLM config is not valid JSON: {source}") from exc
+    if not isinstance(template, dict):
+        raise ValueError(f"LLM config must be a JSON object: {source}")
+
+    effective = dict(template)
+    effective["base_url"] = str(agent_job.model_endpoint)
+    if agent_job.model_name:
+        effective["model"] = _effective_model_name(
+            str(template.get("model") or ""),
+            str(agent_job.model_name),
+            str(agent_job.model_endpoint_type or ""),
+        )
+
+    generation = agent_job.generation_config or {}
+    if not isinstance(generation, dict):
+        raise ValueError("AgentJob generation_config must be a JSON object")
+    for key in _DIRECT_LLM_GENERATION_KEYS:
+        if key in generation and generation[key] is not None:
+            effective[key] = generation[key]
+    for key in _MAX_OUTPUT_TOKEN_KEYS:
+        if key in generation and generation[key] is not None:
+            effective["max_output_tokens"] = generation[key]
+            break
+    if int(agent_job.model_max_retries or 0) > 0:
+        effective["num_retries"] = int(agent_job.model_max_retries)
+
+    destination = output_dir / "effective_llm_config.json"
+    _write_private_json(destination, effective)
+    return destination
+
+
 def _verify_server_trajectory(
     trajectory_id: str,
     run_id: str,
@@ -420,6 +554,16 @@ def main() -> int:
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--max-iterations", type=int, default=30)
     ap.add_argument("--mode", choices=["llm", "gold"], default="llm")
+    ap.add_argument(
+        "--rollout-trace",
+        choices=ROLLOUT_TRACE_MODES,
+        default=os.environ.get("UENV_ROLLOUT_TRACE", "best-effort"),
+        help=(
+            "LLM token trace: off disables injection/collection; best-effort records "
+            "warnings without failing an evaluation; required fails if a training trace "
+            "cannot be produced (default: UENV_ROLLOUT_TRACE or best-effort)"
+        ),
+    )
     ap.add_argument(
         "--run-id",
         default=os.environ.get("UENV_RUN_ID", ""),
@@ -600,19 +744,44 @@ def main() -> int:
     llm = None
     rollout_collector = None
     rollout_fields: dict[str, Any] = {}
+    rollout_status: dict[str, Any] = {
+        "mode": args.rollout_trace,
+        "enabled": False,
+        "state": "not_applicable",
+        "warnings": [],
+    }
     if args.mode == "llm":
         if not args.llm_config:
             print("--llm-config required for llm mode", file=sys.stderr)
             return 1
+        if agent_job and agent_job.model_endpoint:
+            try:
+                args.llm_config = str(
+                    _write_effective_llm_config(
+                        agent_job=agent_job,
+                        template_path=args.llm_config,
+                        output_dir=out,
+                    )
+                )
+            except (OSError, ValueError) as exc:
+                print(f"failed to build effective LLM config: {exc}", file=sys.stderr)
+                return 1
         llm = load_llm_config(args.llm_config)
-        rollout_collector = RolloutTraceCollector(args.llm_config)
         episode_id = str(agent_job.episode_id) if agent_job and agent_job.episode_id else run_id
         dataset = (
             "swesmith"
             if str(args.benchmark_variant).lower() in {"smith", "swesmith", "swe-smith"}
             else "swebench_pro"
         )
-        rollout_collector.install(llm, episode_id=episode_id, dataset=dataset)
+        rollout_collector, rollout_status = start_rollout_trace(
+            args.rollout_trace,
+            llm=llm,
+            config_path=args.llm_config,
+            episode_id=episode_id,
+            dataset=dataset,
+        )
+        _log_rollout_trace_warnings(logger, rollout_status)
+        _save_json(out / "rollout_trace_status.json", rollout_status)
         logger.info("LLM model=%s", llm.model)
 
     session_id = agent_job.session_id if agent_job else None
@@ -638,6 +807,8 @@ def main() -> int:
             "agent_job_file": args.agent_job_file or None,
             "max_iterations": args.max_iterations,
             "llm_model": str(llm.model) if llm else None,
+            "rollout_trace_mode": args.rollout_trace,
+            "rollout_trace_state": rollout_status["state"],
             "benchmark_variant": args.benchmark_variant,
             "repo": row.get("repo"),
             "base_commit": row.get("base_commit"),
@@ -742,9 +913,12 @@ def main() -> int:
                 loop_summary = _run_conversation_loop(
                     conversation, max_fake_responses=max(args.max_iterations - 1, 0)
                 )
-                if rollout_collector is None:
-                    raise RuntimeError("LLM rollout collector was not initialized")
-                rollout_fields = rollout_collector.finalize()
+                if rollout_collector is not None:
+                    rollout_fields, rollout_status = finish_rollout_trace(
+                        args.rollout_trace, rollout_collector
+                    )
+                    _log_rollout_trace_warnings(logger, rollout_status)
+                    _save_json(out / "rollout_trace_status.json", rollout_status)
                 _save_json(
                     out / "conversation_events.json",
                     {
@@ -753,7 +927,8 @@ def main() -> int:
                         **loop_summary,
                     },
                 )
-                _save_json(out / "llm_rollout_trace.json", rollout_fields)
+                if rollout_fields:
+                    _save_json(out / "llm_rollout_trace.json", rollout_fields)
                 # Pre-submit: confirm agent stayed in the right repo.
                 # Pro=/app；Verified/Lite/Smith=/testbed — 勿写死 /app。
                 pre = ws.execute_command(
@@ -771,7 +946,7 @@ def main() -> int:
                 )
                 remote = (pre.stdout or "").splitlines()[0] if pre.stdout else ""
                 expected_repo = str(row.get("repo") or "")
-                if expected_repo and expected_repo.split("/")[-1].lower() not in remote.lower():
+                if remote and expected_repo and expected_repo.split("/")[-1].lower() not in remote.lower():
                     raise WorkspaceProbeError(
                         f"pre-submit remote mismatch: got {remote!r}, expected repo {expected_repo!r}"
                     )

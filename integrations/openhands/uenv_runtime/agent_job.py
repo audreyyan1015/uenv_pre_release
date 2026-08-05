@@ -26,9 +26,37 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+
+def decode_generation_config(value: Any) -> dict[str, Any]:
+    """Decode ``ModelEndpoint.generation_config_json`` into a JSON object.
+
+    Agent jobs written by the poller already contain a dictionary, while the
+    protobuf transport carries UTF-8 JSON bytes.  Keep both representations
+    accepted so the on-disk AgentJob remains a lossless hand-off format.
+    """
+
+    if value in (None, "", b""):
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("generation_config_json is not valid UTF-8") from exc
+    if not isinstance(value, str):
+        raise ValueError("generation_config must be a JSON object or UTF-8 JSON")
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("generation_config_json is not valid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("generation_config_json must decode to a JSON object")
+    return decoded
 
 
 def normalize_benchmark_variant(value: str | None) -> str:
@@ -77,7 +105,11 @@ class AgentJob:
     agent_bridge_id: str = ""
     agent_bridge_version: str = ""
     driver_entrypoint: str = ""
+    model_endpoint_type: str = ""
     model_endpoint: str = ""
+    model_name: str = ""
+    generation_config: dict[str, Any] = field(default_factory=dict)
+    model_max_retries: int = 0
     max_iterations: int = 30
     workspace_dir: str = "/app"
     episode_id: str = ""
@@ -92,6 +124,23 @@ class AgentJob:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentJob":
+        endpoint_config = data.get("model_endpoint_config") or data.get(
+            "modelEndpointConfig"
+        )
+        if not isinstance(endpoint_config, dict):
+            endpoint_config = {}
+        generation_config = data.get("generation_config")
+        if generation_config is None:
+            generation_config = data.get("generationConfig")
+        if generation_config is None:
+            generation_config = endpoint_config.get("generation_config")
+        if generation_config is None:
+            generation_config = endpoint_config.get("generationConfig")
+        if generation_config is None:
+            generation_config = endpoint_config.get("generation_config_json")
+        if generation_config is None:
+            generation_config = endpoint_config.get("generationConfigJson")
+
         variant = normalize_benchmark_variant(
             str(data.get("benchmark_variant") or data.get("benchmarkVariant") or "pro")
         )
@@ -112,7 +161,34 @@ class AgentJob:
             agent_bridge_id=str(data.get("agent_bridge_id") or data.get("agentBridgeId") or ""),
             agent_bridge_version=str(data.get("agent_bridge_version") or data.get("agentBridgeVersion") or ""),
             driver_entrypoint=str(data.get("driver_entrypoint") or data.get("driverEntrypoint") or ""),
-            model_endpoint=str(data.get("model_endpoint") or data.get("modelEndpoint") or ""),
+            model_endpoint_type=str(
+                data.get("model_endpoint_type")
+                or data.get("modelEndpointType")
+                or endpoint_config.get("endpoint_type")
+                or endpoint_config.get("endpointType")
+                or ""
+            ),
+            model_endpoint=str(
+                data.get("model_endpoint")
+                or data.get("modelEndpoint")
+                or endpoint_config.get("url")
+                or ""
+            ),
+            model_name=str(
+                data.get("model_name")
+                or data.get("modelName")
+                or endpoint_config.get("model_name")
+                or endpoint_config.get("modelName")
+                or ""
+            ),
+            generation_config=decode_generation_config(generation_config),
+            model_max_retries=int(
+                data.get("model_max_retries")
+                or data.get("modelMaxRetries")
+                or endpoint_config.get("max_retries")
+                or endpoint_config.get("maxRetries")
+                or 0
+            ),
             max_iterations=int(data.get("max_iterations") or data.get("maxIterations") or 30),
             workspace_dir=workspace,
             episode_id=str(data.get("episode_id") or data.get("episodeId") or ""),
@@ -159,6 +235,13 @@ def write_agent_job_template(path: Path, **overrides: Any) -> AgentJob:
         max_iterations=int(overrides.get("max_iterations", 30)),
         workspace_dir=resolve_workspace_dir(variant, overrides.get("workspace_dir")),
         llm_config_path=str(overrides.get("llm_config_path", "")),
+        model_endpoint_type=str(overrides.get("model_endpoint_type", "")),
+        model_endpoint=str(overrides.get("model_endpoint", "")),
+        model_name=str(overrides.get("model_name", "")),
+        generation_config=decode_generation_config(
+            overrides.get("generation_config", {})
+        ),
+        model_max_retries=int(overrides.get("model_max_retries", 0)),
         instances_catalog=str(overrides.get("instances_catalog", "")),
         instance_catalog_json=str(overrides.get("instance_catalog_json", "")),
     )

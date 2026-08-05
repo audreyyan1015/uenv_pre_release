@@ -65,7 +65,10 @@ trap cleanup EXIT
 PAYLOAD="$WORK_DIR/uenv-$VERSION"
 install -d "$PAYLOAD/bin" "$PAYLOAD/config" "$PAYLOAD/systemd" \
   "$PAYLOAD/plugins/qa" "$PAYLOAD/plugins/math" "$PAYLOAD/plugins/code" \
-  "$PAYLOAD/share/hub-config" "$PAYLOAD/wheels"
+  "$PAYLOAD/share/hub-config" "$PAYLOAD/share/swe/openhands" \
+  "$PAYLOAD/share/docs" \
+  "$PAYLOAD/share/uenv-bridge/configs" "$PAYLOAD/share/uenv-bridge/scripts" \
+  "$PAYLOAD/examples/swe" "$PAYLOAD/wheels"
 
 install -m 0755 "$ROOT/uenv" "$PAYLOAD/bin/uenv"
 install -m 0755 "$ROOT/target/release/uenv-adapter-core" "$PAYLOAD/bin/"
@@ -75,10 +78,17 @@ install -m 0755 "$ROOT/target/release/uenv-code-plugin" "$PAYLOAD/bin/"
 install -m 0755 "$ROOT/uenv-hub/target/release/uenv-hub-server" "$PAYLOAD/bin/"
 install -m 0755 "$ROOT/uenv-hub/target/release/uenv" "$PAYLOAD/bin/uenv-hub-cli"
 install -m 0755 "$ROOT/install.sh" "$PAYLOAD/install.sh"
-install -m 0644 "$ROOT/deploy/config/"* "$PAYLOAD/config/"
+install -m 0644 "$ROOT/deploy/config/server.yaml" "$PAYLOAD/config/server.yaml"
+install -m 0644 "$ROOT/deploy/config/worker.yaml" "$PAYLOAD/config/worker.yaml"
+install -m 0644 "$ROOT/deploy/config/hub.toml" "$PAYLOAD/config/hub.toml"
+# *.env is intentionally ignored by Git.  Package the committed templates under
+# the runtime names expected by install.sh so a clean checkout is releasable.
+install -m 0644 "$ROOT/deploy/config/server.env.example" "$PAYLOAD/config/server.env"
+install -m 0644 "$ROOT/deploy/config/worker.env.example" "$PAYLOAD/config/worker.env"
 install -m 0644 "$ROOT/deploy/systemd/uenv-adapter-core.service" "$PAYLOAD/systemd/"
 install -m 0644 "$ROOT/deploy/systemd/uenv-worker.service" "$PAYLOAD/systemd/"
 install -m 0644 "$ROOT/deploy/systemd/uenv-hub.service" "$PAYLOAD/systemd/"
+install -m 0644 "$ROOT/deploy/systemd/uenv-swe-agent.service" "$PAYLOAD/systemd/"
 
 for plugin in qa math code; do
   install -m 0644 "$ROOT/plugins/$plugin/manifest.yaml" "$PAYLOAD/plugins/$plugin/"
@@ -92,12 +102,37 @@ if [[ -d "$ROOT/uenv-hub/config/swe" ]]; then
   cp -a "$ROOT/uenv-hub/config/swe" "$PAYLOAD/share/hub-config/"
 fi
 
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "==> building Python Bridge wheel"
-  python3 -m pip wheel --no-deps --wheel-dir "$PAYLOAD/wheels" "$ROOT/uenv-bridge"
-elif compgen -G "$ROOT/uenv-bridge/dist/*.whl" >/dev/null; then
-  install -m 0644 "$ROOT"/uenv-bridge/dist/*.whl "$PAYLOAD/wheels/"
-fi
+# Minimal SWE assets.  Hub is optional for the single-Worker examples: the
+# Worker reads these catalogs locally and OpenHands talks to its Runtime Gateway.
+install -m 0644 "$ROOT/config/swe/verified.json" "$PAYLOAD/share/swe/verified.json"
+install -m 0644 "$ROOT/config/swe/smith-smoke.json" "$PAYLOAD/share/swe/smith-example.json"
+install -m 0644 "$ROOT/integrations/openhands/PIN.md" "$PAYLOAD/share/swe/PIN.md"
+install -m 0644 "$ROOT/integrations/openhands/requirements-agent.txt" \
+  "$PAYLOAD/share/swe/requirements-agent.txt"
+install -m 0755 "$ROOT/integrations/openhands/run_swebenchpro_official.py" \
+  "$PAYLOAD/share/swe/openhands/run_swebenchpro_official.py"
+while IFS= read -r -d '' source; do
+  relative="${source#"$ROOT/integrations/openhands/"}"
+  install -D -m 0644 "$source" "$PAYLOAD/share/swe/openhands/$relative"
+done < <(find "$ROOT/integrations/openhands/uenv_runtime" -type f -name '*.py' -print0)
+install -m 0755 "$ROOT/scripts/openhands/openhands_runner.py" \
+  "$PAYLOAD/share/swe/openhands-runner.py"
+
+install -m 0644 "$ROOT/uenv-bridge/configs/uenv-agent-loop.yaml" \
+  "$PAYLOAD/share/uenv-bridge/configs/uenv-agent-loop.yaml"
+install -m 0755 "$ROOT/uenv-bridge/scripts/run_verl_main_ppo.py" \
+  "$PAYLOAD/share/uenv-bridge/scripts/run_verl_main_ppo.py"
+for example in "$ROOT/examples/swe/"*.sh "$ROOT/examples/swe/"*.py; do
+  [[ -f "$example" ]] || continue
+  install -m 0755 "$example" "$PAYLOAD/examples/swe/"
+done
+install -m 0644 "$ROOT/Docs/deployment/UEnv全新服务器部署指南.md" "$PAYLOAD/share/docs/"
+install -m 0644 "$ROOT/Docs/deployment/SWE评测与VeRL训练操作指南.md" "$PAYLOAD/share/docs/"
+install -m 0644 "$ROOT/Docs/deployment/SWE评测操作指南.md" "$PAYLOAD/share/docs/"
+install -m 0644 "$ROOT/Docs/deployment/VeRL-SWE训练操作指南.md" "$PAYLOAD/share/docs/"
+
+echo "==> building Python Bridge wheel"
+python3 -m pip wheel --no-deps --wheel-dir "$PAYLOAD/wheels" "$ROOT/uenv-bridge"
 
 printf '%s\n' "$VERSION" > "$PAYLOAD/VERSION"
 python3 - "$PAYLOAD/manifest.json" "$VERSION" "$ARCH" <<'PY'
@@ -112,7 +147,10 @@ manifest = {
     "version": version,
     "os": "linux",
     "arch": arch,
-    "components": ["adapter-core", "worker", "hub", "hub-cli", "bridge", "qa", "math", "code"],
+    "components": [
+        "adapter-core", "worker", "hub", "hub-cli", "bridge", "qa", "math", "code",
+        "swe-runtime", "openhands-agent", "swe-examples"
+    ],
     "built_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
 }
 with open(path, "w", encoding="utf-8") as handle:

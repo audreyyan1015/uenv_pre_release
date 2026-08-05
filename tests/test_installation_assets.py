@@ -47,7 +47,9 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 
 class InstallationAssetsTest(unittest.TestCase):
     def test_shell_scripts_parse(self) -> None:
-        for path in (ROOT / "install.sh", ROOT / "scripts/build-release.sh"):
+        scripts = [ROOT / "install.sh", ROOT / "scripts/build-release.sh"]
+        scripts.extend(sorted((ROOT / "examples/swe").glob("*.sh")))
+        for path in scripts:
             subprocess.run(["bash", "-n", str(path)], check=True)
 
     def test_unified_cli_reads_version(self) -> None:
@@ -96,6 +98,48 @@ class InstallationAssetsTest(unittest.TestCase):
         script = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
         for name in ("uenv-adapter-core", "uenv-worker", "uenv-hub-server", "uenv-hub-cli"):
             self.assertIn(name, script)
+
+    def test_clean_checkout_contains_runtime_env_templates(self) -> None:
+        for name in ("server.env.example", "worker.env.example"):
+            path = ROOT / "deploy/config" / name
+            self.assertTrue(path.is_file(), name)
+            self.assertTrue(path.read_text(encoding="utf-8").strip(), name)
+        release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
+        self.assertIn('server.env.example" "$PAYLOAD/config/server.env', release)
+        self.assertIn('worker.env.example" "$PAYLOAD/config/worker.env', release)
+
+    def test_swe_release_assets_are_wired(self) -> None:
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
+        worker_unit = (ROOT / "deploy/systemd/uenv-worker.service").read_text(
+            encoding="utf-8"
+        )
+        for token in ("--enable-swe", "UENV_RUNTIME_GATEWAY_ENABLED", "UENV_SWE_INSTANCES"):
+            self.assertIn(token, installer)
+        for token in ("verified.json", "openhands-runner.py", "examples/swe"):
+            self.assertIn(token, release)
+        self.assertIn("/etc/uenv/swe.env", worker_unit)
+        self.assertTrue((ROOT / "deploy/systemd/uenv-swe-agent.service").is_file())
+
+    def test_swe_user_guides_are_packaged(self) -> None:
+        release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
+        for name in (
+            "SWE评测与VeRL训练操作指南.md",
+            "SWE评测操作指南.md",
+            "VeRL-SWE训练操作指南.md",
+        ):
+            path = ROOT / "Docs/deployment" / name
+            self.assertTrue(path.is_file(), name)
+            self.assertIn(name, release)
+            self.assertNotIn("smoke", path.read_text(encoding="utf-8").casefold())
+
+    def test_release_directory_is_immutable_and_staged_atomically(self) -> None:
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn(".bundle.sha256", installer)
+        self.assertIn(".uenv-stage.", installer)
+        self.assertIn('chmod 0755 "$RELEASE_STAGE"', installer)
+        self.assertIn('mv -T "$RELEASE_STAGE" "$RELEASE_DIR"', installer)
+        self.assertIn("不能覆盖现役 release", installer)
 
 
 if __name__ == "__main__":

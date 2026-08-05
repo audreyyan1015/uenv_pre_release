@@ -18,6 +18,36 @@ from typing import Any
 
 
 _TOKEN_ID_RE = re.compile(r"^token_id:(\d+)$")
+ROLLOUT_TRACE_MODES = ("off", "best-effort", "required")
+
+
+def _is_unsupported_trace_option(exc: Exception) -> bool:
+    """Return true when a provider rejected one of the trace-only options.
+
+    Best-effort tracing may safely retry such a request without the tracing
+    options.  Transport failures and unrelated provider errors must still be
+    surfaced: retrying those could duplicate a request that actually ran.
+    """
+
+    message = str(exc).lower()
+    trace_options = (
+        "logprobs",
+        "top_logprobs",
+        "return_tokens_as_token_ids",
+        "thinking",
+    )
+    rejection_markers = (
+        "unsupported",
+        "not support",
+        "unknown parameter",
+        "unrecognized",
+        "unexpected keyword",
+        "invalid parameter",
+        "extra inputs",
+    )
+    return any(option in message for option in trace_options) and any(
+        marker in message for marker in rejection_markers
+    )
 
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
@@ -75,8 +105,29 @@ class RolloutTraceCollector:
         )
         self._responses: list[dict[str, Any]] = []
         self._hf_tokenizer: Any = None
+        self._warnings: list[str] = []
 
-    def install(self, llm: Any, *, episode_id: str = "", dataset: str = "") -> None:
+    @property
+    def warnings(self) -> list[str]:
+        """Trace-only warnings produced by best-effort collection."""
+
+        return list(getattr(self, "_warnings", []))
+
+    def _add_warning(self, message: str) -> None:
+        warnings = getattr(self, "_warnings", None)
+        if warnings is None:
+            warnings = []
+            self._warnings = warnings
+        warnings.append(message)
+
+    def install(
+        self,
+        llm: Any,
+        *,
+        episode_id: str = "",
+        dataset: str = "",
+        best_effort: bool = False,
+    ) -> None:
         """Request logprobs on real agent calls and capture the raw responses."""
         original_completion = llm.completion
 
@@ -102,10 +153,30 @@ class RolloutTraceCollector:
                 kwargs["extra_body"] = extra_body
             add_uenv_headers(kwargs)
 
+        def record_or_warn(response: Any) -> None:
+            try:
+                self.record(response)
+            except Exception as exc:  # noqa: BLE001
+                if not best_effort:
+                    raise
+                self._add_warning(
+                    f"could not record rollout response: {type(exc).__name__}: {exc}"
+                )
+
         def completion(*args: Any, **kwargs: Any) -> Any:
+            original_kwargs = dict(kwargs)
             add_rollout_kwargs(kwargs)
-            response = original_completion(*args, **kwargs)
-            self.record(response)
+            try:
+                response = original_completion(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                if not best_effort or not _is_unsupported_trace_option(exc):
+                    raise
+                self._add_warning(
+                    "provider rejected rollout trace options; retried without them: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                response = original_completion(*args, **original_kwargs)
+            record_or_warn(response)
             return response
 
         object.__setattr__(llm, "completion", completion)
@@ -113,9 +184,19 @@ class RolloutTraceCollector:
         original_acompletion = llm.acompletion
 
         async def acompletion(*args: Any, **kwargs: Any) -> Any:
+            original_kwargs = dict(kwargs)
             add_rollout_kwargs(kwargs)
-            response = await original_acompletion(*args, **kwargs)
-            self.record(response)
+            try:
+                response = await original_acompletion(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                if not best_effort or not _is_unsupported_trace_option(exc):
+                    raise
+                self._add_warning(
+                    "provider rejected rollout trace options; retried without them: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                response = await original_acompletion(*args, **original_kwargs)
+            record_or_warn(response)
             return response
 
         object.__setattr__(llm, "acompletion", acompletion)
@@ -381,3 +462,83 @@ class RolloutTraceCollector:
                 "coverage": "content_tokens_returned_by_provider",
             },
         }
+
+
+def _rollout_trace_failure(stage: str, exc: Exception) -> str:
+    return f"rollout trace {stage} failed: {type(exc).__name__}: {exc}"
+
+
+def start_rollout_trace(
+    mode: str,
+    *,
+    llm: Any,
+    config_path: str,
+    episode_id: str,
+    dataset: str,
+    collector_factory: Any = RolloutTraceCollector,
+) -> tuple[Any | None, dict[str, Any]]:
+    """Install trace capture according to the user-facing strictness mode."""
+
+    if mode == "off":
+        return None, {
+            "mode": mode,
+            "enabled": False,
+            "state": "disabled",
+            "warnings": [],
+        }
+    try:
+        collector = collector_factory(config_path)
+        collector.install(
+            llm,
+            episode_id=episode_id,
+            dataset=dataset,
+            best_effort=mode == "best-effort",
+        )
+    except Exception as exc:  # noqa: BLE001
+        warning = _rollout_trace_failure("setup", exc)
+        if mode == "required":
+            raise RuntimeError(warning) from exc
+        return None, {
+            "mode": mode,
+            "enabled": True,
+            "state": "unavailable",
+            "warnings": [warning],
+        }
+    return collector, {
+        "mode": mode,
+        "enabled": True,
+        "state": "collecting",
+        "warnings": list(getattr(collector, "warnings", [])),
+    }
+
+
+def finish_rollout_trace(
+    mode: str,
+    collector: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Finalize a trace, allowing only best-effort failures to remain non-fatal."""
+
+    try:
+        fields = collector.finalize()
+    except Exception as exc:  # noqa: BLE001
+        warning = _rollout_trace_failure("finalize", exc)
+        if mode == "required":
+            raise RuntimeError(warning) from exc
+        warnings = list(getattr(collector, "warnings", []))
+        warnings.append(warning)
+        return {}, {
+            "mode": mode,
+            "enabled": True,
+            "state": "unavailable",
+            "warnings": warnings,
+        }
+
+    warnings = list(getattr(collector, "warnings", []))
+    token_count = len((fields.get("rollout_trace") or {}).get("response_ids") or [])
+    return fields, {
+        "mode": mode,
+        "enabled": True,
+        "state": "collected_with_warnings" if warnings else "collected",
+        "token_count": token_count,
+        "warnings": warnings,
+    }

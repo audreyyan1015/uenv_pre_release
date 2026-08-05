@@ -332,6 +332,7 @@ class UEnvAgentLoop(AgentLoopBase):
         response_ids = response_ids[:max_response_length] if max_response_length else response_ids
         if not response_ids:
             response_ids = [self._pad_token_id()]
+        response_logprobs = self._response_logprobs_from_result(result, len(response_ids))
 
         response_mask = self._response_mask_from_result(result, len(response_ids))
         response_mask = response_mask[: len(response_ids)]
@@ -348,6 +349,7 @@ class UEnvAgentLoop(AgentLoopBase):
             prompt_ids=prompt_ids,
             response_ids=response_ids,
             response_mask=response_mask,
+            response_logprobs=response_logprobs,
             reward_score=float(result.summary.total_reward),
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=agent_metrics,
@@ -535,6 +537,7 @@ class UEnvAgentLoop(AgentLoopBase):
         response_ids = response_ids[:max_response_length] if max_response_length else response_ids
         if not response_ids:
             response_ids = [self._pad_token_id()]
+        response_logprobs = self._response_logprobs_from_result(result, len(response_ids))
         response_mask = self._response_mask_from_result(result, len(response_ids))
         response_mask = response_mask[: len(response_ids)]
         if len(response_mask) < len(response_ids):
@@ -544,6 +547,7 @@ class UEnvAgentLoop(AgentLoopBase):
             prompt_ids=prompt_ids,
             response_ids=response_ids,
             response_mask=response_mask,
+            response_logprobs=response_logprobs,
             reward_score=float(result.summary.total_reward),
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=AgentLoopMetrics(generate_sequences=0.0, tool_calls=0.0, compute_score=0.0, num_preempted=-1),
@@ -1339,6 +1343,13 @@ class UEnvAgentLoop(AgentLoopBase):
             return []
 
         values: list[Any] = []
+        server_handles = getattr(manager, "_server_id_to_handle", None)
+        if server_handles:
+            try:
+                values.extend(server_handles.keys())
+            except (AttributeError, TypeError):
+                pass
+
         for attr in ("server_addresses", "addresses"):
             value = getattr(manager, attr, None)
             if value:
@@ -1366,6 +1377,22 @@ class UEnvAgentLoop(AgentLoopBase):
                 pass
 
         return values
+
+    def _response_logprobs_from_result(
+        self,
+        result: EpisodeResult,
+        response_length: int,
+    ) -> list[float] | None:
+        if not result.rollout_log_probs:
+            return None
+        source_response_length = len(self._response_ids_from_result(result))
+        if len(result.rollout_log_probs) != source_response_length:
+            raise RuntimeError(
+                "UEnv rollout token trace is inconsistent: "
+                f"response_ids={source_response_length} rollout_log_probs={len(result.rollout_log_probs)} "
+                f"request_id={result.request_id}"
+            )
+        return [float(value) for value in result.rollout_log_probs[:response_length]]
 
     async def _await_ray_value(self, value: Any) -> list[Any]:
         if inspect.isawaitable(value):

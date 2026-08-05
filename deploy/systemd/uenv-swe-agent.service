@@ -1,0 +1,22 @@
+[Unit]
+Description=UEnv SWE OpenHands agent
+After=network-online.target uenv-adapter-core.service uenv-worker.service
+Wants=network-online.target
+Requires=uenv-adapter-core.service uenv-worker.service
+
+[Service]
+Type=simple
+User=uenv-agent
+Group=uenv
+WorkingDirectory=/var/lib/uenv/agent
+EnvironmentFile=/etc/uenv/swe-agent.env
+EnvironmentFile=-/etc/uenv/secrets/swe.env
+ExecStart=/opt/uenv/agent/openhands-benchmarks/.venv/bin/python /opt/uenv/current/share/swe/openhands-runner.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+LimitNOFILE=1048576
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

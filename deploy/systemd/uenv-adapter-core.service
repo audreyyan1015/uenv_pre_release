@@ -9,6 +9,7 @@ User=uenv
 Group=uenv
 WorkingDirectory=/var/lib/uenv/server
 EnvironmentFile=/etc/uenv/server.env
+EnvironmentFile=-/etc/uenv/secrets/swe.env
 ExecStartPre=/opt/uenv/current/bin/uenv-adapter-core --validate-config
 ExecStart=/opt/uenv/current/bin/uenv-adapter-core
 Restart=on-failure

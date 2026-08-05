@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenHands benchmark runner HTTP API (208.77 :8888, health :8777).
+"""OpenHands benchmark runner and UEnv AgentJob poller.
 
 两种触发模式并存：
   - HTTP 旁路（原有）：POST /v1/runs 手动/调试触发。
@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-API_BIND = os.environ.get("OPENHANDS_RUNNER_API_BIND", "0.0.0.0:8888")
-HEALTH_BIND = os.environ.get("OPENHANDS_RUNNER_HEALTH_BIND", "0.0.0.0:8777")
+API_BIND = os.environ.get("OPENHANDS_RUNNER_API_BIND", "127.0.0.1:8888")
+HEALTH_BIND = os.environ.get("OPENHANDS_RUNNER_HEALTH_BIND", "127.0.0.1:8777")
 RUN_SCRIPT = os.environ.get(
-    "OPENHANDS_RUN_SCRIPT", "/root/UEnv/scripts/run-openhands-pro-20877.sh"
+    "OPENHANDS_RUN_SCRIPT", "/opt/uenv/agent/run-agent-job.sh"
 )
-RUNS_DIR = Path(os.environ.get("OPENHANDS_RUNS_DIR", "/var/log/uenv/openhands-runs"))
+RUNS_DIR = Path(os.environ.get("OPENHANDS_RUNS_DIR", "/var/lib/uenv/agent/runs"))
 COMPLETION_SPOOL_DIR = Path(
     os.environ.get("OPENHANDS_COMPLETION_SPOOL_DIR", str(RUNS_DIR / "completion-spool"))
 )
@@ -42,9 +42,19 @@ AGENT_MAX_CONCURRENT = int(os.environ.get("OPENHANDS_AGENT_MAX_CONCURRENT", "1")
 POLL_INTERVAL_SEC = float(os.environ.get("OPENHANDS_POLL_INTERVAL_SEC", "3"))
 HEARTBEAT_INTERVAL_SEC = float(os.environ.get("OPENHANDS_HEARTBEAT_INTERVAL_SEC", "10"))
 # uenv_runtime 包所在目录（agent_client / agent_job），默认 monorepo 路径。
-BRIDGE_DIR = os.environ.get("UENV_AGENT_BRIDGE_DIR", "/root/UEnv/integrations/openhands")
+BRIDGE_DIR = os.environ.get(
+    "UENV_AGENT_BRIDGE_DIR", "/opt/uenv/current/share/swe/openhands"
+)
 # 路由标签，格式 "k1=v1,k2=v2"（如 "region=bj,gpu=a100"），供 Server 多池标签亲和用。
 AGENT_LABELS = os.environ.get("OPENHANDS_AGENT_LABELS", "")
+
+
+def _require_agent_job_rollout_trace(env: dict[str, str]) -> None:
+    """AgentJob poll results feed training, so a real token trace is mandatory."""
+
+    env["UENV_ROLLOUT_TRACE"] = "required"
+    # Keep the completion-side validation as a second line of defence.
+    env["UENV_REQUIRE_SWE_RESPONSE_TRACE"] = "1"
 
 
 def _parse_labels(raw: str) -> dict[str, str]:
@@ -475,10 +485,11 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
             )
             job_dict["gateway_url"] = local_gw
         if not job_dict.get("gateway_api_key"):
-            job_dict["gateway_api_key"] = os.environ.get("UENV_GATEWAY_API_KEY", "swe-pro-secret")
+            job_dict["gateway_api_key"] = os.environ.get("UENV_GATEWAY_API_KEY", "")
         job_file.write_text(json.dumps(job_dict, indent=2) + "\n", encoding="utf-8")
 
         env = os.environ.copy()
+        _require_agent_job_rollout_trace(env)
         env["UENV_AGENT_JOB_FILE"] = str(job_file)
         env["MAX_ITERATIONS"] = str(job.max_iterations or 30)
         env["OPENHANDS_OUT_DIR"] = str(out_dir)  # 让脚本把输出写到可预测目录
@@ -515,7 +526,7 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
             (out_dir / "runner_stderr.log").write_text(proc.stderr[-16000:], encoding="utf-8")
             if proc.returncode == 0:
                 status, reward, trajectory_id, rollout_fields = _read_reward(out_dir)
-                require_trace = os.environ.get(
+                require_trace = env.get(
                     "UENV_REQUIRE_SWE_RESPONSE_TRACE", "1"
                 ).strip().lower() not in {"0", "false", "no", "off"}
                 if (
@@ -527,8 +538,7 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
                     status = "failed"
                     err = (
                         "llm mode completed without rollout_trace.response_ids; "
-                        "refusing pad-fallback training sample "
-                        "(set UENV_REQUIRE_SWE_RESPONSE_TRACE=0 to bypass)"
+                        "refusing pad-fallback training sample"
                     )
             else:
                 status = "failed"
