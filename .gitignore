@@ -104,3 +104,4 @@ server-state/
 /server-state/
 /trajectory-data/
 /logs/
+/dist/

@@ -1,0 +1,2 @@
+[console_scripts]
+uenv-bridge = uenv.bridge.cli:main
