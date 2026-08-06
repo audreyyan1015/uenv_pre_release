@@ -393,7 +393,42 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// 读满整条 HTTP 请求（头 + Content-Length 指定的全部 body）。
+    ///
+    /// 单次 `read()` 只能拿到内核当次交付的字节：header 与 body 是否落在同一个
+    /// TCP 段由协议栈决定，Linux 上常合并、macOS 上常拆开。断言请求体的测试若只读
+    /// 一次，就变成了在断言操作系统的分段行为，会平台性假失败。
+    async fn read_full_request(stream: &mut TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut chunk = vec![0u8; 8192];
+        loop {
+            let n = stream.read(&mut chunk).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+
+            let text = String::from_utf8_lossy(&raw);
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                continue; // 头还没收全
+            };
+            let content_length = text[..head_end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if raw.len() >= head_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&raw).to_string()
+    }
 
     #[test]
     fn uses_typed_model_endpoint_override() {
@@ -530,10 +565,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 8192];
-            let n = stream.read(&mut buffer).await.expect("read");
-            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-            *captured_for_task.lock().expect("lock") = request;
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
             let body = b"{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -569,10 +601,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 16384];
-            let n = stream.read(&mut buffer).await.expect("read");
-            *captured_for_task.lock().expect("lock") =
-                String::from_utf8_lossy(&buffer[..n]).to_string();
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
             let body = b"{\"choices\":[{\"message\":{\"content\":\"def add(a,b): return a+b\"}}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -616,10 +645,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 8192];
-            let n = stream.read(&mut buffer).await.expect("read");
-            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-            *captured_for_task.lock().expect("lock") = request;
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
             let body = b"{\"choices\":[{\"message\":{\"content\":\"#### 4\"},\"finish_reason\":\"stop\"}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -656,10 +682,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 8192];
-            let n = stream.read(&mut buffer).await.expect("read");
-            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-            *captured_for_task.lock().expect("lock") = request;
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
             let body = b"{\"choices\":[{\"message\":{\"content\":\"#### 4\"},\"finish_reason\":\"stop\"}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",

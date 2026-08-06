@@ -16,7 +16,7 @@
 | **Phase 2** | Server / Worker / OpenHands 目标架构联调 | ✅ `SubmitEpisode` gold：`resolved=true reward=1.0` |
 | **Phase 3** | Rollout 导出与训练可读校验 | ✅ `chat_sft*.jsonl` + 7142 `schema_ok` |
 | **LLM** | 拉起 vLLM + 真实 Agent 正式 seal 轨迹 | ✅ DeepSeek-V3 AWQ；轨迹 `…00045`（`resolved=false`，但正式产出） |
-| **Hub** | EnvPackage 正式注册 | ⏳ 后置，不阻塞本期 |
+| **Hub** | EnvPackage + Episode Stack 正式注册 | ✅ `swe-bench-smith@0.1.0`，隔离 HTTP/CLI 联调通过 |
 
 **一句话**：Smith 环境契约与 Pro 共用 Gateway/Agent 栈已打通；gold 与真实 LLM 均可产出带 `benchmark_variant=smith` 的正式 TrajectoryBundle，并可导出训练侧可读 JSONL。
 
@@ -69,6 +69,15 @@
 | `config/openhands-llm-swesmith-qwen36.json` | Smith LLM 配置模板（联调中曾切 DeepSeek） |
 | `fixtures/swe/smith_smoke_sample.json` | 缩略 instance fixture |
 | `Docs/worker/260801/*` | 规划、联调记录、本报告、artifacts |
+
+### 2.5 Hub
+
+| 文件 | 变更摘要 |
+|------|----------|
+| `uenv-hub/uenv-hub-core/src/seed.rs` | 注册 `swe-bench-smith@0.1.0`，声明 Smith overlay、grader、OpenHands 驱动和 `/testbed`；将 Smith 加入 `swe` Task Environment；注册 `swe-bench-smith-openhands@1.0.0` |
+| `uenv-hub/uenv-hub-server/src/routes.rs` | `GET /api/v1/swe/{variant}/instances` 放行 `smith`，按 `smith-smoke.json` → `smith.json` 顺序取目录 |
+| `uenv-hub/uenv-hub-server/tests/e2e.rs` | 验证 Smith EnvPackage 制品、环境声明与 Episode Stack 可解析 |
+| `scripts/test-hub-swesmith-e2e.sh` | 独立数据库/回环端口启动 Hub，校验 HTTP、sync-plan、CLI sync、bundle digest、catalog、镜像索引和 eval spec |
 
 ---
 
@@ -180,7 +189,7 @@ python3 scripts/train_smoke_rollout_jsonl.py \
 
 | 项 | 说明 |
 |----|------|
-| Hub 注册 | `swe-bench-smith` EnvPackage / 镜像分发由 Hub 模块承接 |
+| Hub 生产部署 | 代码与隔离联调已完成；生产 `:8088` 尚未替换。包默认 `local_only`，正式运行前须在 Worker 预载 Smith 镜像，或在 Hub 预置对应 image tar |
 | 全量 Smith | 本期仅本地 5 条 oauthlib 子集；7143 磁盘约 92%，扩集前需空间 |
 | LLM `resolved` | 真实 Agent smoke 未修好 bug（正常）；正式轨迹链路已验证 |
 | SubmitEpisode(llm) | Agent 池常被外部 Pro 任务占用；本期 LLM 用旁路验证，目标架构可在池空闲时复跑 |
@@ -240,6 +249,6 @@ bash /root/UEnv/scripts/uenv-llm-gateway/smoke-test-7142.sh
 | 目标架构 SubmitEpisode ≥1 条 | ✅ gold |
 | TrajectoryBundle 导出 + resolved 过滤 JSONL | ✅ |
 | 7142 可读 + 字段校验 | ✅ |
-| Hub 注册 | ⏳ 后续 |
+| Hub 注册 | ✅ `swe-bench-smith@0.1.0` + `swe-bench-smith-openhands@1.0.0` |
 
 **报告完。**

@@ -158,10 +158,11 @@ curl -X POST http://<hub>/api/v1/packages/swe-bench-verified/versions \
 
 ### 4.1 种子包（开箱即用）
 
-Hub 启动时（`packages.seed_examples=true`，默认开）从 `packages.catalog_seed_dir`（默认 `config/swe`）幂等种子两个包：
+Hub 启动时（`packages.seed_examples=true`，默认开）从 `packages.catalog_seed_dir`（默认 `config/swe`）幂等种子三个包：
 
 - **`swe-bench-verified@1.0.0`**：来自 `config/swe/verified.json`（10 个真实 Verified 实例）；`images.manifest.json` 自动按 Worker 命名规则推导镜像（`swebench/sweb.eval.x86_64.<id 的 __→_1776_>:latest`）。
-- **`swe-bench-pro@0.1.0`**：来自 `config/swe/pro.json`。**诚实标注**：当前 Pro catalog 只含**占位样例** `swe-pro__example-go-1`（base_commit 全 0、镜像指 `registry.example.com`），用于验证封装/路由/grader 选择；**真实 Pro 容器评测需内网 Pro registry 镜像**（离线不可达）。
+- **`swe-bench-pro@0.2.0`**：优先来自 `config/swe/pro-python-smoke.json`（不存在时回退 `pro.json`），用于 7143/OpenHands 联调；完整 Pro 容器评测仍需对应的内网镜像或 Hub 托管 tar。
+- **`swe-bench-smith@0.1.0`**：来自 `config/swe/smith-smoke.json`（oauthlib smoke 子集）；overlay 固定 `benchmark_variant=smith`、`grader=swesmith`，Agent 默认入口为 `run_swesmith_official.py`、工作区为 `/testbed`。Smith 数据集中的 `patch` 是造 bug 补丁，Worker provision 正向应用，gold 通过反向应用修复。
 
 ---
 
@@ -279,7 +280,7 @@ uenv-worker swe-dispatch --endpoint 127.0.0.1:38888 \
 
 ```
 hub-server（temp DB + artifact_dir + catalog_seed_dir=config/swe, seed_examples=true）
-  → GET /packages 返回 swe-bench-verified / swe-bench-pro
+  → GET /packages 返回 swe-bench-verified / swe-bench-pro / swe-bench-smith
   → uenv env sync swe-bench-verified --target-dir /tmp/uenv-e2e/sync
       catalog.json 独立 shasum == manifest digest（sha256:7e51ed12…）✓
       images.manifest.json: 10 images, pull_policy=local_only ✓
@@ -295,7 +296,7 @@ hub-server（temp DB + artifact_dir + catalog_seed_dir=config/swe, seed_examples
 
 | 验证项 | 结果 |
 |--------|------|
-| 种子三包（swe-bench-verified/pro、agent-openhands）启动即写入 | ✅ `seeded EnvPackage …` |
+| 种子四包（swe-bench-verified/pro/smith、agent-openhands）启动即写入 | ✅ `seeded EnvPackage …` |
 | `GET …/versions/latest` manifest 带 `interface`（action/observation/state） | ✅ `has_interface: true` |
 | `GET …/versions/latest` overlay `image_pull_policy` | ✅ `local_only`（零 egress 默认） |
 | **新端点** `GET …/versions/{v}/interface` | ✅ `HTTP 200`，返回 `SweAction/SweObservation/SweState` 完整 JSON Schema |
@@ -329,7 +330,7 @@ hub-server（temp DB + artifact_dir + catalog_seed_dir=config/swe, seed_examples
 | 制品落盘 + digest + 装配 | `uenv-hub/uenv-hub-core/src/package.rs` |
 | DB schema | `uenv-hub/migrations/0002_env_packages.sql` |
 | 仓储（publish/get/list/artifact_meta） | `uenv-hub/uenv-hub-core/src/repository.rs` |
-| 种子（swe-bench-verified/pro） | `uenv-hub/uenv-hub-core/src/seed.rs::seed_packages` |
+| 种子（swe-bench-verified/pro/smith） | `uenv-hub/uenv-hub-core/src/seed.rs::seed_packages` |
 | 服务编排 + 路由 + 配置 | `uenv-hub/uenv-hub-server/src/{service,routes,config}.rs` |
 | 客户端 SDK + `uenv env sync` | `uenv-hub/uenv-hub-client/src/{client.rs,bin/uenv.rs}` |
 | Worker 消费 | `uenv-worker/src/swe/env_package.rs`、`runtime.rs::load_swe_catalog`、`swe/image_cache.rs::ImagePullPolicy` |

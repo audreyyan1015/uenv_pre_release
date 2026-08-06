@@ -1273,3 +1273,110 @@ pub struct ResolvedEpisodeStack {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Hub overview — a single-request projection of "what this Hub currently is"
+// ---------------------------------------------------------------------------
+
+/// Counters over everything the registry currently holds.
+///
+/// These are computed with `COUNT(*)` against the live tables rather than kept
+/// as incrementally-maintained gauges, because the registry is a low-write
+/// system and a counter that can drift from the tables it claims to describe is
+/// worse than one that costs a few milliseconds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegistryStats {
+    pub envs: i64,
+    pub env_versions: i64,
+    pub yanked_env_versions: i64,
+    pub deprecated_envs: i64,
+    pub packages: i64,
+    pub package_versions: i64,
+    pub yanked_package_versions: i64,
+    pub package_artifacts: i64,
+    /// Sum of `env_package_artifacts.size_bytes` as recorded at publish time.
+    pub package_artifact_bytes: i64,
+    pub stacks: i64,
+    pub stack_versions: i64,
+    pub yanked_stack_versions: i64,
+    pub agent_bridges: i64,
+    pub templates: i64,
+    pub active_tokens: i64,
+    pub audit_entries: i64,
+}
+
+/// Physical footprint of the Hub on its host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageStats {
+    pub artifact_dir: String,
+    /// `false` when the directory has not been created yet (nothing published).
+    pub artifact_dir_exists: bool,
+    /// Files actually present under the content-addressed artifact store.
+    pub artifact_files: u64,
+    /// Bytes actually on disk, which can differ from
+    /// [`RegistryStats::package_artifact_bytes`] if a publish was interrupted.
+    pub artifact_bytes: u64,
+    pub database_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_bytes: Option<u64>,
+}
+
+/// Host resource snapshot, collected at request time.
+///
+/// Every field beyond `os`/`arch`/`cpu_cores` is optional: the values come from
+/// Linux `/proc`, and on a non-Linux host (a developer laptop) they are simply
+/// absent rather than fabricated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostStats {
+    pub os: String,
+    pub arch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<u64>,
+    /// Whole-host CPU busy percentage sampled over a short window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_percent: Option<f64>,
+    /// 1 / 5 / 15 minute load averages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_average: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_available_bytes: Option<u64>,
+    /// Resident set size of the Hub process itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_resident_bytes: Option<u64>,
+}
+
+/// The security / operating posture the Hub was started with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubPosture {
+    pub require_token: bool,
+    pub rate_limit_enabled: bool,
+    pub requests_per_second: u64,
+    pub burst: u32,
+    pub cors_allow_origins: Vec<String>,
+    pub seed_examples: bool,
+    pub catalog_seed_dir: String,
+}
+
+/// Response for `GET /api/v1/system/overview`.
+///
+/// One round trip returns identity, registry inventory, on-disk footprint, host
+/// resources and startup posture. A console that had to assemble this from the
+/// individual list endpoints would issue a dozen requests and still not see the
+/// storage or host dimensions, which are not exposed anywhere else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubOverview {
+    pub service: VersionInfo,
+    /// Unix epoch seconds at which this process finished starting up.
+    pub started_at: i64,
+    pub uptime_seconds: i64,
+    /// Server clock, so a console can render relative times without trusting
+    /// the browser's clock.
+    pub server_time: i64,
+    pub db_up: bool,
+    pub registry: RegistryStats,
+    pub storage: StorageStats,
+    pub host: HostStats,
+    pub posture: HubPosture,
+}

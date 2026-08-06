@@ -1638,6 +1638,76 @@ impl SqliteStore {
             notes,
         })
     }
+
+    // ------------------------------------------------------------- overview
+
+    /// Count everything the registry currently holds, in one pass.
+    ///
+    /// Soft-deleted envs / packages / stacks are excluded so the numbers match
+    /// what the list endpoints return; yanked *versions* are counted separately
+    /// rather than excluded, because a yanked version is still served and an
+    /// operator needs to see how much of the catalog is in that state.
+    pub async fn registry_stats(&self) -> Result<dto::RegistryStats> {
+        async fn scalar(store: &SqliteStore, sql: &str) -> Result<i64> {
+            let row: (i64,) = sqlx::query_as(sql).fetch_one(&store.pool).await?;
+            Ok(row.0)
+        }
+        let scalar = |sql: &'static str| scalar(self, sql);
+
+        Ok(dto::RegistryStats {
+            envs: scalar("SELECT COUNT(*) FROM envs WHERE is_deleted = 0").await?,
+            env_versions: scalar(
+                "SELECT COUNT(*) FROM env_versions v \
+                 JOIN envs e ON e.id = v.env_id WHERE e.is_deleted = 0",
+            )
+            .await?,
+            yanked_env_versions: scalar(
+                "SELECT COUNT(*) FROM env_versions v \
+                 JOIN envs e ON e.id = v.env_id WHERE e.is_deleted = 0 AND v.is_yanked = 1",
+            )
+            .await?,
+            deprecated_envs: scalar(
+                "SELECT COUNT(*) FROM envs WHERE is_deleted = 0 AND lifecycle = 'deprecated'",
+            )
+            .await?,
+            packages: scalar("SELECT COUNT(*) FROM env_packages WHERE is_deleted = 0").await?,
+            package_versions: scalar(
+                "SELECT COUNT(*) FROM env_package_versions pv \
+                 JOIN env_packages p ON p.id = pv.package_db_id WHERE p.is_deleted = 0",
+            )
+            .await?,
+            yanked_package_versions: scalar(
+                "SELECT COUNT(*) FROM env_package_versions pv \
+                 JOIN env_packages p ON p.id = pv.package_db_id \
+                 WHERE p.is_deleted = 0 AND pv.is_yanked = 1",
+            )
+            .await?,
+            package_artifacts: scalar("SELECT COUNT(*) FROM env_package_artifacts").await?,
+            package_artifact_bytes: scalar(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM env_package_artifacts",
+            )
+            .await?,
+            stacks: scalar("SELECT COUNT(*) FROM episode_stacks WHERE is_deleted = 0").await?,
+            stack_versions: scalar(
+                "SELECT COUNT(*) FROM episode_stack_versions sv \
+                 JOIN episode_stacks s ON s.id = sv.stack_db_id WHERE s.is_deleted = 0",
+            )
+            .await?,
+            yanked_stack_versions: scalar(
+                "SELECT COUNT(*) FROM episode_stack_versions sv \
+                 JOIN episode_stacks s ON s.id = sv.stack_db_id \
+                 WHERE s.is_deleted = 0 AND sv.is_yanked = 1",
+            )
+            .await?,
+            // Agent bridges are identified by an `agent_kind` inside the
+            // manifest JSON, so there is no column to count — reuse the catalog
+            // query that defines the concept in the first place.
+            agent_bridges: self.list_agent_bridges().await?.len() as i64,
+            templates: scalar("SELECT COUNT(*) FROM env_templates").await?,
+            active_tokens: scalar("SELECT COUNT(*) FROM api_tokens WHERE is_revoked = 0").await?,
+            audit_entries: scalar("SELECT COUNT(*) FROM audit_log").await?,
+        })
+    }
 }
 
 /// The `dataset` values a resolved env version's `config_schema` accepts, when it
