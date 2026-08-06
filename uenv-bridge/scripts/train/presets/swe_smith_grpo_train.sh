@@ -116,7 +116,7 @@ export CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/swesmith_train}
 export SWE_PREPARE_DATA=${SWE_PREPARE_DATA:-1}
 export SWE_WORKSPACE_DIR=${SWE_WORKSPACE_DIR:-/testbed}
 export SWE_LLM_CONFIG_PATH=${SWE_LLM_CONFIG_PATH:-/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json}
-export SWE_TRAJECTORY_MAX_STEPS=${SWE_TRAJECTORY_MAX_STEPS:-30}
+export SWE_TRAJECTORY_MAX_STEPS=${SWE_TRAJECTORY_MAX_STEPS:-50}
 if [ -z "${UENV_EPISODE_MAX_STEPS_OVERRIDE+x}" ]; then
   export UENV_EPISODE_MAX_STEPS_OVERRIDE=${SWE_TRAJECTORY_MAX_STEPS}
 fi
@@ -162,7 +162,7 @@ if [ -z "${EXTRA_VERL_ARGS:-}" ]; then
   EXTRA_VERL_ARG_LIST=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGGING_LEVEL=INFO"
     "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL=INFO"
-    "+actor_rollout_ref.rollout.max_model_len=65536"
+    "+actor_rollout_ref.rollout.max_model_len=131072"
     "actor_rollout_ref.rollout.max_num_batched_tokens=65536"
     "actor_rollout_ref.rollout.multi_stage_wake_up=True"
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True"

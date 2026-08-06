@@ -119,7 +119,7 @@ WANDB_ENV_FILE=${WANDB_ENV_FILE:-${REPO_DIR}/../secrets/wandb.env}
 TRAINER_LOGGER=${TRAINER_LOGGER:-"['console','wandb']"}
 TRAINER_PROJECT_NAME=${TRAINER_PROJECT_NAME:-verl_gsm8k_grpo_train}
 WANDB_MODE=${WANDB_MODE:-online}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_6_35b_a3b_gsm8k_grpo_limit${LIMIT}_${RUN_TS}}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_6_35b_a3b_gsm8k_grpo_${RUN_TS}}
 
 LOG_ROOT=${LOG_ROOT:-${REPO_DIR}/temp/logs}
 LOG_DIR=${LOG_DIR:-${LOG_ROOT}/verl_gsm8k_native_grpo}
