@@ -420,10 +420,18 @@ impl MergeEngine {
                         w.status = status.clone();
                         w.status_reason = observation.status_reason;
                         w.status_changed_ts = observation.status_changed_ts;
+                        if observation.last_heartbeat_ts > 0 {
+                            w.last_heartbeat_ts = observation.last_heartbeat_ts;
+                        }
                         w.current_load = observation.current_load;
                         w.capacity = observation.capacity;
                         w.endpoint = observation.endpoint;
                         w.supported_env_types = observation.supported_env_types;
+                        if !observation.active_episodes.is_empty()
+                            || observation.current_load == 0
+                        {
+                            w.active_episodes = observation.active_episodes;
+                        }
                         upsert_tree_worker(state, &worker_id, &status);
                     }
                 }

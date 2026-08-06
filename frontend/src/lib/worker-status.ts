@@ -91,9 +91,24 @@ export function summarizeWorkerStatuses(
   };
 }
 
+/** 用户面 Worker 详情页路由（与 `/server` 并列，同属面向使用者视图）。 */
+export const WORKER_DETAIL_ROUTE = "/server/worker" as const;
+
 /**
- * Worker 详情页的前端跳转契约。
- * 未来只需提供详情页基地址，即可复用 run / worker / status 三个定位参数。
+ * TanStack Router `search` 参数契约。
+ * `run` / `worker` 为定位键；`status` 仅用于首屏状态徽章回显。
+ */
+export function buildWorkerDetailSearch(target: WorkerDetailTarget) {
+  return {
+    run: target.runId,
+    worker: target.workerId,
+    status: target.status,
+  };
+}
+
+/**
+ * Worker 详情页的前端跳转契约（外部基地址场景，如独立部署）。
+ * 应用内跳转请优先使用 `buildWorkerDetailSearch` + `Link`。
  */
 export function buildWorkerDetailHref(
   baseUrl: string | null | undefined,

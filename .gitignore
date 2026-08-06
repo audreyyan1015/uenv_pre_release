@@ -97,3 +97,6 @@ server-state/
 /uenv-bridge/data/benchmarks/swesmith/raw/
 /uenv-bridge/data/benchmarks/swebenchpro/test.jsonl
 /uenv-bridge/data/benchmarks/swebenchpro/swe_bench_pro_full.csv
+
+# Playwright CLI 本地页面快照（非仓库产物）
+.playwright-cli/
