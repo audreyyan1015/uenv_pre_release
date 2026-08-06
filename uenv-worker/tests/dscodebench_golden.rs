@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use uenv_code_env::dscodebench::{evaluate, EvaluationRequest};
+use uenv_code_env::dscodebench::{EvaluationRequest, evaluate};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

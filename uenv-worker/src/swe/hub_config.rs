@@ -33,7 +33,8 @@ struct RawConfig {
 impl SweDefaultConfig {
     /// 从 JSON 文本解析；校验平级布局并回填键。
     pub fn from_json(raw: &str) -> Result<Self, String> {
-        let raw: RawConfig = serde_json::from_str(raw).map_err(|e| format!("invalid default_config json: {e}"))?;
+        let raw: RawConfig =
+            serde_json::from_str(raw).map_err(|e| format!("invalid default_config json: {e}"))?;
         Self::from_raw(raw)
     }
 
@@ -88,7 +89,9 @@ impl SweDefaultConfig {
             .task_specs
             .get(resolved_task_id)
             .ok_or_else(|| {
-                format!("task_ref `{resolved_task_id}`（instance `{instance_id}`）不在 task_specs 中")
+                format!(
+                    "task_ref `{resolved_task_id}`（instance `{instance_id}`）不在 task_specs 中"
+                )
             })?
             .clone();
 
@@ -96,7 +99,10 @@ impl SweDefaultConfig {
     }
 
     /// 有效 CommandPolicy：默认策略叠加 payload 的 `command_mode` 覆盖。
-    pub fn effective_command_policy(&self, payload_mode: Option<CommandPolicy>) -> CommandPolicyConfig {
+    pub fn effective_command_policy(
+        &self,
+        payload_mode: Option<CommandPolicy>,
+    ) -> CommandPolicyConfig {
         let base = self.default_command_policy.clone().unwrap_or_default();
         match payload_mode {
             Some(mode) => base.with_mode(mode),
@@ -142,9 +148,15 @@ mod tests {
     fn parses_flat_layout_and_backfills_keys() {
         let cfg = SweDefaultConfig::from_json(FLAT_CONFIG).unwrap();
         // 内层省略 instance_id 时由键回填
-        assert_eq!(cfg.instance_specs["sympy__sympy-20800"].instance_id, "sympy__sympy-20800");
+        assert_eq!(
+            cfg.instance_specs["sympy__sympy-20800"].instance_id,
+            "sympy__sympy-20800"
+        );
         // 内层省略 task_id 时由键回填
-        assert_eq!(cfg.task_specs["task_sympy_20800"].task_id, "task_sympy_20800");
+        assert_eq!(
+            cfg.task_specs["task_sympy_20800"].task_id,
+            "task_sympy_20800"
+        );
         let pol = cfg.default_command_policy.as_ref().unwrap();
         assert_eq!(pol.mode, CommandPolicy::RestrictedShell);
         assert_eq!(pol.deny_patterns.as_ref().unwrap().len(), 3);
@@ -172,7 +184,9 @@ mod tests {
     #[test]
     fn explicit_task_id_override() {
         let cfg = SweDefaultConfig::from_json(FLAT_CONFIG).unwrap();
-        let (_, task) = cfg.resolve("sympy__sympy-20590", Some("task_sympy_20800")).unwrap();
+        let (_, task) = cfg
+            .resolve("sympy__sympy-20590", Some("task_sympy_20800"))
+            .unwrap();
         assert_eq!(task.issue_text, "B");
     }
 

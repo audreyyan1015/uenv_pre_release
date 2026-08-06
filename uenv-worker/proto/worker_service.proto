@@ -9,6 +9,7 @@ service WorkerGrpcService {
     rpc DispatchEpisode(DispatchEpisodeRequest) returns (stream uenv.v1.StreamReport);
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
     rpc CancelEpisode(CancelWorkerEpisodeRequest) returns (CancelWorkerEpisodeResponse);
+    rpc PrepareEnvironment(PrepareEnvironmentRequest) returns (PrepareEnvironmentResponse);
 }
 
 message DispatchEpisodeRequest {
@@ -34,4 +35,23 @@ message CancelWorkerEpisodeResponse {
     bool accepted = 1;
     string code = 2;
     string message = 3;
+}
+
+message PrepareEnvironmentRequest {
+    string env_type = 1;
+    string env_package_id = 2;
+    string env_package_version = 3;
+    string expected_bundle_digest = 4;
+    repeated string required_features = 5;
+    string consumer = 6;
+    string stack_id = 7;
+    string stack_version = 8;
+}
+
+message PrepareEnvironmentResponse {
+    bool ready = 1;
+    string env_type = 2;
+    string backend_kind = 3;
+    string package_state = 4;
+    string message = 5;
 }

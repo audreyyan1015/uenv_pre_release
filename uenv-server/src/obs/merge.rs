@@ -427,8 +427,7 @@ impl MergeEngine {
                         w.capacity = observation.capacity;
                         w.endpoint = observation.endpoint;
                         w.supported_env_types = observation.supported_env_types;
-                        if !observation.active_episodes.is_empty()
-                            || observation.current_load == 0
+                        if !observation.active_episodes.is_empty() || observation.current_load == 0
                         {
                             w.active_episodes = observation.active_episodes;
                         }

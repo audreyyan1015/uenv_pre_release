@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Child;
@@ -148,7 +148,8 @@ impl PluginHost {
             if started.elapsed() > ready_timeout {
                 return Err(format!(
                     "plugin UDS did not become ready within {}s timeout: {}",
-                    ready_timeout.as_secs(), uds_path.display()
+                    ready_timeout.as_secs(),
+                    uds_path.display()
                 )
                 .into());
             }
@@ -217,13 +218,17 @@ impl PluginHost {
         &self,
         instance_id: &str,
         action: Vec<u8>,
-    ) -> Result<crate::proto::plugin::v1::StepResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<crate::proto::plugin::v1::StepResponse, Box<dyn std::error::Error + Send + Sync>>
+    {
         let uds_path = self.running_socket(instance_id).await?;
         let mut client = PluginRpcClient::connect_uds(&uds_path).await?;
         client.step(action).await
     }
 
-    pub async fn close(&self, instance_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn close(
+        &self,
+        instance_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let managed = {
             let mut state = self.state.lock().await;
             state.instances.remove(instance_id)
@@ -278,8 +283,12 @@ impl PluginHost {
             if let Ok(entries) = fs::read_dir("/proc") {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
-                    let Some(pid_str) = name.to_str() else { continue };
-                    let Ok(pid) = pid_str.parse::<i32>() else { continue };
+                    let Some(pid_str) = name.to_str() else {
+                        continue;
+                    };
+                    let Ok(pid) = pid_str.parse::<i32>() else {
+                        continue;
+                    };
                     let Ok(bytes) = fs::read(format!("/proc/{pid}/cmdline")) else {
                         continue;
                     };
@@ -351,7 +360,6 @@ impl PluginHost {
         }
         Ok(managed.metadata.uds_path.clone())
     }
-
 }
 
 #[cfg(test)]
@@ -364,7 +372,10 @@ mod tests {
         assert_eq!(plugin_ready_timeout(Some("30")), Duration::from_secs(30));
         assert_eq!(plugin_ready_timeout(Some("0")), Duration::from_secs(2));
         assert_eq!(plugin_ready_timeout(Some("301")), Duration::from_secs(2));
-        assert_eq!(plugin_ready_timeout(Some("invalid")), Duration::from_secs(2));
+        assert_eq!(
+            plugin_ready_timeout(Some("invalid")),
+            Duration::from_secs(2)
+        );
     }
 }
 

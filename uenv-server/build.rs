@@ -11,8 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let worker_proto = "../uenv-worker/proto";
 
     tonic_prost_build::configure()
-        .build_server(true)   // 生成服务端代码（Server trait 和相关结构体）
-        .build_client(true)   // 生成客户端代码（Client 结构体，用于调用其他服务）
+        .build_server(true) // 生成服务端代码（Server trait 和相关结构体）
+        .build_client(true) // 生成客户端代码（Client 结构体，用于调用其他服务）
         .compile_protos(
             &[
                 // 主服务的 proto：定义客户端提交 episode 的接口

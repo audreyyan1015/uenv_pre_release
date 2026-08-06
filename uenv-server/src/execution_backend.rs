@@ -3,9 +3,9 @@
 // 大致工作流：submit_episode 规范化请求后调用选择器；普通请求走 native dispatch，
 // execution_mode=agent 的请求按 env_type 分流到 SWE 或 code ToolEnv 编排。
 
-use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::proto::v1::{EpisodeRequest, EpisodeResult};
@@ -137,13 +137,7 @@ impl EpisodeExecutionBackend for SweAgentBackend {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<EpisodeResult>> + Send + 'a>> {
         Box::pin(async move {
             service
-                .submit_swe_agent_episode(
-                    req,
-                    self.spec.clone(),
-                    deadline,
-                    handle,
-                    async_context,
-                )
+                .submit_swe_agent_episode(req, self.spec.clone(), deadline, handle, async_context)
                 .await
         })
     }
@@ -160,13 +154,7 @@ impl EpisodeExecutionBackend for CodeAgentBackend {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<EpisodeResult>> + Send + 'a>> {
         Box::pin(async move {
             service
-                .submit_code_agent_episode(
-                    req,
-                    self.spec.clone(),
-                    deadline,
-                    handle,
-                    async_context,
-                )
+                .submit_code_agent_episode(req, self.spec.clone(), deadline, handle, async_context)
                 .await
         })
     }

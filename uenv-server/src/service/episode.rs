@@ -240,6 +240,18 @@ impl UEnvEpisodeService {
                 match result {
                     Ok(a) => break a,
                     Err(e) => {
+                        if matches!(
+                            e,
+                            crate::scheduler::traits::ScheduleError::NoMatchingEnvType
+                                | crate::scheduler::traits::ScheduleError::NoMatchingEnvPackage
+                        ) {
+                            if self
+                                .prepare_worker_for_request(&req, &episode_id, &handle, deadline)
+                                .await?
+                            {
+                                continue;
+                            }
+                        }
                         if !is_retryable_schedule_error(&e) {
                             anyhow::bail!("select worker failed: {e}");
                         }
@@ -602,6 +614,78 @@ impl UEnvEpisodeService {
                 }
             }
         }
+    }
+
+    async fn prepare_worker_for_request(
+        &self,
+        req: &EpisodeRequest,
+        episode_id: &str,
+        handle: &Arc<EpisodeHandle>,
+        deadline: Instant,
+    ) -> anyhow::Result<bool> {
+        if Instant::now() > deadline {
+            return Ok(false);
+        }
+        let assignment = match self.state.scheduler.read().select_preparable_worker(req) {
+            Ok(assignment) => assignment,
+            Err(_) => return Ok(false),
+        };
+        tracing::info!(
+            episode_id = %episode_id,
+            worker_id = %assignment.worker_id,
+            env_type = %req.env_type,
+            env_package_id = %req.env_package_id,
+            env_package_version = %req.env_package_version,
+            "worker_prepare_environment_start"
+        );
+        let mut required_features = vec!["hub_dynamic_env".to_string()];
+        if !req.env_package_id.is_empty() {
+            required_features.push("artifact_uri".to_string());
+        }
+        let prepare = crate::ports::prepare_environment_on_worker(
+            &assignment.endpoint,
+            crate::proto::worker::v1::PrepareEnvironmentRequest {
+                env_type: req.env_type.clone(),
+                env_package_id: req.env_package_id.clone(),
+                env_package_version: req.env_package_version.clone(),
+                expected_bundle_digest: String::new(),
+                required_features,
+                consumer: "worker".to_string(),
+                stack_id: req.metadata.get("stack_id").cloned().unwrap_or_default(),
+                stack_version: req.metadata.get("stack_version").cloned().unwrap_or_default(),
+            },
+        );
+        let response = tokio::select! {
+            _ = handle.cancel_token.cancelled() => return Ok(false),
+            response = prepare => response?,
+        };
+        if !response.ready {
+            tracing::warn!(
+                episode_id = %episode_id,
+                worker_id = %assignment.worker_id,
+                env_type = %req.env_type,
+                message = %response.message,
+                "worker_prepare_environment_failed"
+            );
+            return Ok(false);
+        }
+        self.state.scheduler.write().mark_environment_prepared(
+            &assignment.worker_id,
+            &req.env_type,
+            &req.env_package_id,
+            &req.env_package_version,
+            "",
+            &response.backend_kind,
+            &response.message,
+        );
+        tracing::info!(
+            episode_id = %episode_id,
+            worker_id = %assignment.worker_id,
+            env_type = %req.env_type,
+            backend_kind = %response.backend_kind,
+            "worker_prepare_environment_ready"
+        );
+        Ok(true)
     }
 
     pub(crate) async fn submit_swe_agent_episode(

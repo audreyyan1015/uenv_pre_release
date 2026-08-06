@@ -4,6 +4,9 @@ import type {
   NodeStatus,
   TreeNode,
   WorkerView,
+  WorkerPackageState,
+  WorkerPoolSlot,
+  WorkerPoolSummary,
   WorkflowStage,
 } from "@/lib/types/chain-state";
 
@@ -30,12 +33,21 @@ export interface WorkerEnvInstanceSummary {
 }
 
 export interface WorkerLiveOverlay {
+  found?: boolean;
   load?: number;
   capacity?: number;
   heartbeatAgeSecs?: number | null;
   reportAgeSecs?: number | null;
   status?: string;
   endpoint?: string;
+  supportedEnvTypes?: string[];
+  platformFeatures?: string[];
+  backendKinds?: string[];
+  trajectorySchemas?: string[];
+  toolSchemas?: string[];
+  packageStates?: WorkerPackageState[];
+  poolSummary?: WorkerPoolSummary[];
+  poolSlots?: WorkerPoolSlot[];
   liveEpisodes?: Array<{
     episodeId: string;
     attemptId?: number;

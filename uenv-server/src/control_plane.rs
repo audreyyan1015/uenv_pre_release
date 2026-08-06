@@ -23,6 +23,98 @@ use crate::result_finalizer::{
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
 use crate::state::ServerState;
 
+fn package_state_from_proto(
+    p: crate::proto::scheduler::v1::EnvPackageState,
+) -> crate::scheduler::traits::EnvPackageStateInfo {
+    crate::scheduler::traits::EnvPackageStateInfo {
+        package_id: p.package_id,
+        version: p.version,
+        bundle_digest: p.bundle_digest,
+        state: p.state,
+        env_type: p.env_type,
+        backend_kind: p.backend_kind,
+        message: p.message,
+    }
+}
+
+fn pool_summary_from_proto(
+    p: crate::proto::scheduler::v1::WorkerPoolSummary,
+) -> crate::scheduler::traits::WorkerPoolSummaryInfo {
+    crate::scheduler::traits::WorkerPoolSummaryInfo {
+        env_type: p.env_type,
+        variant: p.variant,
+        package_id: p.package_id,
+        package_version: p.package_version,
+        backend_kind: p.backend_kind,
+        ready: p.ready,
+        busy: p.busy,
+        warming: p.warming,
+        capacity: p.capacity,
+    }
+}
+
+fn pool_slot_from_proto(
+    p: crate::proto::scheduler::v1::WorkerPoolSlot,
+) -> crate::scheduler::traits::WorkerPoolSlotInfo {
+    crate::scheduler::traits::WorkerPoolSlotInfo {
+        slot_id: p.slot_id,
+        status: p.status,
+        env_type: p.env_type,
+        variant: p.variant,
+        package_id: p.package_id,
+        package_version: p.package_version,
+        backend_kind: p.backend_kind,
+        episode_id: p.episode_id,
+        session_id: p.session_id,
+    }
+}
+
+fn package_state_to_proto(
+    p: crate::scheduler::traits::EnvPackageStateInfo,
+) -> crate::proto::scheduler::v1::EnvPackageState {
+    crate::proto::scheduler::v1::EnvPackageState {
+        package_id: p.package_id,
+        version: p.version,
+        bundle_digest: p.bundle_digest,
+        state: p.state,
+        env_type: p.env_type,
+        backend_kind: p.backend_kind,
+        message: p.message,
+    }
+}
+
+fn pool_summary_to_proto(
+    p: crate::scheduler::traits::WorkerPoolSummaryInfo,
+) -> crate::proto::scheduler::v1::WorkerPoolSummary {
+    crate::proto::scheduler::v1::WorkerPoolSummary {
+        env_type: p.env_type,
+        variant: p.variant,
+        package_id: p.package_id,
+        package_version: p.package_version,
+        backend_kind: p.backend_kind,
+        ready: p.ready,
+        busy: p.busy,
+        warming: p.warming,
+        capacity: p.capacity,
+    }
+}
+
+fn pool_slot_to_proto(
+    p: crate::scheduler::traits::WorkerPoolSlotInfo,
+) -> crate::proto::scheduler::v1::WorkerPoolSlot {
+    crate::proto::scheduler::v1::WorkerPoolSlot {
+        slot_id: p.slot_id,
+        status: p.status,
+        env_type: p.env_type,
+        variant: p.variant,
+        package_id: p.package_id,
+        package_version: p.package_version,
+        backend_kind: p.backend_kind,
+        episode_id: p.episode_id,
+        session_id: p.session_id,
+    }
+}
+
 /// worker control plane gRPC 服务实现。
 ///
 /// 这个服务负责 worker 注册、心跳、结果上报和 worker 列表查询。它不直接执行 episode，
@@ -83,6 +175,25 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                     version: p.version.clone(),
                     bundle_digest: p.bundle_digest.clone(),
                 })
+                .collect(),
+            platform_features: req.platform_features.clone(),
+            backend_kinds: req.backend_kinds.clone(),
+            trajectory_schemas: req.trajectory_schemas.clone(),
+            tool_schemas: req.tool_schemas.clone(),
+            package_states: req
+                .package_states
+                .into_iter()
+                .map(package_state_from_proto)
+                .collect(),
+            pool_summary: req
+                .pool_summary
+                .into_iter()
+                .map(pool_summary_from_proto)
+                .collect(),
+            pool_slots: req
+                .pool_slots
+                .into_iter()
+                .map(pool_slot_from_proto)
                 .collect(),
         };
 
@@ -153,6 +264,29 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                             &heartbeat.worker_id,
                             heartbeat.load.max(0) as u32,
                             heartbeat.max_load.max(0) as u32,
+                        );
+                        state.scheduler.write().update_worker_runtime_state(
+                            &heartbeat.worker_id,
+                            heartbeat.supported_env_types.clone(),
+                            heartbeat.platform_features.clone(),
+                            heartbeat.backend_kinds.clone(),
+                            heartbeat.trajectory_schemas.clone(),
+                            heartbeat.tool_schemas.clone(),
+                            heartbeat
+                                .package_states
+                                .into_iter()
+                                .map(package_state_from_proto)
+                                .collect(),
+                            heartbeat
+                                .pool_summary
+                                .into_iter()
+                                .map(pool_summary_from_proto)
+                                .collect(),
+                            heartbeat
+                                .pool_slots
+                                .into_iter()
+                                .map(pool_slot_from_proto)
+                                .collect(),
                         );
                         if let Some((old_capacity, new_capacity)) = capacity_change {
                             // worker 心跳改变容量时，dynamic admission 也必须同步。
@@ -562,6 +696,21 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 }
                 .to_string(),
                 endpoint: w.endpoint,
+                platform_features: w.platform_features,
+                backend_kinds: w.backend_kinds,
+                trajectory_schemas: w.trajectory_schemas,
+                tool_schemas: w.tool_schemas,
+                package_states: w
+                    .package_states
+                    .into_iter()
+                    .map(package_state_to_proto)
+                    .collect(),
+                pool_summary: w
+                    .pool_summary
+                    .into_iter()
+                    .map(pool_summary_to_proto)
+                    .collect(),
+                pool_slots: w.pool_slots.into_iter().map(pool_slot_to_proto).collect(),
             })
             .collect();
         Ok(Response::new(ListWorkersResponse { workers }))

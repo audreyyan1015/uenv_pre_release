@@ -103,3 +103,6 @@ server-state/
 
 # Playwright CLI 本地页面快照（非仓库产物）
 .playwright-cli/
+
+# 本地联调截图/导出产物（非仓库产物）
+/output/

@@ -8,7 +8,10 @@ use tokio::sync::Mutex;
 
 use crate::plugin::host::{PluginHost, PluginManifest};
 
-use super::{hub_to_plugin_manifest, pull_full_manifest, HubPullSummary};
+use super::{
+    HubPullSummary, hub_manifest_can_register_as_process_plugin, hub_to_plugin_manifest,
+    pull_full_manifest,
+};
 
 /// Ensures `env_type` is spawnable before WarmupPool creates instances.
 #[derive(Clone)]
@@ -53,11 +56,28 @@ impl EnvResolver {
                 }
                 self.plugin_host.register_manifest(manifest).await?;
             }
+        } else if !summary
+            .supported_backends
+            .iter()
+            .any(|b| b == "process" || b == "openenv_http" || b == "generic_openenv_plugin")
+        {
+            tracing::info!(
+                trace_id = "env_resolver",
+                episode_id = "-",
+                worker_id = "worker",
+                env_type = %summary.env_type,
+                version = %summary.version,
+                backends = %summary.supported_backends.join(","),
+                msg = "hub_manifest_skipped_non_process_plugin"
+            );
         } else {
             self.pull_from_hub_and_register(&summary.env_type).await?;
             return Ok(());
         }
-        self.hub_synced.lock().await.insert(summary.env_type.clone());
+        self.hub_synced
+            .lock()
+            .await
+            .insert(summary.env_type.clone());
         Ok(())
     }
 
@@ -86,12 +106,8 @@ impl EnvResolver {
                 return Ok(());
             }
         }
-        let summary = super::pull_env_manifest(
-            endpoint,
-            env_type,
-            self.hub_token.as_deref(),
-        )
-        .await?;
+        let summary =
+            super::pull_env_manifest(endpoint, env_type, self.hub_token.as_deref()).await?;
         self.apply_hub_summary(&summary).await?;
         tracing::info!(
             trace_id = "env_resolver",
@@ -112,6 +128,12 @@ impl EnvResolver {
             format!("env_type={env_type} has no local manifest and hub is not configured")
         })?;
         let hub = pull_full_manifest(endpoint, env_type, self.hub_token.as_deref()).await?;
+        if !hub_manifest_can_register_as_process_plugin(&hub) {
+            return Err(format!(
+                "hub manifest for env_type={env_type} does not expose a process-compatible plugin contract"
+            )
+            .into());
+        }
         let manifest = hub_to_plugin_manifest(&hub, &self.plugin_dir)?;
         self.plugin_host.register_manifest(manifest).await?;
         self.hub_synced.lock().await.insert(env_type.to_string());
@@ -141,7 +163,9 @@ mod tests {
 
     #[test]
     fn reads_local_entry_from_math_plugin() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("repo");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo");
         let entry = read_local_manifest_entry(&repo.join("plugins/math"));
         assert_eq!(entry.as_deref(), Some("./run.sh"));
     }

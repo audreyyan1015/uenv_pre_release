@@ -38,11 +38,7 @@ impl RewardEngine {
         }
 
         let action = std::str::from_utf8(action)?.trim();
-        Ok(if action == target.trim() {
-            1.0
-        } else {
-            0.0
-        })
+        Ok(if action == target.trim() { 1.0 } else { 0.0 })
     }
 }
 

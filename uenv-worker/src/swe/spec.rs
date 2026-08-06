@@ -46,7 +46,10 @@ impl Workspace {
 pub enum IssueRef {
     /// Hub `task_specs[task_id]` / `tasks[task_id]`。
     TaskId(String),
-    DatasetRow { dataset: String, row_id: String },
+    DatasetRow {
+        dataset: String,
+        row_id: String,
+    },
     /// Episode 级缓存句柄。
     InlineHandle(String),
     /// 未来：`s3://...` / `hf://...`。
@@ -172,7 +175,10 @@ mod tests {
         let ws = Workspace::from_instance_spec(&instance, "/testbed");
         assert_eq!(ws.instance_id, "sympy__sympy-20590");
         assert_eq!(ws.base_commit, "abc123");
-        assert_eq!(ws.issue_ref, IssueRef::TaskId("task_sympy_20590".to_string()));
+        assert_eq!(
+            ws.issue_ref,
+            IssueRef::TaskId("task_sympy_20590".to_string())
+        );
         assert_eq!(ws.issue_ref.as_task_id(), Some("task_sympy_20590"));
         assert_eq!(ws.repo_path, PathBuf::from("/testbed"));
     }

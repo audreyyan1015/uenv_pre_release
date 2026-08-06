@@ -17,7 +17,11 @@ pub trait ResettableInstance: Send {
     fn workspace(&self) -> &Workspace;
 
     /// 将沙箱恢复到未污染状态，绑定本次 episode 的 instance/task。
-    fn reset_for_episode(&self, instance: &InstanceSpec, task: &TaskSpec) -> Result<(), BackendError>;
+    fn reset_for_episode(
+        &self,
+        instance: &InstanceSpec,
+        task: &TaskSpec,
+    ) -> Result<(), BackendError>;
 
     fn health_check(&self) -> bool;
     fn destroy(&self) -> Result<(), BackendError>;
@@ -121,7 +125,11 @@ impl ResettableInstance for PodmanResettableInstance {
         &self.workspace
     }
 
-    fn reset_for_episode(&self, _instance: &InstanceSpec, _task: &TaskSpec) -> Result<(), BackendError> {
+    fn reset_for_episode(
+        &self,
+        _instance: &InstanceSpec,
+        _task: &TaskSpec,
+    ) -> Result<(), BackendError> {
         let script = Self::reset_script(
             &self.workspace.repo_path.to_string_lossy(),
             &self.workspace.base_commit,
@@ -202,7 +210,11 @@ impl ResettableInstance for SnapshotResettableInstance {
         &self.workspace
     }
 
-    fn reset_for_episode(&self, _instance: &InstanceSpec, _task: &TaskSpec) -> Result<(), BackendError> {
+    fn reset_for_episode(
+        &self,
+        _instance: &InstanceSpec,
+        _task: &TaskSpec,
+    ) -> Result<(), BackendError> {
         let old = self.handle.lock().expect("snapshot handle lock").clone();
         let _ = self.backend.destroy(&old);
         let restored = self.backend.restore(&self.snapshot)?;

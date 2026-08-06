@@ -67,13 +67,31 @@ mod tests {
 
     #[test]
     fn parse_accepts_aliases() {
-        assert_eq!(BenchmarkVariant::parse("verified"), Some(BenchmarkVariant::Verified));
-        assert_eq!(BenchmarkVariant::parse("Lite"), Some(BenchmarkVariant::Lite));
+        assert_eq!(
+            BenchmarkVariant::parse("verified"),
+            Some(BenchmarkVariant::Verified)
+        );
+        assert_eq!(
+            BenchmarkVariant::parse("Lite"),
+            Some(BenchmarkVariant::Lite)
+        );
         assert_eq!(BenchmarkVariant::parse("PRO"), Some(BenchmarkVariant::Pro));
-        assert_eq!(BenchmarkVariant::parse("swe-bench_pro"), Some(BenchmarkVariant::Pro));
-        assert_eq!(BenchmarkVariant::parse("smith"), Some(BenchmarkVariant::Smith));
-        assert_eq!(BenchmarkVariant::parse("SWE-smith"), Some(BenchmarkVariant::Smith));
-        assert_eq!(BenchmarkVariant::parse("swe-bench-smith"), Some(BenchmarkVariant::Smith));
+        assert_eq!(
+            BenchmarkVariant::parse("swe-bench_pro"),
+            Some(BenchmarkVariant::Pro)
+        );
+        assert_eq!(
+            BenchmarkVariant::parse("smith"),
+            Some(BenchmarkVariant::Smith)
+        );
+        assert_eq!(
+            BenchmarkVariant::parse("SWE-smith"),
+            Some(BenchmarkVariant::Smith)
+        );
+        assert_eq!(
+            BenchmarkVariant::parse("swe-bench-smith"),
+            Some(BenchmarkVariant::Smith)
+        );
         assert_eq!(BenchmarkVariant::parse("nope"), None);
     }
 

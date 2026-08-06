@@ -94,6 +94,47 @@ export interface WorkerView {
   capacity?: number;
   endpoint?: string;
   supported_env_types?: string[];
+  platform_features?: string[];
+  backend_kinds?: string[];
+  trajectory_schemas?: string[];
+  tool_schemas?: string[];
+  package_states?: WorkerPackageState[];
+  pool_summary?: WorkerPoolSummary[];
+  pool_slots?: WorkerPoolSlot[];
+}
+
+export interface WorkerPackageState {
+  package_id: string;
+  version: string;
+  bundle_digest?: string;
+  state: string;
+  env_type?: string;
+  backend_kind?: string;
+  message?: string;
+}
+
+export interface WorkerPoolSummary {
+  env_type: string;
+  variant?: string;
+  package_id?: string;
+  package_version?: string;
+  backend_kind?: string;
+  ready: number;
+  busy: number;
+  warming: number;
+  capacity: number;
+}
+
+export interface WorkerPoolSlot {
+  slot_id: string;
+  status: string;
+  env_type: string;
+  variant?: string;
+  package_id?: string;
+  package_version?: string;
+  backend_kind?: string;
+  episode_id?: string;
+  session_id?: string;
 }
 
 // ---------- 游标 / 增量 ----------

@@ -9,11 +9,11 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
-use tonic::{Request, Response, Status};
 #[cfg(unix)]
 use tonic::transport::Server;
+use tonic::{Request, Response, Status};
 use uenv_code_env::dscodebench::{
-    evaluate, reward_from_result, EvaluationRequest, EvaluationResult, StepInfo,
+    EvaluationRequest, EvaluationResult, StepInfo, evaluate, reward_from_result,
 };
 use uenv_worker::proto::plugin::v1::plugin_service_server::PluginService;
 #[cfg(unix)]
@@ -113,7 +113,10 @@ fn step_outcome(
     let mut payload = serde_json::to_value(result).unwrap_or(serde_json::Value::Null);
     if let Some(object) = payload.as_object_mut() {
         object.insert("interaction_step".to_string(), current_step.into());
-        object.insert("minimum_interaction_steps".to_string(), required_steps.into());
+        object.insert(
+            "minimum_interaction_steps".to_string(),
+            required_steps.into(),
+        );
         object.insert("continuation_required".to_string(), (!terminated).into());
         if result.passed && !terminated {
             object.insert(
@@ -197,12 +200,13 @@ impl PluginService for CodePlugin {
         };
 
         let result = evaluate(&action, &eval_req).await;
-        let (observation, terminated) = step_outcome(
-            &result,
-            s.current_step,
-            s.min_steps_before_terminate,
-        );
-        let reward = if terminated { reward_from_result(&result) } else { 0.0 };
+        let (observation, terminated) =
+            step_outcome(&result, s.current_step, s.min_steps_before_terminate);
+        let reward = if terminated {
+            reward_from_result(&result)
+        } else {
+            0.0
+        };
         let step_info = StepInfo::from_result(&result, &s.dataset, &s.task_id, &s.library);
         let info_json = serde_json::to_string(&step_info).unwrap_or_default();
 
@@ -276,9 +280,8 @@ impl PluginService for CodePlugin {
             Err(e) => issues.push(format!("python `{python}` not runnable: {e}")),
         }
 
-        let script = std::env::var("UENV_CODE_EVAL_SCRIPT").unwrap_or_else(|_| {
-            "plugins/code/scripts/evaluate_code.py".to_string()
-        });
+        let script = std::env::var("UENV_CODE_EVAL_SCRIPT")
+            .unwrap_or_else(|_| "plugins/code/scripts/evaluate_code.py".to_string());
         if !PathBuf::from(&script).is_file() {
             // Also accept relative discovery used by executor.
             let known = [

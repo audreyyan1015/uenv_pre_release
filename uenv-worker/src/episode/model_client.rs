@@ -3,14 +3,14 @@ use std::time::Instant;
 
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
-use serde_json::{json, Value};
-use tokio::time::{sleep, Duration};
+use serde_json::{Value, json};
+use tokio::time::{Duration, sleep};
 
 use crate::episode::rollout_meta::{
-    parse_logprobs_from_chat_response, parse_model_version_from_response,
-    parse_response_ids_from_chat_response, AsyncRolloutError, RolloutModelMeta,
+    AsyncRolloutError, RolloutModelMeta, parse_logprobs_from_chat_response,
+    parse_model_version_from_response, parse_response_ids_from_chat_response,
 };
-use crate::llm::{chat_completions_url_for_endpoint, is_valid_llm_endpoint, LlmConfig};
+use crate::llm::{LlmConfig, chat_completions_url_for_endpoint, is_valid_llm_endpoint};
 use crate::proto::v1::ModelEndpoint;
 
 #[derive(Debug, Clone)]
@@ -131,7 +131,11 @@ impl ModelClient {
                     .pointer("/episode_config/initial_observation/prompt_text")
                     .and_then(Value::as_str)
             })
-            .or_else(|| payload_json.pointer("/env_config/raw_prompt").and_then(Value::as_str))
+            .or_else(|| {
+                payload_json
+                    .pointer("/env_config/raw_prompt")
+                    .and_then(Value::as_str)
+            })
             .map(str::trim)
             .filter(|q| !q.is_empty());
 
@@ -140,8 +144,9 @@ impl ModelClient {
             let reward_json: Value = if reward_config.is_empty() {
                 Value::Null
             } else {
-                serde_json::from_slice(reward_config)
-                    .map_err(|err| ModelInferError::Other(format!("invalid reward_config json: {err}")))?
+                serde_json::from_slice(reward_config).map_err(|err| {
+                    ModelInferError::Other(format!("invalid reward_config json: {err}"))
+                })?
             };
             if reward_json.get("type").and_then(Value::as_str) == Some("rule_reward") {
                 if let Some(target) = reward_json.get("target").and_then(Value::as_str) {
@@ -227,14 +232,17 @@ impl ModelClient {
                     if status.is_success() {
                         let headers = response_headers(&resp);
                         let resp_json: Value = resp.json().await.map_err(|err| {
-                            ModelInferError::Other(format!("model client: invalid response json: {err}"))
+                            ModelInferError::Other(format!(
+                                "model client: invalid response json: {err}"
+                            ))
                         })?;
                         let content = resp_json
                             .pointer("/choices/0/message/content")
                             .and_then(Value::as_str)
                             .ok_or_else(|| {
                                 ModelInferError::Other(
-                                    "model client: response missing choices[0].message.content".to_string(),
+                                    "model client: response missing choices[0].message.content"
+                                        .to_string(),
                                 )
                             })?;
                         let model_ms = model_start.elapsed().as_millis() as u64;
@@ -283,7 +291,11 @@ impl ModelClient {
                     );
                 }
                 Err(e) => {
-                    last_err = format!("model client connection error (attempt {}): {}", attempt + 1, e);
+                    last_err = format!(
+                        "model client connection error (attempt {}): {}",
+                        attempt + 1,
+                        e
+                    );
                 }
             }
             sleep(Duration::from_secs(2)).await;
@@ -341,15 +353,14 @@ struct LlmTarget {
 }
 
 fn resolve_llm_target(llm: &LlmConfig, model_endpoint: Option<&ModelEndpoint>) -> LlmTarget {
-    let typed_url = model_endpoint.map(|endpoint| endpoint.url.trim()).unwrap_or("");
+    let typed_url = model_endpoint
+        .map(|endpoint| endpoint.url.trim())
+        .unwrap_or("");
     let endpoint_base = if is_valid_llm_endpoint(typed_url) {
         typed_url.to_string()
     } else {
         if !typed_url.is_empty() {
-            tracing::warn!(
-                model_endpoint = typed_url,
-                "worker_model_endpoint_invalid"
-            );
+            tracing::warn!(model_endpoint = typed_url, "worker_model_endpoint_invalid");
         }
         llm.endpoint.trim().to_string()
     };
@@ -387,10 +398,10 @@ fn model_endpoint_generation_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_llm_target, LlmTarget, ModelClient};
+    use super::{LlmTarget, ModelClient, resolve_llm_target};
     use crate::llm::LlmConfig;
     use crate::proto::v1::ModelEndpoint;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -528,11 +539,7 @@ mod tests {
     async fn rule_reward_short_circuit_without_llm_or_question() {
         let client = ModelClient::new();
         let action = client
-            .infer_action(
-                br#"{}"#,
-                br#"{"type":"rule_reward","target":"20"}"#,
-                1,
-            )
+            .infer_action(br#"{}"#, br#"{"type":"rule_reward","target":"20"}"#, 1)
             .await
             .expect("infer");
         assert_eq!(action, b"20");
@@ -566,7 +573,8 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
-            let body = b"{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
+            let body =
+                b"{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
                 body.len(),
@@ -583,7 +591,11 @@ mod tests {
         });
         let payload = r#"{"question":"ping","model_name":"deepseek-v4-flash"}"#;
         let action = client
-            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"x"}"#, 1)
+            .infer_action(
+                payload.as_bytes(),
+                br#"{"type":"rule_reward","target":"x"}"#,
+                1,
+            )
             .await
             .expect("infer");
 
@@ -662,7 +674,11 @@ mod tests {
         });
         let payload = r#"{"question":"2+2?","generation_config":{"max_new_tokens":16}}"#;
         let action = client
-            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"4"}"#, 1)
+            .infer_action(
+                payload.as_bytes(),
+                br#"{"type":"rule_reward","target":"4"}"#,
+                1,
+            )
             .await
             .expect("infer");
 

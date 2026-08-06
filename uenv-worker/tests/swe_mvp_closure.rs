@@ -8,9 +8,9 @@ use std::fs;
 use std::path::Path;
 
 use uenv_worker::backend::{PodmanBackend, SandboxSpec};
-use uenv_worker::swe::command_policy::CommandPolicy;
-use uenv_worker::swe::spec::{build_reset_observation, IssueRef, Workspace};
 use uenv_worker::swe::SweDefaultConfig;
+use uenv_worker::swe::command_policy::CommandPolicy;
+use uenv_worker::swe::spec::{IssueRef, Workspace, build_reset_observation};
 
 fn seed_config() -> SweDefaultConfig {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -43,7 +43,10 @@ fn workspace_is_thin_and_observation_loads_issue_from_task() {
 
     // provision → 瘦 Workspace：issue_ref=TaskId，无 issue_text 字段。
     let ws = Workspace::from_instance_spec(&instance, "/testbed");
-    assert_eq!(ws.issue_ref, IssueRef::TaskId("task_sympy_20590".to_string()));
+    assert_eq!(
+        ws.issue_ref,
+        IssueRef::TaskId("task_sympy_20590".to_string())
+    );
 
     // reset observation 的 issue_text 来自 TaskSpec，而非 Workspace。
     let obs = build_reset_observation(&ws, &task);

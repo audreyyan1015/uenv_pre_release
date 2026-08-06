@@ -25,6 +25,7 @@ fuser -k 28888/tcp 2>/dev/null || true
 sleep 2
 source /root/.uenv-worker.env 2>/dev/null || true
 source /root/.uenv-trajectory.env 2>/dev/null || true
+export UENV_OPENENV_PLUGIN_BIN="${UENV_OPENENV_PLUGIN_BIN:-/root/UEnv/target/release/uenv-openenv-plugin}"
 export UENV_WORKER_ALLOW_DEGRADED_START=1
 # 长耗时 math/OlymMATH：与 Server default_timeout、LLM HTTP 超时对齐到分钟级
 export UENV_WORKER_EPISODE_TIMEOUT_SECS="${UENV_WORKER_EPISODE_TIMEOUT_SECS:-600}"

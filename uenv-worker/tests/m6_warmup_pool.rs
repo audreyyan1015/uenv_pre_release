@@ -27,9 +27,7 @@ async fn m6_warm_pool_reuse_and_no_double_allocation() {
             max_episode_count: 1000,
         },
     );
-    pool.prewarm(&["math".to_string()])
-        .await
-        .expect("prewarm");
+    pool.prewarm(&["math".to_string()]).await.expect("prewarm");
 
     let first = pool.acquire("math").await.expect("first acquire");
     let second = pool.acquire("math").await.expect("second acquire");
@@ -58,7 +56,10 @@ async fn m6_code_pool_independent_from_math() {
     unsafe {
         std::env::set_var("UENV_MATH_PLUGIN_BIN", math_bin);
         std::env::set_var("UENV_CODE_PLUGIN_BIN", code_bin);
-        std::env::set_var("UENV_CODE_EVAL_SCRIPT", eval_script.to_string_lossy().as_ref());
+        std::env::set_var(
+            "UENV_CODE_EVAL_SCRIPT",
+            eval_script.to_string_lossy().as_ref(),
+        );
     }
 
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))

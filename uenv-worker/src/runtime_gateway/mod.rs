@@ -58,7 +58,12 @@ struct ErrorResp {
 }
 
 fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorResp>) {
-    (status, Json(ErrorResp { error: msg.to_string() }))
+    (
+        status,
+        Json(ErrorResp {
+            error: msg.to_string(),
+        }),
+    )
 }
 
 /// 构建 Gateway 路由（注入 L2 池 + 可选 API key）。health 公开，其余经 `X-API-Key` 校验。
@@ -75,16 +80,25 @@ pub fn router(
     };
     let protected = Router::new()
         .route("/runtime/v1/sessions", post(create_session))
-        .route("/runtime/v1/sessions/for-episode", post(create_session_for_episode))
+        .route(
+            "/runtime/v1/sessions/for-episode",
+            post(create_session_for_episode),
+        )
         .route("/runtime/v1/sessions/{id}/exec", post(exec))
         .route("/runtime/v1/sessions/{id}/read", post(read))
         .route("/runtime/v1/sessions/{id}/write", post(write))
-        .route("/runtime/v1/sessions/{id}/submit", post(submit).get(submit_status))
+        .route(
+            "/runtime/v1/sessions/{id}/submit",
+            post(submit).get(submit_status),
+        )
         .route("/runtime/v1/sessions/{id}", delete(destroy))
         .route("/runtime/v1/trajectories/{id}", get(get_trajectory))
         .route("/runtime/v1/trajectories", get(list_trajectories))
         .route("/runtime/v1/instances/{id}", get(get_instance))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), require_api_key))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ))
         .with_state(state);
     Router::new()
         .route("/runtime/v1/health", get(health))
@@ -121,12 +135,12 @@ async fn require_api_key(
     next: Next,
 ) -> Result<Response, (StatusCode, Json<ErrorResp>)> {
     if let Some(expected) = &st.api_key {
-        let provided = req
-            .headers()
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok());
+        let provided = req.headers().get("x-api-key").and_then(|v| v.to_str().ok());
         if provided != Some(expected.as_str()) {
-            return Err(err(StatusCode::UNAUTHORIZED, "missing or invalid X-API-Key"));
+            return Err(err(
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid X-API-Key",
+            ));
         }
     }
     Ok(next.run(req).await)
@@ -231,35 +245,42 @@ async fn create_session(
         .unwrap_or("")
         .to_string();
     let variant = match &req.benchmark_variant {
-        Some(v) => BenchmarkVariant::parse(v)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("invalid benchmark_variant `{v}`")))?,
+        Some(v) => BenchmarkVariant::parse(v).ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid benchmark_variant `{v}`"),
+            )
+        })?,
         None => BenchmarkVariant::default(),
     };
     let mode = match &req.command_mode {
-        Some(m) => CommandPolicy::parse(m)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("invalid command_mode `{m}`")))?,
+        Some(m) => CommandPolicy::parse(m).ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid command_mode `{m}`"),
+            )
+        })?,
         None => CommandPolicy::FullShell, // SWE-bench 对标默认宽容
     };
     let policy = CommandPolicyConfig::default().with_mode(mode);
     let instance_id = req.instance_id.clone();
 
     let pool = st.pool.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        pool.create_session(&instance_id, variant, policy)
-    })
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
+    let result =
+        tokio::task::spawn_blocking(move || pool.create_session(&instance_id, variant, policy))
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
 
     match result {
         Ok((session_id, observation)) => {
             st.pool.set_session_run_id(&session_id, &run_id);
             Ok(Json(CreateResp {
-            session_id,
-            instance_id: req.instance_id,
-            benchmark_variant: variant.as_str().to_string(),
-            command_mode: format!("{mode:?}"),
-            observation,
-        }))
+                session_id,
+                instance_id: req.instance_id,
+                benchmark_variant: variant.as_str().to_string(),
+                command_mode: format!("{mode:?}"),
+                observation,
+            }))
         }
         Err(e) => {
             let msg = e.to_string();
@@ -338,13 +359,21 @@ async fn create_session_for_episode(
     Json(req): Json<ForEpisodeReq>,
 ) -> ApiResult<ForEpisodeResp> {
     let variant = match &req.benchmark_variant {
-        Some(v) => BenchmarkVariant::parse(v)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("invalid benchmark_variant `{v}`")))?,
+        Some(v) => BenchmarkVariant::parse(v).ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid benchmark_variant `{v}`"),
+            )
+        })?,
         None => BenchmarkVariant::default(),
     };
     let mode = match &req.command_mode {
-        Some(m) => CommandPolicy::parse(m)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("invalid command_mode `{m}`")))?,
+        Some(m) => CommandPolicy::parse(m).ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                format!("invalid command_mode `{m}`"),
+            )
+        })?,
         None => CommandPolicy::FullShell,
     };
     let policy = CommandPolicyConfig::default().with_mode(mode);
@@ -366,9 +395,7 @@ async fn create_session_for_episode(
         Ok(((session_id, observation), catalog_row)) => {
             st.pool.set_session_run_id(&session_id, &run_id);
             st.pool.set_session_episode_id(&session_id, &episode_id);
-            let instance_catalog_json = catalog_row
-                .map(mini_catalog_json)
-                .unwrap_or_default();
+            let instance_catalog_json = catalog_row.map(mini_catalog_json).unwrap_or_default();
             Ok(Json(ForEpisodeResp {
                 session_id,
                 gateway_url,
@@ -512,7 +539,10 @@ fn submit_result_value(submit: crate::swe::session::SubmitOutcome) -> serde_json
         .map(|tr| {
             tr.per_test
                 .iter()
-                .map(|(id, ok)| TestEntry { node_id: id.clone(), passed: *ok })
+                .map(|(id, ok)| TestEntry {
+                    node_id: id.clone(),
+                    passed: *ok,
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -530,7 +560,10 @@ fn submit_result_value(submit: crate::swe::session::SubmitOutcome) -> serde_json
     .expect("SubmitResp must serialize")
 }
 
-fn submit_state_response(session_id: String, state: &SubmitState) -> (StatusCode, Json<SubmitStatusResp>) {
+fn submit_state_response(
+    session_id: String,
+    state: &SubmitState,
+) -> (StatusCode, Json<SubmitStatusResp>) {
     match state {
         SubmitState::Running => (
             StatusCode::ACCEPTED,
@@ -586,7 +619,8 @@ async fn submit(
     let session_id = id.clone();
     tokio::spawn(async move {
         let submit_session_id = session_id.clone();
-        let state = match tokio::task::spawn_blocking(move || pool.submit(&submit_session_id)).await {
+        let state = match tokio::task::spawn_blocking(move || pool.submit(&submit_session_id)).await
+        {
             Ok(Ok(submit)) => SubmitState::Completed(submit_result_value(submit)),
             Ok(Err(error)) => SubmitState::Failed(error.to_string()),
             Err(error) => SubmitState::Failed(format!("submit worker task failed: {error}")),
@@ -605,9 +639,12 @@ async fn submit_status(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<SubmitStatusResp>), (StatusCode, Json<ErrorResp>)> {
     let submissions = st.submissions.lock().expect("submit state lock");
-    let state = submissions
-        .get(&id)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "submit has not been started for this session"))?;
+    let state = submissions.get(&id).ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "submit has not been started for this session",
+        )
+    })?;
     Ok(submit_state_response(id, state))
 }
 
@@ -632,7 +669,9 @@ async fn get_trajectory(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
         .map_err(trajectory_error)?;
-    Ok(Json(serde_json::to_value(bundle).unwrap_or(serde_json::json!({}))))
+    Ok(Json(
+        serde_json::to_value(bundle).unwrap_or(serde_json::json!({})),
+    ))
 }
 
 async fn list_trajectories(
@@ -658,10 +697,7 @@ struct DeleteResp {
     released: bool,
 }
 
-async fn destroy(
-    State(st): State<GatewayState>,
-    Path(id): Path<String>,
-) -> ApiResult<DeleteResp> {
+async fn destroy(State(st): State<GatewayState>, Path(id): Path<String>) -> ApiResult<DeleteResp> {
     st.submissions
         .lock()
         .expect("submit state lock")
@@ -721,9 +757,17 @@ mod tests {
 
     #[tokio::test]
     async fn health_is_public_and_ok() {
-        let app = router(empty_pool(), Some("secret".to_string()), "http://gateway.test".to_string());
+        let app = router(
+            empty_pool(),
+            Some("secret".to_string()),
+            "http://gateway.test".to_string(),
+        );
         let resp = app
-            .oneshot(HttpRequest::get("/runtime/v1/health").body(Body::empty()).unwrap())
+            .oneshot(
+                HttpRequest::get("/runtime/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -746,24 +790,40 @@ mod tests {
 
     #[tokio::test]
     async fn api_key_enforced_on_protected_routes() {
-        let app = router(empty_pool(), Some("secret".to_string()), "http://gateway.test".to_string());
+        let app = router(
+            empty_pool(),
+            Some("secret".to_string()),
+            "http://gateway.test".to_string(),
+        );
         // 缺 key → 401
         let resp = app
             .clone()
-            .oneshot(post_json("/runtime/v1/sessions", r#"{"instance_id":"x"}"#, None))
+            .oneshot(post_json(
+                "/runtime/v1/sessions",
+                r#"{"instance_id":"x"}"#,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // 错误 key → 401
         let resp = app
             .clone()
-            .oneshot(post_json("/runtime/v1/sessions", r#"{"instance_id":"x"}"#, Some("wrong")))
+            .oneshot(post_json(
+                "/runtime/v1/sessions",
+                r#"{"instance_id":"x"}"#,
+                Some("wrong"),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         // 正确 key → 放行至 handler（store 空 → 404，证明已过鉴权层）
         let resp = app
-            .oneshot(post_json("/runtime/v1/sessions", r#"{"instance_id":"x"}"#, Some("secret")))
+            .oneshot(post_json(
+                "/runtime/v1/sessions",
+                r#"{"instance_id":"x"}"#,
+                Some("secret"),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

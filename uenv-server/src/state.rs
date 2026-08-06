@@ -397,7 +397,10 @@ pub fn spawn_agent_job_reaper(state: Arc<ServerState>) {
             ));
             loop {
                 interval.tick().await;
-                let reclaimed = state.agent_job_queue.reclaim_stale_jobs(state.agent_job_reclaim_grace_secs).await;
+                let reclaimed = state
+                    .agent_job_queue
+                    .reclaim_stale_jobs(state.agent_job_reclaim_grace_secs)
+                    .await;
                 if reclaimed > 0 {
                     tracing::warn!(reclaimed_jobs = reclaimed, "agent_job_reaper_reaped");
                 }

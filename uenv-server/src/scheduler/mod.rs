@@ -27,6 +27,13 @@ pub struct WorkerSnapshot {
     pub degraded: bool,
     pub gateway_public_url: String,
     pub synced_env_packages: Vec<SyncedEnvPackageInfo>,
+    pub platform_features: Vec<String>,
+    pub backend_kinds: Vec<String>,
+    pub trajectory_schemas: Vec<String>,
+    pub tool_schemas: Vec<String>,
+    pub package_states: Vec<EnvPackageStateInfo>,
+    pub pool_summary: Vec<WorkerPoolSummaryInfo>,
+    pub pool_slots: Vec<WorkerPoolSlotInfo>,
 }
 
 /// 基于轮询策略的调度器。
@@ -70,9 +77,20 @@ impl RoundRobinScheduler {
                 draining: w.draining,
                 last_report_at: w.last_report_at,
                 last_heartbeat_at: w.last_heartbeat_at,
-                degraded: is_worker_degraded(w, self.degraded_threshold_secs, self.heartbeat_timeout_secs),
+                degraded: is_worker_degraded(
+                    w,
+                    self.degraded_threshold_secs,
+                    self.heartbeat_timeout_secs,
+                ),
                 gateway_public_url: w.gateway_public_url.clone(),
                 synced_env_packages: w.synced_env_packages.clone(),
+                platform_features: w.platform_features.clone(),
+                backend_kinds: w.backend_kinds.clone(),
+                trajectory_schemas: w.trajectory_schemas.clone(),
+                tool_schemas: w.tool_schemas.clone(),
+                package_states: w.package_states.clone(),
+                pool_summary: w.pool_summary.clone(),
+                pool_slots: w.pool_slots.clone(),
             })
             .collect()
     }
@@ -126,7 +144,12 @@ impl RoundRobinScheduler {
     ///
     /// 返回 `(old_capacity, new_capacity)`，control plane 用它同步 dynamic admission 容量。
     /// 当 `max_load == 0` 时不更新容量，因为 0 表示 worker 没有提供容量信息。
-    pub fn update_worker_load(&mut self, worker_id: &str, load: u32, max_load: u32) -> Option<(u32, u32)> {
+    pub fn update_worker_load(
+        &mut self,
+        worker_id: &str,
+        load: u32,
+        max_load: u32,
+    ) -> Option<(u32, u32)> {
         if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
             let old_capacity = w.capacity;
             w.reported_load = load;
@@ -141,6 +164,79 @@ impl RoundRobinScheduler {
             Some((old_capacity, w.capacity))
         } else {
             None
+        }
+    }
+
+    pub fn update_worker_runtime_state(
+        &mut self,
+        worker_id: &str,
+        supported_env_types: Vec<String>,
+        platform_features: Vec<String>,
+        backend_kinds: Vec<String>,
+        trajectory_schemas: Vec<String>,
+        tool_schemas: Vec<String>,
+        package_states: Vec<EnvPackageStateInfo>,
+        pool_summary: Vec<WorkerPoolSummaryInfo>,
+        pool_slots: Vec<WorkerPoolSlotInfo>,
+    ) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            if !supported_env_types.is_empty() {
+                w.supported_env_types = supported_env_types;
+            }
+            w.platform_features = platform_features;
+            w.backend_kinds = backend_kinds;
+            w.trajectory_schemas = trajectory_schemas;
+            w.tool_schemas = tool_schemas;
+            w.package_states = package_states;
+            w.pool_summary = pool_summary;
+            w.pool_slots = pool_slots;
+        }
+    }
+
+    pub fn mark_environment_prepared(
+        &mut self,
+        worker_id: &str,
+        env_type: &str,
+        env_package_id: &str,
+        env_package_version: &str,
+        bundle_digest: &str,
+        backend_kind: &str,
+        message: &str,
+    ) {
+        if let Some(w) = self.workers.iter_mut().find(|w| w.worker_id == worker_id) {
+            if !w.supported_env_types.iter().any(|v| v == env_type) {
+                w.supported_env_types.push(env_type.to_string());
+                w.supported_env_types.sort();
+            }
+            if !env_package_id.is_empty()
+                && !w.synced_env_packages.iter().any(|p| {
+                    p.package_id == env_package_id
+                        && (env_package_version.is_empty() || p.version == env_package_version)
+                })
+            {
+                w.synced_env_packages.push(SyncedEnvPackageInfo {
+                    package_id: env_package_id.to_string(),
+                    version: env_package_version.to_string(),
+                    bundle_digest: bundle_digest.to_string(),
+                });
+            }
+            let state = EnvPackageStateInfo {
+                package_id: env_package_id.to_string(),
+                version: env_package_version.to_string(),
+                bundle_digest: bundle_digest.to_string(),
+                state: "ready".to_string(),
+                env_type: env_type.to_string(),
+                backend_kind: backend_kind.to_string(),
+                message: message.to_string(),
+            };
+            w.package_states.retain(|p| {
+                !(p.env_type == env_type
+                    && p.package_id == env_package_id
+                    && p.version == env_package_version)
+            });
+            if !env_package_id.is_empty() || !env_type.is_empty() {
+                w.package_states.push(state);
+            }
         }
     }
 }
@@ -176,11 +272,15 @@ fn effective_load(w: &WorkerInfo) -> u32 {
 ///
 /// 请求字段为 0 或空字符串表示“不要求该资源”。worker 没有上报资源时，只能处理没有资源要求的请求。
 fn resource_fits(worker: &Option<ResourceSpec>, req: &Option<ResourceSpec>) -> bool {
-    let Some(req) = req.as_ref() else { return true; };
+    let Some(req) = req.as_ref() else {
+        return true;
+    };
     if req.cpu_cores == 0 && req.memory_mb == 0 && req.gpu_count == 0 && req.gpu_type.is_empty() {
         return true;
     }
-    let Some(w) = worker.as_ref() else { return false; };
+    let Some(w) = worker.as_ref() else {
+        return false;
+    };
     (req.cpu_cores == 0 || w.cpu_cores >= req.cpu_cores)
         && (req.memory_mb == 0 || w.memory_mb >= req.memory_mb)
         && (req.gpu_count == 0 || w.gpu_count >= req.gpu_count)
@@ -205,6 +305,24 @@ fn assignment_from_worker(w: &WorkerInfo) -> WorkerAssignment {
         endpoint: w.endpoint.clone(),
         gateway_public_url: w.gateway_public_url.clone(),
     }
+}
+
+fn worker_can_prepare(w: &WorkerInfo, request: &EpisodeRequest) -> bool {
+    if w.draining
+        || is_worker_degraded(w, 60 * 60 * 24, 60 * 60 * 24)
+        || effective_load(w) >= w.capacity
+        || !resource_fits(&w.resource, &request.resource_spec)
+    {
+        return false;
+    }
+    let has_dynamic_feature = w
+        .platform_features
+        .iter()
+        .any(|f| f == "hub_dynamic_env" || f == "generic_container_backend");
+    let has_backend = w.backend_kinds.iter().any(|b| {
+        b == "process_plugin" || b == "openenv_http_container" || b == "generic_openenv_plugin"
+    });
+    has_dynamic_feature && has_backend
 }
 
 impl RoundRobinScheduler {
@@ -251,6 +369,23 @@ impl RoundRobinScheduler {
             return ScheduleError::NoMatchingEnvPackage;
         }
         ScheduleError::AllWorkersAtCapacity
+    }
+
+    pub fn select_preparable_worker(
+        &self,
+        request: &EpisodeRequest,
+    ) -> Result<WorkerAssignment, ScheduleError> {
+        let candidates = self
+            .workers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, w)| worker_can_prepare(w, request).then_some(idx))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(ScheduleError::NoPreparableWorker);
+        }
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % candidates.len();
+        Ok(assignment_from_worker(&self.workers[candidates[idx]]))
     }
 }
 
@@ -349,7 +484,6 @@ impl Scheduler for RoundRobinScheduler {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +504,13 @@ mod tests {
             last_heartbeat_at: Some(std::time::Instant::now()),
             gateway_public_url: String::new(),
             synced_env_packages: Vec::new(),
+            platform_features: vec!["hub_dynamic_env".to_string()],
+            backend_kinds: vec!["process_plugin".to_string()],
+            trajectory_schemas: vec!["v2.2".to_string()],
+            tool_schemas: Vec::new(),
+            package_states: Vec::new(),
+            pool_summary: Vec::new(),
+            pool_slots: Vec::new(),
         }
     }
 

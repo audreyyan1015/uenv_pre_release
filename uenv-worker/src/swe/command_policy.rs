@@ -31,7 +31,12 @@ impl Default for CommandPolicy {
 impl CommandPolicy {
     /// 解析 episode payload 里的 `command_mode` 字符串（容错大小写 / 蛇形）。
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().replace(['_', '-'], "").as_str() {
+        match value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', '-'], "")
+            .as_str()
+        {
             "restrictedshell" | "restricted" => Some(Self::RestrictedShell),
             "fullshell" | "full" => Some(Self::FullShell),
             _ => None,
@@ -154,9 +159,15 @@ mod tests {
 
     #[test]
     fn parse_accepts_aliases() {
-        assert_eq!(CommandPolicy::parse("FullShell"), Some(CommandPolicy::FullShell));
+        assert_eq!(
+            CommandPolicy::parse("FullShell"),
+            Some(CommandPolicy::FullShell)
+        );
         assert_eq!(CommandPolicy::parse("full"), Some(CommandPolicy::FullShell));
-        assert_eq!(CommandPolicy::parse("restricted_shell"), Some(CommandPolicy::RestrictedShell));
+        assert_eq!(
+            CommandPolicy::parse("restricted_shell"),
+            Some(CommandPolicy::RestrictedShell)
+        );
         assert_eq!(CommandPolicy::parse("nope"), None);
     }
 
@@ -165,7 +176,11 @@ mod tests {
         let cfg = CommandPolicyConfig::default();
         assert_eq!(
             cfg.wrap_command("pytest -q"),
-            vec!["bash".to_string(), "-lc".to_string(), "pytest -q".to_string()]
+            vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "pytest -q".to_string()
+            ]
         );
     }
 

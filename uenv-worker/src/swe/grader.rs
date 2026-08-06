@@ -116,7 +116,11 @@ impl Grader for SwebenchProGrader {
         if let Some((passing, failing)) = parse_mocha_summary(output) {
             let expected = fail_to_pass.len() + pass_to_pass.len();
             if failing == 0 && passing >= expected.max(fail_to_pass.len()) {
-                let all_ids: Vec<_> = fail_to_pass.iter().chain(pass_to_pass.iter()).cloned().collect();
+                let all_ids: Vec<_> = fail_to_pass
+                    .iter()
+                    .chain(pass_to_pass.iter())
+                    .cloned()
+                    .collect();
                 return GradeResult {
                     resolved: true,
                     reward: 1.0,
@@ -124,10 +128,7 @@ impl Grader for SwebenchProGrader {
                 };
             }
         }
-        let all_pass = |ids: &[String]| {
-            ids.iter()
-                .all(|id| pro_test_passed(&report, id))
-        };
+        let all_pass = |ids: &[String]| ids.iter().all(|id| pro_test_passed(&report, id));
         let resolved = all_pass(fail_to_pass) && all_pass(pass_to_pass);
         let per_test = fail_to_pass
             .iter()
@@ -327,11 +328,7 @@ mod tests {
             "test_b (auth_tests.test_x.MyTest) ... FAIL\n",
         );
         let g = SwebenchGrader(LogParser::Django);
-        let r = g.grade(
-            out,
-            &["auth_tests.test_x.MyTest.test_a".into()],
-            &[],
-        );
+        let r = g.grade(out, &["auth_tests.test_x.MyTest.test_a".into()], &[]);
         assert!(r.resolved);
         let r2 = g.grade(out, &["auth_tests.test_x.MyTest.test_b".into()], &[]);
         assert!(!r2.resolved);
@@ -343,7 +340,10 @@ mod tests {
         assert_eq!(grader_for(Some("swebench")).name(), "swebench");
         assert_eq!(grader_for(Some("swebench_pro")).name(), "swebench_pro");
         assert_eq!(grader_for(Some("swesmith")).name(), "swesmith");
-        assert_eq!(grader_for_spec(None, LogParser::Django).name(), "swebench_django");
+        assert_eq!(
+            grader_for_spec(None, LogParser::Django).name(),
+            "swebench_django"
+        );
     }
 
     #[test]
@@ -394,9 +394,15 @@ mod tests {
         let out = "  300 passing (8s)\n";
         let g = SwebenchProGrader;
         let f2p = vec!["test/a.js | suite test".into()];
-        let p2p: Vec<String> = (0..289).map(|i| format!("test/p{i}.js | case {i}")).collect();
+        let p2p: Vec<String> = (0..289)
+            .map(|i| format!("test/p{i}.js | case {i}"))
+            .collect();
         let r = g.grade(out, &f2p, &p2p);
-        assert!(r.resolved, "expected summary shortcut, per_test len={}", r.per_test.len());
+        assert!(
+            r.resolved,
+            "expected summary shortcut, per_test len={}",
+            r.per_test.len()
+        );
         assert_eq!(r.reward, 1.0);
     }
 }

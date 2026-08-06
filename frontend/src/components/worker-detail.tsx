@@ -99,6 +99,29 @@ const episodeStatusMeta: Record<NodeStatus, { label: string; dot: string }> = {
   CLOSED: { label: "已关闭", dot: "bg-slate-400" },
 };
 
+const poolSlotStatusMeta: Record<string, { label: string; dot: string; tone: string }> = {
+  ready: {
+    label: "ready",
+    dot: "bg-emerald-500",
+    tone: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+  },
+  busy: {
+    label: "busy",
+    dot: "bg-blue-500",
+    tone: "bg-blue-50 text-blue-700 ring-blue-100",
+  },
+  warming: {
+    label: "warming",
+    dot: "bg-amber-400",
+    tone: "bg-amber-50 text-amber-700 ring-amber-100",
+  },
+  failed: {
+    label: "failed",
+    dot: "bg-rose-500",
+    tone: "bg-rose-50 text-rose-700 ring-rose-100",
+  },
+};
+
 const connectionMeta: Record<ConnectionState, { label: string; dot: string }> = {
   idle: { label: "准备连接", dot: "bg-slate-400" },
   connecting: { label: "正在连接 Server", dot: "bg-amber-400" },
@@ -144,9 +167,10 @@ export function WorkerDetail({
   initialStatus?: WorkerOperationalStatus;
 }) {
   const [runId] = useState<string | null>(initialRunId);
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState(0);
 
   useEffect(() => {
+    setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), CLOCK_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, []);
@@ -164,14 +188,31 @@ export function WorkerDetail({
   });
 
   const { live, error: fleetError } = useWorkerFleetLive(workerId);
-
   const projection = useMemo(
     () => projectWorkerDetail(chainState, workerId, live),
     [chainState, workerId, live],
   );
 
   const worker = projection.worker;
-  const hasLiveFleet = Boolean(live && (live.load !== undefined || (live.liveEpisodes?.length ?? 0) > 0 || live.heartbeatAgeSecs != null));
+  const supportedEnvTypes = live?.supportedEnvTypes?.length
+    ? live.supportedEnvTypes
+    : worker?.supported_env_types ?? [];
+  const platformFeatures = live?.platformFeatures ?? worker?.platform_features ?? [];
+  const backendKinds = live?.backendKinds ?? worker?.backend_kinds ?? [];
+  const trajectorySchemas = live?.trajectorySchemas ?? worker?.trajectory_schemas ?? [];
+  const toolSchemas = live?.toolSchemas ?? worker?.tool_schemas ?? [];
+  const packageStates = live?.packageStates ?? worker?.package_states ?? [];
+  const poolSummary = live?.poolSummary ?? worker?.pool_summary ?? [];
+  const poolSlots = live?.poolSlots ?? worker?.pool_slots ?? [];
+  const hasLiveFleet =
+    live?.found === true ||
+    (live?.found !== false &&
+      Boolean(
+        live &&
+          (live.load !== undefined ||
+            (live.liveEpisodes?.length ?? 0) > 0 ||
+            live.heartbeatAgeSecs != null),
+      ));
   const showDetail = Boolean(worker) || hasLiveFleet;
 
   const operationalStatus = useMemo(() => {
@@ -202,6 +243,11 @@ export function WorkerDetail({
     now,
     live?.heartbeatAgeSecs,
   );
+  const poolReady = poolSummary.reduce((sum, item) => sum + (item.ready ?? 0), 0);
+  const poolBusy = poolSummary.reduce((sum, item) => sum + (item.busy ?? 0), 0);
+  const poolCapacity = poolSummary.reduce((sum, item) => sum + (item.capacity ?? 0), 0);
+  const envInstanceCount =
+    poolSlots.length || worker?.env_instances?.length || projection.envInstances.length;
 
   return (
     <main className="min-h-screen bg-[#f7f9fc] text-slate-900">
@@ -233,9 +279,7 @@ export function WorkerDetail({
             </div>
           </div>
 
-          <p className="text-xs text-slate-400">
-            训练运行：{effectiveRunId ?? "未指定"} · Worker 舰队实时 · {freshness}
-          </p>
+          <p className="text-xs text-slate-400">Worker 机器视图 · 舰队实时 · {freshness}</p>
         </header>
 
         {!liveMode && (
@@ -270,7 +314,7 @@ export function WorkerDetail({
             </div>
             <h2 className="mt-5 text-lg font-semibold">暂未找到该 Worker</h2>
             <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
-              该 Worker 可能尚未向 Server 注册，或当前训练运行标识不正确。请返回任务页确认后重试。
+              该 Worker 可能尚未向 Server 注册，或舰队实时名册暂未同步。请返回任务页确认后重试。
             </p>
             <Link
               to="/server"
@@ -310,15 +354,15 @@ export function WorkerDetail({
                 </div>
                 <div className="grid grid-cols-2 gap-3 sm:min-w-[260px]">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <p className="text-xs font-medium text-slate-500">本训练运行累计</p>
+                    <p className="text-xs font-medium text-slate-500">当前活跃 Episode</p>
                     <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900">
-                      {projection.runEpisodeCount}
+                      {projection.liveActiveCount}
                     </p>
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <p className="text-xs font-medium text-slate-500">本训练运行已完成</p>
+                    <p className="text-xs font-medium text-slate-500">实例池槽位</p>
                     <p className="mt-1 text-2xl font-semibold tabular-nums text-emerald-600">
-                      {projection.completedEpisodeCount}
+                      {envInstanceCount}
                     </p>
                   </div>
                 </div>
@@ -333,14 +377,76 @@ export function WorkerDetail({
               <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
                 <div className="flex items-center gap-2 text-sm font-medium text-blue-700">
                   <Layers className="h-4 w-4" />
-                  环境实例
+                  Worker 实例池
                 </div>
-                <h2 className="mt-1 text-xl font-semibold tracking-tight">已加载的环境实例</h2>
+                <h2 className="mt-1 text-xl font-semibold tracking-tight">当前实例池槽位</h2>
                 <p className="mt-2 text-sm text-slate-500">
-                  来自本训练运行的对象树投影；未上报时显示空态。
+                  来自该 Worker 的实时心跳快照，展示本机已准备、执行中和预热中的环境槽。
                 </p>
 
-                {projection.envInstances.length > 0 ? (
+                {poolSummary.length > 0 && (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                      <p className="text-xs text-slate-500">ready</p>
+                      <p className="mt-1 text-lg font-semibold text-emerald-600">{poolReady}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                      <p className="text-xs text-slate-500">busy</p>
+                      <p className="mt-1 text-lg font-semibold text-blue-600">{poolBusy}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                      <p className="text-xs text-slate-500">capacity</p>
+                      <p className="mt-1 text-lg font-semibold text-slate-800">{poolCapacity}</p>
+                    </div>
+                  </div>
+                )}
+
+                {poolSlots.length > 0 ? (
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    {poolSlots.slice(0, 12).map((slot) => {
+                      const slotMeta =
+                        poolSlotStatusMeta[slot.status] ?? {
+                          label: slot.status || "unknown",
+                          dot: "bg-slate-400",
+                          tone: "bg-slate-50 text-slate-600 ring-slate-200",
+                        };
+                      return (
+                        <div key={slot.slot_id} className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate font-mono text-sm font-semibold text-slate-800">
+                                {slot.slot_id}
+                              </p>
+                              <p className="mt-1 truncate text-xs text-slate-500">
+                                {slot.env_type || "env"} · {slot.backend_kind || "backend"}
+                              </p>
+                            </div>
+                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ${slotMeta.tone}`}>
+                              <span className={`h-2 w-2 rounded-full ${slotMeta.dot}`} />
+                              {slotMeta.label}
+                            </span>
+                          </div>
+                          {(slot.package_id || slot.package_version || slot.variant) && (
+                            <p className="mt-3 truncate text-xs text-slate-500">
+                              {slot.package_id || "package"}@{slot.package_version || "latest"}
+                              {slot.variant ? ` · ${slot.variant}` : ""}
+                            </p>
+                          )}
+                          {(slot.episode_id || slot.session_id) && (
+                            <p className="mt-2 truncate font-mono text-xs text-slate-500">
+                              {slot.episode_id || slot.session_id}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {poolSlots.length > 12 && (
+                      <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-6 text-center text-sm text-slate-400">
+                        还有 {poolSlots.length - 12} 个槽位未展开
+                      </div>
+                    )}
+                  </div>
+                ) : projection.envInstances.length > 0 ? (
                   <div className="mt-4 space-y-3">
                     {projection.envInstances.map((instance) => {
                       const episodeMeta =
@@ -398,7 +504,7 @@ export function WorkerDetail({
                   </div>
                 ) : (
                   <div className="mt-4 rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-400">
-                    该 Worker 尚未上报环境实例，或实例尚未预热完成
+                    该 Worker 尚未上报实例池快照；旧版本 Worker 会回退显示 Obs 环境实例
                   </div>
                 )}
               </section>
@@ -461,9 +567,9 @@ export function WorkerDetail({
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                   <p className="text-xs font-medium text-slate-500">支持的环境类型</p>
-                  {worker?.supported_env_types && worker.supported_env_types.length > 0 ? (
+                  {supportedEnvTypes.length > 0 ? (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {worker.supported_env_types.map((envType) => (
+                      {supportedEnvTypes.map((envType) => (
                         <span
                           key={envType}
                           className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200"
@@ -497,16 +603,84 @@ export function WorkerDetail({
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                   <p className="text-xs font-medium text-slate-500">环境实例数</p>
                   <p className="mt-2 text-sm font-semibold text-slate-800">
-                    {worker?.env_instances?.length ?? projection.envInstances.length}
+                    {envInstanceCount}
                   </p>
                 </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+                  <p className="text-xs font-medium text-slate-500">Worker 平台能力</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {[...platformFeatures, ...backendKinds].length > 0 ? (
+                      [...platformFeatures, ...backendKinds].map((item) => (
+                        <span key={item} className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+                          {item}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-sm text-slate-400">尚未上报</span>
+                    )}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+                  <p className="text-xs font-medium text-slate-500">轨迹 / 工具协议</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {[...trajectorySchemas, ...toolSchemas].length > 0 ? (
+                      [...trajectorySchemas, ...toolSchemas].map((item) => (
+                        <span key={item} className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+                          {item}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-sm text-slate-400">尚未上报</span>
+                    )}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+                  <p className="text-xs font-medium text-slate-500">已准备 EnvPackage</p>
+                  <div className="mt-2 space-y-1">
+                    {packageStates.length > 0 ? (
+                      packageStates.slice(0, 4).map((pkg) => (
+                        <p key={`${pkg.env_type}-${pkg.package_id}-${pkg.version}`} className="truncate text-xs text-slate-600">
+                          {pkg.env_type || "env"} · {pkg.package_id || "manifest"}@{pkg.version || "latest"} · {pkg.state}
+                        </p>
+                      ))
+                    ) : (
+                      <span className="text-sm text-slate-400">尚未上报</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+                <p className="text-xs font-medium text-slate-500">实例池汇总</p>
+                {poolSummary.length > 0 || poolSlots.length > 0 ? (
+                  <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    {poolSummary.map((item) => (
+                      <div key={`${item.env_type}-${item.variant}-${item.package_id}`} className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-sm font-medium text-slate-800">
+                            {item.env_type}{item.variant ? `/${item.variant}` : ""}
+                          </span>
+                          <span className="text-xs text-slate-500">{item.backend_kind || "backend"}</span>
+                        </div>
+                        <p className="mt-2 text-xs text-slate-600">
+                          ready {item.ready} · busy {item.busy} · warming {item.warming} · capacity {item.capacity}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-slate-400">未上报实例池快照</p>
+                )}
               </div>
             </section>
           </div>
         )}
 
         <footer className="mt-10 flex flex-col gap-3 py-4 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-          <span>UEnv Worker 详情 · 舰队实时 + 本训练运行累计</span>
+          <span>UEnv Worker 详情 · 机器级舰队实时视图</span>
           <Link to="/server" search={backSearch} className="text-blue-600 hover:text-blue-700">
             返回 Episode 进度
           </Link>

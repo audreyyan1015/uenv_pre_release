@@ -37,7 +37,6 @@ fn now_unix_seconds_f64() -> f64 {
         .as_secs_f64()
 }
 
-
 pub(crate) fn failed_result_from_request(
     req: &EpisodeRequest,
     status: &str,
@@ -253,11 +252,7 @@ fn optional_result_field(value: &str) -> Option<String> {
 }
 
 fn optional_context_field(value: String) -> Option<String> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 pub(crate) struct ResultPersistenceContext {

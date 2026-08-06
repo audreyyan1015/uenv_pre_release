@@ -174,8 +174,8 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
     let sample_context = contextual_metadata(&raw_sample_context);
     let parallel_mode = sample_parallel_mode(&sample)?;
     let model_endpoint_config = sample_model_endpoint_config(&sample);
-    let correlation_id = non_empty_string(&sample.correlation_id)
-        .unwrap_or_else(|| sample.batch_id.clone());
+    let correlation_id =
+        non_empty_string(&sample.correlation_id).unwrap_or_else(|| sample.batch_id.clone());
     let worker_payload = sample_to_worker_payload(&sample, &env_cfg, &sample_context);
     let env_package_id = env_package_field(
         &sample.env_package_id,
@@ -201,7 +201,9 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
             metadata.insert("batch_id".to_string(), v.to_string());
         }
         if let Some(v) = obj.get("run_id").and_then(|x| x.as_str()) {
-            metadata.entry("training_run_id".to_string()).or_insert_with(|| v.to_string());
+            metadata
+                .entry("training_run_id".to_string())
+                .or_insert_with(|| v.to_string());
         }
     }
     if !sample.batch_id.is_empty() {
@@ -222,7 +224,8 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
         } else {
             300
         },
-        reward_config: serde_json::to_vec(&sample_to_worker_reward_config(&reward_cfg)).unwrap_or_default(),
+        reward_config: serde_json::to_vec(&sample_to_worker_reward_config(&reward_cfg))
+            .unwrap_or_default(),
         parallel_mode,
         env_package_id,
         env_package_version,
@@ -240,8 +243,7 @@ fn json_from_bytes(bytes: &[u8]) -> Option<Value> {
 }
 
 fn raw_sample_context_from_sample(sample: &SampleEnvelope) -> Value {
-    json_from_bytes(&sample.sample_context_json)
-        .unwrap_or(Value::Null)
+    json_from_bytes(&sample.sample_context_json).unwrap_or(Value::Null)
 }
 
 fn sample_parallel_mode(sample: &SampleEnvelope) -> Result<String, CoreError> {
@@ -262,13 +264,16 @@ fn normalize_parallel_mode(raw: &str) -> Result<String, CoreError> {
 }
 
 fn sample_model_endpoint_config(sample: &SampleEnvelope) -> Option<ProtoModelEndpoint> {
-    sample.model_endpoint.as_ref().map(|endpoint| ProtoModelEndpoint {
-        endpoint_type: endpoint.endpoint_type.clone(),
-        url: endpoint.url.clone(),
-        model_name: endpoint.model_name.clone(),
-        generation_config_json: endpoint.generation_config_json.clone(),
-        max_retries: endpoint.max_retries,
-    })
+    sample
+        .model_endpoint
+        .as_ref()
+        .map(|endpoint| ProtoModelEndpoint {
+            endpoint_type: endpoint.endpoint_type.clone(),
+            url: endpoint.url.clone(),
+            model_name: endpoint.model_name.clone(),
+            generation_config_json: endpoint.generation_config_json.clone(),
+            max_retries: endpoint.max_retries,
+        })
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
@@ -329,11 +334,7 @@ fn contextual_metadata(metadata: &Value) -> Value {
     Value::Object(filtered)
 }
 
-fn sample_to_worker_payload(
-    sample: &SampleEnvelope,
-    env_cfg: &Value,
-    metadata: &Value,
-) -> Value {
+fn sample_to_worker_payload(sample: &SampleEnvelope, env_cfg: &Value, metadata: &Value) -> Value {
     let extra_info = metadata.get("extra_info").unwrap_or(&Value::Null);
 
     let question = json_string(extra_info, "question")
@@ -357,10 +358,16 @@ fn sample_to_worker_payload(
         }
         if let Some(endpoint) = sample.model_endpoint.as_ref() {
             if !endpoint.url.trim().is_empty() {
-                obj.insert("model_endpoint".to_string(), Value::String(endpoint.url.clone()));
+                obj.insert(
+                    "model_endpoint".to_string(),
+                    Value::String(endpoint.url.clone()),
+                );
             }
             if !endpoint.model_name.trim().is_empty() {
-                obj.insert("model_name".to_string(), Value::String(endpoint.model_name.clone()));
+                obj.insert(
+                    "model_name".to_string(),
+                    Value::String(endpoint.model_name.clone()),
+                );
             }
             if let Some(generation_config) = json_from_bytes(&endpoint.generation_config_json) {
                 obj.insert("generation_config".to_string(), generation_config);
@@ -371,7 +378,12 @@ fn sample_to_worker_payload(
     // image and grade (the generic mapping above only carries question/dataset).
     if sample.env_type == "swe" {
         if let Some(obj) = worker_payload.as_object_mut() {
-            for key in ["instance_id", "benchmark_variant", "use_gold_patch", "command_mode"] {
+            for key in [
+                "instance_id",
+                "benchmark_variant",
+                "use_gold_patch",
+                "command_mode",
+            ] {
                 if let Some(v) = env_cfg.get(key) {
                     obj.insert(key.to_string(), v.clone());
                 }
@@ -519,10 +531,7 @@ fn build_trajectory_json(
     if has_trajectory_id || has_metadata {
         let mut envelope = serde_json::Map::new();
         envelope.insert("steps".to_string(), serde_json::Value::Array(vec![]));
-        envelope.insert(
-            "total_reward".to_string(),
-            serde_json::json!(total_reward),
-        );
+        envelope.insert("total_reward".to_string(), serde_json::json!(total_reward));
         envelope.insert("total_steps".to_string(), serde_json::json!(total_steps));
         if has_trajectory_id {
             envelope.insert(
@@ -531,10 +540,7 @@ fn build_trajectory_json(
             );
         }
         if has_metadata {
-            envelope.insert(
-                "metadata".to_string(),
-                serde_json::json!(result.metadata),
-            );
+            envelope.insert("metadata".to_string(), serde_json::json!(result.metadata));
         }
         return serde_json::to_vec(&serde_json::Value::Object(envelope)).map_err(|err| {
             CoreError::InvalidEpisodeResult(format!("failed to encode trajectory_json: {err}"))
@@ -752,7 +758,10 @@ mod tests {
     fn make_sample(request_id: &str, sample_index: u32, payload: &[u8]) -> SampleEnvelope {
         let payload = json_from_bytes(payload).unwrap_or(Value::Null);
         let env_cfg = payload.get("env_config").cloned().unwrap_or(Value::Null);
-        let episode_cfg = payload.get("episode_config").cloned().unwrap_or(Value::Null);
+        let episode_cfg = payload
+            .get("episode_config")
+            .cloned()
+            .unwrap_or(Value::Null);
         let reward_cfg = payload.get("reward_config").cloned().unwrap_or(Value::Null);
         let metadata = payload.get("metadata").cloned().unwrap_or(Value::Null);
         SampleEnvelope {
@@ -800,7 +809,8 @@ mod tests {
             return None;
         }
         Some(ModelEndpoint {
-            endpoint_type: json_string(value, "endpoint_type").unwrap_or_else(|| "http".to_string()),
+            endpoint_type: json_string(value, "endpoint_type")
+                .unwrap_or_else(|| "http".to_string()),
             url,
             model_name,
             generation_config_json: json_bytes(&generation_config),
@@ -926,7 +936,10 @@ mod tests {
             serde_json::from_slice(&model_endpoint_config.generation_config_json)
                 .expect("generation config json");
         assert_eq!(generation_config["max_new_tokens"], 8);
-        assert_eq!(worker_payload["model_endpoint"], "http://127.0.0.1:18080/v1");
+        assert_eq!(
+            worker_payload["model_endpoint"],
+            "http://127.0.0.1:18080/v1"
+        );
         assert_eq!(worker_payload["model_name"], "mock-policy");
         assert_eq!(worker_payload["generation_config"]["max_new_tokens"], 8);
         assert_eq!(worker_reward["type"], "rule_reward");
@@ -1064,7 +1077,9 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(matches!(err, CoreError::InvalidEnvelope(message) if message.contains("unsupported parallel_mode")));
+        assert!(
+            matches!(err, CoreError::InvalidEnvelope(message) if message.contains("unsupported parallel_mode"))
+        );
     }
 
     #[tokio::test]
@@ -1086,8 +1101,14 @@ mod tests {
         assert_eq!(response.results[0].rollout_policy_version, "actor-step-11");
         assert_eq!(response.results[0].rollout_log_probs, vec![-0.1, -0.2]);
         assert_eq!(trajectory["steps"][0]["action"], "42");
-        assert_eq!(trajectory["steps"][0]["rollout_trace"]["response_ids"], json!([101, 102]));
-        assert_eq!(trajectory["steps"][0]["rollout_trace"]["response_mask"], json!([1, 1]));
+        assert_eq!(
+            trajectory["steps"][0]["rollout_trace"]["response_ids"],
+            json!([101, 102])
+        );
+        assert_eq!(
+            trajectory["steps"][0]["rollout_trace"]["response_mask"],
+            json!([1, 1])
+        );
     }
 
     #[tokio::test]

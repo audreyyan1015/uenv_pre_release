@@ -219,8 +219,14 @@ mod tests {
     fn projects_busy_idle_attention_and_offline() {
         let now = now_ms();
         assert_eq!(
-            project_worker_status(&snapshot(1, 2, 1, 1), None, config(), now, vec!["ep-1".into()])
-                .status,
+            project_worker_status(
+                &snapshot(1, 2, 1, 1),
+                None,
+                config(),
+                now,
+                vec!["ep-1".into()]
+            )
+            .status,
             "BUSY"
         );
         assert_eq!(
@@ -252,10 +258,14 @@ mod tests {
 
     #[test]
     fn preserves_status_changed_timestamp_while_state_is_stable() {
-        let first =
-            project_worker_status(&snapshot(0, 2, 1, 1), None, config(), 100, Vec::new());
-        let second =
-            project_worker_status(&snapshot(0, 2, 2, 2), Some(&first), config(), 200, Vec::new());
+        let first = project_worker_status(&snapshot(0, 2, 1, 1), None, config(), 100, Vec::new());
+        let second = project_worker_status(
+            &snapshot(0, 2, 2, 2),
+            Some(&first),
+            config(),
+            200,
+            Vec::new(),
+        );
         assert_eq!(second.status_changed_ts, 100);
         assert!(!worker_observation_changed(&first, &second));
     }
@@ -272,6 +282,9 @@ mod tests {
             vec!["a".into(), "b".into()],
         );
         assert!(worker_observation_changed(&first, &second));
-        assert_eq!(second.active_episodes, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            second.active_episodes,
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 }

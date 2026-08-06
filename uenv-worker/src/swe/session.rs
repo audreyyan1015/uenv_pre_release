@@ -14,7 +14,6 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::swe::artifact::{EpisodeArtifact, TestResults};
-use crate::swe::trajectory::{now_ms, StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore};
 use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for_spec;
@@ -22,7 +21,10 @@ use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
 use crate::swe::image_cache::{ImageCacheFactory, ImagePullPolicy, resolve_provision_image};
 use crate::swe::pro_eval::try_external_pro_grade;
 use crate::swe::resettable::PodmanResettableInstance;
-use crate::swe::spec::{build_reset_observation, ResetObservation, Workspace};
+use crate::swe::spec::{ResetObservation, Workspace, build_reset_observation};
+use crate::swe::trajectory::{
+    StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore, now_ms,
+};
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
@@ -154,7 +156,11 @@ impl SweSession {
             PodmanResettableInstance::reset_script_keep_built(ws, &instance.base_commit);
         let r = session.exec_raw(&reset_script)?; // 失败时 session 析构 → 清理容器
         if r.exit_code != 0 {
-            return Err(format!("reset failed (code {}): {}\n{}", r.exit_code, r.stdout, r.stderr).into());
+            return Err(format!(
+                "reset failed (code {}): {}\n{}",
+                r.exit_code, r.stdout, r.stderr
+            )
+            .into());
         }
         session.run_pro_setup_at_provision()?;
 
@@ -181,7 +187,10 @@ impl SweSession {
             }
         }
 
-        session.record_provision_reset(&observation.issue_text, provision_start.elapsed().as_millis() as u64);
+        session.record_provision_reset(
+            &observation.issue_text,
+            provision_start.elapsed().as_millis() as u64,
+        );
 
         tracing::info!(
             episode_id = %session.episode_id,
@@ -362,7 +371,12 @@ impl SweSession {
         self.apply_patch_with_reverse(patch, label, true)
     }
 
-    fn apply_patch_with_reverse(&self, patch: &str, label: &str, reverse: bool) -> Result<(), DynErr> {
+    fn apply_patch_with_reverse(
+        &self,
+        patch: &str,
+        label: &str,
+        reverse: bool,
+    ) -> Result<(), DynErr> {
         if patch.trim().is_empty() {
             return Ok(());
         }
@@ -414,7 +428,12 @@ impl SweSession {
             // v2.2 聚合字段：run_id 由 gateway 在 Stage B 注入（X-UEnv-Run-Id）；
             // native 路径下 episode_id 取会话 episode_id，run_id 暂空。
             run_id: {
-                let rid = self.run_id.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                let rid = self
+                    .run_id
+                    .lock()
+                    .ok()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
                 if rid.trim().is_empty() {
                     // v2.2 fallback: gateway did not inject X-UEnv-Run-Id; synthesize a
                     // non-empty run_id so the server does not reject the upload with 400.
@@ -520,12 +539,18 @@ impl SweSession {
             )? {
                 ext
             } else {
-                grader_for_spec(Some("swebench_pro"), log_parser)
-                    .grade(&combined, &self.instance.fail_to_pass, &self.instance.pass_to_pass)
+                grader_for_spec(Some("swebench_pro"), log_parser).grade(
+                    &combined,
+                    &self.instance.fail_to_pass,
+                    &self.instance.pass_to_pass,
+                )
             }
         } else {
-            grader_for_spec(None, log_parser)
-                .grade(&combined, &self.instance.fail_to_pass, &self.instance.pass_to_pass)
+            grader_for_spec(None, log_parser).grade(
+                &combined,
+                &self.instance.fail_to_pass,
+                &self.instance.pass_to_pass,
+            )
         };
 
         let ws = self.instance.workspace_dir();
@@ -571,10 +596,11 @@ impl SweSession {
     /// post-patch 安装命令（M1-3 / M1-2）：实例 `install_cmd` > `repo@version` 规格 install
     /// > 全局 `UENV_SWE_INSTALL_CMD`；命中则包到 conda `testbed` + `cd /testbed`。
     fn install_command(&self) -> Option<String> {
-        let raw = self
-            .instance
-            .resolved_install_command()
-            .or_else(|| std::env::var("UENV_SWE_INSTALL_CMD").ok().filter(|s| !s.trim().is_empty()))?;
+        let raw = self.instance.resolved_install_command().or_else(|| {
+            std::env::var("UENV_SWE_INSTALL_CMD")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })?;
         Some(format!(
             "source /opt/miniconda3/bin/activate testbed 2>/dev/null; cd {TESTBED} && {raw}"
         ))
@@ -586,7 +612,12 @@ impl SweSession {
             .output()
             .map_err(|e| format!("{} cp spawn failed: {e}", self.runtime.cli()))?;
         if !out.status.success() {
-            return Err(format!("{} cp failed: {}", self.runtime.cli(), String::from_utf8_lossy(&out.stderr)).into());
+            return Err(format!(
+                "{} cp failed: {}",
+                self.runtime.cli(),
+                String::from_utf8_lossy(&out.stderr)
+            )
+            .into());
         }
         Ok(())
     }
@@ -599,8 +630,10 @@ impl crate::swe::resettable::ResettableSession for SweSession {
 
     /// 重置沙箱回 base_commit（保留已编译产物），供池 `recycle` 复用（M0-2）。
     fn reset_to_base(&self) -> Result<(), DynErr> {
-        let reset_script =
-            PodmanResettableInstance::reset_script_keep_built(self.instance.workspace_dir(), &self.instance.base_commit);
+        let reset_script = PodmanResettableInstance::reset_script_keep_built(
+            self.instance.workspace_dir(),
+            &self.instance.base_commit,
+        );
         let r = self.exec_raw(&reset_script)?;
         if r.exit_code != 0 {
             return Err(format!(
@@ -645,7 +678,12 @@ pub fn build_swe_run_args(
     pro_image: bool,
     stress_run_id: Option<&str>,
 ) -> Vec<String> {
-    let mut args = vec!["run".to_string(), "-d".to_string(), "--name".to_string(), container.to_string()];
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        container.to_string(),
+    ];
     if let Some(run_id) = stress_run_id {
         args.push("--label".to_string());
         args.push(format!("io.uenv.swe.run_id={run_id}"));
@@ -705,7 +743,13 @@ fn single_quote(s: &str) -> String {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -723,20 +767,40 @@ mod tests {
 
     #[test]
     fn restricted_run_args_drop_caps_and_isolate_network() {
-        let a = build_swe_run_args("c1", "img:latest", CommandPolicy::RestrictedShell, Some("/testbed"), None, false, None);
+        let a = build_swe_run_args(
+            "c1",
+            "img:latest",
+            CommandPolicy::RestrictedShell,
+            Some("/testbed"),
+            None,
+            false,
+            None,
+        );
         assert_eq!(&a[..4], &["run", "-d", "--name", "c1"]);
         assert!(a.contains(&"--cap-drop=ALL".to_string()));
         assert!(a.contains(&"no-new-privileges".to_string()));
         assert!(a.contains(&"--network=none".to_string()));
         assert!(a.contains(&"-w".to_string()) && a.contains(&"/testbed".to_string()));
-        assert!(a.ends_with(&["img:latest".to_string(), "sleep".to_string(), "infinity".to_string()]));
+        assert!(a.ends_with(&[
+            "img:latest".to_string(),
+            "sleep".to_string(),
+            "infinity".to_string()
+        ]));
         // 未传 seccomp_file → 不注入 security-opt seccomp
         assert!(!a.iter().any(|s| s.starts_with("seccomp=")));
     }
 
     #[test]
     fn full_run_args_bridge_network_no_capdrop() {
-        let a = build_swe_run_args("c2", "img:latest", CommandPolicy::FullShell, None, None, false, Some("stress-run-1"));
+        let a = build_swe_run_args(
+            "c2",
+            "img:latest",
+            CommandPolicy::FullShell,
+            None,
+            None,
+            false,
+            Some("stress-run-1"),
+        );
         assert!(a.contains(&"--network=bridge".to_string()));
         assert!(!a.contains(&"--cap-drop=ALL".to_string()));
         assert!(!a.contains(&"--network=none".to_string()));

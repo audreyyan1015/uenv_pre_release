@@ -20,6 +20,14 @@ interface AdminWorkerRow {
   last_heartbeat_secs?: number | null;
   last_report_secs?: number | null;
   episodes?: AdminWorkerEpisode[];
+  supported_env_types?: string[];
+  platform_features?: string[];
+  backend_kinds?: string[];
+  trajectory_schemas?: string[];
+  tool_schemas?: string[];
+  package_states?: Array<Record<string, unknown>>;
+  pool_summary?: Array<Record<string, unknown>>;
+  pool_slots?: Array<Record<string, unknown>>;
 }
 
 interface AdminWorkersPayload {
@@ -56,6 +64,7 @@ export function useWorkerFleetLive(workerId: string | null): {
         const row = (payload.workers ?? []).find((item) => item.worker_id === workerId);
         if (!row) {
           setLive({
+            found: false,
             liveEpisodes: [],
             load: 0,
             fetchedAt: Date.now(),
@@ -64,12 +73,21 @@ export function useWorkerFleetLive(workerId: string | null): {
           return;
         }
         setLive({
+          found: true,
           load: row.load,
           capacity: row.capacity,
           heartbeatAgeSecs: row.last_heartbeat_secs ?? null,
           reportAgeSecs: row.last_report_secs ?? null,
           status: row.status,
           endpoint: row.endpoint,
+          supportedEnvTypes: row.supported_env_types ?? [],
+          platformFeatures: row.platform_features ?? [],
+          backendKinds: row.backend_kinds ?? [],
+          trajectorySchemas: row.trajectory_schemas ?? [],
+          toolSchemas: row.tool_schemas ?? [],
+          packageStates: (row.package_states ?? []) as never,
+          poolSummary: (row.pool_summary ?? []) as never,
+          poolSlots: (row.pool_slots ?? []) as never,
           liveEpisodes: (row.episodes ?? [])
             .map((episode) => ({
               episodeId: episode.episode_id ?? "",

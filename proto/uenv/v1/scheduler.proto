@@ -21,6 +21,40 @@ message SyncedEnvPackage {
     string bundle_digest = 3;
 }
 
+message EnvPackageState {
+    string package_id = 1;
+    string version = 2;
+    string bundle_digest = 3;
+    string state = 4;          // missing | syncing | ready | failed
+    string env_type = 5;
+    string backend_kind = 6;
+    string message = 7;
+}
+
+message WorkerPoolSummary {
+    string env_type = 1;
+    string variant = 2;
+    string package_id = 3;
+    string package_version = 4;
+    string backend_kind = 5;
+    int32 ready = 6;
+    int32 busy = 7;
+    int32 warming = 8;
+    int32 capacity = 9;
+}
+
+message WorkerPoolSlot {
+    string slot_id = 1;
+    string status = 2;         // ready | busy | warming | failed
+    string env_type = 3;
+    string variant = 4;
+    string package_id = 5;
+    string package_version = 6;
+    string backend_kind = 7;
+    string episode_id = 8;
+    string session_id = 9;
+}
+
 message RegisterWorkerRequest {
     string worker_id = 1;
     repeated string supported_env_types = 2;
@@ -35,6 +69,13 @@ message RegisterWorkerRequest {
     int32 load = 8;
     // 注册时 worker 侧真实容量。区别于历史 max_concurrent 配置值。
     int32 max_load = 9;
+    repeated string platform_features = 10;
+    repeated string backend_kinds = 11;
+    repeated string trajectory_schemas = 12;
+    repeated string tool_schemas = 13;
+    repeated EnvPackageState package_states = 14;
+    repeated WorkerPoolSummary pool_summary = 15;
+    repeated WorkerPoolSlot pool_slots = 16;
 }
 
 message RegisterWorkerResponse {
@@ -50,6 +91,14 @@ message HeartbeatRequest {
     int32 max_load = 3;
     int64 timestamp_ms = 4;
     uint64 server_epoch = 5;
+    repeated string supported_env_types = 6;
+    repeated string platform_features = 7;
+    repeated string backend_kinds = 8;
+    repeated string trajectory_schemas = 9;
+    repeated string tool_schemas = 10;
+    repeated EnvPackageState package_states = 11;
+    repeated WorkerPoolSummary pool_summary = 12;
+    repeated WorkerPoolSlot pool_slots = 13;
 }
 
 message HeartbeatResponse {
@@ -91,6 +140,13 @@ message WorkerInfo {
     int32 max_load = 4;
     string status = 5;
     string endpoint = 6;
+    repeated string platform_features = 7;
+    repeated string backend_kinds = 8;
+    repeated string trajectory_schemas = 9;
+    repeated string tool_schemas = 10;
+    repeated EnvPackageState package_states = 11;
+    repeated WorkerPoolSummary pool_summary = 12;
+    repeated WorkerPoolSlot pool_slots = 13;
 }
 
 message ListWorkersResponse {

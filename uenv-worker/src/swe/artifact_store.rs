@@ -37,7 +37,11 @@ impl ArtifactStore {
 
     /// 该 artifact 的落盘文件路径（纯函数，便于单测）。
     pub fn path_for(&self, episode_id: &str, instance_id: &str) -> PathBuf {
-        self.dir.join(format!("{}__{}.json", sanitize(episode_id), sanitize(instance_id)))
+        self.dir.join(format!(
+            "{}__{}.json",
+            sanitize(episode_id),
+            sanitize(instance_id)
+        ))
     }
 
     /// 落盘 artifact（pretty JSON），返回写入路径字符串（供 `artifact_uri`）。
@@ -52,7 +56,13 @@ impl ArtifactStore {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 

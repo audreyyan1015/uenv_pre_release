@@ -62,7 +62,11 @@ pub async fn evaluate(raw_action: &str, req: &EvaluationRequest) -> EvaluationRe
     let started = Instant::now();
     let code = extract_python_code(raw_action);
     if code.trim().is_empty() {
-        return fail_result(started, "empty code after extraction", "candidate_runtime_error");
+        return fail_result(
+            started,
+            "empty code after extraction",
+            "candidate_runtime_error",
+        );
     }
 
     let script = evaluator_script_path();

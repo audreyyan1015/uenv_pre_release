@@ -148,7 +148,9 @@ impl TrajectoryStore {
     }
 
     pub fn body_path(&self, trajectory_id: &str) -> PathBuf {
-        self.dir.join("bodies").join(format!("{trajectory_id}.json"))
+        self.dir
+            .join("bodies")
+            .join(format!("{trajectory_id}.json"))
     }
 
     pub fn index_path(&self, trajectory_id: &str) -> PathBuf {
@@ -340,7 +342,13 @@ mod tests {
             }),
         };
         let value = serde_json::to_value(&step).expect("serialize");
-        assert_eq!(value["rollout_trace"]["response_ids"], serde_json::json!([101, 102]));
-        assert_eq!(value["rollout_trace"]["response_mask"], serde_json::json!([1, 0]));
+        assert_eq!(
+            value["rollout_trace"]["response_ids"],
+            serde_json::json!([101, 102])
+        );
+        assert_eq!(
+            value["rollout_trace"]["response_mask"],
+            serde_json::json!([1, 0])
+        );
     }
 }

@@ -143,7 +143,12 @@ impl SweInstancePool {
         let instance = self
             .store
             .get(instance_id)
-            .ok_or_else(|| format!("swe instance_id `{instance_id}` not in catalog (size={})", self.store.len()))?
+            .ok_or_else(|| {
+                format!(
+                    "swe instance_id `{instance_id}` not in catalog (size={})",
+                    self.store.len()
+                )
+            })?
             .clone();
 
         // M4：解析 Hub 预制镜像 tar（若 EnvPackage 已同步），直接交给 provision。
@@ -156,19 +161,22 @@ impl SweInstancePool {
 
         // M2-4：叠加池级 seccomp profile 目录（call-site 仅决定 mode）。
         let policy = self.apply_seccomp(policy);
-        let session_id = format!("sess-{}-{}", sanitize(instance_id), self.seq.fetch_add(1, Ordering::SeqCst));
-        let (session, observation) =
-            SweSession::provision(
-                &instance,
-                &session_id,
-                self.runtime,
-                policy,
-                false,
-                &self.worker_id,
-                &self.gateway_base_url,
-                image_tar.as_deref(),
-                pull_policy,
-            )?;
+        let session_id = format!(
+            "sess-{}-{}",
+            sanitize(instance_id),
+            self.seq.fetch_add(1, Ordering::SeqCst)
+        );
+        let (session, observation) = SweSession::provision(
+            &instance,
+            &session_id,
+            self.runtime,
+            policy,
+            false,
+            &self.worker_id,
+            &self.gateway_base_url,
+            image_tar.as_deref(),
+            pull_policy,
+        )?;
 
         let count = {
             let mut guard = self.sessions.lock().expect("pool lock");
@@ -353,7 +361,10 @@ impl SweInstancePool {
         }
     }
 
-    pub fn get_trajectory(&self, trajectory_id: &str) -> Result<crate::swe::trajectory::TrajectoryBundle, DynErr> {
+    pub fn get_trajectory(
+        &self,
+        trajectory_id: &str,
+    ) -> Result<crate::swe::trajectory::TrajectoryBundle, DynErr> {
         let store = TrajectoryStore::from_env()
             .ok_or_else(|| "UENV_SWE_ARTIFACT_DIR not configured".to_string())?;
         store.get(trajectory_id)
@@ -412,6 +423,12 @@ impl SweInstancePool {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }

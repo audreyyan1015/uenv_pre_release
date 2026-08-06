@@ -20,6 +20,53 @@ impl AdminService for AdminServiceImpl {
                 load: w.load as i32,
                 max_load: w.capacity as i32,
                 status: w.status,
+                platform_features: w.platform_features,
+                backend_kinds: w.backend_kinds,
+                trajectory_schemas: w.trajectory_schemas,
+                tool_schemas: w.tool_schemas,
+                package_states: w
+                    .package_states
+                    .into_iter()
+                    .map(|p| crate::proto::scheduler::v1::EnvPackageState {
+                        package_id: p.package_id,
+                        version: p.version,
+                        bundle_digest: p.bundle_digest,
+                        state: p.state,
+                        env_type: p.env_type,
+                        backend_kind: p.backend_kind,
+                        message: p.message,
+                    })
+                    .collect(),
+                pool_summary: w
+                    .pool_summary
+                    .into_iter()
+                    .map(|p| crate::proto::scheduler::v1::WorkerPoolSummary {
+                        env_type: p.env_type,
+                        variant: p.variant,
+                        package_id: p.package_id,
+                        package_version: p.package_version,
+                        backend_kind: p.backend_kind,
+                        ready: p.ready,
+                        busy: p.busy,
+                        warming: p.warming,
+                        capacity: p.capacity,
+                    })
+                    .collect(),
+                pool_slots: w
+                    .pool_slots
+                    .into_iter()
+                    .map(|p| crate::proto::scheduler::v1::WorkerPoolSlot {
+                        slot_id: p.slot_id,
+                        status: p.status,
+                        env_type: p.env_type,
+                        variant: p.variant,
+                        package_id: p.package_id,
+                        package_version: p.package_version,
+                        backend_kind: p.backend_kind,
+                        episode_id: p.episode_id,
+                        session_id: p.session_id,
+                    })
+                    .collect(),
             })
             .collect();
         Ok(Response::new(ListWorkersResponse { workers }))

@@ -10,9 +10,7 @@ pub const PARALLEL_MODE_FULLY_ASYNC: &str = "fully_async";
 pub struct UnsupportedParallelMode(pub String);
 
 /// 从 EpisodeRequest 的 canonical typed field 读取 parallel_mode。
-pub fn extract_parallel_mode(
-    episode: &EpisodeRequest,
-) -> Result<String, UnsupportedParallelMode> {
+pub fn extract_parallel_mode(episode: &EpisodeRequest) -> Result<String, UnsupportedParallelMode> {
     normalize_parallel_mode(&episode.parallel_mode)
 }
 pub fn normalize_parallel_mode(raw: &str) -> Result<String, UnsupportedParallelMode> {

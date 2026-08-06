@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::swe::repo_specs::{spec_for, LogParser, RepoSpec, DEFAULT_SPEC};
+use crate::swe::repo_specs::{DEFAULT_SPEC, LogParser, RepoSpec, spec_for};
 use crate::swe::spec::{EvaluationSpec, InstanceSpec, TaskSpec};
 use crate::swe::variant::BenchmarkVariant;
 
@@ -70,7 +70,11 @@ impl SweInstance {
     /// 官方 SWE-bench 评测镜像名：`instance_id` 的 `__` 替换为 `_1776_`。
     /// Pro 等变体优先用显式 `image_cache_key`。
     pub fn image_ref(&self) -> String {
-        if let Some(img) = self.image_cache_key.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(img) = self
+            .image_cache_key
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
             return img.clone();
         }
         image_ref(&self.instance_id)
@@ -112,7 +116,11 @@ impl SweInstance {
     /// Pro 置备脚本（`before_repo_set_cmd`）：git reset + 测试文件 checkout。
     pub fn resolved_setup_command(&self) -> Option<String> {
         if let Some(c) = self.setup_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
-            return Some(format!("cd {} && {}", self.workspace_dir(), c.replace('\n', " && ")));
+            return Some(format!(
+                "cd {} && {}",
+                self.workspace_dir(),
+                c.replace('\n', " && ")
+            ));
         }
         None
     }
@@ -132,15 +140,23 @@ impl SweInstance {
     /// 整套 runner），否则按 `repo@version` 规格拼接节点 id。
     pub fn resolved_test_command(&self, testbed: &str) -> String {
         let ws = self.workspace_dir();
-        let bed = if self.variant() == BenchmarkVariant::Pro { ws } else { testbed };
+        let bed = if self.variant() == BenchmarkVariant::Pro {
+            ws
+        } else {
+            testbed
+        };
         if let Some(cmd) = self.test_cmd.as_ref().filter(|s| !s.trim().is_empty()) {
             if self.variant() == BenchmarkVariant::Pro {
                 return format!("cd {ws} && {cmd}");
             }
             return format!("{CONDA_ACTIVATE}; cd {bed} && {cmd}");
         }
-        self.repo_spec()
-            .build_test_command(CONDA_ACTIVATE, bed, &self.fail_to_pass, &self.pass_to_pass)
+        self.repo_spec().build_test_command(
+            CONDA_ACTIVATE,
+            bed,
+            &self.fail_to_pass,
+            &self.pass_to_pass,
+        )
     }
 
     /// 解析 post-patch 安装命令原文（M1-3 / M1-2）：实例显式 `install_cmd` 优先，
@@ -318,8 +334,14 @@ mod tests {
         assert_eq!(inst.pass_to_pass.len(), 1);
 
         let ispec = inst.to_instance_spec();
-        assert_eq!(ispec.repo_url, "https://github.com/scikit-learn/scikit-learn");
-        assert_eq!(ispec.image_cache_key.as_deref(), Some("swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14141:latest"));
+        assert_eq!(
+            ispec.repo_url,
+            "https://github.com/scikit-learn/scikit-learn"
+        );
+        assert_eq!(
+            ispec.image_cache_key.as_deref(),
+            Some("swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14141:latest")
+        );
 
         let tspec = inst.to_task_spec();
         assert_eq!(tspec.issue_text, "Add joblib in show_versions");
@@ -330,7 +352,10 @@ mod tests {
     fn verified_defaults_and_grader() {
         let store = InstanceStore::from_json(SAMPLE).unwrap();
         let inst = store.get("scikit-learn__scikit-learn-14141").unwrap();
-        assert_eq!(inst.variant(), crate::swe::variant::BenchmarkVariant::Verified);
+        assert_eq!(
+            inst.variant(),
+            crate::swe::variant::BenchmarkVariant::Verified
+        );
         assert_eq!(inst.grader_name(), "swebench");
         assert!(inst.image_namespace_consistent());
         assert!(store.image_namespace_violations().is_empty());
@@ -354,7 +379,10 @@ mod tests {
         let inst = store.get("acme__widget-42").unwrap();
         assert_eq!(inst.variant(), crate::swe::variant::BenchmarkVariant::Pro);
         assert_eq!(inst.grader_name(), "swebench_pro");
-        assert_eq!(inst.image_ref(), "registry.example.com/swe-pro/acme-widget-42:latest");
+        assert_eq!(
+            inst.image_ref(),
+            "registry.example.com/swe-pro/acme-widget-42:latest"
+        );
         assert!(inst.image_namespace_consistent());
         assert!(store.image_namespace_violations().is_empty());
     }
@@ -371,7 +399,10 @@ mod tests {
           }
         }"#;
         let store = InstanceStore::from_json(raw).unwrap();
-        assert_eq!(store.image_namespace_violations(), vec!["bad__pro-1".to_string()]);
+        assert_eq!(
+            store.image_namespace_violations(),
+            vec!["bad__pro-1".to_string()]
+        );
     }
 
     #[test]
