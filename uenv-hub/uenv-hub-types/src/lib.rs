@@ -999,6 +999,10 @@ pub struct PackageSummary {
     /// instead of listing every dataset as if it were a top-level concept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_type: Option<String>,
+    /// Dataset / variant key under that contract, e.g. `smith` under `swe`,
+    /// or `dscodebench` under `code`. Distinct from [`Self::package_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
     /// Number of task instances the benchmark declares, when its manifest says so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_count: Option<i64>,
@@ -1045,9 +1049,9 @@ impl PackageKind {
 
     /// Derive the role of a package from its manifest.
     ///
-    /// Order matters: a scaffold may ship fixtures, and a benchmark may ship image
-    /// tarballs, so the most specific declaration wins. Only the last two arms look
-    /// at the package id, and only for names that carry no other signal.
+    /// Order matters: a scaffold may ship fixtures, and a smoke fixture may ship a
+    /// tiny catalog, so the most specific declaration wins. Package-id suffixes
+    /// (`fixture` / `smoke` / `rubric`) are consulted only after structure.
     pub fn classify(manifest: &EnvPackageManifest) -> Self {
         let has_agent_kind = manifest
             .agent_defaults
@@ -1056,6 +1060,19 @@ impl PackageKind {
             .is_some_and(|s| !s.trim().is_empty());
         if has_agent_kind {
             return Self::AgentScaffold;
+        }
+
+        let id = manifest.package_id.to_ascii_lowercase();
+        let fixture_flag = manifest
+            .worker_overlay
+            .pointer("/math/fixture_package")
+            .or_else(|| manifest.worker_overlay.get("fixture_package"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        // Smoke / fixture packages often carry a small catalog; the name and the
+        // explicit flag are what mark them as non-training material.
+        if fixture_flag || id.contains("fixture") || id.contains("smoke") {
+            return Self::Fixture;
         }
 
         let artifact_kind = |k: &str| manifest.artifacts.iter().any(|a| a.kind == k);
@@ -1073,25 +1090,25 @@ impl PackageKind {
             return Self::ImageBundle;
         }
 
-        let id = manifest.package_id.to_ascii_lowercase();
         if id.contains("rubric") {
             return Self::Rubric;
-        }
-        if id.contains("fixture") || id.contains("smoke") {
-            return Self::Fixture;
         }
         Self::Other
     }
 
-    /// The Task Environment a benchmark supplies data to, if its overlay says.
+    /// The Task Environment a benchmark supplies data to.
     ///
-    /// Read from `worker_overlay.swe.env_type` / `worker_overlay.env_type`, falling
-    /// back to the presence of SWE-specific keys. Returns `None` rather than
-    /// guessing when the manifest is silent.
+    /// Resolution order:
+    /// 1. explicit `env_type` in the overlay;
+    /// 2. a well-formed contract subtree (`swe.benchmark_variant`, `code.*`, `qa`/`math`);
+    /// 3. package-id conventions (`swe-bench-*` → `swe`, `olymmath` → `qa`, …).
+    ///
+    /// Step 3 exists because several production packages were published with a
+    /// copy-pasted `{"swe":{"image_pull_policy":"local_only"}}` overlay that does
+    /// not describe their real contract. Guessing from the id is preferable to
+    /// dumping them under "undeclared" in the console.
     pub fn benchmark_env_type(manifest: &EnvPackageManifest) -> Option<String> {
         let overlay = &manifest.worker_overlay;
-        // Prefer an explicit env_type; only then infer from a well-known overlay
-        // subtree. Presence of an unrelated key must not invent a contract.
         for path in [
             &["env_type"][..],
             &["swe", "env_type"][..],
@@ -1109,7 +1126,11 @@ impl PackageKind {
                 }
             }
         }
-        if overlay.get("swe").and_then(|s| s.get("benchmark_variant")).is_some() {
+        if overlay
+            .get("swe")
+            .and_then(|s| s.get("benchmark_variant"))
+            .is_some()
+        {
             return Some("swe".to_string());
         }
         if overlay.get("code").is_some() {
@@ -1117,6 +1138,56 @@ impl PackageKind {
         }
         if overlay.get("qa").is_some() || overlay.get("math").is_some() {
             return Some("qa".to_string());
+        }
+        Self::infer_env_from_package_id(&manifest.package_id)
+    }
+
+    /// Dataset / variant key under the contract (e.g. `smith`, `dscodebench`).
+    pub fn benchmark_dataset(manifest: &EnvPackageManifest) -> Option<String> {
+        let overlay = &manifest.worker_overlay;
+        for path in [
+            &["swe", "benchmark_variant"][..],
+            &["code", "dataset"][..],
+            &["qa", "dataset"][..],
+            &["math", "dataset"][..],
+            &["dataset"][..],
+        ] {
+            let mut cur = Some(overlay);
+            for seg in path {
+                cur = cur.and_then(|v| v.get(*seg));
+            }
+            if let Some(s) = cur.and_then(Value::as_str) {
+                if !s.trim().is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        let id = &manifest.package_id;
+        if let Some(rest) = id.strip_prefix("swe-bench-") {
+            return Some(rest.to_string());
+        }
+        // For single-dataset packages the package id is the dataset name.
+        match Self::infer_env_from_package_id(id) {
+            Some(_) => Some(id.clone()),
+            None => None,
+        }
+    }
+
+    fn infer_env_from_package_id(package_id: &str) -> Option<String> {
+        let id = package_id.to_ascii_lowercase();
+        if id.starts_with("swe-bench") || id.contains("swesmith") || id == "swebenchpro" {
+            return Some("swe".into());
+        }
+        if id == "dscodebench" || id.starts_with("dscode") {
+            return Some("code".into());
+        }
+        if matches!(
+            id.as_str(),
+            "olymmath" | "pubmedqa" | "scitab" | "gsm8k"
+        ) || id.contains("olymmath")
+            || id.starts_with("math-")
+        {
+            return Some("qa".into());
         }
         None
     }
@@ -1592,7 +1663,7 @@ mod package_kind_tests {
         assert_eq!(PackageKind::classify(&m), PackageKind::ImageBundle);
     }
     #[test]
-    fn overlay_swe_pull_policy_alone_is_not_swe_env() {
+    fn olymmath_with_copy_pasted_swe_overlay_still_maps_to_qa() {
         let mut m = bare_manifest("olymmath");
         m.artifacts.push(PackageArtifactRef {
             name: "catalog.json".into(),
@@ -1604,13 +1675,16 @@ mod package_kind_tests {
             media_type: None,
             target_rel_path: "catalog.json".into(),
         });
+        // Production residue: overlay claims swe.image_pull_policy but the package
+        // is a QA dataset — package id must win over the misleading subtree.
         m.worker_overlay = json!({"swe": {"image_pull_policy": "local_only"}});
         assert_eq!(PackageKind::classify(&m), PackageKind::Benchmark);
-        assert_eq!(PackageKind::benchmark_env_type(&m), None);
+        assert_eq!(PackageKind::benchmark_env_type(&m).as_deref(), Some("qa"));
+        assert_eq!(PackageKind::benchmark_dataset(&m).as_deref(), Some("olymmath"));
     }
 
     #[test]
-    fn overlay_math_subtree_maps_to_qa() {
+    fn smoke_fixture_is_not_a_training_benchmark() {
         let mut m = bare_manifest("math-smoke-fixtures");
         m.artifacts.push(PackageArtifactRef {
             name: "catalog.json".into(),
@@ -1622,8 +1696,17 @@ mod package_kind_tests {
             media_type: None,
             target_rel_path: "catalog.json".into(),
         });
-        m.worker_overlay = json!({"math": {"datasets": ["gsm8k"]}});
+        m.worker_overlay = json!({"math": {"datasets": ["gsm8k"], "fixture_package": true}});
+        assert_eq!(PackageKind::classify(&m), PackageKind::Fixture);
         assert_eq!(PackageKind::benchmark_env_type(&m).as_deref(), Some("qa"));
+    }
+
+    #[test]
+    fn swe_bench_id_yields_variant_dataset() {
+        let mut m = bare_manifest("swe-bench-smith");
+        m.worker_overlay = json!({"swe": {"benchmark_variant": "smith", "instance_count": 10}});
+        assert_eq!(PackageKind::benchmark_env_type(&m).as_deref(), Some("swe"));
+        assert_eq!(PackageKind::benchmark_dataset(&m).as_deref(), Some("smith"));
     }
 
 }

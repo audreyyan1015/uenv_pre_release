@@ -234,6 +234,7 @@ pub fn package_summary(row: &EnvPackageRow) -> dto::PackageSummary {
         // layer that can read it; a bare row conversion cannot classify.
         kind: dto::PackageKind::default(),
         env_type: None,
+        dataset: None,
         instance_count: None,
     }
 }

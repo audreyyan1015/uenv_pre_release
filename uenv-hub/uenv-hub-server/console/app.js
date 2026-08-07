@@ -893,72 +893,183 @@
   });
 
   // ------------------------------------------------------ 视图：基准与数据集
+  //
+  // 层级：环境契约（交互怎么定义）→ 基准/数据集（考哪些题）→ 制品（字节）。
+  // 三个正式契约固定展示，避免「未声明」把本该归类的包甩到一边。
+
+  const ENV_CONTRACTS = [
+    {
+      id: "swe",
+      title: "SWE · 仓库级缺陷修复",
+      blurb:
+        "容器内多轮修 bug。verified / pro / smith 是同一契约下的三个数据集变体，" +
+        "差别在题目集、镜像命名与 grader，不是三种环境。",
+    },
+    {
+      id: "qa",
+      title: "QA · 单轮问答 / 判分",
+      blurb:
+        "一道题一次作答，按标准答案或 rubric 判分。olymmath / pubmedqa / scitab 等" +
+        "都是挂在 qa 下的数据集（历史名 math 已归并到 qa）。",
+    },
+    {
+      id: "code",
+      title: "Code · 代码执行",
+      blurb: "生成代码并跑测试拿奖励。当前挂载的数据集是 DSCodeBench。",
+    },
+  ];
+
+  const datasetLabel = (p) => {
+    if (p.dataset) return p.dataset;
+    const id = p.package_id || "";
+    if (id.startsWith("swe-bench-")) return id.slice("swe-bench-".length);
+    return "—";
+  };
 
   routes.benchmarks = async () => {
-    setCrumbs("基准与数据集", "kind=benchmark");
+    setCrumbs("基准与数据集", "环境契约 → 数据集变体");
     const { groups } = await packagesByKind();
+    // 正式训练数据与 smoke fixture 分开：后者不是「又一种契约」。
     const benches = groups.benchmark || [];
+    const fixtures = groups.fixture || [];
 
-    // 基准按它供给的环境契约归组：`swe` 下面才是 verified / pro / smith，
-    // 而不是把每个 benchmark 平铺成一个顶级概念。
     const byEnv = {};
     for (const b of benches) {
-      const k = b.env_type || "未声明环境";
+      const k = b.env_type || "_unknown";
       (byEnv[k] = byEnv[k] || []).push(b);
+    }
+    for (const list of Object.values(byEnv)) {
+      list.sort((a, b) => a.package_id.localeCompare(b.package_id));
     }
 
     const frag = document.createDocumentFragment();
     frag.appendChild(
-      lead(
-        "一个基准就是某个环境契约的一份任务数据：目录（catalog）、评测规格（eval_spec）、" +
-          "镜像清单与 Worker overlay 一起版本化。同一个环境契约下可以有多个基准变体。",
-      ),
+      el("div", { class: "model-card" }, [
+        el("h3", { text: "怎么读这一页" }),
+        el("ol", { class: "model-steps" }, [
+          el("li", {
+            html: "<strong>环境契约</strong>（swe / qa / code）定义「一次 reset/step 是什么、奖励怎么算」。",
+          }),
+          el("li", {
+            html: "<strong>基准数据集</strong>是契约下的题目与镜像打包，发给 Worker 的内容寻址单元。",
+          }),
+          el("li", {
+            html: "<strong>变体 / dataset</strong>是契约内的路由键，例如 swe 下的 <code>smith</code>，不是新的环境类型。",
+          }),
+        ]),
+        el("p", {
+          class: "model-note",
+          text: "Episode Stack 再往上选一层：把「契约 + 某个数据集 + Agent 脚手架」钉成可运行组合。",
+        }),
+      ]),
     );
 
-    const envKeys = Object.keys(byEnv).sort();
-    if (!envKeys.length) {
-      frag.appendChild(el("div", { class: "empty", text: "尚未发布任何基准数据集" }));
-      return frag;
-    }
-    for (const envType of envKeys) {
-      const list = byEnv[envType];
+    for (const contract of ENV_CONTRACTS) {
+      const list = byEnv[contract.id] || [];
+      delete byEnv[contract.id];
       const totalInstances = list.reduce((a, x) => a + (x.instance_count || 0), 0);
-      const title = envType === "未声明环境" ? envType : `环境契约 ${envType}`;
+      const body = el("div", {}, [
+        el("p", { class: "contract-blurb", text: contract.blurb }),
+        list.length
+          ? table(
+              [
+                "基准包",
+                "变体 / dataset",
+                "最新版本",
+                { label: "实例数", num: true },
+                "描述",
+                "更新时间",
+              ],
+              list.map((p) => ({
+                onclick: () => go(`#/packages/${encodeURIComponent(p.package_id)}`),
+                cells: [
+                  el("strong", { text: p.package_id }),
+                  badge(datasetLabel(p), "info"),
+                  el("code", { class: "mono", text: p.latest_version || "—" }),
+                  p.instance_count ? fmtNum(p.instance_count) : "—",
+                  p.description || "—",
+                  fmtTime(p.updated_at),
+                ],
+              })),
+              { empty: "该契约下尚未挂载基准" },
+            )
+          : el("div", { class: "empty", text: "该契约下尚未挂载基准数据集" }),
+      ]);
+      frag.appendChild(
+        el("div", { class: "section" }, [
+          card(contract.title, body, {
+            tight: true,
+            hint:
+              `${list.length} 个数据集` +
+              (totalInstances ? ` · 合计 ${fmtNum(totalInstances)} 条实例` : ""),
+            actions: [
+              el("a", {
+                class: "btn sm",
+                href: `#/envs/${encodeURIComponent(contract.id)}`,
+                text: `契约 ${contract.id}`,
+              }),
+            ],
+          }),
+        ]),
+      );
+    }
+
+    const leftovers = Object.entries(byEnv).flatMap(([, list]) => list);
+    if (leftovers.length) {
       frag.appendChild(
         el("div", { class: "section" }, [
           card(
-            title,
-            table(
-              ["基准包", "最新版本", { label: "实例数", num: true }, "描述", "更新时间"],
-              list.map((p) =>
-                pkgRow(p, (x) => [
-                  x.instance_count ? fmtNum(x.instance_count) : "—",
-                ]),
+            "尚无法归入上述契约",
+            el("div", {}, [
+              el("p", {
+                class: "contract-blurb",
+                text:
+                  "这些包有 catalog，但 overlay / 包名都无法映射到 swe、qa、code。" +
+                  "需要补 worker_overlay.env_type 或按命名规范发布。",
+              }),
+              table(
+                ["基准包", "最新版本", "描述", "更新时间"],
+                leftovers.map((p) => pkgRow(p)),
+                { empty: "无" },
               ),
-              { empty: "无" },
-            ),
-            {
-              tight: true,
-              hint:
-                envType === "未声明环境"
-                  ? `${list.length} 个基准`
-                  : `${list.length} 个基准变体` +
-                    (totalInstances ? ` · 合计 ${fmtNum(totalInstances)} 条实例` : ""),
-              actions:
-                envType === "未声明环境"
-                  ? []
-                  : [
-                      el("a", {
-                        class: "btn sm",
-                        href: `#/envs/${encodeURIComponent(envType)}`,
-                        text: "查看契约",
-                      }),
-                    ],
-            },
+            ]),
+            { tight: true, hint: `${leftovers.length} 个` },
           ),
         ]),
       );
     }
+
+    if (fixtures.length) {
+      frag.appendChild(
+        el("div", { class: "section" }, [
+          card(
+            "联调夹具（非训练基准）",
+            el("div", {}, [
+              el("p", {
+                class: "contract-blurb",
+                text: "smoke / fixture 包只用于预热与回归，不计入正式基准目录。",
+              }),
+              table(
+                ["包 ID", "归属契约", "最新版本", "描述", "更新时间"],
+                fixtures.map((p) => ({
+                  onclick: () => go(`#/packages/${encodeURIComponent(p.package_id)}`),
+                  cells: [
+                    el("strong", { text: p.package_id }),
+                    p.env_type ? badge(p.env_type) : "—",
+                    el("code", { class: "mono", text: p.latest_version || "—" }),
+                    p.description || "—",
+                    fmtTime(p.updated_at),
+                  ],
+                })),
+                { empty: "无" },
+              ),
+            ]),
+            { tight: true, hint: `${fixtures.length} 个夹具` },
+          ),
+        ]),
+      );
+    }
+
     return frag;
   };
 

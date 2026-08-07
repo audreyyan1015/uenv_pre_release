@@ -1107,8 +1107,12 @@ impl SqliteStore {
         };
         let manifest: dto::EnvPackageManifest = serde_json::from_str(&version.manifest_json)?;
         item.kind = dto::PackageKind::classify(&manifest);
-        if item.kind == dto::PackageKind::Benchmark {
+        if matches!(
+            item.kind,
+            dto::PackageKind::Benchmark | dto::PackageKind::Fixture
+        ) {
             item.env_type = dto::PackageKind::benchmark_env_type(&manifest);
+            item.dataset = dto::PackageKind::benchmark_dataset(&manifest);
             item.instance_count = manifest
                 .worker_overlay
                 .get("instance_count")
