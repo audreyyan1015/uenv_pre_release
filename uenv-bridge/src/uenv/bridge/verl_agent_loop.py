@@ -182,6 +182,7 @@ class UEnvAgentLoopConfig:
     model_gateway_stop_on_close: bool = True
     require_swe_response_trace: bool = True
     parallel_mode: str = "sync"
+    expected_worker_parallelism: int | None = None
     failed_episode_policy: str = "raise"
 
 
@@ -230,6 +231,7 @@ class UEnvAgentLoop(AgentLoopBase):
         model_gateway_stop_on_close: bool | None = None,
         require_swe_response_trace: bool | None = None,
         parallel_mode: str = "sync",
+        expected_worker_parallelism: int | None = None,
         failed_episode_policy: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -266,6 +268,7 @@ class UEnvAgentLoop(AgentLoopBase):
             model_gateway_stop_on_close=_bool_value(model_gateway_stop_on_close, True),
             require_swe_response_trace=_bool_value(require_swe_response_trace, True),
             parallel_mode=_optional_string(parallel_mode) or "sync",
+            expected_worker_parallelism=_optional_int_value(expected_worker_parallelism),
             failed_episode_policy=_failed_episode_policy(failed_episode_policy),
         )
         self.model_gateway = ModelGateway(
@@ -751,6 +754,8 @@ class UEnvAgentLoop(AgentLoopBase):
         metadata["training_run_id"] = training_run_id
         parallel_mode, parallel_metadata = self._parallel_metadata(sample_kwargs)
         metadata.update(parallel_metadata)
+        if self.config_for_uenv.expected_worker_parallelism is not None:
+            metadata["expected_worker_parallelism"] = self.config_for_uenv.expected_worker_parallelism
         generation_config = {
             "temperature": sampling_params.get("temperature"),
             "top_p": sampling_params.get("top_p"),
