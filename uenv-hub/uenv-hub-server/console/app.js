@@ -224,6 +224,34 @@
     return s ? `?${s}` : "";
   };
 
+  // -------------------------------------------------------- 环境包的角色分类
+  //
+  // Hub 存的「环境包」是一种分发单元，不是一类东西：任务数据、Agent 脚手架、
+  // 评分契约和纯镜像 tar 都用同一张表。服务端按 manifest 推导 `kind`，控制台据此
+  // 分栏，这样导航反映的是构件的角色，而不是数据库的表结构。
+
+  const PACKAGE_KINDS = {
+    benchmark: { label: "基准数据集", badge: "info", desc: "任务目录 + 评测规格，喂给某个环境契约" },
+    agent_scaffold: { label: "Agent 脚手架", badge: "ok", desc: "决定「怎么答」，由 Agent 宿主同步" },
+    rubric: { label: "评分契约", badge: "warn", desc: "判分口径与对齐证据" },
+    image_bundle: { label: "镜像包", badge: "", desc: "只有 docker load 输入，无任务数据" },
+    fixture: { label: "测试夹具", badge: "", desc: "回归用，不参与正式训练" },
+    other: { label: "其他", badge: "", desc: "未声明角色" },
+  };
+
+  const kindMeta = (k) => PACKAGE_KINDS[k] || PACKAGE_KINDS.other;
+
+  /** 一次拉满整张包表并按 kind 归组；列表端点不支持按角色过滤，故在前端分。 */
+  async function packagesByKind() {
+    const data = await api(`/api/v1/packages${qs({ per_page: 200 })}`);
+    const groups = {};
+    for (const p of data.items || []) {
+      const k = p.kind || "other";
+      (groups[k] = groups[k] || []).push(p);
+    }
+    return { total: data.total, items: data.items || [], groups };
+  }
+
   // ------------------------------------------------------------------ 路由
 
   const routes = {};
@@ -422,30 +450,66 @@
       ]),
     );
 
-    // 注册内容
+    // 可运行组合 —— Hub 里唯一「能直接跑」的东西，所以单独提到前面。
     const nav = (hash) => () => go(hash);
+    const byKind = r.packages_by_kind || {};
     frag.appendChild(
       el("div", { class: "section" }, [
-        el("h4", { class: "section-title", text: "注册内容" }),
+        el("h4", { class: "section-title", text: "可运行组合" }),
+        el("p", {
+          style: "margin:-4px 0 10px;font-size:12.5px;color:var(--muted-foreground)",
+          text:
+            "一个 Episode Stack 把「环境契约 + 基准数据集 + Agent 脚手架 + 运行时网关要求」" +
+            "钉成一份可解析的组合。它自己不含字节，只按版本引用下面的构件 —— " +
+            "所以同一份数据配不同脚手架，是两个 Stack，而不是两份数据。",
+        }),
         el("div", { class: "grid cols-4" }, [
           clickable(
-            statTile("环境", fmtNum(r.envs), `${fmtNum(r.env_versions)} 个版本 · ${fmtNum(r.yanked_env_versions)} 已撤回`),
-            nav("#/envs"),
-          ),
-          clickable(
-            statTile("环境包", fmtNum(r.packages), `${fmtNum(r.package_versions)} 个版本 · ${fmtNum(r.yanked_package_versions)} 已撤回`),
-            nav("#/packages"),
-          ),
-          clickable(
-            statTile("Episode Stack", fmtNum(r.stacks), `${fmtNum(r.stack_versions)} 个版本 · ${fmtNum(r.yanked_stack_versions)} 已撤回`),
+            statTile(
+              "Episode Stack",
+              fmtNum(r.stacks),
+              `${fmtNum(r.stack_versions)} 个版本 · ${fmtNum(r.yanked_stack_versions)} 已撤回`,
+            ),
             nav("#/stacks"),
           ),
           clickable(
-            statTile("Agent Bridge", fmtNum(r.agent_bridges), "声明 agent_kind 的包"),
-            nav("#/bridges"),
+            statTile("基准数据集", fmtNum(byKind.benchmark ?? 0), "任务目录 + 评测规格"),
+            nav("#/benchmarks"),
           ),
-          clickable(statTile("脚手架模板", fmtNum(r.templates), "uenv env init 可用"), nav("#/templates")),
-          statTile("已弃用环境", fmtNum(r.deprecated_envs), "仍可解析，带迁移标记"),
+          clickable(
+            statTile("Agent 脚手架", fmtNum(byKind.agent_scaffold ?? r.agent_bridges), "决定「怎么答」"),
+            nav("#/scaffolds"),
+          ),
+          clickable(
+            statTile(
+              "环境契约",
+              fmtNum(r.active_envs ?? r.envs),
+              `${fmtNum(r.env_versions)} 个版本 · ${fmtNum(r.deprecated_envs)} 个历史名已归并`,
+            ),
+            nav("#/envs"),
+          ),
+        ]),
+      ]),
+    );
+
+    // 其余包与运维计数
+    const otherKinds = Object.entries(byKind)
+      .filter(([k]) => k !== "benchmark" && k !== "agent_scaffold")
+      .map(([k, n]) => `${kindMeta(k).label} ${n}`)
+      .join(" · ");
+    frag.appendChild(
+      el("div", { class: "section" }, [
+        el("h4", { class: "section-title", text: "存储与运维" }),
+        el("div", { class: "grid cols-4" }, [
+          clickable(
+            statTile(
+              "登记产物",
+              fmtNum(r.package_artifacts),
+              `${fmtNum(r.packages)} 个包 · ${fmtNum(r.package_versions)} 个版本`,
+            ),
+            nav("#/artifacts"),
+          ),
+          statTile("其他角色的包", otherKinds || "无", "评分契约 / 镜像包 / 夹具"),
           clickable(statTile("审计条目", fmtNum(r.audit_entries), "发布 / 撤回 / 令牌变更"), nav("#/audit")),
           statTile("有效令牌", fmtNum(r.active_tokens), ov.posture.require_token ? "强制鉴权" : "开放模式"),
         ]),
@@ -503,7 +567,7 @@
 
   routes.envs = async (segs, query) => {
     if (segs.length >= 1) return envDetail(segs[0], segs[1], query);
-    setCrumbs("环境", "GET /api/v1/envs");
+    setCrumbs("环境契约", "GET /api/v1/envs");
 
     const page = Number(query.page || 1);
     const perPage = Number(query.per_page || 20);
@@ -564,16 +628,48 @@
       ],
     }));
 
-    const body = el("div", {}, [
-      table(
-        ["环境", "命名空间", "最新版本", "描述", "标签", "作者", "更新时间"],
-        rows,
-        { empty: "没有匹配的环境" },
+    // 能力契约与「被当成环境注册的基准」不是一回事：后者已归并到某个契约的
+    // dataset 枚举里，只为兼容旧引用而保留可解析。分开列，层级才看得出来。
+    const isRetired = (e) => e.lifecycle === "deprecated";
+    const live = rows.filter((_, i) => !isRetired(data.items[i]));
+    const retired = rows.filter((_, i) => isRetired(data.items[i]));
+    const columns = ["环境", "命名空间", "最新版本", "描述", "标签", "作者", "更新时间"];
+
+    const out = el("div", {}, [
+      lead(
+        "环境契约定义「一次 reset/step 是什么意思、奖励怎么算」，是能力层面的抽象；" +
+          "具体考哪些题由基准数据集提供，通过契约的 dataset 路由键挂载。",
       ),
-      pager(data, (p) => go(`#/envs${qs({ page: p, per_page: perPage, ...filters })}`)),
+      toolbar,
+      card(
+        "能力契约",
+        el("div", {}, [
+          table(columns, live, { empty: "没有匹配的环境契约" }),
+          pager(data, (p) => go(`#/envs${qs({ page: p, per_page: perPage, ...filters })}`)),
+        ]),
+        { tight: true, hint: `${live.length} 个在用契约` },
+      ),
     ]);
 
-    return el("div", {}, [toolbar, card("环境注册表", body, { tight: true, hint: `共 ${data.total} 项` })]);
+    if (retired.length) {
+      out.appendChild(
+        el("div", { class: "section" }, [
+          card(
+            "已归并的历史名",
+            el("div", {}, [
+              lead(
+                "这些名字曾被注册成独立环境，实际上是某个契约下的一个基准。" +
+                  "它们仍以 200 + Deprecation 头可解析，Worker 预热不会因改名而失败；" +
+                  "新接入请直接用 superseded_by 指向的契约。",
+              ),
+              table(columns, retired, { empty: "无" }),
+            ]),
+            { tight: true, hint: `${retired.length} 个已归并` },
+          ),
+        ]),
+      );
+    }
+    return out;
   };
 
   function pager(page, onGo) {
@@ -775,41 +871,197 @@
 
   // ---------------------------------------------------------- 视图：环境包
 
-  routes.packages = async (segs, query) => {
+  const lead = (text) =>
+    el("p", { style: "margin:0 0 14px;color:var(--muted-foreground);font-size:13px", text });
+
+  /** `#/packages` 只保留详情路由；列表按角色拆到了基准 / 脚手架 / 制品三页。 */
+  routes.packages = async (segs) => {
     if (segs.length >= 1) return packageDetail(segs[0], segs[1]);
-    setCrumbs("环境包", "GET /api/v1/packages");
+    go("#/benchmarks");
+    return el("div", { class: "empty", text: "正在跳转到「基准与数据集」…" });
+  };
 
-    const page = Number(query.page || 1);
-    const perPage = Number(query.per_page || 20);
-    const data = await api(`/api/v1/packages${qs({ page, per_page: perPage })}`);
+  const pkgRow = (p, extra) => ({
+    onclick: () => go(`#/packages/${encodeURIComponent(p.package_id)}`),
+    cells: [
+      el("strong", { text: p.package_id }),
+      el("code", { class: "mono", text: p.latest_version || "—" }),
+      ...(extra ? extra(p) : []),
+      p.description || "—",
+      fmtTime(p.updated_at),
+    ],
+  });
 
-    const rows = data.items.map((p) => ({
-      onclick: () => go(`#/packages/${encodeURIComponent(p.package_id)}`),
-      cells: [
-        el("strong", { text: p.package_id }),
-        el("code", { class: "mono", text: p.latest_version || "—" }),
-        p.publisher || "—",
-        p.description || "—",
-        fmtTime(p.updated_at),
-      ],
-    }));
+  // ------------------------------------------------------ 视图：基准与数据集
+
+  routes.benchmarks = async () => {
+    setCrumbs("基准与数据集", "kind=benchmark");
+    const { groups } = await packagesByKind();
+    const benches = groups.benchmark || [];
+
+    // 基准按它供给的环境契约归组：`swe` 下面才是 verified / pro / smith，
+    // 而不是把每个 benchmark 平铺成一个顶级概念。
+    const byEnv = {};
+    for (const b of benches) {
+      const k = b.env_type || "未声明环境";
+      (byEnv[k] = byEnv[k] || []).push(b);
+    }
+
+    const frag = document.createDocumentFragment();
+    frag.appendChild(
+      lead(
+        "一个基准就是某个环境契约的一份任务数据：目录（catalog）、评测规格（eval_spec）、" +
+          "镜像清单与 Worker overlay 一起版本化。同一个环境契约下可以有多个基准变体。",
+      ),
+    );
+
+    const envKeys = Object.keys(byEnv).sort();
+    if (!envKeys.length) {
+      frag.appendChild(el("div", { class: "empty", text: "尚未发布任何基准数据集" }));
+      return frag;
+    }
+    for (const envType of envKeys) {
+      const list = byEnv[envType];
+      const totalInstances = list.reduce((a, x) => a + (x.instance_count || 0), 0);
+      const title = envType === "未声明环境" ? envType : `环境契约 ${envType}`;
+      frag.appendChild(
+        el("div", { class: "section" }, [
+          card(
+            title,
+            table(
+              ["基准包", "最新版本", { label: "实例数", num: true }, "描述", "更新时间"],
+              list.map((p) =>
+                pkgRow(p, (x) => [
+                  x.instance_count ? fmtNum(x.instance_count) : "—",
+                ]),
+              ),
+              { empty: "无" },
+            ),
+            {
+              tight: true,
+              hint:
+                envType === "未声明环境"
+                  ? `${list.length} 个基准`
+                  : `${list.length} 个基准变体` +
+                    (totalInstances ? ` · 合计 ${fmtNum(totalInstances)} 条实例` : ""),
+              actions:
+                envType === "未声明环境"
+                  ? []
+                  : [
+                      el("a", {
+                        class: "btn sm",
+                        href: `#/envs/${encodeURIComponent(envType)}`,
+                        text: "查看契约",
+                      }),
+                    ],
+            },
+          ),
+        ]),
+      );
+    }
+    return frag;
+  };
+
+  // ------------------------------------------------------- 视图：Agent 脚手架
+
+  routes.scaffolds = async () => {
+    setCrumbs("Agent 脚手架", "kind=agent_scaffold · GET /api/v1/agent-bridges");
+    const [{ groups }, bridges] = await Promise.all([
+      packagesByKind(),
+      api("/api/v1/agent-bridges").catch(() => []),
+    ]);
+    const scaffolds = groups.agent_scaffold || [];
+    // Agent Bridge 目录不是另一类实体，而是同一批脚手架包按 `agent_kind` 的投影；
+    // 这里把两者并到一张表，避免同一个包在导航里被数两遍。
+    const byId = new Map((Array.isArray(bridges) ? bridges : []).map((b) => [b.package_id, b]));
 
     return el("div", {}, [
-      el("p", {
-        style: "margin:0 0 14px;color:var(--muted-foreground);font-size:13px",
-        text:
-          "环境包是内容寻址的分发单元：目录、镜像清单、评测规格与 Worker overlay 一起版本化，" +
-          "镜像字节本身按摘要引用，不进 Hub 数据库。",
-      }),
+      lead(
+        "脚手架决定「怎么答」：它跑在 Agent 宿主上，通过 Worker Runtime Gateway 把命令" +
+          "路由回任务容器。它本身也是环境包，只是在 agent_defaults 里声明了 agent_kind，" +
+          "因此同时出现在 Agent Bridge 目录里 —— 是同一个对象的两种视图，不是两样东西。",
+      ),
       card(
-        "EnvPackage 注册表",
-        el("div", {}, [
-          table(["包 ID", "最新版本", "发布者", "描述", "更新时间"], rows, {
-            empty: "尚未发布任何环境包",
-          }),
-          pager(data, (p) => go(`#/packages${qs({ page: p, per_page: perPage })}`)),
-        ]),
-        { tight: true, hint: `共 ${data.total} 项` },
+        "脚手架注册表",
+        table(
+          ["包 ID", "最新版本", "agent_kind", "可驱动环境", "描述", "更新时间"],
+          scaffolds.map((p) =>
+            pkgRow(p, (x) => {
+              const b = byId.get(x.package_id);
+              return [
+                b?.agent_kind ? badge(b.agent_kind, "info") : "—",
+                (b?.required_env_types || []).join(", ") || "—",
+              ];
+            }),
+          ),
+          { empty: "尚未发布 Agent 脚手架" },
+        ),
+        { tight: true, hint: `${scaffolds.length} 个脚手架` },
+      ),
+    ]);
+  };
+
+  // ------------------------------------------------------- 视图：制品与镜像
+
+  routes.artifacts = async () => {
+    setCrumbs("制品与镜像", "各包 manifest 的产物汇总");
+    const { items } = await packagesByKind();
+
+    // 逐包取最新版本清单，把产物摊平成一张「字节从哪来」的表。包数是两位数量级，
+    // 顺序请求即可；真正大的是产物本身，而产物字节从不进这个页面。
+    const rows = [];
+    let totalBytes = 0;
+    let tarBytes = 0;
+    for (const p of items) {
+      if (!p.latest_version) continue;
+      let m;
+      try {
+        m = await api(
+          `/api/v1/packages/${encodeURIComponent(p.package_id)}/versions/${encodeURIComponent(p.latest_version)}`,
+        );
+      } catch {
+        continue;
+      }
+      for (const a of m.artifacts || []) {
+        const size = a.size_bytes || 0;
+        totalBytes += size;
+        const isTar = a.name.endsWith(".tar") || a.kind === "image_tar";
+        if (isTar) tarBytes += size;
+        rows.push({
+          size,
+          onclick: () => go(`#/packages/${encodeURIComponent(p.package_id)}`),
+          cells: [
+            el("code", { class: "mono", text: a.name }),
+            isTar ? badge("镜像 tar", "info") : a.kind || "—",
+            el("span", {}, [link(p.package_id, `#/packages/${encodeURIComponent(p.package_id)}`)]),
+            el("code", { class: "mono", text: p.latest_version }),
+            size ? fmtBytes(size) : "—",
+            a.sync_mode || "—",
+            el("span", { class: "digest", text: shortDigest(a.digest), title: a.digest }),
+          ],
+        });
+      }
+    }
+    rows.sort((a, b) => b.size - a.size);
+
+    return el("div", {}, [
+      lead(
+        "制品是内容寻址的字节：Hub 按 sha256 存一份，消费侧按摘要取。镜像 tar 由 Hub 托管时，" +
+          "Worker 可以 docker load 而无需外部 registry —— 这就是零外拉。",
+      ),
+      el("div", { class: "grid cols-3 section" }, [
+        statTile("产物总数", fmtNum(rows.length), "全部包的最新版本"),
+        statTile("登记字节", fmtBytes(totalBytes), "发布时记录的大小"),
+        statTile("其中镜像 tar", fmtBytes(tarBytes), "可供零外拉 docker load"),
+      ]),
+      card(
+        "产物清单",
+        table(
+          ["名称", "类型", "所属包", "版本", { label: "大小", num: true }, "同步方式", "摘要"],
+          rows,
+          { empty: "尚无登记产物" },
+        ),
+        { tight: true, hint: "按大小降序" },
       ),
     ]);
   };
@@ -828,15 +1080,39 @@
     const summary = await api(`/api/v1/packages${qs({ per_page: 200 })}`).catch(() => null);
     const entry = (summary?.items || []).find((p) => p.package_id === packageId);
 
+    const meta = kindMeta(entry?.kind);
+    const backTo =
+      entry?.kind === "agent_scaffold"
+        ? ["← 返回 Agent 脚手架", "#/scaffolds"]
+        : entry?.kind === "benchmark"
+          ? ["← 返回基准与数据集", "#/benchmarks"]
+          : ["← 返回制品与镜像", "#/artifacts"];
+
     const frag = document.createDocumentFragment();
-    frag.appendChild(link("← 返回环境包列表", "#/packages", "backlink"));
+    frag.appendChild(link(backTo[0], backTo[1], "backlink"));
     frag.appendChild(
       el("div", { class: "title-row" }, [
         el("h2", { text: packageId }),
         badge(manifest.version, "info"),
+        badge(meta.label, meta.badge),
         el("p", { text: entry?.description || manifest.description || "（无描述）" }),
       ]),
     );
+
+    // SWE 基准的实例明细自己就是一份大目录，放进详情页而不是顶级导航：
+    // 它是这个包的内容，不是与包平级的概念。
+    const sweVariant = manifest.worker_overlay?.swe?.benchmark_variant;
+    if (sweVariant) {
+      frag.appendChild(
+        el("div", { class: "section" }, [
+          el("a", {
+            class: "btn",
+            href: `#/swe${qs({ variant: sweVariant })}`,
+            text: `浏览该基准的实例目录（variant=${sweVariant}）`,
+          }),
+        ]),
+      );
+    }
 
     const artifactBytes = (manifest.artifacts || []).reduce((a, x) => a + (x.size_bytes || 0), 0);
     frag.appendChild(
@@ -1113,11 +1389,11 @@
       el("p", {
         style: "margin:0 0 14px;color:var(--muted-foreground);font-size:13px",
         text:
-          "凡在 agent_defaults 里声明 agent_kind 的环境包，都会出现在这份目录里。" +
+          "这是「Agent 脚手架」按 agent_kind 的投影视图，内容与该页同源；" +
           "bundle_digest 与 Agent 注册时上报的字段同名同值，两侧可以直接比对。",
       }),
       card(
-        "Agent 脚手架目录",
+        "Agent Bridge 投影",
         table(
           ["包 ID", "版本", "脚手架族", "驱动的环境", "Worker 特性要求", "Bundle 摘要", "发布时间"],
           items.map((b) => ({
@@ -1522,10 +1798,14 @@
 
   function applyOverviewChrome(ov) {
     $("#brand-version").textContent = `v${ov.service.version}${ov.service.git_sha ? ` · ${ov.service.git_sha.slice(0, 7)}` : ""}`;
-    $("#c-envs").textContent = ov.registry.envs;
-    $("#c-packages").textContent = ov.registry.packages;
+    const byKind = ov.registry.packages_by_kind || {};
+    // 侧栏计数要与各页实际列出的行数一致，否则数字本身就是误导：环境契约页
+    // 只列在用契约，制品页统计的是产物而非包。
+    $("#c-envs").textContent = ov.registry.active_envs ?? ov.registry.envs;
+    $("#c-benchmarks").textContent = byKind.benchmark ?? 0;
+    $("#c-scaffolds").textContent = byKind.agent_scaffold ?? ov.registry.agent_bridges;
+    $("#c-artifacts").textContent = ov.registry.package_artifacts;
     $("#c-stacks").textContent = ov.registry.stacks;
-    $("#c-bridges").textContent = ov.registry.agent_bridges;
     $("#c-templates").textContent = ov.registry.templates;
     const uptime = $("#uptime-pill");
     uptime.hidden = false;
