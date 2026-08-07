@@ -192,7 +192,8 @@ export function WorkerDetail({
   const load = live?.load ?? worker?.current_load ?? projection.liveActiveCount;
   const capacity = live?.capacity ?? worker?.capacity;
   const reason = worker?.status_reason?.trim().toUpperCase() ?? "";
-  const backSearch = effectiveRunId ? { run: effectiveRunId } : {};
+  // /server 的 validateSearch 要求 run: string | null，不能传缺省字段。
+  const backSearch = { run: effectiveRunId ?? null };
   const freshness = formatFreshnessLabel(
     live?.fetchedAt ?? projection.stateUpdatedAt,
     now,

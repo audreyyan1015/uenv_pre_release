@@ -39,7 +39,7 @@ Hub 里容易混的名字，按**是什么 / 不是什么 / 在哪看**对齐如
 | **基准数据集**（benchmark 包） | 某契约下的题目目录 + 评测规格 +（可选）镜像 tar；版本化分发单元 | 不是新的环境类型 | 构件 → 基准与数据集 | `swe-bench-smith@0.2.0` |
 | **变体 / dataset** | 契约内的路由键，写入 Stack / Worker 配置 | 不是与契约平级的第四类环境 | 基准表「变体 / dataset」列 | swe 下 `verified`/`pro`/`smith` |
 | **环境包**（Env Package） | 一切可版本化发布的分发单元（manifest + artifacts） | 不是单一业务概念；需再看 `kind` | 包详情 `#/packages/:id` | 基准 / 脚手架 / rubric / … |
-| **Episode Stack** | 可运行配方：钉死「契约 + 数据集 + 脚手架 + 网关要求」 | 自身不含字节 | 可运行 → Episode Stack | `swe-bench-smith-openhands@1.1.0` |
+| **Episode Stack** | 可运行配方：确定「契约 + 数据集 + 脚手架 + 网关要求」 | 自身不含字节 | 可运行 → Episode Stack | `swe-bench-smith-openhands@1.1.0` |
 | **Agent 脚手架** | 声明了 `agent_kind` 的环境包（怎么答） | 不是 Bridge 实体本身 | 构件 → Agent 脚手架 | `uenv-agent-openhands` |
 | **Agent Bridge** | 脚手架包按 `agent_kind` 的**投影视图** | 不是独立注册表行 | （投影，与脚手架同源） | `openhands` / `toolenv` |
 | **Rubric** | 评分契约（按 dataset 路由 scorer） | 不是题目数据 | 包详情 / 制品侧可见 | `uenv-qa-rubric` |
@@ -70,7 +70,7 @@ Hub 里容易混的名字，按**是什么 / 不是什么 / 在哪看**对齐如
 
 读法：
 
-1. **先定契约**（交互形态），再选 **dataset 变体**（考哪些题），再选 **脚手架**（谁来答），最后用 Stack 钉死组合。  
+1. **先定契约**（交互形态），再选 **dataset 变体**（考哪些题），再选 **脚手架**（谁来答），最后用 Stack 确定组合。  
 2. **环境包**是分发单位；**Stack** 是组合单位；**制品**是字节单位。三者不可互换。  
 3. 历史里把 `olymmath`、`dscodebench` 等注册成独立 `env_type`，等于把「数据集」抬成了「契约」——层级塌陷的根因。
 
