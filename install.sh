@@ -18,6 +18,10 @@ SWE_RUNTIME="docker"
 SWE_GATEWAY_BIND="127.0.0.1:28999"
 SWE_GATEWAY_PUBLIC=""
 SWE_IMAGE_PULL_POLICY="local_only"
+SWE_TRAJECTORY_ENDPOINT=""
+SWE_SHARED_KEY_FILE=""
+HAS_SERVER=0
+HAS_WORKER=0
 
 usage() {
   printf '%s\n' \
@@ -37,10 +41,12 @@ usage() {
     '  --swe-gateway HOST:PORT  SWE gateway bind address (default: 127.0.0.1:28999)' \
     '  --swe-gateway-public URL address advertised to the local/remote Agent' \
     '  --swe-image-policy POLICY  local_only or allow_public (default: local_only)' \
+    '  --swe-trajectory-endpoint URL  Adapter trajectory service used by a Worker' \
+    '  --swe-shared-key-file FILE  protected file containing the shared Gateway key' \
     '  --no-start             install without starting systemd units' \
     '  --force-config         replace existing component configs' \
     '  --force-swe-config     replace only the generated SWE runtime config' \
-    '  --reset-swe-key        generate a new shared Server/Worker Gateway key' \
+    '  --reset-swe-key        rotate the shared key; split nodes also require --swe-shared-key-file' \
     '  -h, --help'
 }
 
@@ -67,6 +73,8 @@ while (($#)); do
     --swe-gateway) SWE_GATEWAY_BIND="${2:-}"; shift 2 ;;
     --swe-gateway-public) SWE_GATEWAY_PUBLIC="${2:-}"; shift 2 ;;
     --swe-image-policy) SWE_IMAGE_PULL_POLICY="${2:-}"; shift 2 ;;
+    --swe-trajectory-endpoint) SWE_TRAJECTORY_ENDPOINT="${2:-}"; shift 2 ;;
+    --swe-shared-key-file) SWE_SHARED_KEY_FILE="${2:-}"; shift 2 ;;
     --no-start) NO_START=1; shift ;;
     --force-config) FORCE_CONFIG=1; shift ;;
     --force-swe-config) FORCE_SWE_CONFIG=1; shift ;;
@@ -81,6 +89,13 @@ case "$PROFILE" in
   *) fail "--profile 必须是 single-node、control-plane、worker、hub 或 full" ;;
 esac
 
+case "$PROFILE" in
+  single-node|control-plane|full) HAS_SERVER=1 ;;
+esac
+case "$PROFILE" in
+  single-node|worker|full) HAS_WORKER=1 ;;
+esac
+
 if [[ -n "$HUB_TOKEN_FILE" ]]; then
   [[ -f "$HUB_TOKEN_FILE" ]] || fail "找不到 Hub token 文件：$HUB_TOKEN_FILE"
   [[ -s "$HUB_TOKEN_FILE" ]] || fail "Hub token 文件为空：$HUB_TOKEN_FILE"
@@ -91,12 +106,13 @@ if [[ -n "$HUB_TOKEN_FILE" ]]; then
 fi
 
 if [[ "$ENABLE_SWE" -eq 1 ]]; then
-  [[ "$PROFILE" == "single-node" || "$PROFILE" == "full" ]] \
-    || fail "--enable-swe 当前只支持 single-node 或 full；SWE Agent 需要控制面和 Worker"
-  [[ "$SWE_RUNTIME" == "docker" || "$SWE_RUNTIME" == "podman" ]] \
-    || fail "--swe-runtime 必须是 docker 或 podman"
-  python3 - "$SWE_GATEWAY_BIND" <<'PY' \
-    || fail "--swe-gateway 当前只支持 IPv4:PORT，例如 127.0.0.1:28999"
+  [[ "$HAS_SERVER" -eq 1 || "$HAS_WORKER" -eq 1 ]] \
+    || fail "--enable-swe 支持 single-node、full、control-plane 或 worker"
+  if [[ "$HAS_WORKER" -eq 1 ]]; then
+    [[ "$SWE_RUNTIME" == "docker" || "$SWE_RUNTIME" == "podman" ]] \
+      || fail "--swe-runtime 必须是 docker 或 podman"
+    python3 - "$SWE_GATEWAY_BIND" <<'PY' \
+      || fail "--swe-gateway 当前只支持 IPv4:PORT，例如 127.0.0.1:28999"
 import ipaddress
 import sys
 
@@ -107,16 +123,26 @@ ipaddress.IPv4Address(host)
 if not port.isdigit() or not 1 <= int(port) <= 65535:
     raise SystemExit(1)
 PY
-  [[ "$SWE_IMAGE_PULL_POLICY" == "local_only" || "$SWE_IMAGE_PULL_POLICY" == "allow_public" ]] \
-    || fail "--swe-image-policy 必须是 local_only 或 allow_public"
-  if [[ -z "$SWE_GATEWAY_PUBLIC" ]]; then
-    if [[ "$SWE_GATEWAY_BIND" == 0.0.0.0:* || "$SWE_GATEWAY_BIND" == \[*\]:* ]]; then
-      fail "网关监听非回环地址时必须传 --swe-gateway-public http://<Agent可达地址>:端口"
+    [[ "$SWE_IMAGE_PULL_POLICY" == "local_only" || "$SWE_IMAGE_PULL_POLICY" == "allow_public" ]] \
+      || fail "--swe-image-policy 必须是 local_only 或 allow_public"
+    if [[ -z "$SWE_GATEWAY_PUBLIC" ]]; then
+      if [[ "$SWE_GATEWAY_BIND" == 0.0.0.0:* || "$SWE_GATEWAY_BIND" == \[*\]:* ]]; then
+        fail "网关监听非回环地址时必须传 --swe-gateway-public http://<Agent可达地址>:端口"
+      fi
+      SWE_GATEWAY_PUBLIC="http://$SWE_GATEWAY_BIND"
     fi
-    SWE_GATEWAY_PUBLIC="http://$SWE_GATEWAY_BIND"
+    [[ "$SWE_GATEWAY_PUBLIC" =~ ^https?://[^[:space:]]+$ ]] \
+      || fail "--swe-gateway-public 必须是 http(s) URL"
+
+    if [[ -z "$SWE_TRAJECTORY_ENDPOINT" ]]; then
+      if [[ "$PROFILE" == "worker" ]]; then
+        fail "worker 启用 SWE 时必须传 --swe-trajectory-endpoint http://<CONTROL_PLANE>:8077"
+      fi
+      SWE_TRAJECTORY_ENDPOINT="http://127.0.0.1:8077"
+    fi
+    [[ "$SWE_TRAJECTORY_ENDPOINT" =~ ^https?://[^[:space:]]+$ ]] \
+      || fail "--swe-trajectory-endpoint 必须是 http(s) URL"
   fi
-  [[ "$SWE_GATEWAY_PUBLIC" =~ ^https?://[^[:space:]]+$ ]] \
-    || fail "--swe-gateway-public 必须是 http(s) URL"
 fi
 
 [[ "$(uname -s)" == "Linux" ]] || fail "当前安装器只支持 Linux"
@@ -127,6 +153,56 @@ done
 command -v python3 >/dev/null || fail "缺少 Python 3.10+（统一 uenv 命令需要）"
 python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
   || fail "需要 Python 3.10 或更新版本"
+
+if [[ -n "$SWE_SHARED_KEY_FILE" ]]; then
+  SWE_SHARED_KEY_FILE="$(cd "$(dirname "$SWE_SHARED_KEY_FILE")" && pwd)/$(basename "$SWE_SHARED_KEY_FILE")"
+  SWE_SHARED_KEY="$(python3 - "$SWE_SHARED_KEY_FILE" <<'PY'
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(path, flags)
+except OSError as exc:
+    raise SystemExit(f"无法安全打开 --swe-shared-key-file：{exc}")
+try:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit("--swe-shared-key-file 必须是普通文件")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise SystemExit(
+            "--swe-shared-key-file 不能允许 group/other 读取"
+            f"（当前权限 {stat.S_IMODE(metadata.st_mode):04o}）"
+        )
+    raw = os.read(descriptor, 4097)
+    if len(raw) > 4096:
+        raise SystemExit("--swe-shared-key-file 内容过大")
+finally:
+    os.close(descriptor)
+try:
+    text = raw.decode("ascii")
+except UnicodeDecodeError as exc:
+    raise SystemExit("--swe-shared-key-file 必须是 ASCII 文本") from exc
+lines = text.splitlines()
+if len(lines) != 1 or not re.fullmatch(r"[A-Za-z0-9._~-]{32,256}", lines[0]):
+    raise SystemExit("--swe-shared-key-file 必须只包含一行 32-256 位原始 key")
+print(lines[0])
+PY
+)" || fail "共享 Gateway key 校验失败"
+fi
+
+if [[ "$ENABLE_SWE" -eq 1 && ( "$PROFILE" == "control-plane" || "$PROFILE" == "worker" ) \
+  && -z "$SWE_SHARED_KEY_FILE" && ! -s /etc/uenv/secrets/swe.env ]]; then
+  fail "多机 SWE 首次准备需要 --swe-shared-key-file FILE，控制面和所有 Worker 必须使用同一 key"
+fi
+if [[ "$ENABLE_SWE" -eq 1 && "$RESET_SWE_KEY" -eq 1 \
+  && ( "$PROFILE" == "control-plane" || "$PROFILE" == "worker" ) \
+  && -z "$SWE_SHARED_KEY_FILE" ]]; then
+  fail "多机 SWE 轮换 key 时必须通过 --swe-shared-key-file 在各节点使用同一新 key"
+fi
 
 case "$(uname -m)" in
   x86_64|amd64) ARCH="x86_64" ;;
@@ -176,12 +252,12 @@ PAYLOAD="$(find "$TMP_DIR" -mindepth 1 -maxdepth 2 -type f -name manifest.json -
 RELEASE_VERSION="$(tr -d '[:space:]' < "$PAYLOAD/VERSION")"
 [[ "$RELEASE_VERSION" =~ ^[0-9A-Za-z._+-]+$ ]] || fail "安装包版本号非法"
 
-if [[ "$ENABLE_SWE" -eq 1 ]]; then
+if [[ "$ENABLE_SWE" -eq 1 && "$HAS_WORKER" -eq 1 ]]; then
   command -v "$SWE_RUNTIME" >/dev/null \
     || fail "未找到 $SWE_RUNTIME；SWE 环境需要先安装可用的 Docker 或 Podman"
   [[ -f "$PAYLOAD/share/swe/verified.json" ]] \
     || fail "安装包缺少 SWE Verified catalog"
-  [[ -f "$PAYLOAD/share/swe/smith-example.json" ]] \
+  [[ -f "$PAYLOAD/share/swe/smith-sample-catalog.json" ]] \
     || fail "安装包缺少 SWE-smith 示例 catalog"
 fi
 
@@ -209,6 +285,7 @@ fi
 ln -sfn "$RELEASE_DIR" /opt/uenv/current
 ln -sfn /opt/uenv/current/bin/uenv /usr/local/bin/uenv
 ln -sfn /opt/uenv/current/bin/uenv /usr/local/bin/uenv-ctl
+ln -sfn /opt/uenv/current/bin/uenv-train /usr/local/bin/uenv-train
 
 if ! getent group uenv >/dev/null; then
   groupadd --system uenv
@@ -224,6 +301,9 @@ install -d -o uenv -g uenv -m 0750 \
   /var/lib/uenv/server/obs /var/lib/uenv/server/trajectory \
   /var/lib/uenv/worker/wal /var/lib/uenv/hub/artifacts
 install -d -o uenv -g uenv -m 0750 /var/lib/uenv/worker/swe-artifacts
+if [[ "$ENABLE_SWE" -eq 1 && "$HAS_WORKER" -eq 1 ]]; then
+  install -d -o root -g uenv -m 0750 /var/lib/uenv/evaluation-runs
+fi
 chown -R uenv:uenv /var/log/uenv
 
 install_config() {
@@ -299,7 +379,7 @@ if [[ "$PROFILE" == "single-node" || "$PROFILE" == "worker" || "$PROFILE" == "fu
   UNITS+=(uenv-worker.service)
 fi
 
-if [[ "$ENABLE_SWE" -eq 1 ]]; then
+if [[ "$ENABLE_SWE" -eq 1 && "$HAS_WORKER" -eq 1 ]]; then
   cat > "$TMP_DIR/swe.env" <<EOF
 UENV_ENV_TYPES=qa,math,code,swe
 UENV_RUNTIME_GATEWAY_ENABLED=true
@@ -307,12 +387,12 @@ UENV_RUNTIME_GATEWAY_LISTEN=$SWE_GATEWAY_BIND
 UENV_RUNTIME_GATEWAY_CAPACITY=4
 UENV_SWE_GATEWAY_PUBLIC_URL=$SWE_GATEWAY_PUBLIC
 UENV_SWE_INSTANCES=/opt/uenv/current/share/swe/verified.json
-UENV_SWE_EXTRA_CATALOG=/opt/uenv/current/share/swe/smith-example.json
+UENV_SWE_EXTRA_CATALOG=/opt/uenv/current/share/swe/smith-sample-catalog.json
 UENV_SWE_VARIANTS=verified,smith
 UENV_SWE_RUNTIME=$SWE_RUNTIME
 UENV_SWE_IMAGE_PULL_POLICY=$SWE_IMAGE_PULL_POLICY
 UENV_SWE_ARTIFACT_DIR=/var/lib/uenv/worker/swe-artifacts
-UENV_TRAJECTORY_ENDPOINT=http://127.0.0.1:8077
+UENV_TRAJECTORY_ENDPOINT=$SWE_TRAJECTORY_ENDPOINT
 EOF
   if [[ -e /etc/uenv/swe.env && "$FORCE_SWE_CONFIG" -ne 1 ]]; then
     cmp -s "$TMP_DIR/swe.env" /etc/uenv/swe.env \
@@ -320,22 +400,6 @@ EOF
     info "保留已有 SWE 配置 /etc/uenv/swe.env"
   else
     install -m 0644 "$TMP_DIR/swe.env" /etc/uenv/swe.env
-  fi
-
-  if [[ "$RESET_SWE_KEY" -eq 1 || ! -s /etc/uenv/secrets/swe.env ]]; then
-    SWE_GATEWAY_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
-    cat > "$TMP_DIR/swe-secret.env" <<EOF
-UENV_RUNTIME_GATEWAY_API_KEY=$SWE_GATEWAY_KEY
-UENV_SWE_GATEWAY_API_KEY=$SWE_GATEWAY_KEY
-EOF
-    install -o root -g uenv -m 0640 "$TMP_DIR/swe-secret.env" /etc/uenv/secrets/swe.env
-  else
-    RUNTIME_GATEWAY_KEY="$(awk -F= '$1 == "UENV_RUNTIME_GATEWAY_API_KEY" {print substr($0, length($1) + 2); exit}' /etc/uenv/secrets/swe.env)"
-    SERVER_GATEWAY_KEY="$(awk -F= '$1 == "UENV_SWE_GATEWAY_API_KEY" {print substr($0, length($1) + 2); exit}' /etc/uenv/secrets/swe.env)"
-    [[ -n "$RUNTIME_GATEWAY_KEY" && "$RUNTIME_GATEWAY_KEY" == "$SERVER_GATEWAY_KEY" ]] \
-      || fail "/etc/uenv/secrets/swe.env 的两项 Gateway key 缺失或不一致；备份后使用 --reset-swe-key"
-    chown root:uenv /etc/uenv/secrets/swe.env
-    chmod 0640 /etc/uenv/secrets/swe.env
   fi
 
   if [[ "$SWE_RUNTIME" == "docker" ]]; then
@@ -347,6 +411,41 @@ EOF
   command -v runuser >/dev/null || fail "缺少命令：runuser"
   runuser -u uenv -- "$SWE_RUNTIME" info >/dev/null 2>&1 \
     || fail "uenv 用户无法使用 $SWE_RUNTIME；请确认容器服务已启动并检查 socket/用户权限"
+fi
+
+if [[ "$ENABLE_SWE" -eq 1 ]]; then
+  INSTALLED_SWE_KEY=""
+  if [[ -s /etc/uenv/secrets/swe.env ]]; then
+    RUNTIME_GATEWAY_KEY="$(awk -F= '$1 == "UENV_RUNTIME_GATEWAY_API_KEY" {print substr($0, length($1) + 2); exit}' /etc/uenv/secrets/swe.env)"
+    SERVER_GATEWAY_KEY="$(awk -F= '$1 == "UENV_SWE_GATEWAY_API_KEY" {print substr($0, length($1) + 2); exit}' /etc/uenv/secrets/swe.env)"
+    if [[ "$RUNTIME_GATEWAY_KEY" =~ ^[A-Za-z0-9._~-]{32,256}$ \
+      && "$RUNTIME_GATEWAY_KEY" == "$SERVER_GATEWAY_KEY" ]]; then
+      INSTALLED_SWE_KEY="$RUNTIME_GATEWAY_KEY"
+    elif [[ -n "$SWE_SHARED_KEY_FILE" && "$RESET_SWE_KEY" -eq 1 ]]; then
+      info "使用显式共享 key 替换无效的 /etc/uenv/secrets/swe.env"
+    else
+      fail "/etc/uenv/secrets/swe.env 的两项 Gateway key 缺失、无效或不一致；请提供 --swe-shared-key-file 并使用 --reset-swe-key"
+    fi
+  fi
+
+  if [[ -n "$SWE_SHARED_KEY_FILE" ]]; then
+    if [[ -n "$INSTALLED_SWE_KEY" && "$INSTALLED_SWE_KEY" != "$SWE_SHARED_KEY" \
+      && "$RESET_SWE_KEY" -ne 1 ]]; then
+      fail "共享 key 与已安装 key 不一致；协调所有节点后使用 --reset-swe-key 轮换"
+    fi
+    SWE_GATEWAY_KEY="$SWE_SHARED_KEY"
+  elif [[ "$RESET_SWE_KEY" -eq 1 || -z "$INSTALLED_SWE_KEY" ]]; then
+    SWE_GATEWAY_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+  else
+    SWE_GATEWAY_KEY="$INSTALLED_SWE_KEY"
+  fi
+
+  cat > "$TMP_DIR/swe-secret.env" <<EOF
+UENV_RUNTIME_GATEWAY_API_KEY=$SWE_GATEWAY_KEY
+UENV_SWE_GATEWAY_API_KEY=$SWE_GATEWAY_KEY
+EOF
+  install -o root -g uenv -m 0640 "$TMP_DIR/swe-secret.env" /etc/uenv/secrets/swe.env
+  unset SWE_GATEWAY_KEY SWE_SHARED_KEY RUNTIME_GATEWAY_KEY SERVER_GATEWAY_KEY INSTALLED_SWE_KEY
 fi
 
 if [[ "$PROFILE" == "hub" || "$PROFILE" == "full" ]]; then
@@ -376,14 +475,13 @@ if [[ "$NO_START" -eq 0 ]]; then
       || fail "$unit 未能启动；请运行 journalctl -u $unit -n 100 --no-pager"
   done
 
-  if [[ "$ENABLE_SWE" -eq 1 ]]; then
-    SWE_HEALTH_KEY="$(awk -F= '$1 == "UENV_RUNTIME_GATEWAY_API_KEY" {print substr($0, length($1) + 2); exit}' /etc/uenv/secrets/swe.env)"
-    python3 - "$SWE_GATEWAY_BIND" "$SWE_HEALTH_KEY" <<'PY'
+  if [[ "$ENABLE_SWE" -eq 1 && "$HAS_WORKER" -eq 1 ]]; then
+    python3 - "$SWE_GATEWAY_BIND" <<'PY'
 import sys
 import time
 import urllib.request
 
-bind, api_key = sys.argv[1:]
+bind = sys.argv[1]
 host, separator, port = bind.rpartition(":")
 if not separator or not port.isdigit():
     raise SystemExit(f"SWE Gateway 监听地址无效：{bind}")
@@ -393,8 +491,6 @@ url = f"http://{host}:{port}/runtime/v1/health"
 last_error = None
 for _ in range(30):
     request = urllib.request.Request(url)
-    if api_key:
-        request.add_header("X-API-Key", api_key)
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
             if response.status // 100 == 2:
@@ -411,11 +507,20 @@ fi
 echo
 echo "UEnv $RELEASE_VERSION 已安装。"
 echo "  检查：sudo -u uenv uenv doctor"
-echo "  状态：uenv status"
+if [[ "$HAS_SERVER" -eq 1 ]]; then
+  echo "  状态：uenv status"
+elif [[ "$HAS_WORKER" -eq 1 ]]; then
+  echo "  状态：systemctl status uenv-worker.service"
+  echo "  注册：请在控制面运行 uenv status"
+fi
 echo "  日志：uenv logs server（或 worker / hub）"
 if [[ "$ENABLE_SWE" -eq 1 ]]; then
-  echo "  SWE：已启用；先运行评测脚本拉取所选实例镜像"
-  echo "  网关：$SWE_GATEWAY_PUBLIC"
+  if [[ "$HAS_WORKER" -eq 1 ]]; then
+    echo "  SWE：Worker Runtime 已启用；先运行评测脚本拉取所选实例镜像"
+    echo "  网关：$SWE_GATEWAY_PUBLIC"
+  else
+    echo "  SWE：控制面共享 Gateway key 已配置"
+  fi
   echo "  指南：/opt/uenv/current/share/docs/UEnv评测指南.md"
 fi
 if [[ "$NO_START" -eq 1 ]]; then

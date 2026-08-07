@@ -11,7 +11,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PREPARER_PATH = ROOT / "examples/swe/prepare_verl_data.py"
+PREPARER_PATH = ROOT / "libexec/uenv/swe/prepare_verl_data.py"
 
 
 def load_preparer():
@@ -29,7 +29,7 @@ class SweExamplesTest(unittest.TestCase):
         cls.preparer = load_preparer()
 
     def test_bundled_training_catalog_produces_hub_free_row(self) -> None:
-        catalog = self.preparer.load_catalog(ROOT / "config/swe/smith-smoke.json")
+        catalog = self.preparer.load_catalog(ROOT / "config/swe/smith-sample-catalog.json")
         self.assertTrue(catalog)
         self.preparer.validate_smith_row(catalog[0])
         args = argparse.Namespace(
@@ -76,7 +76,7 @@ class SweExamplesTest(unittest.TestCase):
                 sys.executable,
                 str(PREPARER_PATH),
                 "--catalog",
-                str(ROOT / "config/swe/smith-smoke.json"),
+                str(ROOT / "config/swe/smith-sample-catalog.json"),
                 "--benchmark-variant",
                 "smith",
                 "--output-dir",

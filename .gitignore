@@ -20,6 +20,7 @@ secrets/*
 !secrets/README.md
 # scripts 默认忽略，显式保留运维交付脚本；_ 前缀为联调临时脚本，不入库
 /scripts/*
+!/scripts/uenv-train
 /scripts/_*
 /scripts/integrations/
 !/scripts/connect-remote.sh

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RELEASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RELEASE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 VENV="${UENV_EVAL_VENV:-$HOME/.local/share/uenv/evaluation-venv}"
 WHEEL="${UENV_EVAL_WHEEL:-}"
 WHEELHOUSE="${UENV_EVAL_WHEELHOUSE:-}"

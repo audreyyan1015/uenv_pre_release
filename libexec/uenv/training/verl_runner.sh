@@ -6,7 +6,7 @@ VERL_REPOSITORY="https://github.com/verl-project/verl.git"
 VERL_VERSION="v0.7.1"
 VERL_COMMIT="bec9ef74768dd201881cd4e54cd0385e87caae27"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_RELEASE="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_RELEASE="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 usage() {
   cat <<'EOF'
@@ -38,7 +38,9 @@ GPU 主机（准备固定版本 VeRL 和 Bridge）：
 
 prepare-uenv 选项：
   --uenv-release DIR       已安装的 UEnv release（默认 /opt/uenv/current）
-  --server HOST:PORT       Agent 连接的 UEnv Server（默认 127.0.0.1:50051）
+  --profile PROFILE        single-node、full 或 worker（默认 single-node）
+  --server HOST:PORT       OpenHands Agent 连接的 Adapter gRPC 地址（默认 127.0.0.1:50051）
+  --trajectory-endpoint URL  OpenHands Agent 上传交互轨迹的 Adapter URL
   --openhands-dir DIR      OpenHands 安装目录
   --skip-openhands         使用已有 OpenHands，不执行安装器
 
@@ -72,7 +74,9 @@ run 选项：
   --train-batch-size N     每批问题数（必填）
   --runtime docker|podman  容器运行时（必填）
   --image IMAGE            VeRL CUDA 镜像或 digest（必填）
+  --verl-config FILE       每行一个 Hydra KEY=VALUE；空行和 # 注释忽略
   --set KEY=VALUE          追加一个 Hydra 覆盖，可重复
+  --print-effective-config 打印合并后的覆盖列表并退出
   --dry-run                完成校验并打印容器命令，不启动训练
 
 此入口固定 VeRL 源码到 v0.7.1 / bec9ef74768dd201881cd4e54cd0385e87caae27，
@@ -133,14 +137,18 @@ EOF
 
 prepare_uenv() {
   local release="/opt/uenv/current"
+  local profile="single-node"
   local server="127.0.0.1:50051"
+  local trajectory_endpoint=""
   local openhands_dir="/opt/uenv/agent/openhands-benchmarks"
-  local admin_url="${UENV_ADMIN_URL:-http://127.0.0.1:50052}"
+  local health_url="${UENV_SWE_AGENT_HEALTH_URL:-http://127.0.0.1:8777/health}"
   local skip_openhands=0
   while (($#)); do
     case "$1" in
       --uenv-release) release="${2:-}"; shift 2 ;;
+      --profile) profile="${2:-}"; shift 2 ;;
       --server) server="${2:-}"; shift 2 ;;
+      --trajectory-endpoint) trajectory_endpoint="${2:-}"; shift 2 ;;
       --openhands-dir) openhands_dir="${2:-}"; shift 2 ;;
       --skip-openhands) skip_openhands=1; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -150,14 +158,26 @@ prepare_uenv() {
 
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || fail "prepare-uenv 需要 sudo"
   release="$(absolute_dir "$release")"
+  case "$profile" in
+    single-node|full|worker) ;;
+    *) fail "prepare-uenv --profile 必须是 single-node、full 或 worker" ;;
+  esac
   [[ "$server" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "--server 应为 HOST:PORT"
+  if [[ -z "$trajectory_endpoint" ]]; then
+    if [[ "$profile" == "worker" ]]; then
+      fail "worker 需要 --trajectory-endpoint http://<CONTROL_PLANE>:8077"
+    fi
+    trajectory_endpoint="http://127.0.0.1:8077"
+  fi
+  [[ "$trajectory_endpoint" =~ ^https?://[^[:space:]]+$ ]] \
+    || fail "--trajectory-endpoint 必须是 http(s) URL"
   [[ -f /etc/uenv/swe.env ]] || fail "SWE 尚未启用；请用 install.sh --enable-swe 安装或升级 UEnv"
   [[ -f "$release/systemd/uenv-swe-agent.service" ]] || fail "release 缺少 uenv-swe-agent.service"
   [[ -f "$release/share/swe/openhands-runner.py" ]] || fail "release 缺少 OpenHands poller"
   [[ -f "$release/share/swe/openhands/run_swebenchpro_official.py" ]] || fail "release 缺少 OpenHands driver"
-  [[ -f "$release/examples/swe/run_agent_job.sh" ]] || fail "release 缺少通用 AgentJob runner"
+  [[ -f "$release/libexec/uenv/swe/run_agent_job.sh" ]] || fail "release 缺少通用 AgentJob runner"
 
-  local installer="$release/examples/swe/install_openhands.sh"
+  local installer="$release/libexec/uenv/swe/install_openhands.sh"
   local pin="$release/share/swe/PIN.md"
   if [[ "$skip_openhands" -eq 0 ]]; then
     [[ -x "$installer" || -f "$installer" ]] || fail "release 缺少 install_openhands.sh"
@@ -173,7 +193,7 @@ prepare_uenv() {
 
   id uenv-agent >/dev/null 2>&1 || fail "缺少 uenv-agent 用户；请重新运行 OpenHands 安装器"
   install -d -o uenv-agent -g uenv -m 0750 /var/lib/uenv/agent /var/lib/uenv/agent/runs /opt/uenv/agent
-  install -o root -g uenv -m 0755 "$release/examples/swe/run_agent_job.sh" /opt/uenv/agent/run-agent-job.sh
+  install -o root -g uenv -m 0755 "$release/libexec/uenv/swe/run_agent_job.sh" /opt/uenv/agent/run-agent-job.sh
 
   local temporary
   temporary="$(mktemp -d -t uenv-verl-agent.XXXXXXXX)"
@@ -203,7 +223,7 @@ OPENHANDS_BENCHMARKS_DIR=$openhands_dir
 OPENHANDS_LLM_TEMPLATE=/etc/uenv/openhands-llm.json
 UENV_AGENT_BRIDGE_DIR=$release/share/swe/openhands
 UENV_RELEASE=$release
-UENV_TRAJECTORY_ENDPOINT=http://127.0.0.1:8077
+UENV_TRAJECTORY_ENDPOINT=$trajectory_endpoint
 EOF
   install -o root -g uenv -m 0640 "$temporary/openhands-llm.json" /etc/uenv/openhands-llm.json
   install -o root -g uenv -m 0640 "$temporary/swe-agent.env" /etc/uenv/swe-agent.env
@@ -211,7 +231,9 @@ EOF
   rm -rf -- "$temporary"
 
   require_command systemctl
-  systemctl is-active --quiet uenv-adapter-core.service || fail "uenv-adapter-core 未运行"
+  if [[ "$profile" == "single-node" || "$profile" == "full" ]]; then
+    systemctl is-active --quiet uenv-adapter-core.service || fail "uenv-adapter-core 未运行"
+  fi
   systemctl is-active --quiet uenv-worker.service || fail "uenv-worker 未运行"
   systemctl daemon-reload
   systemctl enable uenv-swe-agent.service >/dev/null
@@ -220,33 +242,31 @@ EOF
     systemctl --no-pager --full status uenv-swe-agent.service || true
     fail "uenv-swe-agent 启动失败"
   fi
-  if ! python3 - "$admin_url" <<'PY'
+  if ! python3 - "$health_url" "$server" <<'PY'
 import json
 import sys
 import time
 import urllib.request
 
-url = sys.argv[1].rstrip("/") + "/agents"
+url, expected_server = sys.argv[1:]
 deadline = time.monotonic() + 45
 last_error = "no response"
 while time.monotonic() < deadline:
     try:
         with urllib.request.urlopen(url, timeout=3) as response:
             document = json.load(response)
-        agents = document.get("agents", []) if isinstance(document, dict) else []
-        if any(
-            isinstance(agent, dict)
-            and agent.get("agent_pool_id") == "openhands-default"
-            and not agent.get("stale", False)
-            for agent in agents
+        if (
+            isinstance(document, dict)
+            and document.get("registered") is True
+            and document.get("server_endpoint") == expected_server
         ):
             print("OpenHands Agent registration passed")
             raise SystemExit(0)
-        last_error = f"pool not registered; agents={agents!r}"
+        last_error = f"runner not registered; health={document!r}"
     except Exception as exc:
         last_error = str(exc)
     time.sleep(2)
-raise SystemExit(f"Agent registration check failed at {url}: {last_error}")
+raise SystemExit(f"Agent local registration health failed at {url}: {last_error}")
 PY
   then
     systemctl --no-pager --full status uenv-swe-agent.service || true
@@ -409,7 +429,7 @@ prepare_data() {
   catalog="$(absolute_file "$catalog")"
   install -d "$output_dir"
   output_dir="$(absolute_dir "$output_dir")"
-  local preparer="$SCRIPT_RELEASE/examples/swe/prepare_verl_data.py"
+  local preparer="$SCRIPT_RELEASE/libexec/uenv/swe/prepare_verl_data.py"
   [[ -f "$preparer" ]] || fail "找不到 prepare_verl_data.py：$preparer"
 
   local -a arguments=(
@@ -490,11 +510,68 @@ except OSError as exc:
 PY
 }
 
+hydra_key() {
+  local override="$1"
+  [[ "$override" == *=* ]] || fail "Hydra 覆盖必须使用 KEY=VALUE：$override"
+  local key="${override%%=*}"
+  [[ "$key" =~ ^\+{0,2}[A-Za-z_][A-Za-z0-9_.-]*$ ]] \
+    || fail "Hydra 配置键格式非法：$key"
+  printf '%s\n' "$key"
+}
+
+validate_user_hydra_override() {
+  local override="$1" key normalized
+  key="$(hydra_key "$override")"
+  normalized="${key#+}"
+  normalized="${normalized#+}"
+  case "$normalized" in
+    data.train_files|data.val_files|data.train_batch_size|\
+    actor_rollout_ref.model.path|actor_rollout_ref.rollout.n|\
+    actor_rollout_ref.rollout.agent.default_agent_loop|\
+    actor_rollout_ref.rollout.agent.agent_loop_config_path|\
+    trainer.n_gpus_per_node|trainer.nnodes|trainer.total_training_steps)
+      fail "Hydra 配置 $normalized 由 UEnv 公共参数管理，请修改对应命令行参数"
+      ;;
+  esac
+}
+
+read_verl_config() {
+  local path="$1" raw line
+  [[ -f "$path" ]] || fail "--verl-config 文件不存在：$path"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    raw="${raw%$'\r'}"
+    line="${raw#"${raw%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    validate_user_hydra_override "$line"
+    VERL_FILE_HYDRA+=("$line")
+  done < "$path"
+}
+
+merge_hydra_overrides() {
+  local -n destination="$1"
+  shift
+  local -A positions=()
+  local override key index
+  destination=()
+  for override in "$@"; do
+    key="$(hydra_key "$override")"
+    if [[ -n "${positions[$key]+x}" ]]; then
+      index="${positions[$key]}"
+      destination[$index]="$override"
+    else
+      positions[$key]="${#destination[@]}"
+      destination+=("$override")
+    fi
+  done
+}
+
 run_training() {
   parse_asset_options
   local env_type="" model="" data="" endpoint="" gateway_url="" gateway_port=18080 gateway_bind=""
   local gateway_port_explicit=0
   local gpus="" steps="" rollouts="" train_batch="" runtime="" image="" dry_run=0
+  local verl_config="" print_effective_config=0
   local -a extra_hydra=()
   while (($#)); do
     case "$1" in
@@ -515,7 +592,9 @@ run_training() {
       --train-batch-size) train_batch="${2:-}"; shift 2 ;;
       --runtime) runtime="${2:-}"; shift 2 ;;
       --image) image="${2:-}"; shift 2 ;;
+      --verl-config) verl_config="${2:-}"; shift 2 ;;
       --set) extra_hydra+=("${2:-}"); shift 2 ;;
+      --print-effective-config) print_effective_config=1; shift ;;
       --dry-run) dry_run=1; shift ;;
       -h|--help) usage; exit 0 ;;
       *) fail "run 未知参数：$1" ;;
@@ -572,16 +651,10 @@ run_training() {
   local verl_checkout
   verl_checkout="$(ensure_verl_checkout "$WORK_DIR")"
 
-  runtime="$(choose_runtime "$runtime")"
-  require_command python3
-  if [[ "$dry_run" -eq 0 ]]; then
-    check_endpoint "$endpoint"
-  fi
-
   local effective_batch=$((train_batch * rollouts))
   [[ "$effective_batch" -ge "$gpus" && $((effective_batch % gpus)) -eq 0 ]] \
     || fail "--train-batch-size × --rollouts 必须不小于 GPU 数，且能被 GPU 数整除"
-  local -a hydra_args=(
+  local -a baseline_hydra=(
     "algorithm.adv_estimator=grpo"
     "algorithm.use_kl_in_reward=False"
     "data.train_files=/data/train.parquet"
@@ -633,7 +706,30 @@ run_training() {
     "trainer.default_local_dir=/outputs/checkpoints"
     "ray_kwargs.ray_init.num_cpus=$((gpus * 4))"
   )
-  hydra_args+=("${extra_hydra[@]}")
+  VERL_FILE_HYDRA=()
+  [[ -z "$verl_config" ]] || read_verl_config "$verl_config"
+  local override
+  for override in "${extra_hydra[@]}"; do
+    validate_user_hydra_override "$override"
+  done
+  local -a hydra_args=()
+  merge_hydra_overrides hydra_args \
+    "${baseline_hydra[@]}" "${VERL_FILE_HYDRA[@]}" "${extra_hydra[@]}"
+
+  install -d "$WORK_DIR/output"
+  local effective_config="$WORK_DIR/output/effective-hydra-overrides.txt"
+  printf '%s\n' "${hydra_args[@]}" > "$effective_config"
+  echo "最终 Hydra 配置：$effective_config"
+  if [[ "$print_effective_config" -eq 1 ]]; then
+    cat "$effective_config"
+    return 0
+  fi
+
+  runtime="$(choose_runtime "$runtime")"
+  require_command python3
+  if [[ "$dry_run" -eq 0 ]]; then
+    check_endpoint "$endpoint"
+  fi
 
   local -a container_args=(run --rm --network host --shm-size=32g --workdir /workspace/verl)
   if [[ "$runtime" == docker ]]; then

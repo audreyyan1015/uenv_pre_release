@@ -1,67 +1,69 @@
 # UEnv — 面向强化学习的分布式环境执行系统
 
-UEnv 为大模型评测和后训练提供统一的 Episode 接口。训练或评测程序提交任务后，
-UEnv 负责选择 Worker、执行环境、计算 reward，并返回 trajectory。环境实现与训练框架
-彼此解耦：同一个环境可以用于离线评测，也可以接入训练 rollout。
+UEnv 为大模型评测和后训练提供统一的 Episode 接口。评测程序或训练框架通过 UEnv Bridge 提交任务样本。Adapter 将每个 Episode 分配给 UEnv Worker；UEnv Worker 执行环境，计算得分（reward）并返回交互轨迹（trajectory）。同一环境可用于评测和训练采样。
 
-## 组件
+Adapter 由 `uenv-adapter-core.service` 运行。该服务内部使用 UEnv Server（`uenv-server`）模块完成 UEnv Worker 注册、Episode 调度和状态管理。用户指南统一使用组件名“Adapter”；`--server`、`server.endpoint` 和 `uenv logs server` 中的 `server` 是保留的代码名。
+
+## 核心组件
 
 ```text
 评测程序 / 训练框架
         │
         ▼
-uenv-bridge（框架适配；当前提供 VeRL 适配）
+uenv-bridge / UEnv Bridge（任务样本 ↔ Episode）
         │ EpisodeRequest / EpisodeResult
         ▼
-uenv-server（控制面、调度、状态与轨迹）
+uenv-adapter-core / Adapter（内部使用 UEnv Server 模块）
         │
         ▼
-uenv-worker（环境执行、模型调用、reward）
+uenv-worker / UEnv Worker（环境执行、模型 API 调用与得分计算）
         │
-        ├── qa / code 等 Proto-UDS 进程插件
-        └── 需要专用运行时的复杂环境
+        ├── qa / code / 自定义 process plugin（进程插件）
+        └── SWE Runtime Gateway / OpenHands Agent
 
-uenv-hub（可选：环境注册、版本和制品分发；不参与 Episode 热路径）
+uenv-hub / UEnv Hub（可选：环境注册、版本与 EnvPackage（环境包）分发）
 ```
 
 | 组件 | 主要职责 |
 |---|---|
-| `uenv-bridge` | 把训练框架样本映射为 Episode；当前提供 VeRL AgentLoop |
-| `uenv-server` | Worker 注册、任务调度、状态、结果和轨迹 |
-| `uenv-worker` | 调用模型、驱动环境、计算并返回 reward |
-| `uenv-hub` | 可选的环境注册表、版本管理和 EnvPackage 分发 |
+| `uenv-bridge`（UEnv Bridge） | 将训练框架的任务样本转换为 Episode，并将得分和交互轨迹返回框架；当前提供 VeRL AgentLoop 适配 |
+| `uenv-adapter-core`（Adapter） | 接收 UEnv Worker 注册、分配 Episode，并保存状态和结果；内部使用 `uenv-server` 模块 |
+| `uenv-worker`（UEnv Worker） | 调用模型 API、执行环境、计算并返回得分 |
+| `uenv-hub`（UEnv Hub） | 可选的环境注册、版本管理与 EnvPackage 分发服务 |
 
-Hub 与单机/多机是两个独立维度。单机可以使用 Hub 管理环境版本，多机也可以在
-没有 Hub 的情况下通过其他方式分发环境。
+## 已有环境类型与数据集 ID
 
-## 内置环境
+| 环境类型（`env_type`） | 数据集 ID（`dataset`）/ SWE 变体 | 数据集 | 执行方式 |
+|---|---|---|---|
+| `qa` | `gsm8k` | [GSM8K（Grade School Math 8K）](https://huggingface.co/datasets/openai/gsm8k) | 单轮问答与结果匹配 |
+| `qa` | `pubmedqa` | [PubMedQA: A Dataset for Biomedical Research Question Answering](https://github.com/pubmedqa/pubmedqa) | 生物医学问答与分类 |
+| `qa` | `scitab` | [SCITAB: A Challenging Benchmark for Compositional Reasoning and Claim Verification on Scientific Tables](https://github.com/XinyuanLu00/SciTab) | 科学表格声明验证 |
+| `qa` | `olymmath`、`olymmath-easy`、`olymmath-hard` | [OlymMATH: Challenging the Boundaries of Reasoning: An Olympiad-Level Math Benchmark for Large Language Models](https://huggingface.co/datasets/RUC-AIBOX/OlymMATH) | 奥数问题与答案匹配 |
+| `code` | `dscodebench` | [DSCodeBench: A Realistic Benchmark for Data Science Code Generation](https://github.com/ShuyinOuyang/DSCodeBench) | 生成代码并运行任务测试 |
+| `swe` | `verified` | [SWE-bench Verified](https://huggingface.co/datasets/SWE-bench/SWE-bench_Verified) | SWE Runtime Gateway 与 OpenHands Agent |
+| `swe` | `lite` | [SWE-bench Lite](https://huggingface.co/datasets/SWE-bench/SWE-bench_Lite) | SWE Runtime Gateway 与 OpenHands Agent |
+| `swe` | `pro` | [SWE-bench Pro](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro) | SWE Runtime Gateway 与 OpenHands Agent |
+| `swe` | `smith` | [SWE-smith](https://huggingface.co/datasets/SWE-bench/SWE-smith) | SWE Runtime Gateway 与 OpenHands Agent；当前提供 VeRL 训练适配 |
 
-| `env_type` | 当前任务 | 执行方式 |
-|---|---|---|
-| `qa` | GSM8K、PubMedQA、SciTab、OlymMATH | Proto-UDS 进程插件 |
-| `code` | DSCodeBench | Proto-UDS 进程插件 |
-| `swe` | SWE-bench 系列仓库级修复任务 | 容器、Runtime Gateway 与 Agent |
+环境类型（`env_type`）确定环境的交互和判分实现，数据集 ID（`dataset`）确定该环境使用的数据格式和判分方式。`math` 是 `qa` 的历史兼容名，新任务使用 `qa`。
 
-`env_type` 表示交互和判分能力，`dataset` 表示该能力下的具体任务集。`math` 是
-`qa` 的历史兼容名，新接入统一使用 `qa`。
+按以下条件选择新任务的实现方式：
 
-新增任务时：
+- 环境返回内容、模型动作格式和得分方式与已有环境相同：在已有环境中增加数据集 ID 和判分实现。
+- 任务初始化、环境返回内容、模型动作格式或得分方式与已有环境不同：用 `uenv env plugin create` 创建 process plugin。
+- 任务需要容器和外部执行程序：实现任务专用的运行组件；UEnv 安装包中的 SWE 实现可作为代码参考。
 
-- 交互和 reward 语义不变：在现有环境中增加 dataset/backend。
-- 需要新的交互与判分协议：从 [`templates/process-plugin`](./templates/process-plugin/) 创建插件。
-- 需要容器、工具或 Agent：实现专用 Runtime/AgentBridge；`swe` 是现有参考案例。
+## 使用指南
 
-## 从哪里开始
+公开手册按用户的实际操作顺序拆为五份：
 
-公开手册按职责拆为五份：
+1. [UEnv 基础部署指南](./Docs/deployment/UEnv基础部署指南.md)：从 GitHub 源码或预构建包安装单机 Adapter 与 UEnv Worker。
+2. [UEnv 多机部署指南](./Docs/deployment/UEnv多机部署指南.md)：将 Adapter 与 UEnv Worker 安装到不同主机，并增加 UEnv Worker。
+3. [UEnv Hub 使用指南](./Docs/deployment/UEnv%20Hub使用指南.md)：部署可选的 UEnv Hub，管理环境版本、EnvPackage 分发与回滚。
+4. [UEnv 评测指南](./Docs/deployment/UEnv评测指南.md)：执行 QA、Code、process plugin 和 SWE 评测，并说明新任务的接入方法。
+5. [UEnv 训练指南](./Docs/deployment/UEnv训练指南.md)：使用 UEnv、VeRL 模型 API 和 UEnv Bridge 执行 QA、Code、process plugin 与 SWE 训练。
 
-1. [UEnv 基础部署指南](./Docs/deployment/UEnv基础部署指南.md)：单机最小部署。
-2. [UEnv 多机部署指南](./Docs/deployment/UEnv多机部署指南.md)：控制面与多个 Worker。
-3. [UEnv Hub 使用指南](./Docs/deployment/UEnv%20Hub使用指南.md)：单机或多机的环境管理与分发。
-4. [UEnv 评测指南](./Docs/deployment/UEnv评测指南.md)：通用评测、环境扩展和 SWE 案例。
-5. [UEnv 训练指南](./Docs/deployment/UEnv训练指南.md)：通用训练接入、VeRL 和 SWE 案例。
-
-安装完成后，评测和训练都要显式声明任务。下面以 `qa + gsm8k` 展示命令形状：
+基础部署后，评测命令明确填写环境类型、数据集 ID、输入与输出。以 `qa + gsm8k` 为例：
 
 ```bash
 sudo uenv evaluate configure-model \
@@ -73,17 +75,21 @@ uenv evaluate run-task \
   --endpoint '127.0.0.1:50051' \
   --env-type qa \
   --dataset gsm8k \
-  --input /opt/uenv/current/examples/evaluation/qa-gsm8k.jsonl \
+  --input /opt/uenv/current/examples/cases/evaluation/qa-gsm8k.jsonl \
   --output "$PWD/results/qa-gsm8k.jsonl" \
   --max-steps 1
+```
 
+训练使用同样的环境类型、数据集 ID 和任务样本，并填写模型、工作目录、GPU 和 VeRL 训练参数：
+
+```bash
 uenv train run-task \
   --model /data/models/Qwen2.5-3B-Instruct \
   --work-dir /data/uenv-runs/qa-gsm8k \
   --uenv-endpoint '127.0.0.1:50051' \
   --env-type qa \
   --dataset gsm8k \
-  --input /opt/uenv/current/examples/training/qa-gsm8k.jsonl \
+  --input /opt/uenv/current/examples/cases/training/qa-gsm8k.jsonl \
   --max-steps 1 \
   --gpus 1 \
   --steps 1 \
@@ -91,16 +97,17 @@ uenv train run-task \
   --train-batch-size 1 \
   --runtime docker \
   --image 'docker.io/verlai/verl:vllm017.latest'
-
-bash /opt/uenv/current/examples/environment/plugin.sh \
-  create my-environment --dataset my-dataset
 ```
 
-`env-type + dataset + input` 决定运行什么任务，`env_config + reward_config`
-描述每条样本如何初始化和判分。命令行中的 `env-type`、`dataset`、
-`max-steps` 是批次权威值；JSONL 可以重复这些字段用于自描述，但不一致会报错。
-换成 Code 或自定义环境时，保持命令形状，明确替换任务参数和 JSONL；
-SWE 则通过 `run-swe` 显式选择 catalog、benchmark variant 和 instance。具体操作见评测和训练指南。
+创建新 process plugin：
+
+```bash
+mkdir -p "$HOME/uenv-envs"
+cd "$HOME/uenv-envs"
+uenv env plugin create my-environment --dataset my-dataset
+```
+
+命令中的 `--env-type`、`--dataset` 和 `--input` 分别填写环境类型、数据集 ID 和任务样本 JSONL。JSONL 中的 `env_config` 和 `reward_config` 描述每条任务样本的初始配置和判分配置。SWE 使用 `--catalog`、`--benchmark-variant` 和 `--input` 选择仓库修复实例。
 
 ## 源码构建
 
@@ -119,16 +126,27 @@ uenv-linux-x86_64.tar.gz
 uenv-linux-x86_64.tar.gz.sha256
 ```
 
-安装和验收命令以基础部署指南为准。
+安装、系统要求与验收命令见 UEnv 基础部署指南。
+
+## 源码布局
+
+| 目录 | 用途 |
+|---|---|
+| `examples/cases/` | 面向用户的可修改任务样本 JSONL 和配置示例 |
+| `templates/` | 创建新 process plugin 的模板 |
+| `libexec/uenv/` | `uenv` CLI 调用的内部自动化实现 |
+| `tools/` | 管理员按需调用的运维工具 |
+
+用户按指南使用 `uenv evaluate ...`、`uenv train ...` 和 `uenv env plugin ...`。`libexec` 内的脚本是 CLI 实现细节，为发布包和自动化测试提供稳定的内部路径。
 
 ## 协议
 
-| 链路 | 协议 |
+| 通信双方 | 协议 |
 |---|---|
-| Bridge ↔ Adapter Core / Server | `proto/` 中的 L1 gRPC |
-| Server ↔ Worker | 调度、Dispatch、心跳与结果上报 |
-| Worker ↔ process plugin | [`plugin_proto/`](./plugin_proto/) 中的 L2 gRPC over UDS |
-| Worker ↔ 模型服务 | OpenAI-compatible HTTP |
+| UEnv Bridge ↔ Adapter | `proto/` 中的 L1 gRPC |
+| Adapter ↔ UEnv Worker | Episode 分配、定期状态报告与结果上报 |
+| UEnv Worker ↔ process plugin | [`plugin_proto/`](./plugin_proto/) 中的 L2 gRPC over UDS |
+| UEnv Worker ↔ 模型 API | 兼容 OpenAI Chat Completions 协议的 HTTP |
 
 协议和数据结构说明见 [PROTOCOL.md](./PROTOCOL.md)。
 

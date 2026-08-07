@@ -5,11 +5,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RELEASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RELEASE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LOW_LEVEL="$SCRIPT_DIR/verl_runner.sh"
 PREPARE_DATA="$SCRIPT_DIR/prepare_episode_data.py"
 CLIENT_KIT="$SCRIPT_DIR/create_client_kit.sh"
-PREPARE_SWE_RUNTIME="$RELEASE_ROOT/examples/evaluation/prepare_swe.sh"
+PREPARE_SWE_RUNTIME="$RELEASE_ROOT/libexec/uenv/evaluation/prepare_swe.sh"
 
 fail() {
   echo "错误：$*" >&2
@@ -48,9 +48,9 @@ SWE 任务（catalog 和实例选择必须显式）：
   --uenv-release DIR         已安装 release 或训练客户端包根目录
   --bundle FILE              兼容旧流程：从完整 release bundle 读取客户端资产
   --bridge-wheel FILE        仅提供 UEnv Bridge wheel
-  --uenv-endpoint HOST:PORT  Adapter Core（run-task/run-swe 必填）
-  --gateway-public-url URL   双机时 CPU/UEnv 主机访问 GPU 模型网关的 URL
-  --gateway-port PORT        模型网关监听端口（默认 18080）
+  --uenv-endpoint HOST:PORT  Adapter gRPC 地址（run-task/run-swe 必填）
+  --gateway-public-url URL   双机时 UEnv 主机访问 VeRL 模型 API 的 URL
+  --gateway-port PORT        VeRL 模型 API 监听端口（默认 18080）
   --gateway-bind HOST        监听地址；单机默认 127.0.0.1，双机默认 0.0.0.0
   --gpus N                   GPU 数（必填）
   --steps N                  训练步数（必填）
@@ -58,7 +58,9 @@ SWE 任务（catalog 和实例选择必须显式）：
   --train-batch-size N       每批问题数（必填）
   --runtime docker|podman    容器运行时（必填）
   --image IMAGE              VeRL CUDA 镜像或 digest（必填）
+  --verl-config FILE         每行一个 Hydra KEY=VALUE；适合版本管理
   --set KEY=VALUE            追加 VeRL/Hydra 配置，可重复
+  --print-effective-config   打印最终 Hydra 配置并退出，不启动训练
   --dry-run                  只准备并打印训练命令
 
 run-task 必填任务选项：
@@ -137,6 +139,8 @@ parse_run_common() {
   GATEWAY_PORT=""
   GATEWAY_BIND=""
   DRY_RUN=0
+  VERL_CONFIG=""
+  PRINT_EFFECTIVE_CONFIG=0
   EXTRA_HYDRA=()
 }
 
@@ -169,6 +173,8 @@ append_run_common() {
   [[ -n "$GATEWAY_BIND" ]] && RUN_ARGS+=(--gateway-bind "$GATEWAY_BIND")
   [[ -n "$RUNTIME" ]] && RUN_ARGS+=(--runtime "$RUNTIME")
   [[ -n "$IMAGE" ]] && RUN_ARGS+=(--image "$IMAGE")
+  [[ -n "$VERL_CONFIG" ]] && RUN_ARGS+=(--verl-config "$VERL_CONFIG")
+  [[ "$PRINT_EFFECTIVE_CONFIG" -eq 1 ]] && RUN_ARGS+=(--print-effective-config)
   [[ "$DRY_RUN" -eq 1 ]] && RUN_ARGS+=(--dry-run)
   local item
   for item in "${EXTRA_HYDRA[@]}"; do
@@ -196,7 +202,9 @@ run_task() {
       --train-batch-size) TRAIN_BATCH="${2:-}"; shift 2 ;;
       --runtime) RUNTIME="${2:-}"; shift 2 ;;
       --image) IMAGE="${2:-}"; shift 2 ;;
+      --verl-config) VERL_CONFIG="${2:-}"; shift 2 ;;
       --set) EXTRA_HYDRA+=("${2:-}"); shift 2 ;;
+      --print-effective-config) PRINT_EFFECTIVE_CONFIG=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --input) input="${2:-}"; shift 2 ;;
       --env-type) env_type="${2:-}"; shift 2 ;;
@@ -236,8 +244,6 @@ run_task() {
   append_run_common
   bash "$LOW_LEVEL" run \
     --env-type "$env_type" \
-    --set trainer.project_name=uenv \
-    --set trainer.experiment_name="uenv_${env_type}_${dataset}" \
     "${RUN_ARGS[@]}"
 }
 
@@ -262,7 +268,9 @@ run_swe() {
       --train-batch-size) TRAIN_BATCH="${2:-}"; shift 2 ;;
       --runtime) RUNTIME="${2:-}"; shift 2 ;;
       --image) IMAGE="${2:-}"; shift 2 ;;
+      --verl-config) VERL_CONFIG="${2:-}"; shift 2 ;;
       --set) EXTRA_HYDRA+=("${2:-}"); shift 2 ;;
+      --print-effective-config) PRINT_EFFECTIVE_CONFIG=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --catalog) catalog="${2:-}"; shift 2 ;;
       --benchmark-variant) benchmark_variant="${2:-}"; shift 2 ;;
@@ -316,14 +324,33 @@ run_swe() {
 
 prepare_swe() {
   local -a runtime_args=()
+  local profile="" server="" trajectory_endpoint=""
   while (($#)); do
     case "$1" in
-      --bundle|--installer|--profile|--runtime|--image-policy|--gateway|--gateway-public)
+      --bundle|--installer|--runtime|--image-policy|--gateway|--gateway-public|--advertise|--shared-key-file)
         [[ $# -ge 2 && -n "${2:-}" ]] || fail "$1 缺少参数"
         runtime_args+=("$1" "$2")
         shift 2
         ;;
-      --force-swe-config)
+      --profile)
+        [[ $# -ge 2 && -n "${2:-}" ]] || fail "$1 缺少参数"
+        profile="$2"
+        runtime_args+=("$1" "$2")
+        shift 2
+        ;;
+      --server)
+        [[ $# -ge 2 && -n "${2:-}" ]] || fail "$1 缺少参数"
+        server="$2"
+        runtime_args+=("$1" "$2")
+        shift 2
+        ;;
+      --trajectory-endpoint)
+        [[ $# -ge 2 && -n "${2:-}" ]] || fail "$1 缺少参数"
+        trajectory_endpoint="$2"
+        runtime_args+=("$1" "$2")
+        shift 2
+        ;;
+      --force-swe-config|--reset-swe-key)
         runtime_args+=("$1")
         shift
         ;;
@@ -336,7 +363,14 @@ prepare_swe() {
   done
   [[ -f "$PREPARE_SWE_RUNTIME" ]] || fail "找不到 SWE runtime 准备脚本：$PREPARE_SWE_RUNTIME"
   bash "$PREPARE_SWE_RUNTIME" "${runtime_args[@]}"
-  local -a agent_args=(prepare-uenv --uenv-release /opt/uenv/current --skip-openhands)
+  [[ "$profile" != "control-plane" ]] || return 0
+  local -a agent_args=(
+    prepare-uenv --uenv-release /opt/uenv/current --skip-openhands
+    --profile "$profile"
+  )
+  [[ -n "$server" ]] && agent_args+=(--server "$server")
+  [[ -n "$trajectory_endpoint" ]] \
+    && agent_args+=(--trajectory-endpoint "$trajectory_endpoint")
   bash "$LOW_LEVEL" "${agent_args[@]}"
 }
 
@@ -351,10 +385,7 @@ case "$command_name" in
   prepare-gpu) exec bash "$LOW_LEVEL" prepare-gpu "$@" ;;
   prepare-data) exec python3 "$PREPARE_DATA" "$@" ;;
   run)
-    exec bash "$LOW_LEVEL" run \
-      --set trainer.project_name=uenv \
-      --set trainer.experiment_name=uenv_grpo \
-      "$@"
+    exec bash "$LOW_LEVEL" run "$@"
     ;;
   prepare-swe-uenv) exec bash "$LOW_LEVEL" prepare-uenv "$@" ;;
   prepare-swe-data) exec bash "$LOW_LEVEL" prepare-data "$@" ;;

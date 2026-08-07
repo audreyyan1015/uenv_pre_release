@@ -213,6 +213,14 @@ def find_hub_cli(args: argparse.Namespace) -> Path:
 
 
 def cmd_env(args: argparse.Namespace) -> None:
+    if args.hub_args and args.hub_args[0] == "plugin":
+        script = args.install_root / "libexec" / "uenv" / "environment" / "plugin.sh"
+        if not script.is_file():
+            raise CliError(f"当前 release 不包含 process plugin 工具：{script}")
+        os.execv(
+            "/usr/bin/env",
+            ["/usr/bin/env", "bash", str(script), *args.hub_args[1:]],
+        )
     binary = find_hub_cli(args)
     os.execv(str(binary), [str(binary), "env", *args.hub_args])
 
@@ -318,14 +326,16 @@ def cmd_environments(args: argparse.Namespace) -> None:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
-    script = args.install_root / "examples" / "evaluation" / "evaluate.sh"
+    script = args.install_root / "libexec" / "uenv" / "evaluation" / "evaluate.sh"
     if not script.is_file():
         raise CliError(f"当前 release 不包含通用评测入口：{script}")
     os.execv("/usr/bin/env", ["/usr/bin/env", "bash", str(script), *args.evaluate_args])
 
 
 def cmd_train(args: argparse.Namespace) -> None:
-    script = args.install_root / "examples" / "training" / "train_verl.sh"
+    script = args.install_root / "bin" / "uenv-train"
+    if not script.is_file():
+        script = args.install_root / "scripts" / "uenv-train"
     if not script.is_file():
         raise CliError(f"当前 release 不包含训练入口：{script}")
     os.execv("/usr/bin/env", ["/usr/bin/env", "bash", str(script), *args.train_args])
@@ -363,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     hub.add_argument("hub_args", nargs=argparse.REMAINDER)
     hub.set_defaults(func=cmd_hub)
     evaluate = sub.add_parser(
-        "evaluate", help="通过 Adapter Core 执行通用评测 JSONL", add_help=False
+        "evaluate", help="通过 Adapter 执行通用评测 JSONL", add_help=False
     )
     evaluate.add_argument("evaluate_args", nargs=argparse.REMAINDER)
     evaluate.set_defaults(func=cmd_evaluate)

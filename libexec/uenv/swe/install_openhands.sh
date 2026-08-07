@@ -7,7 +7,7 @@ set -euo pipefail
 cd /
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RELEASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RELEASE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 INSTALL_DIR="${OPENHANDS_BENCHMARKS_DIR:-/opt/uenv/agent/openhands-benchmarks}"
 AGENT_USER="${UENV_AGENT_USER:-uenv-agent}"
 AGENT_HOME="/var/lib/uenv/agent"

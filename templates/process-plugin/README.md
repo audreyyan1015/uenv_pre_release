@@ -16,10 +16,10 @@ Worker 与环境之间的 gRPC/Unix socket 通信，不包含任务规则。
 在源码仓库中：
 
 ```bash
-./examples/environment/plugin.sh create my-environment --dataset my-dataset
+./libexec/uenv/environment/plugin.sh create my-environment --dataset my-dataset
 # 编辑 my-environment/environment.py
-./examples/environment/plugin.sh test my-environment
-sudo ./examples/environment/plugin.sh install-local my-environment
+./libexec/uenv/environment/plugin.sh test my-environment
+sudo ./libexec/uenv/environment/plugin.sh install-local my-environment
 ```
 
 评测时明确写出环境、数据集和输入文件；与内置 QA/Code 的命令结构相同：
@@ -37,7 +37,7 @@ uenv evaluate run-task \
 使用安装包时，入口位于：
 
 ```bash
-/opt/uenv/current/examples/environment/plugin.sh
+/opt/uenv/current/libexec/uenv/environment/plugin.sh
 ```
 
 本地安装会把代码放进不可变的版本目录，原子切换
@@ -47,7 +47,7 @@ uenv evaluate run-task \
 要发布到已经登录的 Hub：
 
 ```bash
-./examples/environment/plugin.sh publish my-environment
+./libexec/uenv/environment/plugin.sh publish my-environment
 ```
 
 该命令会自动运行测试、创建 `.venv`、准备 `wheelhouse/`，再调用
@@ -76,14 +76,14 @@ schema 版本。无需修改 Bridge、Worker 或 protobuf 来增加任务字段�
 先运行不需要第三方依赖的逻辑测试：
 
 ```bash
-./examples/environment/plugin.sh test my-environment --logic-only
+./libexec/uenv/environment/plugin.sh test my-environment --logic-only
 ```
 
 完整测试会启动真实 Unix socket，依次调用 `HealthCheck`、`Reset`、`Step` 和
 `Close`：
 
 ```bash
-./examples/environment/plugin.sh test my-environment
+./libexec/uenv/environment/plugin.sh test my-environment
 ```
 
 ## 升级协议

@@ -78,4 +78,4 @@ find "$temporary" -depth -delete
 temporary=""
 
 echo "训练客户端已安装：$TARGET"
-echo "下一步：bash '$TARGET/examples/training/train_verl.sh' run-task --help"
+echo "下一步：'$TARGET/bin/uenv-train' run-task --help"

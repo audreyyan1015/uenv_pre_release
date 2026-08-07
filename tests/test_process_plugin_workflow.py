@@ -10,7 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / "examples/environment/plugin.sh"
+WORKFLOW = ROOT / "libexec/uenv/environment/plugin.sh"
 TEMPLATE = ROOT / "templates/process-plugin"
 
 

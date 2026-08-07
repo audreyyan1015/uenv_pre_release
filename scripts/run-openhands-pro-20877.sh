@@ -47,7 +47,7 @@ if [[ "$VARIANT" == "smith" || "$VARIANT" == "swe-smith" || "$VARIANT" == "swesm
     DEFAULT_INSTANCES=""
   else
     DEFAULT_INSTANCES="$UENV/fixtures/swe/smith_catalog.json"
-    [[ -f "$DEFAULT_INSTANCES" ]] || DEFAULT_INSTANCES="$UENV/config/swe/smith-smoke.json"
+    [[ -f "$DEFAULT_INSTANCES" ]] || DEFAULT_INSTANCES="$UENV/config/swe/smith-sample-catalog.json"
   fi
 else
   DEFAULT_INSTANCE="instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c"

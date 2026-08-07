@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run an OpenHands SWE agent through the UEnv Worker Runtime Gateway.
 
-End users should normally call ``examples/swe/evaluate.sh`` for evaluation or
-``examples/swe/train_verl.sh`` for VeRL training. This module is their shared
+End users should normally call ``uenv evaluate run-swe`` for evaluation or
+``uenv train run-swe`` for VeRL training. This module is their shared
 low-level driver.
 """
 
@@ -94,7 +94,7 @@ def _smith_catalog_candidates(repo_root: Path) -> list[Path]:
             Path("/data/uenv/envs/swe-bench-smith/0.1.0-local/catalog.json"),
             # Smoke fixtures last — never prefer these over a full EnvPackage.
             repo_root / "fixtures/swe/smith_catalog.json",
-            repo_root / "config/swe/smith-smoke.json",
+            repo_root / "config/swe/smith-sample-catalog.json",
         ]
     )
     # de-dupe while preserving order

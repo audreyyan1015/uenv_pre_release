@@ -1,53 +1,59 @@
 # UEnv 多机部署指南
 
-本指南将 Adapter Core 和 Worker 拆到不同服务器，并可继续添加 Worker。这样做适合：
+Adapter 由 `uenv-adapter-core.service` 运行；其内部使用 UEnv Server（`uenv-server`）模块完成 UEnv Worker 注册、Episode 调度和状态管理。
 
-- 需要将调度控制面与环境执行资源分离。
+本指南将 Adapter 和 UEnv Worker 安装在不同主机上，并说明如何继续添加 UEnv Worker。UEnv 对一条任务样本的一次执行称为 Episode。以下情况适合使用多机部署：
+
+- 需要将 Adapter 与运行环境的主机分开。
 - 需要提高 Episode 并发能力。
-- 不同 Worker 需要不同资源或隔离策略。
+- 不同 UEnv Worker 需要不同资源或隔离设置。
 
-Hub 和多机是两个独立选择：多机可以不部署 Hub，单机也可以使用 Hub。本指南只讲控制面和 Worker 的多机部署；需要环境注册、制品同步或版本回滚时，同时阅读 [UEnv Hub 使用指南](./UEnv%20Hub使用指南.md)。
+本指南说明 Adapter 与 UEnv Worker 的多机部署。运维人员需要保证各主机使用相同的 UEnv 版本、环境插件和任务文件。
+
+需要统一发布环境、固定版本或回滚时，再按 [UEnv Hub 使用指南](./UEnv%20Hub使用指南.md) 配置 UEnv Hub。
 
 ## 1. 部署结构
 
-最小多机结构由 1 个控制面和 1 个或多个 Worker 组成：
+最小多机结构由 1 个 Adapter 和 1 个或多个 UEnv Worker 组成：
 
 ```text
 评测或训练程序
         |
         | Episode
         v
-Adapter Core（控制面）
+Adapter
         |
-        | 调度、下发、结果回收
+        | 分配、发送、收集结果
         +-------------------+
         v                   v
-     Worker 1            Worker 2 ...
+ UEnv Worker 1       UEnv Worker 2 ...
 ```
 
-Adapter Core 不会代替 Worker 执行环境。Worker 会主动向 Adapter Core 注册和发送心跳，Adapter Core 还必须能够连回 Worker 对外公告的 gRPC 地址。
+UEnv Worker 主动向 Adapter 注册，并定期报告运行状态。Adapter 把 Episode 分配给 UEnv Worker，再通过 UEnv Worker 公布的 gRPC 地址发送 Episode。
+
+Adapter 主机与每台 UEnv Worker 主机都需要能够访问对方指定的端口。
 
 ## 2. 主机与网络规划
 
-先为每台机器确定稳定的内网 IP 或可解析主机名。以下示例使用：
+先为每台主机确定稳定的内网 IP 或可解析主机名。以下示例使用：
 
 ```text
-控制面：10.0.0.10
-Worker 1：10.0.0.21
-Worker 2：10.0.0.22
+Adapter：10.0.0.10
+UEnv Worker 1：10.0.0.21
+UEnv Worker 2：10.0.0.22
 ```
 
-节点之间至少需要放行：
+主机之间至少需要放行：
 
 | 来源 | 目标 | 端口 | 用途 |
 |---|---|---:|---|
-| Bridge、Worker | 控制面 | 50051/TCP | 提交 Episode；Worker 注册、心跳和上报 |
-| 控制面 | 每台 Worker | 50054/TCP | 下发 Episode |
-| 运维网络（可选） | Worker | 19090/TCP | 健康检查和指标 |
+| 评测程序、训练程序和 UEnv Worker | Adapter | 50051/TCP | 提交 Episode；UEnv Worker 注册、定期报告状态和上报结果 |
+| Adapter | 每台 UEnv Worker | 50054/TCP | 发送 Episode |
+| 运维网络（可选） | UEnv Worker | 19090/TCP | 健康检查和运行指标 |
 
-控制面的 Admin HTTP 默认只监听 `127.0.0.1:50052`，不应直接暴露到公网。需要远程运维时，优先使用 SSH 或受控内网。
+Adapter 管理接口默认监听 `127.0.0.1:50052`。远程运维可通过 SSH 或受控内网访问该主机。
 
-在部署前检查双向连通性。例如，控制面安装后可以从 Worker 检查 50051；Worker 安装后再从控制面检查 50054：
+在部署前检查两个方向的网络连接。Adapter 安装后，从 UEnv Worker 主机检查 50051；UEnv Worker 安装后，从 Adapter 主机检查 50054：
 
 ```bash
 python3 -c 'import socket; socket.create_connection(("10.0.0.10", 50051), 5).close()'
@@ -63,11 +69,11 @@ install.sh
 uenv-linux-x86_64.tar.gz
 ```
 
-每台节点必须使用同一个 bundle。如果有 `.sha256` 文件，也一并复制并在每台节点校验。
+每台主机必须使用同一个 UEnv 安装包。如果有 `.sha256` 文件，也一并复制并在每台主机上校验。
 
-多机可以不使用 Hub，但运维人员必须自行保证每台 Worker 的 UEnv 版本、插件和任务制品一致。
+本指南的默认流程由运维人员保证每台 UEnv Worker 的 UEnv 版本、环境插件和任务文件一致。需要统一管理环境版本时，可在第 7 节配置 UEnv Hub。
 
-## 4. 部署控制面
+## 4. 部署 Adapter
 
 在 `10.0.0.10` 执行：
 
@@ -78,6 +84,8 @@ sudo bash install.sh \
   --profile control-plane
 ```
 
+`--profile` 选择安装模式（profile）。`control-plane` 是安装模式的固定代码值，该模式只安装 Adapter。本指南正文统一使用组件名“Adapter”。`--bundle` 指定 UEnv 安装包的路径。
+
 检查：
 
 ```bash
@@ -86,9 +94,9 @@ curl -fsS http://127.0.0.1:50052/health
 sudo -u uenv uenv doctor
 ```
 
-刚安装完时 `uenv status` 显示没有 Worker 是正常的；下一节完成后 Worker 才会注册。
+此时只安装了 Adapter，因此 `uenv status` 中的 UEnv Worker 数量为 0。完成下一节后，第一台 UEnv Worker 会注册到 Adapter。
 
-## 5. 部署第一台 Worker
+## 5. 部署第一台 UEnv Worker
 
 在 `10.0.0.21` 执行：
 
@@ -101,12 +109,16 @@ sudo bash install.sh \
   --advertise 10.0.0.21:50054
 ```
 
-两个地址的含义不同：
+`worker` 安装模式只安装 UEnv Worker。
 
-- `--server`：Worker 用来注册、发送心跳和上报结果的控制面地址。
-- `--advertise`：控制面下发 Episode 时用来连接该 Worker 的地址。必须是控制面可达的地址，不能填 `127.0.0.1`。
+安装命令中的 `--server` 是固定参数名，其中的 `server` 对应 Adapter 内部的 UEnv Server 模块。这个参数填写 Adapter 地址。两个地址的含义如下：
 
-在 Worker 上检查：
+| 参数 | 填写的地址 | 连接方向 |
+|---|---|---|
+| `--server` | Adapter 的 gRPC 地址，例如 `10.0.0.10:50051` | UEnv Worker 连接 Adapter，用于注册、定期报告状态和上报结果 |
+| `--advertise` | Adapter 可访问的 UEnv Worker gRPC 地址，例如 `10.0.0.21:50054` | Adapter 连接 UEnv Worker，用于发送 Episode |
+
+在 UEnv Worker 主机上检查：
 
 ```bash
 sudo systemctl is-active uenv-worker.service
@@ -114,18 +126,18 @@ curl -fsS http://127.0.0.1:19090/health
 sudo -u uenv uenv doctor
 ```
 
-然后回到控制面检查注册结果：
+然后回到 Adapter 主机检查注册结果：
 
 ```bash
 uenv status
 uenv workers
 ```
 
-应能看到 Worker 状态为 `ready`，且 endpoint 为 `10.0.0.21:50054`。
+应能看到 UEnv Worker 状态为 `ready`，且状态输出中的 `endpoint` 字段为 `10.0.0.21:50054`。
 
-## 6. 增加更多 Worker
+## 6. 增加更多 UEnv Worker
 
-在新 Worker 上重复上一节，只需替换 `--advertise` 地址。例如 `10.0.0.22`：
+在新 UEnv Worker 主机上重复上一节，并将 `--advertise` 替换为该主机的地址。例如 `10.0.0.22`：
 
 ```bash
 sudo bash install.sh \
@@ -135,72 +147,74 @@ sudo bash install.sh \
   --advertise 10.0.0.22:50054
 ```
 
-添加后在控制面执行：
+添加后在 Adapter 主机执行：
 
 ```bash
 uenv status
 ```
 
-确认 Worker 数量与预期一致，并检查每台 Worker 的 endpoint、状态、容量和心跳时间。
+确认 UEnv Worker 数量与预期一致，并检查每台 UEnv Worker 的地址、状态、容量和最后报告时间。
 
-## 7. 可选：让 Worker 使用 Hub
+## 7. 可选：让 UEnv Worker 使用 UEnv Hub
 
-多机不要求 Hub。当需要中心化的环境版本、制品同步或回滚时，先完成 [UEnv Hub 使用指南](./UEnv%20Hub使用指南.md) 中的 Hub 部署和鉴权配置。对受 Token 保护的 Hub，为 Worker 安装命令同时增加：
+需要统一管理环境版本、向多台 UEnv Worker 分发 EnvPackage（环境包）或回滚环境版本时，先按 [UEnv Hub 使用指南](./UEnv%20Hub使用指南.md) 部署 UEnv Hub。
+
+完成 UEnv Hub 访问令牌（Token）配置后，在 UEnv Worker 安装命令中增加：
 
 ```text
 --hub http://<hub-ip>:8080
 --hub-token-file ./worker-reader.token
 ```
 
-这只是让 Worker 连接 Hub，不会自动将 Hub 中的所有环境安装到 Worker。Hub 的发布、同步、激活和版本锁定以 Hub 指南为准。
+这两个参数让 UEnv Worker 连接 UEnv Hub。随后将环境版本发布为 EnvPackage，在每台 UEnv Worker 上下载并激活同一版本，再重启 UEnv Worker 加载该版本。完整操作见 UEnv Hub 使用指南。
 
 ## 8. 多机验收
 
 建议按以下顺序检查：
 
-1. 控制面上 `uenv-adapter-core.service` 为 `active`。
-2. 每台 Worker 上 `uenv-worker.service` 为 `active`。
-3. 每台 Worker 都能连接控制面 `50051`。
-4. 控制面都能连接每台 Worker 公告的 `50054`。
-5. `uenv status` 中的 Worker 数量、endpoint 和状态都正确。
+1. Adapter 主机上的 `uenv-adapter-core.service` 为 `active`。
+2. 每台 UEnv Worker 主机上的 `uenv-worker.service` 为 `active`。
+3. 每台 UEnv Worker 都能连接 Adapter 的 `50051/TCP`。
+4. Adapter 能连接每台 UEnv Worker 公布的 `50054/TCP`。
+5. `uenv status` 中 UEnv Worker 的数量、`endpoint` 字段和状态都正确。
+6. 所有主机的 `uenv version` 相同。
 
-注意：Worker 配置 `id: "auto"` 时，每次重启都会以新的 Worker ID 重新注册，旧记录在心跳超时后先转为 `degraded` 再被清除。刚重启过 Worker 的几分钟内，`uenv status` 的 Worker 数量短暂多于实际节点数属于正常现象，验收应在心跳稳定后再核对数量。
-6. 所有节点的 `uenv version` 相同。
+当 UEnv Worker 配置为 `id: "auto"` 时，重启后的旧记录会保留到状态报告超时。重启后等待几分钟，再核对 `uenv status` 中的 UEnv Worker 数量。
 
-完成平台部署后，再根据用途执行 [UEnv 评测指南](./UEnv评测指南.md) 或 [UEnv 训练指南](./UEnv训练指南.md) 中的单 Episode 验证。
+完成部署后，再根据用途执行 [UEnv 评测指南](./UEnv评测指南.md) 或 [UEnv 训练指南](./UEnv训练指南.md) 中的任务验证。
 
 ## 9. 扩容、升级和下线
 
 ### 扩容
 
-新 Worker 准备完与现有节点一致的 release、插件和环境制品后，按第 6 节安装即可。不要在环境尚未就绪时就将 Worker 加入生产调度。
+新 UEnv Worker 主机准备好与现有主机相同的 UEnv 版本、环境插件和任务文件后，按第 6 节安装，并在任务验收通过后加入生产调度。
 
 ### 升级
 
-优先逐台升级 Worker：
+先逐台升级 UEnv Worker：
 
-1. 确认该 Worker 没有正在运行的 Episode。
-2. 在该节点用新 bundle 重新执行 `--profile worker` 安装命令。
-3. 确认 Worker 重新注册并可执行任务。
+1. 确认该 UEnv Worker 没有正在运行的 Episode。
+2. 在该主机上使用新的 UEnv 安装包重新执行 `--profile worker` 安装命令。
+3. 确认 UEnv Worker 重新注册并可执行任务。
 4. 再处理下一台。
 
-所有 Worker 验证完成后再升级控制面。跨版本升级前应备份 `/etc/uenv` 和 `/var/lib/uenv/server`。
+所有 UEnv Worker 验证完成后再升级 Adapter。跨版本升级前应备份 `/etc/uenv` 和 `/var/lib/uenv/server`。路径中的 `server` 是固定目录名，用于保存 Adapter 内部 UEnv Server 模块的运行数据。
 
 ### 下线
 
-先确认 Worker 上没有运行中的 Episode，再执行：
+先确认 UEnv Worker 上没有运行中的 Episode，再执行：
 
 ```bash
 sudo systemctl disable --now uenv-worker.service
 ```
 
-控制面会在心跳超时后将该 Worker 标记为不可用。不要直接关机一台仍在执行 Episode 的 Worker。
+Adapter 会在状态报告超时后将该 UEnv Worker 标记为不可用。关机前等待当前 Episode 结束，再使用上面的 systemd 命令完成下线。
 
 ## 10. 排障
 
-### Worker 没有出现在 `uenv status`
+### UEnv Worker 没有出现在 `uenv status`
 
-在 Worker 检查：
+在 UEnv Worker 主机上检查：
 
 ```bash
 sudo journalctl -u uenv-worker.service -n 200 --no-pager
@@ -208,20 +222,22 @@ python3 -c 'import socket; socket.create_connection(("10.0.0.10", 50051), 5).clo
 sed -n '1,80p' /etc/uenv/worker.yaml
 ```
 
-重点核对 `server.endpoint`、`worker.advertise_endpoint` 和防火墙。
+重点核对 `server.endpoint`、`worker.advertise_endpoint` 和防火墙。`server.endpoint` 中的 `server` 对应 Adapter 内部的 UEnv Server 模块；这个固定配置键保存 Adapter 地址。
 
-### Worker 已注册，但下发失败
+### UEnv Worker 已注册，但 Adapter 发送 Episode 失败
 
-在控制面检查它是否能连接 Worker 公告的地址：
+在 Adapter 主机检查它是否能连接 UEnv Worker 公布的地址：
 
 ```bash
 python3 -c 'import socket; socket.create_connection(("10.0.0.21", 50054), 5).close()'
 uenv logs server -n 200
 ```
 
-常见原因是 `--advertise` 填成了回环地址、NAT 后的不可达地址，或 50054/TCP 没有放行。
+`uenv logs server` 中的 `server` 是 UEnv 命令中的固定子命令，对应 Adapter 内部的 UEnv Server 模块；该命令查看 `uenv-adapter-core.service` 日志。
 
-### 各 Worker 行为不一致
+常见原因是 `--advertise` 填成了回环地址、网络地址转换（NAT）后 Adapter 无法访问的地址，或 50054/TCP 没有放行。
+
+### 各 UEnv Worker 行为不一致
 
 先比对：
 
@@ -230,4 +246,4 @@ uenv version
 cat /opt/uenv/current/.bundle.sha256 2>/dev/null || true
 ```
 
-然后核对插件、配置和任务制品。需要中心化管理这些版本时，使用 Hub，不要在每台 Worker 上手工覆盖文件。
+然后核对环境插件、配置和任务文件。需要统一管理环境版本时，使用 UEnv Hub 的发布、同步和激活流程。

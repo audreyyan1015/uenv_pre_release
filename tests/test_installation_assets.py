@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -47,8 +48,13 @@ class StatusHandler(http.server.BaseHTTPRequestHandler):
 
 class InstallationAssetsTest(unittest.TestCase):
     def test_shell_scripts_parse(self) -> None:
-        scripts = [ROOT / "install.sh", ROOT / "scripts/build-release.sh"]
-        scripts.extend(sorted((ROOT / "examples").glob("*/*.sh")))
+        scripts = [
+            ROOT / "install.sh",
+            ROOT / "scripts/build-release.sh",
+            ROOT / "scripts/uenv-train",
+        ]
+        scripts.extend(sorted((ROOT / "libexec/uenv").rglob("*.sh")))
+        scripts.extend(sorted((ROOT / "tools").rglob("*.sh")))
         for path in scripts:
             subprocess.run(["bash", "-n", str(path)], check=True)
 
@@ -67,7 +73,7 @@ class InstallationAssetsTest(unittest.TestCase):
     def test_unified_cli_forwards_training_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            script = root / "examples/training/train_verl.sh"
+            script = root / "bin/uenv-train"
             script.parent.mkdir(parents=True)
             script.write_text('printf "train:%s\\n" "$*"\n', encoding="utf-8")
             forwarded = [
@@ -95,6 +101,31 @@ class InstallationAssetsTest(unittest.TestCase):
                 check=True,
             )
         self.assertEqual(result.stdout.strip(), f"train:{' '.join(forwarded)}")
+
+    def test_unified_cli_routes_plugin_workflow_without_hub_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "libexec/uenv/environment/plugin.sh"
+            script.parent.mkdir(parents=True)
+            script.write_text('printf "plugin:%s\\n" "$*"\n', encoding="utf-8")
+            forwarded = ["create", "warehouse", "--dataset", "warehouse-v1"]
+            result = subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "uenv"),
+                    "--install-root",
+                    str(root),
+                    "env",
+                    "plugin",
+                    *forwarded,
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"plugin:{' '.join(forwarded)}")
 
     def test_unified_cli_lists_local_environments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -208,19 +239,87 @@ class InstallationAssetsTest(unittest.TestCase):
 
     def test_swe_release_assets_are_wired(self) -> None:
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("/var/lib/uenv/evaluation-runs", installer)
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
         worker_unit = (ROOT / "deploy/systemd/uenv-worker.service").read_text(
             encoding="utf-8"
         )
         for token in ("--enable-swe", "UENV_RUNTIME_GATEWAY_ENABLED", "UENV_SWE_INSTANCES"):
             self.assertIn(token, installer)
-        for token in ("verified.json", "openhands-runner.py", "examples/swe"):
+        for token in ("verified.json", "openhands-runner.py", "libexec/uenv/swe"):
             self.assertIn(token, release)
+        for relative in (
+            "libexec/uenv/swe/evaluate.sh",
+            "libexec/uenv/swe/evaluate_batch.py",
+            "libexec/uenv/swe/evaluate_one.sh",
+            "tools/swe/build_catalog.py",
+        ):
+            self.assertTrue((ROOT / relative).is_file(), relative)
         self.assertIn("/etc/uenv/swe.env", worker_unit)
         self.assertTrue((ROOT / "deploy/systemd/uenv-swe-agent.service").is_file())
 
+    def test_split_swe_uses_shared_key_without_putting_it_in_process_argv(self) -> None:
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        agent_unit = (ROOT / "deploy/systemd/uenv-swe-agent.service").read_text(
+            encoding="utf-8"
+        )
+        training_runner = (
+            ROOT / "libexec/uenv/training/verl_runner.sh"
+        ).read_text(encoding="utf-8")
+        openhands_runner = (
+            ROOT / "scripts/openhands/openhands_runner.py"
+        ).read_text(encoding="utf-8")
+        evaluate_one = (
+            ROOT / "libexec/uenv/swe/evaluate_one.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--swe-shared-key-file", installer)
+        self.assertIn("--swe-trajectory-endpoint", installer)
+        self.assertIn('python3 - "$SWE_GATEWAY_BIND" <<\'PY\'', installer)
+        self.assertNotIn('python3 - "$SWE_GATEWAY_BIND" "$SWE_HEALTH_KEY"', installer)
+        self.assertNotIn("Requires=uenv-adapter-core.service", agent_unit)
+        self.assertNotIn("Requires=uenv-worker.service", agent_unit)
+        self.assertNotIn("/etc/uenv/secrets/swe.env", agent_unit)
+        self.assertIn("UENV_SWE_AGENT_HEALTH_URL", training_runner)
+        self.assertIn('document.get("registered") is True', training_runner)
+        self.assertIn('"registered": registered', openhands_runner)
+        self.assertIn('UENV_TRAJECTORY_ENDPOINT="$TRAJECTORY_ENDPOINT"', evaluate_one)
+
+    @unittest.skipUnless(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        "install.sh intentionally requires root",
+    )
+    def test_installer_rejects_world_readable_shared_key_without_echoing_it(self) -> None:
+        secret = "do-not-print-this-shared-gateway-key-1234567890"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key_file = root / "swe.key"
+            key_file.write_text(secret + "\n", encoding="ascii")
+            key_file.chmod(0o644)
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(ROOT / "install.sh"),
+                    "--bundle",
+                    str(root / "missing-bundle.tar.gz"),
+                    "--profile",
+                    "control-plane",
+                    "--enable-swe",
+                    "--swe-shared-key-file",
+                    str(key_file),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        combined = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("不能允许 group/other 读取", combined)
+        self.assertNotIn(secret, combined)
+
     def test_public_user_guides_are_packaged(self) -> None:
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
+        guides = []
         for name in (
             "UEnv基础部署指南.md",
             "UEnv多机部署指南.md",
@@ -231,25 +330,46 @@ class InstallationAssetsTest(unittest.TestCase):
             path = ROOT / "Docs/deployment" / name
             self.assertTrue(path.is_file(), name)
             self.assertIn(name, release)
-            self.assertNotIn("smoke", path.read_text(encoding="utf-8").casefold())
+            text = path.read_text(encoding="utf-8")
+            guides.append(text)
+            self.assertNotIn("smoke", text.casefold())
+            self.assertNotIn("Adapter Core", text)
+            self.assertIn("Adapter", text)
+        self.assertTrue(any("UEnv Server" in text for text in guides))
 
     def test_generic_examples_and_plugin_template_are_packaged(self) -> None:
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
         for token in (
-            "examples/environment",
-            "examples/evaluation",
-            "examples/hub",
-            "examples/training",
+            "libexec/uenv/environment",
+            "libexec/uenv/evaluation",
+            "libexec/uenv/swe",
+            "libexec/uenv/training",
+            "examples/cases/evaluation",
+            "examples/cases/training",
+            "tools/hub",
+            "tools/swe",
             "templates/process-plugin",
         ):
             self.assertIn(token, release)
-        self.assertTrue((ROOT / "examples/environment/plugin.sh").is_file())
-        self.assertTrue((ROOT / "examples/environment/README.md").is_file())
-        self.assertTrue((ROOT / "examples/evaluation/qa-gsm8k.jsonl").is_file())
-        self.assertTrue((ROOT / "examples/evaluation/README.md").is_file())
-        self.assertTrue((ROOT / "examples/training/qa-gsm8k.jsonl").is_file())
-        self.assertTrue((ROOT / "examples/training/README.md").is_file())
-        self.assertTrue((ROOT / "examples/hub/image_bundle.sh").is_file())
+        self.assertTrue((ROOT / "scripts/uenv-train").is_file())
+        self.assertIn(
+            "/usr/local/bin/uenv-train",
+            (ROOT / "install.sh").read_text(encoding="utf-8"),
+        )
+        self.assertTrue((ROOT / "libexec/uenv/environment/plugin.sh").is_file())
+        self.assertTrue((ROOT / "libexec/uenv/environment/README.md").is_file())
+        self.assertTrue((ROOT / "examples/cases/evaluation/qa-gsm8k.jsonl").is_file())
+        self.assertTrue((ROOT / "examples/cases/evaluation/README.md").is_file())
+        self.assertTrue((ROOT / "examples/cases/evaluation/swe-verified.jsonl").is_file())
+        self.assertTrue((ROOT / "examples/cases/training/qa-gsm8k.jsonl").is_file())
+        self.assertTrue(
+            (ROOT / "examples/cases/training/verl-grpo-overrides.conf").is_file()
+        )
+        self.assertTrue((ROOT / "examples/cases/training/README.md").is_file())
+        self.assertTrue((ROOT / "tools/hub/image_bundle.sh").is_file())
+        self.assertTrue((ROOT / "tools/swe/build_catalog.py").is_file())
+        self.assertFalse(list((ROOT / "examples").rglob("*.sh")))
+        self.assertFalse(list((ROOT / "examples").rglob("*.py")))
         for name in ("environment.py", "plugin.py", "uenv_plugin_api.py"):
             self.assertTrue((ROOT / "templates/process-plugin" / name).is_file())
         for excluded in (".venv", "wheelhouse", "__pycache__", "*.pyc"):

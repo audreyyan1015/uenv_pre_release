@@ -23,7 +23,7 @@ usage() {
   --output FILE   输出 tar.gz（默认 ./uenv-training-client.tar.gz）
 
 客户端包只包含 VeRL 入口、UEnv Bridge wheel/config 和示例数据，不包含
-Adapter Core、Worker、Hub 或 systemd 服务。把它复制到 GPU 主机解压即可。
+Adapter、UEnv Worker、UEnv Hub 或 systemd 服务。把它复制到 GPU 主机解压即可。
 EOF
 }
 
@@ -44,17 +44,19 @@ OUTPUT="$(mkdir -p "$(dirname "$OUTPUT")" && cd "$(dirname "$OUTPUT")" && printf
 required=(
   VERSION
   manifest.json
-  examples/training/train_verl.sh
-  examples/training/verl_runner.sh
-  examples/training/prepare_episode_data.py
-  examples/training/qa-gsm8k.jsonl
-  examples/training/code-dscodebench.jsonl
-  examples/training/process-plugin.jsonl
-  examples/training/README.md
-  examples/swe/prepare_verl_data.py
+  bin/uenv-train
+  libexec/uenv/training/train_verl.sh
+  libexec/uenv/training/verl_runner.sh
+  libexec/uenv/training/prepare_episode_data.py
+  libexec/uenv/swe/prepare_verl_data.py
+  examples/cases/training/qa-gsm8k.jsonl
+  examples/cases/training/code-dscodebench.jsonl
+  examples/cases/training/process-plugin.jsonl
+  examples/cases/training/verl-grpo-overrides.conf
+  examples/cases/training/README.md
   share/uenv-bridge/configs/uenv-agent-loop.yaml
   share/uenv-bridge/scripts/run_verl_main_ppo.py
-  share/swe/smith-example.json
+  share/swe/smith-sample-catalog.json
 )
 for relative in "${required[@]}"; do
   [[ -f "$RELEASE/$relative" ]] || fail "release 缺少训练客户端文件：$relative"
@@ -76,10 +78,11 @@ for relative in "${required[@]}"; do
   install -D -m 0644 "$RELEASE/$relative" "$root/$relative"
 done
 chmod 0755 \
-  "$root/examples/training/train_verl.sh" \
-  "$root/examples/training/verl_runner.sh" \
-  "$root/examples/training/prepare_episode_data.py" \
-  "$root/examples/swe/prepare_verl_data.py" \
+  "$root/bin/uenv-train" \
+  "$root/libexec/uenv/training/train_verl.sh" \
+  "$root/libexec/uenv/training/verl_runner.sh" \
+  "$root/libexec/uenv/training/prepare_episode_data.py" \
+  "$root/libexec/uenv/swe/prepare_verl_data.py" \
   "$root/share/uenv-bridge/scripts/run_verl_main_ppo.py"
 install -D -m 0644 "$wheel" "$root/wheels/$(basename "$wheel")"
 
@@ -88,7 +91,7 @@ cat > "$root/README.txt" <<'EOF'
 
 解压后运行：
   cd /path/to/uenv-training-client
-  bash examples/training/train_verl.sh run-task \
+  ./bin/uenv-train run-task \
     --uenv-release "$PWD" \
     --model /absolute/model/path \
     --input /absolute/task/cases.jsonl \
@@ -106,7 +109,7 @@ cat > "$root/README.txt" <<'EOF'
     --runtime docker \
     --image docker.io/verlai/verl:vllm017.latest
 
-CPU/UEnv 主机必须已经运行 Adapter Core 和 Worker；本包不会安装服务。
+UEnv 主机必须已经运行 Adapter 和 UEnv Worker；本包不会安装服务。
 EOF
 
 tar -czf "$OUTPUT" -C "$temporary" uenv-training-client

@@ -49,8 +49,8 @@ template_dir() {
   local candidate
   for candidate in \
     "${UENV_PROCESS_PLUGIN_TEMPLATE:-}" \
-    "$SCRIPT_DIR/../../templates/process-plugin" \
-    "$SCRIPT_DIR/../../share/templates/process-plugin" \
+    "$SCRIPT_DIR/../../../templates/process-plugin" \
+    "$SCRIPT_DIR/../../../share/templates/process-plugin" \
     "/opt/uenv/current/share/templates/process-plugin"; do
     if [[ -n "$candidate" && -f "$candidate/manifest.yaml" ]]; then
       (cd "$candidate" && pwd)
@@ -228,7 +228,7 @@ default_worker_min() {
     echo "$UENV_WORKER_MIN"
     return
   fi
-  for file in "$SCRIPT_DIR/../../VERSION" /opt/uenv/current/VERSION; do
+  for file in "$SCRIPT_DIR/../../../VERSION" /opt/uenv/current/VERSION; do
     if [[ -f "$file" ]]; then
       value="$(tr -d '[:space:]' < "$file")"
       if [[ "$value" =~ ^[0-9A-Za-z._+-]+$ ]]; then

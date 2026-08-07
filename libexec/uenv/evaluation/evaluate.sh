@@ -2,13 +2,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RELEASE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RELEASE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 VENV="${UENV_EVAL_VENV:-$HOME/.local/share/uenv/evaluation-venv}"
 BIN="$VENV/bin/uenv-evaluate"
 SETUP_SCRIPT="${UENV_EVAL_SETUP_SCRIPT:-$SCRIPT_DIR/setup.sh}"
 CONFIGURE_MODEL_SCRIPT="${UENV_EVAL_CONFIGURE_MODEL_SCRIPT:-$SCRIPT_DIR/configure_model.sh}"
 PREPARE_SWE_SCRIPT="${UENV_EVAL_PREPARE_SWE_SCRIPT:-$SCRIPT_DIR/prepare_swe.sh}"
-SWE_EVALUATE_SCRIPT="${UENV_SWE_EVALUATE_SCRIPT:-$RELEASE_ROOT/examples/swe/evaluate.sh}"
+SWE_EVALUATE_SCRIPT="$RELEASE_ROOT/libexec/uenv/swe/evaluate.sh"
+SWE_CATALOG_TOOL="$RELEASE_ROOT/tools/swe/build_catalog.py"
 
 usage() {
   cat <<'EOF'
@@ -19,24 +20,29 @@ Run a process-plugin task (task identity is always explicit):
     --endpoint HOST:PORT --env-type NAME --dataset NAME \
     --input FILE --output FILE --max-steps N [OPTIONS]
 
-SWE workflow (does not use the generic evaluation venv):
+SWE workflow:
   sudo uenv evaluate prepare-swe \
-    --bundle FILE --profile single-node|full --runtime docker|podman \
-    --image-policy local_only|allow_public --gateway HOST:PORT
+    --bundle FILE --profile single-node|full|control-plane|worker [ROLE OPTIONS]
   sudo uenv evaluate run-swe \
     --provider local --model MODEL --base-url URL \
     --gateway URL --catalog FILE --benchmark-variant VARIANT \
-    --instance INSTANCE --output-dir DIR --max-iterations N
+    --input FILE --output FILE --artifacts-dir DIR \
+    --max-iterations N --batch-size N
   sudo uenv evaluate run-swe \
     --provider volcengine --model ENDPOINT_ID \
     --gateway URL --catalog FILE --benchmark-variant VARIANT \
-    --instance INSTANCE --output-dir DIR --max-iterations N
+    --input FILE --output FILE --artifacts-dir DIR \
+    --max-iterations N --batch-size N
+
+Build a Worker catalog from an official JSON, JSONL, or Parquet export:
+  uenv evaluate build-swe-catalog \
+    --variant verified|lite|pro|smith --input FILE --output FILE
 
 Worker model connection for QA/Code/process plugins:
   sudo uenv evaluate configure-model [OPTIONS]
 
 Required task arguments:
-  --endpoint HOST:PORT  Adapter Core endpoint
+  --endpoint HOST:PORT  Adapter gRPC address
   --env-type NAME       interaction and scoring implementation
   --dataset NAME        task/dataset route inside that environment
   --input FILE          portable Episode JSONL
@@ -72,7 +78,7 @@ require_task_arguments() {
   local option
   for option in --endpoint --env-type --dataset --input --output --max-steps; do
     has_option "$option" "${args[@]}" || {
-      echo "run-task requires $option; UEnv does not guess the task" >&2
+      echo "run-task requires $option; these arguments define the task" >&2
       exit 2
     }
   done
@@ -101,9 +107,9 @@ run_swe() {
     *) echo "run-swe: unsupported provider: $provider" >&2; exit 2 ;;
   esac
   local option
-  for option in --model --gateway --catalog --benchmark-variant --instance --output-dir --max-iterations; do
+  for option in --model --gateway --catalog --benchmark-variant --input --output --artifacts-dir --max-iterations --batch-size; do
     has_option "$option" "${forwarded[@]}" || {
-      echo "run-swe requires $option; UEnv does not select a benchmark case for you" >&2
+      echo "run-swe requires $option; these arguments define the evaluation batch" >&2
       exit 2
     }
   done
@@ -139,6 +145,14 @@ case "${1:-}" in
   run-swe)
     shift
     run_swe "$@"
+    ;;
+  build-swe-catalog)
+    shift
+    [[ -f "$SWE_CATALOG_TOOL" ]] || {
+      echo "SWE catalog tool not found: $SWE_CATALOG_TOOL" >&2
+      exit 1
+    }
+    exec python3 "$SWE_CATALOG_TOOL" "$@"
     ;;
 esac
 

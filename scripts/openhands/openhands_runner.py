@@ -74,6 +74,11 @@ _stop = threading.Event()
 _active_jobs = 0  # 当前在跑的 AgentJob 数（心跳上报用）
 _active_lock = threading.Lock()
 _registration_lock = threading.Lock()
+_agent_state: dict[str, Any] = {
+    "agent_id": AGENT_ID,
+    "registered": False,
+    "last_error": "poller is starting" if AGENT_POLL_ENABLED else "",
+}
 
 
 def _sync_directory(path: Path) -> None:
@@ -235,8 +240,29 @@ class HealthHandler(BaseHTTPRequestHandler):
         print(f"[runner-health] {self.address_string()} {fmt % args}", flush=True)
 
     def do_GET(self) -> None:  # noqa: N802
-        body = b'{"status":"ok","service":"openhands-runner"}\n'
-        self.send_response(200)
+        if self.path != "/health":
+            self.send_error(404)
+            return
+        with _registration_lock:
+            registered = bool(_agent_state.get("registered"))
+            agent_id = str(_agent_state.get("agent_id") or "")
+            last_error = str(_agent_state.get("last_error") or "")
+        ready = not AGENT_POLL_ENABLED or registered
+        document = {
+            "status": "ok" if ready else "starting",
+            "service": "openhands-runner",
+            "poll_enabled": AGENT_POLL_ENABLED,
+            "registered": registered,
+            "agent_id": agent_id,
+            "agent_pool_id": AGENT_POOL_ID,
+            "server_endpoint": SERVER_ENDPOINT,
+        }
+        if last_error and not ready:
+            document["last_error"] = last_error
+        body = (json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n").encode(
+            "utf-8"
+        )
+        self.send_response(200 if ready else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -609,6 +635,7 @@ def _mark_agent_unregistered(agent_state: dict[str, Any], reason: str) -> None:
     with _registration_lock:
         was_registered = bool(agent_state.get("registered"))
         agent_state["registered"] = False
+        agent_state["last_error"] = reason
     if was_registered:
         print(f"[agent-poll] registration invalidated: {reason}", flush=True)
 
@@ -630,11 +657,14 @@ def _register_agent_once(
             labels=labels,
         )
     except Exception as exc:  # noqa: BLE001
+        with _registration_lock:
+            agent_state["last_error"] = f"register_failed: {exc}"
         print(f"[agent-poll] RegisterAgent failed, retrying: {exc}", flush=True)
         return False
     with _registration_lock:
         agent_state["agent_id"] = agent_id
         agent_state["registered"] = True
+        agent_state["last_error"] = ""
     print(
         f"[agent-poll] registered agent_id={agent_id} pool={AGENT_POOL_ID} "
         f"max_concurrent={AGENT_MAX_CONCURRENT}",
@@ -670,6 +700,7 @@ def _heartbeat_loop(client: Any, agent_state: dict[str, Any], registration_lost_
 def _poll_loop() -> None:
     global _active_jobs
     if not SERVER_ENDPOINT:
+        _mark_agent_unregistered(_agent_state, "UENV_SERVER_ENDPOINT is unset")
         print("[agent-poll] UENV_SERVER_ENDPOINT unset; poll mode disabled", flush=True)
         return
     try:
@@ -678,12 +709,13 @@ def _poll_loop() -> None:
         # ?? catch????? poll ?????? HTTP ???
         client = AgentControlClient(SERVER_ENDPOINT)
     except Exception as exc:  # noqa: BLE001
+        _mark_agent_unregistered(_agent_state, f"agent_client_init_failed: {exc}")
         print(f"[agent-poll] cannot init agent client (poll mode off): {exc}", flush=True)
         return
 
     bridges = [{"package_id": AGENT_BRIDGE_ID, "version": AGENT_BRIDGE_VERSION, "bundle_digest": ""}]
     labels = _parse_labels(AGENT_LABELS)
-    agent_state: dict[str, Any] = {"agent_id": AGENT_ID, "registered": False}
+    agent_state = _agent_state
 
     # ?????????? Server ?????? heartbeat/poll ???? registered
     # ????????? RegisterAgent??? Server ?????????????

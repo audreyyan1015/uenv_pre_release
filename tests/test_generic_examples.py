@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_prepare_module():
-    path = ROOT / "examples/training/prepare_episode_data.py"
+    path = ROOT / "libexec/uenv/training/prepare_episode_data.py"
     spec = importlib.util.spec_from_file_location("prepare_episode_data", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -38,7 +38,7 @@ class GenericExampleTests(unittest.TestCase):
     def test_qa_rows_carry_explicit_environment(self) -> None:
         module = load_prepare_module()
         rows = module.load_rows(
-            ROOT / "examples/training/qa-gsm8k.jsonl",
+            ROOT / "examples/cases/training/qa-gsm8k.jsonl",
             dataset="gsm8k",
             env_type="qa",
             max_steps=1,
@@ -115,7 +115,7 @@ class GenericExampleTests(unittest.TestCase):
 
     def test_training_entry_help(self) -> None:
         result = subprocess.run(
-            ["bash", str(ROOT / "examples/training/train_verl.sh"), "--help"],
+            ["bash", str(ROOT / "scripts/uenv-train"), "--help"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -126,11 +126,13 @@ class GenericExampleTests(unittest.TestCase):
         self.assertIn("run-swe", result.stdout)
         self.assertIn("prepare-data", result.stdout)
         self.assertIn("prepare-swe-uenv", result.stdout)
+        self.assertIn("--verl-config FILE", result.stdout)
+        self.assertIn("--print-effective-config", result.stdout)
         self.assertNotIn("quickstart", result.stdout.casefold())
         task_help = subprocess.run(
             [
                 "bash",
-                str(ROOT / "examples/training/train_verl.sh"),
+                str(ROOT / "scripts/uenv-train"),
                 "run-task",
                 "--help",
             ],
@@ -143,7 +145,7 @@ class GenericExampleTests(unittest.TestCase):
         self.assertIn("run-task", task_help.stdout)
 
     def test_training_legacy_quickstarts_are_rejected(self) -> None:
-        script = ROOT / "examples/training/train_verl.sh"
+        script = ROOT / "scripts/uenv-train"
         for command in ("quickstart-env", "quickstart-qa", "quickstart-swe"):
             result = subprocess.run(
                 ["bash", str(script), command],
@@ -156,7 +158,7 @@ class GenericExampleTests(unittest.TestCase):
             self.assertIn(f"未知命令：{command}", result.stderr)
 
     def test_low_level_training_runner_does_not_default_task_or_scale(self) -> None:
-        script = ROOT / "examples/training/verl_runner.sh"
+        script = ROOT / "libexec/uenv/training/verl_runner.sh"
         result = subprocess.run(
             ["bash", str(script), "run", "--model", "/tmp/model", "--data", "/tmp/data"],
             text=True,
@@ -179,8 +181,91 @@ class GenericExampleTests(unittest.TestCase):
         self.assertIn("--gpus N                 单节点 GPU 数（必填）", help_result.stdout)
         self.assertIn("--steps N                训练步数（必填）", help_result.stdout)
 
+    def test_verl_config_merges_in_documented_order_and_protects_uenv_keys(self) -> None:
+        runner = ROOT / "libexec/uenv/training/verl_runner.sh"
+        shell = r'''
+source <(sed '/^COMMAND=/,$d' "$RUNNER")
+VERL_FILE_HYDRA=()
+read_verl_config "$CONFIG"
+extra=("trainer.save_freq=30")
+for item in "${extra[@]}"; do
+  validate_user_hydra_override "$item"
+done
+baseline=(
+  "actor_rollout_ref.actor.optim.lr=1e-6"
+  "trainer.save_freq=-1"
+  "trainer.project_name=uenv"
+)
+effective=()
+merge_hydra_overrides effective \
+  "${baseline[@]}" "${VERL_FILE_HYDRA[@]}" "${extra[@]}"
+printf '%s\n' "${effective[@]}"
+        '''
+        with tempfile.TemporaryDirectory() as temp_dir:
+            functions = Path(temp_dir) / "verl-functions.sh"
+            functions.write_text(
+                runner.read_text(encoding="utf-8").split("\nCOMMAND=", 1)[0] + "\n",
+                encoding="utf-8",
+            )
+            shell = shell.replace(
+                "source <(sed '/^COMMAND=/,$d' \"$RUNNER\")",
+                'source "$FUNCTIONS"',
+            )
+            config = Path(temp_dir) / "verl.conf"
+            config.write_text(
+                "# versioned experiment settings\n"
+                "actor_rollout_ref.actor.optim.lr=5e-7\n"
+                "trainer.save_freq=20\n"
+                "trainer.experiment_name=warehouse_grpo\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", "-c", shell],
+                env={
+                    **os.environ,
+                    "FUNCTIONS": str(functions),
+                    "CONFIG": str(config),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    "actor_rollout_ref.actor.optim.lr=5e-7",
+                    "trainer.save_freq=30",
+                    "trainer.project_name=uenv",
+                    "trainer.experiment_name=warehouse_grpo",
+                ],
+            )
+
+            protected = Path(temp_dir) / "protected.conf"
+            protected.write_text("trainer.nnodes=2\n", encoding="utf-8")
+            rejected = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$FUNCTIONS"; '
+                    'VERL_FILE_HYDRA=(); read_verl_config "$CONFIG"',
+                ],
+                env={
+                    **os.environ,
+                    "FUNCTIONS": str(functions),
+                    "CONFIG": str(protected),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("由 UEnv 公共参数管理", rejected.stderr)
+
     def test_training_run_task_rejects_missing_explicit_inputs_before_setup(self) -> None:
-        script = ROOT / "examples/training/train_verl.sh"
+        script = ROOT / "scripts/uenv-train"
         required = {
             "--model": "/models/example",
             "--work-dir": "WORK_DIR",
@@ -219,7 +304,7 @@ class GenericExampleTests(unittest.TestCase):
                 self.assertFalse(work_dir.exists(), omitted)
 
     def test_training_run_swe_requires_explicit_variant_before_setup(self) -> None:
-        script = ROOT / "examples/training/train_verl.sh"
+        script = ROOT / "scripts/uenv-train"
         with tempfile.TemporaryDirectory() as temp_dir:
             work_dir = Path(temp_dir) / "must-not-be-created"
             result = subprocess.run(
@@ -263,7 +348,7 @@ class GenericExampleTests(unittest.TestCase):
 
     def test_training_client_kit_entry_help(self) -> None:
         result = subprocess.run(
-            ["bash", str(ROOT / "examples/training/create_client_kit.sh"), "--help"],
+            ["bash", str(ROOT / "libexec/uenv/training/create_client_kit.sh"), "--help"],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -273,7 +358,7 @@ class GenericExampleTests(unittest.TestCase):
         self.assertIn("GPU 训练客户端包", result.stdout)
 
     def test_hub_image_bundle_entry_help(self) -> None:
-        script = ROOT / "examples/hub/image_bundle.sh"
+        script = ROOT / "tools/hub/image_bundle.sh"
         result = subprocess.run(
             ["bash", str(script), "--help"],
             text=True,
@@ -296,7 +381,7 @@ class GenericExampleTests(unittest.TestCase):
         "image_bundle.sh intentionally requires root",
     )
     def test_hub_image_install_loads_cached_tar_into_correct_engine_store(self) -> None:
-        script = ROOT / "examples/hub/image_bundle.sh"
+        script = ROOT / "tools/hub/image_bundle.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             bin_dir = root / "bin"
@@ -417,17 +502,19 @@ JSON
         required = [
             "VERSION",
             "manifest.json",
-            "examples/training/train_verl.sh",
-            "examples/training/verl_runner.sh",
-            "examples/training/prepare_episode_data.py",
-            "examples/training/qa-gsm8k.jsonl",
-            "examples/training/code-dscodebench.jsonl",
-            "examples/training/process-plugin.jsonl",
-            "examples/training/README.md",
-            "examples/swe/prepare_verl_data.py",
+            "bin/uenv-train",
+            "libexec/uenv/training/train_verl.sh",
+            "libexec/uenv/training/verl_runner.sh",
+            "libexec/uenv/training/prepare_episode_data.py",
+            "libexec/uenv/swe/prepare_verl_data.py",
+            "examples/cases/training/qa-gsm8k.jsonl",
+            "examples/cases/training/code-dscodebench.jsonl",
+            "examples/cases/training/process-plugin.jsonl",
+            "examples/cases/training/verl-grpo-overrides.conf",
+            "examples/cases/training/README.md",
             "share/uenv-bridge/configs/uenv-agent-loop.yaml",
             "share/uenv-bridge/scripts/run_verl_main_ppo.py",
-            "share/swe/smith-example.json",
+            "share/swe/smith-sample-catalog.json",
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -443,7 +530,7 @@ JSON
             result = subprocess.run(
                 [
                     "bash",
-                    str(ROOT / "examples/training/create_client_kit.sh"),
+                    str(ROOT / "libexec/uenv/training/create_client_kit.sh"),
                     "--release",
                     str(release),
                     "--output",
@@ -486,11 +573,16 @@ JSON
                 check=False,
             )
             self.assertEqual(unpack.returncode, 0, unpack.stderr)
-            self.assertTrue((installed / "examples/training/train_verl.sh").is_file())
+            self.assertTrue((installed / "bin/uenv-train").is_file())
             self.assertIn("run-task", unpack.stdout)
             self.assertNotIn("quickstart", unpack.stdout.casefold())
-        self.assertIn("uenv-training-client/examples/training/train_verl.sh", names)
-        self.assertIn("uenv-training-client/examples/training/README.md", names)
+        self.assertIn("uenv-training-client/bin/uenv-train", names)
+        self.assertIn(
+            "uenv-training-client/libexec/uenv/training/train_verl.sh", names
+        )
+        self.assertIn(
+            "uenv-training-client/examples/cases/training/README.md", names
+        )
         self.assertIn(
             "uenv-training-client/wheels/uenv_bridge-0.1.0-py3-none-any.whl",
             names,
@@ -500,7 +592,7 @@ JSON
         self.assertNotIn("quickstart", client_readme.casefold())
 
     def test_evaluation_run_task_forwards_only_explicit_arguments(self) -> None:
-        script = ROOT / "examples/evaluation/evaluate.sh"
+        script = ROOT / "libexec/uenv/evaluation/evaluate.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             venv = root / "venv"
@@ -545,7 +637,7 @@ JSON
         self.assertNotIn("gsm8k", result.stdout.splitlines())
 
     def test_evaluation_run_task_requires_identity_and_files_before_setup(self) -> None:
-        script = ROOT / "examples/evaluation/evaluate.sh"
+        script = ROOT / "libexec/uenv/evaluation/evaluate.sh"
         required = {
             "--endpoint": "10.0.0.10:50051",
             "--env-type": "warehouse",
@@ -589,7 +681,7 @@ JSON
                 self.assertFalse(marker.exists(), omitted)
 
     def test_evaluation_legacy_presets_are_rejected_before_setup(self) -> None:
-        script = ROOT / "examples/evaluation/evaluate.sh"
+        script = ROOT / "libexec/uenv/evaluation/evaluate.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             marker = root / "setup-was-called"
@@ -620,7 +712,7 @@ JSON
                 self.assertFalse(marker.exists(), command)
 
     def test_evaluation_first_run_auto_setup_and_offline_forwarding(self) -> None:
-        script = ROOT / "examples/evaluation/evaluate.sh"
+        script = ROOT / "libexec/uenv/evaluation/evaluate.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             venv = root / "venv"
@@ -694,7 +786,7 @@ chmod 0755 "$venv/bin/uenv-evaluate"
         self.assertIn("--limit", result.stdout.splitlines())
 
     def test_evaluation_can_disable_auto_setup(self) -> None:
-        script = ROOT / "examples/evaluation/evaluate.sh"
+        script = ROOT / "libexec/uenv/evaluation/evaluate.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             env = os.environ.copy()
             env["UENV_EVAL_VENV"] = str(Path(temp_dir) / "missing")
@@ -728,7 +820,7 @@ chmod 0755 "$venv/bin/uenv-evaluate"
         self.assertIn("wheelhouse", result.stderr)
 
     def test_evaluation_service_commands_skip_generic_python_setup(self) -> None:
-        script = ROOT / "examples/evaluation/evaluate.sh"
+        script = ROOT / "libexec/uenv/evaluation/evaluate.sh"
         commands = {
             "configure-model": "configure_model.sh",
             "prepare-swe": "prepare-swe",
@@ -758,7 +850,7 @@ chmod 0755 "$venv/bin/uenv-evaluate"
             self.assertNotIn("automatic setup is disabled", result.stderr)
 
     def test_evaluation_run_swe_requires_explicit_case_selection(self) -> None:
-        script = ROOT / "examples/evaluation/evaluate.sh"
+        script = ROOT / "libexec/uenv/evaluation/evaluate.sh"
         required = {
             "--provider": "local",
             "--model": "local-model",
@@ -766,22 +858,32 @@ chmod 0755 "$venv/bin/uenv-evaluate"
             "--gateway": "http://10.0.0.10:28999",
             "--catalog": "/data/verified.json",
             "--benchmark-variant": "verified",
-            "--instance": "owner__repo-1",
-            "--output-dir": "/results/swe",
+            "--input": "/data/swe-cases.jsonl",
+            "--output": "/results/swe.jsonl",
+            "--artifacts-dir": "/results/swe-artifacts",
             "--max-iterations": "30",
+            "--batch-size": "2",
         }
         explicitly_selected = (
             "--provider",
             "--catalog",
             "--benchmark-variant",
-            "--instance",
-            "--output-dir",
+            "--input",
+            "--output",
+            "--artifacts-dir",
             "--max-iterations",
+            "--batch-size",
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            evaluation_dir = root / "libexec/uenv/evaluation"
+            swe_dir = root / "libexec/uenv/swe"
+            evaluation_dir.mkdir(parents=True)
+            swe_dir.mkdir(parents=True)
+            copied_script = evaluation_dir / "evaluate.sh"
+            copied_script.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
             marker = root / "swe-was-called"
-            fake_swe = root / "swe-evaluate.sh"
+            fake_swe = swe_dir / "evaluate.sh"
             fake_swe.write_text(
                 "#!/usr/bin/env bash\ntouch \"$UENV_TEST_SWE_MARKER\"\nprintf '%s\\n' \"$@\"\n",
                 encoding="utf-8",
@@ -789,13 +891,12 @@ chmod 0755 "$venv/bin/uenv-evaluate"
             fake_swe.chmod(0o755)
             env = {
                 **os.environ,
-                "UENV_SWE_EVALUATE_SCRIPT": str(fake_swe),
                 "UENV_TEST_SWE_MARKER": str(marker),
                 "UENV_EVAL_VENV": str(root / "must-not-be-created"),
                 "UENV_EVAL_AUTO_SETUP": "0",
             }
             for omitted in explicitly_selected:
-                args = ["bash", str(script), "run-swe"]
+                args = ["bash", str(copied_script), "run-swe"]
                 for option, value in required.items():
                     if option != omitted:
                         args.extend([option, value])
@@ -823,17 +924,21 @@ chmod 0755 "$venv/bin/uenv-evaluate"
                 "/data/verified.json",
                 "--benchmark-variant",
                 "verified",
-                "--instance",
-                "owner__repo-1",
-                "--output-dir",
-                "/results/swe",
+                "--input",
+                "/data/swe-cases.jsonl",
+                "--output",
+                "/results/swe.jsonl",
+                "--artifacts-dir",
+                "/results/swe-artifacts",
                 "--max-iterations",
                 "30",
+                "--batch-size",
+                "2",
             ]
             complete = subprocess.run(
                 [
                     "bash",
-                    str(script),
+                    str(copied_script),
                     "run-swe",
                     *[
                         item
@@ -854,7 +959,7 @@ chmod 0755 "$venv/bin/uenv-evaluate"
         self.assertEqual(complete.stdout.splitlines(), expected)
 
     def test_prepare_swe_runs_installer_and_openhands_once(self) -> None:
-        script = ROOT / "examples/evaluation/prepare_swe.sh"
+        script = ROOT / "libexec/uenv/evaluation/prepare_swe.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             bundle = root / "uenv-linux-x86_64.tar.gz"
@@ -931,7 +1036,7 @@ chmod 0755 "$venv/bin/uenv-evaluate"
         self.assertEqual(openhands_args, ["called"])
 
     def test_prepare_swe_rejects_unsupported_profile_before_install(self) -> None:
-        script = ROOT / "examples/evaluation/prepare_swe.sh"
+        script = ROOT / "libexec/uenv/evaluation/prepare_swe.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             bundle = root / "bundle.tar.gz"
@@ -947,13 +1052,7 @@ chmod 0755 "$venv/bin/uenv-evaluate"
                     "--bundle",
                     str(bundle),
                     "--profile",
-                    "worker",
-                    "--runtime",
-                    "podman",
-                    "--image-policy",
-                    "local_only",
-                    "--gateway",
-                    "127.0.0.1:28999",
+                    "hub",
                 ],
                 text=True,
                 stdout=subprocess.PIPE,
@@ -961,10 +1060,343 @@ chmod 0755 "$venv/bin/uenv-evaluate"
                 check=False,
             )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("single-node 或 full", result.stderr)
+        self.assertIn("single-node、full、control-plane 或 worker", result.stderr)
+
+    def test_prepare_swe_worker_forwards_multi_node_contract(self) -> None:
+        script = ROOT / "libexec/uenv/evaluation/prepare_swe.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle = root / "bundle.tar.gz"
+            bundle.write_bytes(b"test")
+            shared_key = root / "swe.key"
+            shared_key.write_text("a" * 48 + "\n", encoding="ascii")
+            shared_key.chmod(0o600)
+            installer_log = root / "installer.args"
+            openhands_log = root / "openhands.args"
+            installer = root / "install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$INSTALLER_LOG\"\n",
+                encoding="utf-8",
+            )
+            openhands = root / "install_openhands.sh"
+            openhands.write_text(
+                "#!/usr/bin/env bash\nprintf 'called\\n' >> \"$OPENHANDS_LOG\"\n",
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "UENV_OPENHANDS_INSTALLER": str(openhands),
+                "INSTALLER_LOG": str(installer_log),
+                "OPENHANDS_LOG": str(openhands_log),
+            }
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--installer",
+                    str(installer),
+                    "--bundle",
+                    str(bundle),
+                    "--profile",
+                    "worker",
+                    "--server",
+                    "10.0.0.10:50051",
+                    "--advertise",
+                    "10.0.0.21:50054",
+                    "--runtime",
+                    "docker",
+                    "--image-policy",
+                    "allow_public",
+                    "--gateway",
+                    "0.0.0.0:28999",
+                    "--gateway-public",
+                    "http://10.0.0.21:28999",
+                    "--trajectory-endpoint",
+                    "http://10.0.0.10:8077",
+                    "--shared-key-file",
+                    str(shared_key),
+                ],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            installer_args = installer_log.read_text(encoding="utf-8").splitlines()
+            openhands_calls = openhands_log.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            installer_args,
+            [
+                "--bundle",
+                str(bundle),
+                "--profile",
+                "worker",
+                "--enable-swe",
+                "--swe-runtime",
+                "docker",
+                "--swe-image-policy",
+                "allow_public",
+                "--swe-gateway",
+                "0.0.0.0:28999",
+                "--swe-gateway-public",
+                "http://10.0.0.21:28999",
+                "--server",
+                "10.0.0.10:50051",
+                "--advertise",
+                "10.0.0.21:50054",
+                "--swe-trajectory-endpoint",
+                "http://10.0.0.10:8077",
+                "--swe-shared-key-file",
+                str(shared_key),
+            ],
+        )
+        self.assertEqual(openhands_calls, ["called"])
+
+    def test_prepare_swe_worker_requires_shared_key_before_install(self) -> None:
+        script = ROOT / "libexec/uenv/evaluation/prepare_swe.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle = root / "bundle.tar.gz"
+            bundle.write_bytes(b"test")
+            marker = root / "installer-called"
+            installer = root / "install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\ntouch \"$INSTALLER_MARKER\"\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--installer",
+                    str(installer),
+                    "--bundle",
+                    str(bundle),
+                    "--profile",
+                    "worker",
+                    "--server",
+                    "10.0.0.10:50051",
+                    "--advertise",
+                    "10.0.0.21:50054",
+                    "--runtime",
+                    "docker",
+                    "--image-policy",
+                    "allow_public",
+                    "--gateway",
+                    "0.0.0.0:28999",
+                    "--gateway-public",
+                    "http://10.0.0.21:28999",
+                    "--trajectory-endpoint",
+                    "http://10.0.0.10:8077",
+                ],
+                env={**os.environ, "INSTALLER_MARKER": str(marker)},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--shared-key-file", result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_prepare_swe_worker_does_not_generate_missing_shared_key(self) -> None:
+        script = ROOT / "libexec/uenv/evaluation/prepare_swe.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle = root / "bundle.tar.gz"
+            bundle.write_bytes(b"test")
+            shared_key = root / "missing-swe.key"
+            marker = root / "installer-called"
+            installer = root / "install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\ntouch \"$INSTALLER_MARKER\"\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--installer",
+                    str(installer),
+                    "--bundle",
+                    str(bundle),
+                    "--profile",
+                    "worker",
+                    "--runtime",
+                    "docker",
+                    "--image-policy",
+                    "allow_public",
+                    "--gateway",
+                    "0.0.0.0:28999",
+                    "--server",
+                    "10.0.0.10:50051",
+                    "--advertise",
+                    "10.0.0.21:50054",
+                    "--gateway-public",
+                    "http://10.0.0.21:28999",
+                    "--trajectory-endpoint",
+                    "http://10.0.0.10:8077",
+                    "--shared-key-file",
+                    str(shared_key),
+                ],
+                env={**os.environ, "INSTALLER_MARKER": str(marker)},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            shared_key_was_created = shared_key.exists()
+            installer_was_called = marker.exists()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("必须指向普通文件", result.stderr)
+        self.assertFalse(shared_key_was_created)
+        self.assertFalse(installer_was_called)
+
+    def test_prepare_swe_control_plane_generates_key_and_skips_openhands(self) -> None:
+        script = ROOT / "libexec/uenv/evaluation/prepare_swe.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bundle = root / "bundle.tar.gz"
+            bundle.write_bytes(b"test")
+            shared_key = root / "swe.key"
+            installer_log = root / "installer.args"
+            openhands_log = root / "openhands.args"
+            installer = root / "install.sh"
+            installer.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$INSTALLER_LOG\"\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--installer",
+                    str(installer),
+                    "--bundle",
+                    str(bundle),
+                    "--profile",
+                    "control-plane",
+                    "--shared-key-file",
+                    str(shared_key),
+                ],
+                env={
+                    **os.environ,
+                    "UENV_OPENHANDS_INSTALLER": str(root / "must-not-run.sh"),
+                    "INSTALLER_LOG": str(installer_log),
+                    "OPENHANDS_LOG": str(openhands_log),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            installer_args = installer_log.read_text(encoding="utf-8").splitlines()
+            generated_key = shared_key.read_text(encoding="ascii")
+            generated_mode = stat.S_IMODE(shared_key.stat().st_mode)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(generated_key, r"^[0-9a-f]{64}\n$")
+        self.assertEqual(generated_mode, 0o600)
+        self.assertFalse(openhands_log.exists())
+        self.assertEqual(
+            installer_args,
+            [
+                "--bundle",
+                str(bundle),
+                "--profile",
+                "control-plane",
+                "--enable-swe",
+                "--swe-shared-key-file",
+                str(shared_key),
+            ],
+        )
+
+    def test_training_prepare_swe_passes_remote_agent_topology(self) -> None:
+        source = ROOT / "libexec/uenv/training/train_verl.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            training_dir = root / "libexec/uenv/training"
+            evaluation_dir = root / "libexec/uenv/evaluation"
+            training_dir.mkdir(parents=True)
+            evaluation_dir.mkdir(parents=True)
+            entry = training_dir / "train_verl.sh"
+            entry.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            runtime_log = root / "runtime.args"
+            agent_log = root / "agent.args"
+            (evaluation_dir / "prepare_swe.sh").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$RUNTIME_LOG\"\n",
+                encoding="utf-8",
+            )
+            (training_dir / "verl_runner.sh").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$AGENT_LOG\"\n",
+                encoding="utf-8",
+            )
+            bundle = root / "bundle.tar.gz"
+            bundle.write_bytes(b"test")
+            key = root / "swe.key"
+            key.write_text("c" * 48 + "\n", encoding="ascii")
+            key.chmod(0o600)
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(entry),
+                    "prepare-swe",
+                    "--bundle",
+                    str(bundle),
+                    "--profile",
+                    "worker",
+                    "--server",
+                    "10.0.0.10:50051",
+                    "--advertise",
+                    "10.0.0.21:50054",
+                    "--runtime",
+                    "docker",
+                    "--image-policy",
+                    "allow_public",
+                    "--gateway",
+                    "0.0.0.0:28999",
+                    "--gateway-public",
+                    "http://10.0.0.21:28999",
+                    "--trajectory-endpoint",
+                    "http://10.0.0.10:8077",
+                    "--shared-key-file",
+                    str(key),
+                ],
+                env={
+                    **os.environ,
+                    "RUNTIME_LOG": str(runtime_log),
+                    "AGENT_LOG": str(agent_log),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            runtime_args = runtime_log.read_text(encoding="utf-8").splitlines()
+            agent_args = agent_log.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--shared-key-file", runtime_args)
+        self.assertEqual(
+            agent_args,
+            [
+                "prepare-uenv",
+                "--uenv-release",
+                "/opt/uenv/current",
+                "--skip-openhands",
+                "--profile",
+                "worker",
+                "--server",
+                "10.0.0.10:50051",
+                "--trajectory-endpoint",
+                "http://10.0.0.10:8077",
+            ],
+        )
 
     def test_swe_volcengine_noninteractive_key_error_is_actionable(self) -> None:
-        script = ROOT / "examples/swe/evaluate.sh"
+        script = ROOT / "libexec/uenv/swe/evaluate.sh"
         env = os.environ.copy()
         env.pop("ARK_API_KEY", None)
         result = subprocess.run(
@@ -980,12 +1412,16 @@ chmod 0755 "$venv/bin/uenv-evaluate"
                 "/data/verified.json",
                 "--benchmark-variant",
                 "verified",
-                "--instance",
-                "owner__repo-1",
-                "--output-dir",
-                "/tmp/uenv-test-results",
+                "--input",
+                "/tmp/uenv-test-swe-input.jsonl",
+                "--output",
+                "/tmp/uenv-test-results.jsonl",
+                "--artifacts-dir",
+                "/tmp/uenv-test-artifacts",
                 "--max-iterations",
                 "30",
+                "--batch-size",
+                "1",
             ],
             env=env,
             stdin=subprocess.DEVNULL,
@@ -995,11 +1431,11 @@ chmod 0755 "$venv/bin/uenv-evaluate"
             check=False,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("非交互运行需要设置 ARK_API_KEY", result.stderr)
-        self.assertIn("隐藏地提示输入", result.stderr)
+        self.assertIn("ARK_API_KEY", result.stderr)
+        self.assertIn("--api-key-file", result.stderr)
 
     def test_evaluation_offline_setup_requires_wheelhouse(self) -> None:
-        script = ROOT / "examples/evaluation/setup.sh"
+        script = ROOT / "libexec/uenv/evaluation/setup.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             wheel = root / "uenv_bridge-test.whl"
@@ -1020,7 +1456,7 @@ chmod 0755 "$venv/bin/uenv-evaluate"
         "configure_model.sh intentionally requires root",
     )
     def test_configure_model_writes_secret_once_and_restarts_on_change(self) -> None:
-        script = ROOT / "examples/evaluation/configure_model.sh"
+        script = ROOT / "libexec/uenv/evaluation/configure_model.sh"
         secret = "test-key-that-must-not-be-printed"
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

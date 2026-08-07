@@ -22,30 +22,31 @@ usage() {
   image_bundle.sh install \
     --package PACKAGE --version VERSION [选项]
 
-publish 在 Hub 主机执行：
-  1. 将本机已有镜像导出到 Hub 的受控导入目录；
+publish 在 UEnv Hub 主机执行：
+  1. 将本机已有镜像导出到 UEnv Hub 的受控导入目录；
   2. 发布一个只包含镜像 tar 的 EnvPackage。
 
-install 在离线 Worker 执行：
-  1. 从 Hub 下载并校验该 EnvPackage；
+install 在离线 UEnv Worker 执行：
+  1. 从 UEnv Hub 下载并校验该 EnvPackage；
   2. 自动执行 docker/podman load。
 
 共同选项：
-  --package ID          Hub package ID
-  --version VERSION     不可覆盖的 package 版本
+  --package ID          UEnv Hub 中的 EnvPackage ID
+  --version VERSION     不可覆盖的 EnvPackage 版本
   --engine NAME         docker 或 podman（默认 docker）
 
 publish 选项：
-  --image REF           Hub 主机上已存在的镜像，推荐使用 @sha256:digest
-  --import-dir DIR      Hub 受控导入目录（默认 /var/lib/uenv/hub/import）
-  --worker-min VERSION  最低 Worker 版本（默认取 uenv version）
+  --image REF           UEnv Hub 主机上已存在的镜像，推荐使用 @sha256:digest
+  --import-dir DIR      UEnv Hub 受控导入目录（默认 /var/lib/uenv/hub/import）
+  --worker-min VERSION  最低 UEnv Worker 版本（默认取 uenv version）
 
 install 选项：
-  --target-dir DIR      Worker 同步根目录（默认 /var/lib/uenv）
-  --worker-version VER  当前 Worker 版本（默认取 uenv version）
+  --target-dir DIR      UEnv Worker 同步根目录（默认 /var/lib/uenv）
+  --worker-version VER  当前 UEnv Worker 版本（默认取 uenv version）
 
-运行前请先为当前 root 用户执行 `uenv hub login`：publish 使用 Publisher
-Token，install 使用 Reader Token。脚本必须由 root 运行。
+UEnv Hub 启用访问令牌鉴权时，先为当前 root 用户执行 `uenv hub login`：
+publish 使用发布者令牌，install 使用只读令牌。本机无鉴权 UEnv Hub 可跳过登录。
+脚本必须由 root 运行。
 EOF
 }
 

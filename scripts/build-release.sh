@@ -65,14 +65,17 @@ trap cleanup EXIT
 PAYLOAD="$WORK_DIR/uenv-$VERSION"
 install -d "$PAYLOAD/bin" "$PAYLOAD/config" "$PAYLOAD/systemd" \
   "$PAYLOAD/plugins/qa" "$PAYLOAD/plugins/math" "$PAYLOAD/plugins/code" \
+  "$PAYLOAD/libexec/uenv/environment" "$PAYLOAD/libexec/uenv/evaluation" \
+  "$PAYLOAD/libexec/uenv/swe" "$PAYLOAD/libexec/uenv/training" \
   "$PAYLOAD/share/hub-config" "$PAYLOAD/share/swe/openhands" \
   "$PAYLOAD/share/docs" \
   "$PAYLOAD/share/templates/process-plugin" \
   "$PAYLOAD/share/uenv-bridge/configs" "$PAYLOAD/share/uenv-bridge/scripts" \
-  "$PAYLOAD/examples/environment" "$PAYLOAD/examples/evaluation" "$PAYLOAD/examples/hub" "$PAYLOAD/examples/training" \
-  "$PAYLOAD/examples/swe" "$PAYLOAD/wheels"
+  "$PAYLOAD/examples/cases/evaluation" "$PAYLOAD/examples/cases/training" \
+  "$PAYLOAD/tools/hub" "$PAYLOAD/tools/swe" "$PAYLOAD/wheels"
 
 install -m 0755 "$ROOT/uenv" "$PAYLOAD/bin/uenv"
+install -m 0755 "$ROOT/scripts/uenv-train" "$PAYLOAD/bin/uenv-train"
 install -m 0755 "$ROOT/target/release/uenv-adapter-core" "$PAYLOAD/bin/"
 install -m 0755 "$ROOT/target/release/uenv-worker" "$PAYLOAD/bin/"
 install -m 0755 "$ROOT/target/release/uenv-math-plugin" "$PAYLOAD/bin/"
@@ -107,7 +110,8 @@ fi
 # Minimal SWE assets.  Hub is optional for the single-Worker examples: the
 # Worker reads these catalogs locally and OpenHands talks to its Runtime Gateway.
 install -m 0644 "$ROOT/config/swe/verified.json" "$PAYLOAD/share/swe/verified.json"
-install -m 0644 "$ROOT/config/swe/smith-smoke.json" "$PAYLOAD/share/swe/smith-example.json"
+install -m 0644 "$ROOT/config/swe/smith-sample-catalog.json" \
+  "$PAYLOAD/share/swe/smith-sample-catalog.json"
 install -m 0644 "$ROOT/integrations/openhands/PIN.md" "$PAYLOAD/share/swe/PIN.md"
 install -m 0644 "$ROOT/integrations/openhands/requirements-agent.txt" \
   "$PAYLOAD/share/swe/requirements-agent.txt"
@@ -124,36 +128,35 @@ install -m 0644 "$ROOT/uenv-bridge/configs/uenv-agent-loop.yaml" \
   "$PAYLOAD/share/uenv-bridge/configs/uenv-agent-loop.yaml"
 install -m 0755 "$ROOT/uenv-bridge/scripts/run_verl_main_ppo.py" \
   "$PAYLOAD/share/uenv-bridge/scripts/run_verl_main_ppo.py"
-for example in "$ROOT/examples/swe/"*.sh "$ROOT/examples/swe/"*.py; do
-  [[ -f "$example" ]] || continue
-  install -m 0755 "$example" "$PAYLOAD/examples/swe/"
-done
-for example in "$ROOT/examples/evaluation/"*.sh "$ROOT/examples/evaluation/"*.py \
-  "$ROOT/examples/evaluation/"*.jsonl "$ROOT/examples/evaluation/"README.md; do
-  [[ -f "$example" ]] || continue
-  case "$example" in
-    *.sh|*.py) mode=0755 ;;
-    *) mode=0644 ;;
-  esac
-  install -m "$mode" "$example" "$PAYLOAD/examples/evaluation/"
-done
-for example in "$ROOT/examples/training/"*.sh "$ROOT/examples/training/"*.py \
-  "$ROOT/examples/training/"*.jsonl "$ROOT/examples/training/"README.md; do
-  [[ -f "$example" ]] || continue
-  case "$example" in
-    *.sh|*.py) mode=0755 ;;
-    *) mode=0644 ;;
-  esac
-  install -m "$mode" "$example" "$PAYLOAD/examples/training/"
+for area in environment evaluation swe training; do
+  for source in "$ROOT/libexec/uenv/$area/"*; do
+    [[ -f "$source" ]] || continue
+    case "$source" in
+      *.sh|*.py) mode=0755 ;;
+      *) mode=0644 ;;
+    esac
+    install -m "$mode" "$source" "$PAYLOAD/libexec/uenv/$area/"
+  done
 done
 
-install -m 0755 "$ROOT/examples/hub/image_bundle.sh" \
-  "$PAYLOAD/examples/hub/image_bundle.sh"
+install -m 0644 "$ROOT/examples/README.md" "$PAYLOAD/examples/README.md"
+for kind in evaluation training; do
+  for example in "$ROOT/examples/cases/$kind/"*; do
+    [[ -f "$example" ]] || continue
+    install -m 0644 "$example" "$PAYLOAD/examples/cases/$kind/"
+  done
+done
 
-install -m 0755 "$ROOT/examples/environment/plugin.sh" \
-  "$PAYLOAD/examples/environment/plugin.sh"
-install -m 0644 "$ROOT/examples/environment/README.md" \
-  "$PAYLOAD/examples/environment/README.md"
+for area in hub swe; do
+  for source in "$ROOT/tools/$area/"*; do
+    [[ -f "$source" ]] || continue
+    case "$source" in
+      *.sh|*.py) mode=0755 ;;
+      *) mode=0644 ;;
+    esac
+    install -m "$mode" "$source" "$PAYLOAD/tools/$area/"
+  done
+done
 
 if [[ -d "$ROOT/templates/process-plugin" ]]; then
   # Development venvs, wheels and Python caches must never leak into a release.
@@ -195,8 +198,8 @@ manifest = {
     "components": [
         "adapter-core", "worker", "hub", "hub-cli", "bridge", "qa", "math", "code",
         "environment-evaluation", "environment-training", "process-plugin-template",
-        "environment-authoring", "hub-image-transfer",
-        "swe-runtime", "openhands-agent", "swe-examples"
+        "environment-authoring", "hub-image-transfer", "swe-catalog-tools",
+        "swe-runtime", "openhands-agent", "example-cases"
     ],
     "built_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
 }
