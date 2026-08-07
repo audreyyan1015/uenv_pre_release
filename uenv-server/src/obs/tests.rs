@@ -124,6 +124,7 @@ async fn global_worker_snapshot_is_overlaid_on_run_state() {
             capacity: 1,
             endpoint: format!("{worker_id}:9000"),
             supported_env_types: vec!["math".into()],
+            ..Default::default()
         };
     obs.ingest_sync(worker_status_snapshot(
         vec![

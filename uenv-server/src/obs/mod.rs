@@ -390,6 +390,8 @@ fn overlay_global_workers(engine: &MergeEngine, run_id: &str, mut state: ChainSt
         worker.capacity = runtime.capacity;
         worker.endpoint = runtime.endpoint.clone();
         worker.supported_env_types = runtime.supported_env_types.clone();
+        // 舰队实时名册覆盖 run 内历史 active_episodes，避免页面把旧 ACTIVE 当成当前任务。
+        worker.active_episodes = runtime.active_episodes.clone();
 
         if let Some(node) = state
             .tree

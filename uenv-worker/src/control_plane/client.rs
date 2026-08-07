@@ -151,38 +151,53 @@ impl SchedulerControlPlaneClient {
     }
 
     async fn register_once(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
-        let identity = self.identity.read().await.clone();
-        let active_load = self.metrics.active_episode_count() as i32;
-        let response = client
-            .register_worker(RegisterWorkerRequest {
-                worker_id: identity.worker_id.clone(),
-                supported_env_types: self.supported_env_types.clone(),
-                resource: Some(self.resource.clone()),
-                endpoint: self.register_endpoint.clone(),
-                max_concurrent: self.max_concurrent,
-                gateway_public_url: self.gateway_public_url.clone(),
-                synced_env_packages: self.synced_env_packages.clone(),
-                load: active_load,
-                max_load: self.max_concurrent as i32,
-            })
-            .await?
-            .into_inner();
+        // Server hung with an ESTABLISHED TCP but no gRPC reply used to block worker
+        // startup before Gateway bind; bound the whole register attempt.
+        let timeout_secs =
+            bounded_env_u64("UENV_WORKER_REGISTER_TIMEOUT_SECS", 10, 1, 300);
+        let fut = async {
+            let mut client =
+                ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
+            let identity = self.identity.read().await.clone();
+            let active_load = self.metrics.active_episode_count() as i32;
+            let response = client
+                .register_worker(RegisterWorkerRequest {
+                    worker_id: identity.worker_id.clone(),
+                    supported_env_types: self.supported_env_types.clone(),
+                    resource: Some(self.resource.clone()),
+                    endpoint: self.register_endpoint.clone(),
+                    max_concurrent: self.max_concurrent,
+                    gateway_public_url: self.gateway_public_url.clone(),
+                    synced_env_packages: self.synced_env_packages.clone(),
+                    load: active_load,
+                    max_load: self.max_concurrent as i32,
+                })
+                .await?
+                .into_inner();
 
-        let mut identity = self.identity.write().await;
-        if !response.worker_id.is_empty() {
-            identity.worker_id = response.worker_id;
+            let mut identity = self.identity.write().await;
+            if !response.worker_id.is_empty() {
+                identity.worker_id = response.worker_id;
+            }
+            identity.server_epoch = response.server_epoch;
+            self.connected.store(true, Ordering::Relaxed);
+            tracing::info!(
+                trace_id = "control_plane",
+                episode_id = "-",
+                worker_id = %identity.worker_id,
+                server_epoch = identity.server_epoch,
+                msg = "register"
+            );
+            Ok(())
+        };
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), fut).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "register timed out after {timeout_secs}s talking to {}",
+                self.endpoint
+            )
+            .into()),
         }
-        identity.server_epoch = response.server_epoch;
-        self.connected.store(true, Ordering::Relaxed);
-        tracing::info!(
-            trace_id = "control_plane",
-            episode_id = "-",
-            worker_id = %identity.worker_id,
-            server_epoch = identity.server_epoch,
-            msg = "register"
-        );
-        Ok(())
     }
 
     pub async fn register(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

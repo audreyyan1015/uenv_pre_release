@@ -8,6 +8,7 @@ Mirrors the Rust gateway contract in ``uenv-worker/src/runtime_gateway/mod.rs``:
     POST   /runtime/v1/sessions/{id}/write     {path, content}  -> {ok}
     POST   /runtime/v1/sessions/{id}/submit                     -> {resolved, reward, tests_passed, ...}
     DELETE /runtime/v1/sessions/{id}                            -> {released}
+    GET    /runtime/v1/instances/{instance_id}                  -> catalog row (slim)
     GET    /runtime/v1/health                                   -> "ok"
 
 Standard library only (``urllib``) so it runs on the offline Worker host.
@@ -199,6 +200,15 @@ class UEnvGatewayClient:
             command_mode="FullShell",
             observation={},
         )
+
+    def get_instance(self, instance_id: str) -> dict:
+        """Fetch one catalog row from Worker in-memory EnvPackage catalog.
+
+        Used by OpenHands drivers on Agent hosts that do not hold the full
+        SWE-smith catalog (multi-GB). PASS_TO_PASS may be empty in the response.
+        """
+        encoded = urllib.parse.quote(instance_id, safe="")
+        return self._request("GET", f"/runtime/v1/instances/{encoded}")
 
     # ── per-session ops (used by UEnvSession) ────────────────────────
     def exec(self, session_id: str, command: str) -> ExecResult:

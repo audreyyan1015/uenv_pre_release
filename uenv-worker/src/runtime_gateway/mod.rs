@@ -11,6 +11,7 @@
 //! - `POST   /runtime/v1/sessions/{id}/write` 写文件 / 补丁
 //! - `POST   /runtime/v1/sessions/{id}/submit`提交评测 → reward + artifact
 //! - `DELETE /runtime/v1/sessions/{id}`       释放
+//! - `GET    /runtime/v1/instances/{id}`      按 instance_id 取 catalog 行（供 Agent 侧单样本 catalog）
 //! - `GET    /runtime/v1/health`              探活
 
 use std::collections::HashMap;
@@ -82,6 +83,7 @@ pub fn router(
         .route("/runtime/v1/sessions/{id}", delete(destroy))
         .route("/runtime/v1/trajectories/{id}", get(get_trajectory))
         .route("/runtime/v1/trajectories", get(list_trajectories))
+        .route("/runtime/v1/instances/{id}", get(get_instance))
         .layer(axum::middleware::from_fn_with_state(state.clone(), require_api_key))
         .with_state(state);
     Router::new()
@@ -132,6 +134,70 @@ async fn require_api_key(
 
 async fn health() -> impl IntoResponse {
     "ok"
+}
+
+/// Agent-facing catalog row. Omits bulky `PASS_TO_PASS` (Worker grading still uses
+/// the in-memory full row); OpenHands driver only needs issue/patch/repo fields.
+#[derive(Serialize)]
+struct AgentCatalogInstance {
+    instance_id: String,
+    repo: String,
+    version: String,
+    base_commit: String,
+    #[serde(default)]
+    environment_setup_commit: String,
+    problem_statement: String,
+    patch: String,
+    #[serde(default)]
+    test_patch: String,
+    #[serde(rename = "FAIL_TO_PASS")]
+    fail_to_pass: Vec<String>,
+    #[serde(rename = "PASS_TO_PASS")]
+    pass_to_pass: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    benchmark_variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_cmd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_cmd: Option<String>,
+}
+
+async fn get_instance(
+    State(st): State<GatewayState>,
+    Path(id): Path<String>,
+) -> ApiResult<AgentCatalogInstance> {
+    let pool = st.pool.clone();
+    let lookup_id = id.clone();
+    let catalog_len = st.pool.catalog_len();
+    let instance = tokio::task::spawn_blocking(move || pool.get_instance(&lookup_id))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("swe instance_id `{id}` not in catalog (size={catalog_len})"),
+            )
+        })?;
+    Ok(Json(AgentCatalogInstance {
+        instance_id: instance.instance_id.clone(),
+        repo: instance.repo,
+        version: instance.version,
+        base_commit: instance.base_commit,
+        environment_setup_commit: instance.environment_setup_commit,
+        problem_statement: instance.problem_statement,
+        patch: instance.patch,
+        test_patch: instance.test_patch,
+        fail_to_pass: instance.fail_to_pass,
+        // Keep schema compatible with catalog.json rows; P2P is unused by the agent
+        // instruction builder and can be multi-MB per row.
+        pass_to_pass: Vec::new(),
+        benchmark_variant: instance.benchmark_variant,
+        image_cache_key: instance.image_cache_key,
+        test_cmd: instance.test_cmd,
+        install_cmd: instance.install_cmd,
+    }))
 }
 
 // ─── create ──────────────────────────────────────────────────────────
@@ -229,6 +295,42 @@ struct ForEpisodeResp {
     benchmark_variant: String,
     command_mode: String,
     observation: ResetObservation,
+    /// Mini catalog JSON: `{ "<instance_id>": { ...agent catalog row... } }`.
+    /// Server copies this into AgentJob.instance_catalog_json for OpenHands drivers.
+    #[serde(default)]
+    instance_catalog_json: String,
+}
+
+fn agent_catalog_instance_from(instance: crate::swe::dataset::SweInstance) -> AgentCatalogInstance {
+    AgentCatalogInstance {
+        instance_id: instance.instance_id,
+        repo: instance.repo,
+        version: instance.version,
+        base_commit: instance.base_commit,
+        environment_setup_commit: instance.environment_setup_commit,
+        problem_statement: instance.problem_statement,
+        patch: instance.patch,
+        test_patch: instance.test_patch,
+        fail_to_pass: instance.fail_to_pass,
+        pass_to_pass: Vec::new(),
+        benchmark_variant: instance.benchmark_variant,
+        image_cache_key: instance.image_cache_key,
+        test_cmd: instance.test_cmd,
+        install_cmd: instance.install_cmd,
+    }
+}
+
+fn mini_catalog_json(instance: crate::swe::dataset::SweInstance) -> String {
+    let id = instance.instance_id.clone();
+    let row = agent_catalog_instance_from(instance);
+    let mut map = serde_json::Map::new();
+    match serde_json::to_value(row) {
+        Ok(v) => {
+            map.insert(id, v);
+        }
+        Err(_) => return String::new(),
+    }
+    serde_json::Value::Object(map).to_string()
 }
 
 async fn create_session_for_episode(
@@ -252,14 +354,21 @@ async fn create_session_for_episode(
     let pool = st.pool.clone();
     let gateway_url = st.gateway_public_url.clone();
 
-    let result = tokio::task::spawn_blocking(move || pool.create_session(&instance_id, variant, policy))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
+    let result = tokio::task::spawn_blocking(move || {
+        let catalog_row = pool.get_instance(&instance_id);
+        let created = pool.create_session(&instance_id, variant, policy)?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((created, catalog_row))
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
 
     match result {
-        Ok((session_id, observation)) => {
+        Ok(((session_id, observation), catalog_row)) => {
             st.pool.set_session_run_id(&session_id, &run_id);
             st.pool.set_session_episode_id(&session_id, &episode_id);
+            let instance_catalog_json = catalog_row
+                .map(mini_catalog_json)
+                .unwrap_or_default();
             Ok(Json(ForEpisodeResp {
                 session_id,
                 gateway_url,
@@ -267,6 +376,7 @@ async fn create_session_for_episode(
                 benchmark_variant: variant.as_str().to_string(),
                 command_mode: format!("{mode:?}"),
                 observation,
+                instance_catalog_json,
             }))
         }
         Err(e) => {

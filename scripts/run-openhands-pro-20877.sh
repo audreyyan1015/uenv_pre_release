@@ -13,12 +13,40 @@ UENV="${UENV_REPO:-/root/UEnv}"
 GATEWAY="${UENV_GATEWAY:-}"
 API_KEY="${UENV_GATEWAY_API_KEY:-swe-pro-secret}"
 LLM_JSON="${OPENHANDS_LLM_CONFIG:-$UENV/config/openhands-llm-20877.json}"
+
+# Server 编排：从 AgentJob 读取 variant，避免 .env 默认 pro / smoke fixture 抢占 Smith。
+if [[ -n "${UENV_AGENT_JOB_FILE:-}" && -f "${UENV_AGENT_JOB_FILE}" ]]; then
+  JOB_VARIANT="$(python3 - "$UENV_AGENT_JOB_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+print((d.get("benchmark_variant") or d.get("benchmarkVariant") or "").strip())
+PY
+)"
+  if [[ -n "$JOB_VARIANT" ]]; then
+    UENV_BENCHMARK_VARIANT="$JOB_VARIANT"
+  fi
+  JOB_LLM="$(python3 - "$UENV_AGENT_JOB_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+print((d.get("llm_config_path") or d.get("llmConfigPath") or "").strip())
+PY
+)"
+  if [[ -n "$JOB_LLM" && -f "$JOB_LLM" ]]; then
+    LLM_JSON="$JOB_LLM"
+  fi
+fi
+
 VARIANT="${UENV_BENCHMARK_VARIANT:-pro}"
-if [[ "$VARIANT" == "smith" || "$VARIANT" == "swe-smith" || "$VARIANT" == "swesmith" ]]; then
+if [[ "$VARIANT" == "smith" || "$VARIANT" == "swe-smith" || "$VARIANT" == "swesmith" || "$VARIANT" == "swe-bench-smith" ]]; then
   VARIANT="smith"
   DEFAULT_INSTANCE="oauthlib__oauthlib.1fd52536.combine_file__0fceycuu"
-  DEFAULT_INSTANCES="$UENV/fixtures/swe/smith_catalog.json"
-  [[ -f "$DEFAULT_INSTANCES" ]] || DEFAULT_INSTANCES="$UENV/config/swe/smith-smoke.json"
+  # AgentJob 路径不要绑死 smoke fixture；留给 driver 走 Gateway 单样本拉取。
+  if [[ -n "${UENV_AGENT_JOB_FILE:-}" ]]; then
+    DEFAULT_INSTANCES=""
+  else
+    DEFAULT_INSTANCES="$UENV/fixtures/swe/smith_catalog.json"
+    [[ -f "$DEFAULT_INSTANCES" ]] || DEFAULT_INSTANCES="$UENV/config/swe/smith-smoke.json"
+  fi
 else
   DEFAULT_INSTANCE="instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c"
   DEFAULT_INSTANCES="$UENV/config/swe/pro-python-smoke.json"
@@ -49,13 +77,22 @@ DRIVER="$BRIDGE_DIR/drivers/run_swebenchpro_official.py"
 if [[ "$VARIANT" == "smith" && -f "$BRIDGE_DIR/run_swesmith_official.py" && -z "${UENV_AGENT_JOB_FILE:-}" ]]; then
   DRIVER="$BRIDGE_DIR/run_swesmith_official.py"
 fi
-INSTANCES="${UENV_SWE_INSTANCES:-$DEFAULT_INSTANCES}"
-# .openhands-20877.env 默认绑 Pro 全量 catalog；Smith 旁路/编排勿误用。
-if [[ "$VARIANT" == "smith" ]]; then
+# AgentJob + smith：显式清空 Pro 默认 catalog；driver 会 Gateway 拉取单样本。
+if [[ "$VARIANT" == "smith" && -n "${UENV_AGENT_JOB_FILE:-}" ]]; then
   case "${UENV_SWE_INSTANCES:-}" in
     *smith*) INSTANCES="$UENV_SWE_INSTANCES" ;;
-    *) INSTANCES="$DEFAULT_INSTANCES" ;;
+    *)
+      INSTANCES=""
+      unset UENV_SWE_INSTANCES || true
+      ;;
   esac
+elif [[ "$VARIANT" == "smith" ]]; then
+  case "${UENV_SWE_INSTANCES:-}" in
+    *smith*) INSTANCES="$UENV_SWE_INSTANCES" ;;
+    *) INSTANCES="${DEFAULT_INSTANCES}" ;;
+  esac
+else
+  INSTANCES="${UENV_SWE_INSTANCES:-$DEFAULT_INSTANCES}"
 fi
 
 cd "$SDK"
@@ -68,12 +105,12 @@ DRIVER_ARGS=(
   --api-key "$API_KEY"
   --run-id "$RUN_ID"
   --instance "$INSTANCE"
-  --instances "$INSTANCES"
   --benchmark-variant "$VARIANT"
   --mode "$MODE"
   --max-iterations "${MAX_ITERATIONS:-30}"
   --output-dir "$OUT"
 )
+[[ -n "$INSTANCES" ]] && DRIVER_ARGS+=(--instances "$INSTANCES")
 [[ -n "$GATEWAY" ]] && DRIVER_ARGS+=(--gateway "$GATEWAY")
 [[ -n "${UENV_AGENT_JOB_FILE:-}" ]] && DRIVER_ARGS+=(--agent-job-file "$UENV_AGENT_JOB_FILE")
 

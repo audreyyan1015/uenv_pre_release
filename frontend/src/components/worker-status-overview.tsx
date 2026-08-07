@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import {
   Activity,
   AlertTriangle,
@@ -12,8 +13,9 @@ import {
 
 import type { WorkerView } from "@/lib/types/chain-state";
 import {
-  buildWorkerDetailHref,
+  buildWorkerDetailSearch,
   summarizeWorkerStatuses,
+  WORKER_DETAIL_ROUTE,
   type WorkerOperationalStatus,
 } from "@/lib/worker-status";
 
@@ -106,7 +108,7 @@ export function WorkerStatusOverview({
   const summary = useMemo(() => summarizeWorkerStatuses(workers), [workers]);
   const [filter, setFilter] = useState<WorkerFilter>("all");
   const [page, setPage] = useState(1);
-  const detailBaseUrl = import.meta.env.VITE_WORKER_STATUS_DETAIL_URL?.trim() || null;
+  const canNavigate = Boolean(runId?.trim());
   const allWorkers = useMemo(
     () =>
       summary.groups
@@ -259,7 +261,7 @@ export function WorkerStatusOverview({
               const load = item.worker.current_load ?? item.activeEpisodeCount;
               const capacity = item.worker.capacity;
               const reason = item.worker.status_reason?.trim().toUpperCase() ?? "";
-              const href = buildWorkerDetailHref(detailBaseUrl, {
+              const detailSearch = buildWorkerDetailSearch({
                 runId: runId ?? "",
                 workerId: item.worker.worker_id,
                 status: item.status,
@@ -293,18 +295,19 @@ export function WorkerStatusOverview({
                   >
                     {statusMeta[item.status].label}
                   </span>
-                  {href && <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-400" />}
+                  {canNavigate && <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-400" />}
                 </>
               );
 
-              return href ? (
-                <a
+              return canNavigate ? (
+                <Link
                   key={item.worker.worker_id}
-                  href={href}
+                  to={WORKER_DETAIL_ROUTE}
+                  search={detailSearch}
                   className="flex h-20 shrink-0 items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-3 transition hover:border-blue-200 hover:bg-blue-50/50 2xl:h-14 2xl:py-1"
                 >
                   {content}
-                </a>
+                </Link>
               ) : (
                 <div
                   key={item.worker.worker_id}

@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ServerRouteImport } from './routes/server'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ServerWorkerRouteImport } from './routes/server_.worker'
 
 const ServerRoute = ServerRouteImport.update({
   id: '/server',
@@ -22,31 +23,40 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ServerWorkerRoute = ServerWorkerRouteImport.update({
+  id: '/server_/worker',
+  path: '/server/worker',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/server': typeof ServerRoute
+  '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/server': typeof ServerRoute
+  '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/server': typeof ServerRoute
+  '/server_/worker': typeof ServerWorkerRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/server'
+  fullPaths: '/' | '/server' | '/server/worker'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/server'
-  id: '__root__' | '/' | '/server'
+  to: '/' | '/server' | '/server/worker'
+  id: '__root__' | '/' | '/server' | '/server_/worker'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ServerRoute: typeof ServerRoute
+  ServerWorkerRoute: typeof ServerWorkerRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -65,12 +75,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/server_/worker': {
+      id: '/server_/worker'
+      path: '/server/worker'
+      fullPath: '/server/worker'
+      preLoaderRoute: typeof ServerWorkerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ServerRoute: ServerRoute,
+  ServerWorkerRoute: ServerWorkerRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

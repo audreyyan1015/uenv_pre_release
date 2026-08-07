@@ -903,6 +903,9 @@ impl UEnvEpisodeService {
             enqueue_ts: req.enqueue_ts,
             metadata: req.metadata.clone(),
             task_payload_json: String::new(),
+            // Prefer Worker-provided mini catalog so Agent hosts need not hold EnvPackage.
+            instances_catalog: String::new(),
+            instance_catalog_json: session.instance_catalog_json.clone(),
         };
         if let Some(store) = self.state.persistence_store() {
             let deadline_at_ms = crate::persistence::now_ms().saturating_add(
@@ -1193,6 +1196,8 @@ impl UEnvEpisodeService {
             enqueue_ts: req.enqueue_ts,
             metadata: req.metadata.clone(),
             task_payload_json: spec.task_payload_json.clone(),
+            instances_catalog: String::new(),
+            instance_catalog_json: String::new(),
         };
         let mut rx = self.state.agent_job_queue.enqueue(&pool_id, job);
         handle.set_agent_job(pool_id.clone(), job_id.clone());

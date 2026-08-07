@@ -57,6 +57,9 @@ def _ensure_benchmarks_path() -> None:
         sys.path.insert(0, bench)
 
 
+_MAX_LOCAL_CATALOG_BYTES = 64 * 1024 * 1024  # avoid loading multi-GB EnvPackage on Agent hosts
+
+
 def _load_catalog(path: Path, instance_id: str) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if instance_id not in data:
@@ -64,12 +67,46 @@ def _load_catalog(path: Path, instance_id: str) -> dict[str, Any]:
     return data[instance_id]
 
 
+def _catalog_contains(path: Path, instance_id: str) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        if path.stat().st_size > _MAX_LOCAL_CATALOG_BYTES:
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(data, dict) and instance_id in data
+
+
 def _smith_catalog_candidates(repo_root: Path) -> list[Path]:
-    return [
-        repo_root / "fixtures/swe/smith_catalog.json",
-        repo_root / "config/swe/smith-smoke.json",
-        Path("/var/lib/uenv/envs/swe-bench-smith/0.1.0-local/catalog.json"),
-    ]
+    """Prefer EnvPackage / env overrides; keep smoke fixtures as last resort only."""
+    env_pkg = os.environ.get("UENV_SWE_ENV_PACKAGE", "").strip()
+    env_cat = os.environ.get("UENV_SWE_ENV_PACKAGE_CATALOG", "").strip()
+    out: list[Path] = []
+    if env_cat:
+        out.append(Path(env_cat))
+    if env_pkg:
+        out.append(Path(env_pkg) / "catalog.json")
+    out.extend(
+        [
+            Path("/var/lib/uenv/envs/swe-bench-smith/0.1.0-local/catalog.json"),
+            Path("/data/uenv/envs/swe-bench-smith/0.1.0-local/catalog.json"),
+            # Smoke fixtures last — never prefer these over a full EnvPackage.
+            repo_root / "fixtures/swe/smith_catalog.json",
+            repo_root / "config/swe/smith-smoke.json",
+        ]
+    )
+    # de-dupe while preserving order
+    seen: set[str] = set()
+    uniq: list[Path] = []
+    for p in out:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(p)
+    return uniq
 
 
 def _resolve_instances_catalog(
@@ -77,20 +114,55 @@ def _resolve_instances_catalog(
     variant: str,
     explicit: str,
     repo_root: Path,
+    instance_id: str = "",
 ) -> Path:
-    """Prefer explicit path; for smith fall back to local EnvPackage/fixture catalogs."""
+    """Prefer explicit path that contains the target; for smith fall back to EnvPackage then fixture."""
     from uenv_runtime.agent_job import normalize_benchmark_variant
 
     if explicit.strip():
         path = Path(explicit)
         if not path.is_absolute():
             path = repo_root / path
-        return path
+        if not instance_id or _catalog_contains(path, instance_id):
+            return path
     if normalize_benchmark_variant(variant) == "smith":
+        for cand in _smith_catalog_candidates(repo_root):
+            if not cand.is_file():
+                continue
+            if instance_id and not _catalog_contains(cand, instance_id):
+                continue
+            return cand
+        # Last resort: first existing candidate (may still miss instance → gateway fetch).
         for cand in _smith_catalog_candidates(repo_root):
             if cand.is_file():
                 return cand
     return repo_root / "config/swe/pro-python-smoke.json"
+
+
+def _fetch_instance_via_gateway(
+    *,
+    gateway: str,
+    api_key: str | None,
+    instance_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    from uenv_runtime.client import UEnvGatewayClient
+
+    client = UEnvGatewayClient(gateway, api_key=api_key, run_id=run_id)
+    row = client.get_instance(instance_id)
+    if not isinstance(row, dict) or not row.get("instance_id"):
+        raise SystemExit(f"gateway returned invalid instance payload for {instance_id!r}")
+    return row
+
+
+def _write_mini_catalog(out_dir: Path, instance_id: str, row: dict[str, Any]) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "instance_catalog.json"
+    path.write_text(
+        json.dumps({instance_id: row}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _workspace_dir(variant: str, override: str = "") -> str:
@@ -340,10 +412,9 @@ def main() -> int:
     ap.add_argument("--instance", default=os.environ.get("UENV_PRO_INSTANCE", ""))
     ap.add_argument(
         "--instances",
-        default=os.environ.get(
-            "UENV_SWE_INSTANCES",
-            os.environ.get("UENV_SWE_ENV_PACKAGE_CATALOG", "config/swe/pro-python-smoke.json"),
-        ),
+        default=os.environ.get("UENV_SWE_INSTANCES", "")
+        or os.environ.get("UENV_SWE_ENV_PACKAGE_CATALOG", ""),
+        help="Local catalog JSON; empty → smith resolves EnvPackage/fixture or Gateway fetch",
     )
     ap.add_argument("--benchmark-variant", default="pro")
     ap.add_argument("--output-dir", required=True)
@@ -420,33 +491,101 @@ def main() -> int:
     # CLI/default instances may still point at Pro smoke; resolve after AgentJob variant override.
     from uenv_runtime.agent_job import normalize_benchmark_variant
 
-    if normalize_benchmark_variant(args.benchmark_variant) == "smith" and not (
+    catalog_path = Path(args.instances) if args.instances else Path()
+    if args.instances and not catalog_path.is_absolute():
+        catalog_path = repo_root / catalog_path
+
+    catalog_source = str(catalog_path) if args.instances else ""
+    row: dict[str, Any] | None = None
+
+    # 1) Official path: AgentJob.instance_catalog_json from Server/Worker for-episode.
+    if agent_job and (agent_job.instance_catalog_json or "").strip():
+        try:
+            payload = json.loads(agent_job.instance_catalog_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"AgentJob.instance_catalog_json is not valid JSON: {exc}"
+            ) from exc
+        if isinstance(payload, dict) and args.instance in payload and isinstance(
+            payload[args.instance], dict
+        ):
+            row = payload[args.instance]
+            mini = _write_mini_catalog(out, args.instance, row)
+            catalog_path = mini
+            args.instances = str(mini)
+            catalog_source = f"agent_job.instance_catalog_json -> {mini}"
+            print(f"[catalog] using AgentJob.instance_catalog_json -> {mini}", flush=True)
+        elif isinstance(payload, dict) and payload.get("instance_id") == args.instance:
+            # Allow a bare SweInstance object as well as a mini catalog map.
+            row = payload
+            mini = _write_mini_catalog(out, args.instance, row)
+            catalog_path = mini
+            args.instances = str(mini)
+            catalog_source = f"agent_job.instance_catalog_json(row) -> {mini}"
+            print(f"[catalog] using AgentJob.instance_catalog_json row -> {mini}", flush=True)
+        else:
+            print(
+                f"[catalog] AgentJob.instance_catalog_json missing {args.instance}; "
+                "falling back to local/gateway",
+                flush=True,
+            )
+
+    if row is None and normalize_benchmark_variant(args.benchmark_variant) == "smith" and not (
         agent_job and agent_job.instances_catalog
     ):
-        # Keep explicit --instances only when it already contains the target (checked below).
         catalog_path = _resolve_instances_catalog(
             variant=args.benchmark_variant,
-            explicit="",
+            explicit=str(args.instances or ""),
             repo_root=repo_root,
+            instance_id=args.instance,
         )
-        # If caller passed a usable smith catalog via --instances, prefer it.
-        explicit = Path(args.instances)
-        if not explicit.is_absolute():
-            explicit = repo_root / explicit
-        if explicit.is_file():
-            try:
-                data = json.loads(explicit.read_text(encoding="utf-8"))
-                if args.instance in data:
-                    catalog_path = explicit
-            except Exception:
-                pass
         args.instances = str(catalog_path)
-    else:
-        catalog_path = Path(args.instances)
-        if not catalog_path.is_absolute():
-            catalog_path = repo_root / catalog_path
+        catalog_source = str(catalog_path)
 
-    row = _load_catalog(catalog_path, args.instance)
+    if row is None:
+        if args.instances and _catalog_contains(catalog_path, args.instance):
+            row = _load_catalog(catalog_path, args.instance)
+            catalog_source = str(catalog_path)
+        else:
+            # Agent hosts (e.g. 208.77) often only have smoke fixtures; fetch one row
+            # from Worker Gateway which already loaded the full EnvPackage catalog.
+            gw = (args.gateway or (agent_job.gateway_url if agent_job else "") or "").strip()
+            if not gw:
+                raise SystemExit(
+                    f"instance {args.instance!r} not in {catalog_path or '(no local catalog)'} "
+                    "and no gateway / AgentJob.instance_catalog_json available"
+                )
+            print(
+                f"[catalog] local miss for {args.instance} in {catalog_path or '(empty)'}; "
+                f"fetching via gateway {gw}",
+                flush=True,
+            )
+            row = _fetch_instance_via_gateway(
+                gateway=gw,
+                api_key=args.api_key,
+                instance_id=args.instance,
+                run_id=run_id,
+            )
+            mini = _write_mini_catalog(out, args.instance, row)
+            catalog_path = mini
+            args.instances = str(mini)
+            catalog_source = f"gateway:{gw} -> {mini}"
+            print(f"[catalog] wrote mini catalog {mini}", flush=True)
+
+    _save_json(
+        out / "catalog_resolve.json",
+        {
+            "instance_id": args.instance,
+            "catalog_path": str(catalog_path),
+            "catalog_source": catalog_source,
+            "env_package_id": getattr(agent_job, "env_package_id", "") if agent_job else "",
+            "benchmark_variant": args.benchmark_variant,
+            "has_agent_job_catalog_json": bool(
+                agent_job and (agent_job.instance_catalog_json or "").strip()
+            ),
+        },
+    )
+
     job_workspace = agent_job.workspace_dir if agent_job else ""
     workspace_dir = _workspace_dir(args.benchmark_variant, job_workspace)
 

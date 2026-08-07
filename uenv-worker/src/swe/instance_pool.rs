@@ -110,6 +110,12 @@ impl SweInstancePool {
         self.store.len()
     }
 
+    /// Lookup a catalog row by `instance_id` (for Agent drivers that do not hold
+    /// the full EnvPackage catalog locally).
+    pub fn get_instance(&self, instance_id: &str) -> Option<crate::swe::dataset::SweInstance> {
+        self.store.get(instance_id).cloned()
+    }
+
     pub fn session_count(&self) -> usize {
         self.sessions.lock().expect("pool lock").len()
     }

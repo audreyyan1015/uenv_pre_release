@@ -181,6 +181,8 @@ pub(crate) struct ForEpisodeSession {
     pub(crate) session_id: String,
     /// agent 访问该 session 的 URL。
     pub(crate) gateway_url: String,
+    /// Worker 回传的单样本 catalog JSON（`{instance_id: row}`）；写入 AgentJob。
+    pub(crate) instance_catalog_json: String,
 }
 
 fn swe_gateway_api_key() -> String {

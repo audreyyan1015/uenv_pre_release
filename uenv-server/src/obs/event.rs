@@ -171,19 +171,23 @@ pub struct WorkerView {
 
 /// Scheduler Worker 快照投影到 Obs 的稳定载荷。
 ///
-/// `active_episodes` 仍由各 training run 的 Episode 事件维护；这里承载 Server 级别的
-/// 在线状态、负载和容量，随后由 Obs 在读取 run state 时叠加到对应 WorkerView。
+/// 读取 run state 时会把这些字段叠加到对应 WorkerView，保证负载/心跳/实时 Episode
+/// 名册不依赖易丢弃的高频 WORKER_HEARTBEAT 事件。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct WorkerStatusObservation {
     pub worker_id: String,
     pub status: String,
     pub status_reason: String,
     pub status_changed_ts: i64,
+    #[serde(default)]
+    pub last_heartbeat_ts: i64,
     pub current_load: u32,
     pub capacity: u32,
     pub endpoint: String,
     #[serde(default)]
     pub supported_env_types: Vec<String>,
+    #[serde(default)]
+    pub active_episodes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
