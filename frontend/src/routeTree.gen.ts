@@ -10,12 +10,18 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ServerRouteImport } from './routes/server'
+import { Route as OpsRouteImport } from './routes/ops'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ServerWorkerRouteImport } from './routes/server_.worker'
 
 const ServerRoute = ServerRouteImport.update({
   id: '/server',
   path: '/server',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OpsRoute = OpsRouteImport.update({
+  id: '/ops',
+  path: '/ops',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -31,30 +37,34 @@ const ServerWorkerRoute = ServerWorkerRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/ops': typeof OpsRoute
   '/server': typeof ServerRoute
   '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/ops': typeof OpsRoute
   '/server': typeof ServerRoute
   '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/ops': typeof OpsRoute
   '/server': typeof ServerRoute
   '/server_/worker': typeof ServerWorkerRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/server' | '/server/worker'
+  fullPaths: '/' | '/ops' | '/server' | '/server/worker'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/server' | '/server/worker'
-  id: '__root__' | '/' | '/server' | '/server_/worker'
+  to: '/' | '/ops' | '/server' | '/server/worker'
+  id: '__root__' | '/' | '/ops' | '/server' | '/server_/worker'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  OpsRoute: typeof OpsRoute
   ServerRoute: typeof ServerRoute
   ServerWorkerRoute: typeof ServerWorkerRoute
 }
@@ -66,6 +76,13 @@ declare module '@tanstack/react-router' {
       path: '/server'
       fullPath: '/server'
       preLoaderRoute: typeof ServerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ops': {
+      id: '/ops'
+      path: '/ops'
+      fullPath: '/ops'
+      preLoaderRoute: typeof OpsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -87,6 +104,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  OpsRoute: OpsRoute,
   ServerRoute: ServerRoute,
   ServerWorkerRoute: ServerWorkerRoute,
 }

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { TrainingConsole } from "@/components/training-console";
+import { UserLaunchConsole } from "@/components/user-launch-console";
 
 export const Route = createFileRoute("/")({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -7,15 +7,15 @@ export const Route = createFileRoute("/")({
   }),
   head: () => ({
     meta: [
-      { title: "UEnv · Training Run Visualization" },
+      { title: "UEnv · 训练与评测控制台" },
       {
         name: "description",
-        content: "Operational console for observing distributed UEnv training runs in real time.",
+        content: "User-facing console for launching UEnv training and benchmark evaluation tasks.",
       },
-      { property: "og:title", content: "UEnv · Training Run Visualization" },
+      { property: "og:title", content: "UEnv · 训练与评测控制台" },
       {
         property: "og:description",
-        content: "Operational console for observing distributed UEnv training runs in real time.",
+        content: "Launch UEnv training and benchmark evaluation tasks from one page.",
       },
     ],
   }),
@@ -24,5 +24,5 @@ export const Route = createFileRoute("/")({
 
 function Index() {
   const { run } = Route.useSearch();
-  return <TrainingConsole initialRunId={run} />;
+  return <UserLaunchConsole initialRunId={run} />;
 }

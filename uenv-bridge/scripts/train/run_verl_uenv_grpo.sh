@@ -36,6 +36,8 @@ Common environment overrides:
   UENV_AGENT_LOOP_BATCH         Batch episodes before Python -> Rust core RPC. Default: 1
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
   UENV_AGENT_LOOP_PARALLEL_MODE Adapter metadata parallel mode. Default: sync
+  UENV_EXPECTED_WORKER_PARALLELISM
+                                  Expected UEnv Worker execution slots for observability only. Default: empty
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
   UENV_EPISODE_MAX_STEPS_OVERRIDE Runtime max_steps/max_iterations override. Default: empty
   TRAINER_LOGGER                VeRL logger backends. Use "['console','wandb']" to enable wandb. Default: "['console']"
@@ -184,6 +186,7 @@ UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
 UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
 UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
 UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
+UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM:-}
 UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-3600}
 UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE:-}
 UENV_OBS_URL=${UENV_OBS_URL:-}
@@ -254,6 +257,9 @@ run_verl_training() {
   fi
   echo "AgentLoop request records: ${SERVICE_DIR}/agent-loop-requests.jsonl"
   echo "AgentLoop result records: ${SERVICE_DIR}/agent-loop-results.jsonl"
+  if [ -n "${UENV_EXPECTED_WORKER_PARALLELISM}" ]; then
+    echo "Expected UEnv worker parallelism: ${UENV_EXPECTED_WORKER_PARALLELISM}"
+  fi
   if [ -n "${UENV_OBS_URL}" ]; then
     echo "Frontend run: ${UENV_OBS_URL%/obs}/?run=${UENV_TRAINING_RUN_ID}"
   fi
@@ -294,6 +300,7 @@ export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
 export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
 export UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS}
 export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE}
+export UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM}
 export UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS}
 export UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE}
 export UENV_OBS_URL=\"${UENV_OBS_URL}\"
@@ -362,7 +369,7 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.enable_chunked_prefill=True \\
   actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
   +actor_rollout_ref.rollout.enable_sleep_mode=${ROLLOUT_ENABLE_SLEEP_MODE} \\
-  actor_rollout_ref.rollout.max_num_seqs=4 \\
+  actor_rollout_ref.rollout.max_num_seqs=8 \\
   actor_rollout_ref.rollout.max_num_batched_tokens=2048 \\
   actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\
