@@ -24,6 +24,9 @@ usage() {
 可选环境变量：
   UENV_UV_VERSION          用于安装依赖的 uv 版本（默认 0.8.14）
   UENV_AGENT_USER         运行 OpenHands 的系统用户（默认 uenv-agent）
+  UV_HTTP_TIMEOUT         uv 单个请求超时秒数（默认 120；慢网络可调大）
+  UV_INDEX_URL            自定义 Python 包索引。注意：依赖由 uv.lock 固定哈希，
+                          镜像与 PyPI 文件不一致时会校验失败，不要混用镜像
 EOF
 }
 
@@ -116,6 +119,8 @@ run_agent() {
     HOME="$AGENT_HOME" \
     XDG_CACHE_HOME="$AGENT_HOME/.cache" \
     UV_CACHE_DIR="$AGENT_HOME/.cache/uv" \
+    UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}" \
+    ${UV_INDEX_URL:+UV_INDEX_URL="$UV_INDEX_URL"} \
     "$@"
 }
 

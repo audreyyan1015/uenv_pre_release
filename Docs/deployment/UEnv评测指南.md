@@ -170,10 +170,12 @@ uenv evaluate run-task \
   --endpoint '127.0.0.1:50051' \
   --env-type warehouse \
   --dataset warehouse-v1 \
-  --input "$HOME/uenv-envs/warehouse/cases.jsonl" \
+  --input "$HOME/uenv-envs/warehouse/example.jsonl" \
   --output "$PWD/results/warehouse.jsonl" \
   --max-steps 4
 ```
+
+`uenv env plugin create` 生成的示例输入文件固定命名为 `example.jsonl`；使用自定义输入文件时替换 `--input` 的路径。
 
 输入 JSONL 每行是一条任务样本。一条 `run-task` 命令会为文件中的每条任务样本执行一个 Episode：
 
@@ -340,6 +342,11 @@ sudo uenv evaluate prepare-swe \
 `--image-policy allow_public` 允许 UEnv Worker 在首次执行某个 SWE 实例时从容器镜像仓库（OCI Registry）拉取 SWE 实例镜像。
 
 离线 UEnv Worker 需要先导入本次评测的 SWE 实例镜像，再将参数改为 `--image-policy local_only`。
+
+`prepare-swe` 还会安装固定版本的 OpenHands 依赖（uv 创建独立环境，下载量约 1 GiB 以上）。两点注意：
+
+- 依赖版本由 uv.lock 固定内容哈希。**不要**用 `UV_INDEX_URL` 指向与 PyPI 文件不一致的镜像，否则会因哈希校验失败；慢网络只需调大 `UV_HTTP_TIMEOUT`（默认 120 秒）。离线主机可在同架构、同 Python 版本的联网主机完成一次 `prepare-swe` 后，把 `/opt/uenv/agent/openhands-benchmarks` 和 `/var/lib/uenv/agent/.cache/uv` 原样复制过来再重跑。
+- `prepare-swe` 不会创建常驻的 OpenHands Agent 服务；`run-swe` 会按需拉起 Agent。训练场景的常驻 Agent（`uenv-swe-agent.service`）由 `uenv train prepare-swe` 安装，见训练指南。
 
 ### 7.2 准备 SWE 输入
 

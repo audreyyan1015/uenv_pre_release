@@ -84,12 +84,40 @@ require_task_arguments() {
   done
 }
 
+run_swe_usage() {
+  cat <<'EOF'
+Run a SWE evaluation batch through UEnv.
+
+Usage:
+  sudo uenv evaluate run-swe --provider local|volcengine [REQUIRED OPTIONS]
+
+Required for both providers:
+  --model NAME           local model name or volcengine endpoint ID
+  --gateway URL          Worker Runtime Gateway URL
+  --catalog FILE         SWE catalog JSON
+  --benchmark-variant V  verified, lite, pro, or smith
+  --input FILE           JSONL; each line selects one instance_id from the catalog
+  --output FILE          per-instance result JSONL
+  --artifacts-dir DIR    per-instance evaluation run files
+  --max-iterations N     Agent iteration limit per instance
+  --batch-size N         instances executed concurrently
+
+Provider options:
+  --base-url URL         required with --provider local; optional for volcengine
+  --api-key-file FILE    single-line API key file (0600); otherwise prompted,
+                         or taken from ARK_API_KEY for volcengine
+
+Optional:
+  --offline              use only locally imported instance images
+EOF
+}
+
 run_swe() {
   local provider=""
   local -a forwarded=()
   while (($#)); do
     case "$1" in
-      -h|--help) usage; exit 0 ;;
+      -h|--help) run_swe_usage; exit 0 ;;
       --provider)
         [[ $# -ge 2 && -n "${2:-}" ]] || {
           echo "run-swe: --provider requires local or volcengine" >&2

@@ -323,6 +323,8 @@ sudo uenv train prepare-swe \
 
 `--image-policy allow_public` 允许 UEnv Worker 按 SWE catalog 拉取当前实例的 SWE 实例镜像。离线 UEnv Worker 由管理员先导入所需 SWE 实例镜像，然后使用 `--image-policy local_only`。
 
+`prepare-swe` 安装 OpenHands 依赖需要访问 Python 包索引和 Git 源；镜像使用注意和离线准备方法见 [UEnv 评测指南](./UEnv评测指南.md#71-为-uenv-worker-启用-swe-runtime)。
+
 增加更多 UEnv Worker 时，在每台 UEnv Worker 重复上述 `worker` 安装模式命令，并为 `--advertise` 和 `--gateway-public` 填写该 UEnv Worker 的内网地址。
 
 所有 UEnv Worker 使用同一个 Adapter 地址和 SWE 共享密钥。

@@ -86,6 +86,8 @@ sudo bash install.sh \
 
 `--profile` 选择安装模式（profile）。`control-plane` 是安装模式的固定代码值，该模式只安装 Adapter。本指南正文统一使用组件名“Adapter”。`--bundle` 指定 UEnv 安装包的路径。
 
+如果这台主机此前用 `single-node` 或 `full` 安装过，安装器会自动停用遗留的本机 `uenv-worker.service`（和 `uenv-swe-agent.service`），避免旧 Worker 继续以 `127.0.0.1:50054` 注册到 Adapter。
+
 检查：
 
 ```bash
@@ -110,6 +112,8 @@ sudo bash install.sh \
 ```
 
 `worker` 安装模式只安装 UEnv Worker。
+
+重复执行安装命令时，安装器默认保留已有的 `/etc/uenv` 配置，此时命令行的 `--server`、`--advertise`、`--hub` 等参数不会生效（安装器会给出警告）。确需用新参数替换配置时，先备份 `/etc/uenv`，再加 `--force-config` 重新执行。
 
 安装命令中的 `--server` 是固定参数名，其中的 `server` 对应 Adapter 内部的 UEnv Server 模块。这个参数填写 Adapter 地址。两个地址的含义如下：
 
@@ -179,7 +183,7 @@ uenv status
 5. `uenv status` 中 UEnv Worker 的数量、`endpoint` 字段和状态都正确。
 6. 所有主机的 `uenv version` 相同。
 
-当 UEnv Worker 配置为 `id: "auto"` 时，重启后的旧记录会保留到状态报告超时。重启后等待几分钟，再核对 `uenv status` 中的 UEnv Worker 数量。
+当 UEnv Worker 配置为 `id: "auto"` 时，重启后的旧记录会保留到状态报告超时。重启后等待几分钟，再核对 `uenv status` 中的 UEnv Worker 数量。新 Worker 以同一地址重新注册时，Adapter 会把旧记录名下的在途 Episode 以 `ERR_LEASE_SUPERSEDED` 终态结束，客户端会收到明确的失败结果而不是一直等待；但重启窗口内仍不建议提交新任务。
 
 完成部署后，再根据用途执行 [UEnv 评测指南](./UEnv评测指南.md) 或 [UEnv 训练指南](./UEnv训练指南.md) 中的任务验证。
 

@@ -22,6 +22,9 @@ SWE_TRAJECTORY_ENDPOINT=""
 SWE_SHARED_KEY_FILE=""
 HAS_SERVER=0
 HAS_WORKER=0
+EXPLICIT_SERVER=0
+EXPLICIT_ADVERTISE=0
+EXPLICIT_HUB=0
 
 usage() {
   printf '%s\n' \
@@ -64,9 +67,9 @@ while (($#)); do
     --profile) PROFILE="${2:-}"; shift 2 ;;
     --bundle) BUNDLE="${2:-}"; shift 2 ;;
     --version) VERSION="${2:-}"; shift 2 ;;
-    --server) SERVER_ENDPOINT="${2:-}"; shift 2 ;;
-    --advertise) ADVERTISE_ENDPOINT="${2:-}"; shift 2 ;;
-    --hub) HUB_ENDPOINT="${2:-}"; shift 2 ;;
+    --server) SERVER_ENDPOINT="${2:-}"; EXPLICIT_SERVER=1; shift 2 ;;
+    --advertise) ADVERTISE_ENDPOINT="${2:-}"; EXPLICIT_ADVERTISE=1; shift 2 ;;
+    --hub) HUB_ENDPOINT="${2:-}"; EXPLICIT_HUB=1; shift 2 ;;
     --hub-token-file) HUB_TOKEN_FILE="${2:-}"; shift 2 ;;
     --enable-swe) ENABLE_SWE=1; shift ;;
     --swe-runtime) SWE_RUNTIME="${2:-}"; shift 2 ;;
@@ -315,6 +318,16 @@ install_config() {
   fi
 }
 
+# 保留已有配置时，本次命令行传入的地址类参数不会生效。生成结果与现有配置不一致
+# 且用户显式传了参数时给出明确警告，避免静默忽略。
+warn_if_config_kept_with_flags() {
+  local generated="$1" target="$2"; shift 2
+  [[ -e "$target" && "$FORCE_CONFIG" -ne 1 ]] || return 0
+  cmp -s "$generated" "$target" && return 0
+  echo "警告：已保留现有配置 $target；本次传入的 $* 未生效。" >&2
+  echo "      如需用本次参数替换配置，请备份后重新运行并加 --force-config。" >&2
+}
+
 UNITS=()
 if [[ "$PROFILE" == "single-node" || "$PROFILE" == "control-plane" || "$PROFILE" == "full" ]]; then
   install_config "$RELEASE_DIR/config/server.yaml" /etc/uenv/server.yaml
@@ -367,6 +380,15 @@ if [[ "$PROFILE" == "single-node" || "$PROFILE" == "worker" || "$PROFILE" == "fu
     -e "s|@HUB_TOKEN_FILE@|$HUB_TOKEN_CONFIG_PATH|g" \
     "$RELEASE_DIR/config/worker.yaml" > "$TMP_DIR/worker.yaml"
   install_config "$TMP_DIR/worker.yaml" /etc/uenv/worker.yaml
+  {
+    provided=()
+    [[ "${EXPLICIT_SERVER}" -eq 1 ]] && provided+=(--server)
+    [[ "${EXPLICIT_ADVERTISE}" -eq 1 ]] && provided+=(--advertise)
+    [[ "${EXPLICIT_HUB}" -eq 1 ]] && provided+=(--hub)
+    [[ -n "${HUB_TOKEN_FILE}" ]] && provided+=(--hub-token-file)
+    ((${#provided[@]})) \
+      && warn_if_config_kept_with_flags "$TMP_DIR/worker.yaml" /etc/uenv/worker.yaml "${provided[@]}"
+  }
   install_config "$RELEASE_DIR/config/worker.env" /etc/uenv/worker.env
   if [[ ! -e /etc/uenv/secrets/worker-llm.env ]]; then
     install -o root -g uenv -m 0640 /dev/null /etc/uenv/secrets/worker-llm.env
@@ -452,6 +474,24 @@ if [[ "$PROFILE" == "hub" || "$PROFILE" == "full" ]]; then
   install_config "$RELEASE_DIR/config/hub.toml" /etc/uenv/hub.toml
   install -m 0644 "$RELEASE_DIR/systemd/uenv-hub.service" /etc/systemd/system/uenv-hub.service
   UNITS+=(uenv-hub.service)
+fi
+
+# control-plane 只包含 Adapter。此前以 single-node/full 安装的主机可能仍运行本机
+# UEnv Worker（和 swe-agent）；留着它会以 127.0.0.1:50054 注册，与"仅控制面"的
+# 预期不符，因此切换 profile 时一并停用。
+if [[ "$PROFILE" == "control-plane" ]]; then
+  for stale_unit in uenv-worker.service uenv-swe-agent.service; do
+    if systemctl cat "$stale_unit" >/dev/null 2>&1; then
+      if [[ "$NO_START" -eq 0 ]]; then
+        if systemctl is-active --quiet "$stale_unit" || systemctl is-enabled --quiet "$stale_unit" 2>/dev/null; then
+          info "control-plane 不包含本机 Worker；停用此前安装的 $stale_unit"
+          systemctl disable --now "$stale_unit" >/dev/null 2>&1 || true
+        fi
+      else
+        echo "注意：$stale_unit 仍存在；control-plane 不包含本机 Worker，建议 systemctl disable --now $stale_unit" >&2
+      fi
+    fi
+  done
 fi
 
 if [[ "$NO_START" -eq 0 ]]; then

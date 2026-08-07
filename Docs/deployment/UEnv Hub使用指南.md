@@ -259,7 +259,7 @@ uenv env plugin publish "$HOME/uenv-envs/my-environment"
 
 修改环境行为、得分计算、依赖或接口后，先增加 `manifest.yaml` 中的 `version`，再发布新版本。同一个名称和版本发布后保持内容不变。
 
-发布主机和目标 UEnv Worker 应使用相同的 Linux CPU 架构与 Python 版本。联网发布会从 Python 包索引下载依赖。离线发布需要提前准备 Python 离线依赖目录（wheelhouse），并增加 `--offline`。
+发布主机和目标 UEnv Worker 应使用相同的 Linux CPU 架构与 Python 版本。联网发布会从 Python 包索引下载依赖，下载沿用发布主机的 pip 配置；使用 HTTP 内网镜像时，`trusted-host` 需要写在 pip 配置的 `[global]` 段（只写在 `[install]` 段时发布阶段的依赖下载会失败）。离线发布需要提前准备 Python 离线依赖目录（wheelhouse），并增加 `--offline`。
 
 该命令直接上传的文件总量上限为 40 MiB。模型权重、大型官方数据集和容器镜像分别保存在模型存储、数据存储和容器镜像仓库中。
 
@@ -417,7 +417,7 @@ uenv env yank my-environment \
 
 备份前停止 `uenv-hub.service`。复制以上文件后重新启动服务，并检查 `/healthz`。
 
-常用检查命令：
+常用检查命令（UEnv Hub 与检查主机同机、且监听回环地址时）：
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
@@ -426,6 +426,8 @@ uenv env list
 uenv logs hub -n 200
 sudo journalctl -u uenv-hub.service -n 200 --no-pager
 ```
+
+独立 UEnv Hub（第 2.3 节）把 `127.0.0.1` 换成 `hub.toml` 中配置的监听地址，例如 `curl -fsS http://10.0.0.15:8080/healthz`。`uenv doctor` 的 Hub 健康检查同样使用 `hub.toml` 的监听地址。
 
 | 现象 | 检查内容 |
 |---|---|

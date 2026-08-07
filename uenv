@@ -150,6 +150,33 @@ def doctor_line(ok: bool, name: str, detail: str) -> bool:
     return ok
 
 
+def hub_health_url(config_dir: Path) -> str:
+    """Hub 健康检查地址。独立 Hub 可绑定非回环地址，不能总是查 127.0.0.1。"""
+    override = os.environ.get("UENV_HUB_URL")
+    if override:
+        return f"{override.rstrip('/')}/healthz"
+    host, port = "127.0.0.1", 8080
+    try:
+        in_server = False
+        for raw in (config_dir / "hub.toml").read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("["):
+                in_server = line == "[server]"
+                continue
+            if not in_server or "=" not in line:
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            if key == "host":
+                host = value.strip('"').strip("'") or host
+            elif key == "port":
+                port = int(value)
+    except Exception:
+        pass
+    if host in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    return f"http://{host}:{port}/healthz"
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     checks: list[bool] = []
     manifest = args.install_root / "manifest.json"
@@ -179,8 +206,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if (args.config_dir / "worker.yaml").exists():
         checks.append(doctor_line(worker_ok, "Worker 健康检查", worker_detail or args.worker_url))
 
-    hub_url = os.environ.get("UENV_HUB_URL", "http://127.0.0.1:8080")
-    hub_ok, hub_detail = http_ok(f"{hub_url.rstrip('/')}/healthz")
+    hub_url = hub_health_url(args.config_dir)
+    hub_ok, hub_detail = http_ok(hub_url)
     if (args.config_dir / "hub.toml").exists():
         checks.append(doctor_line(hub_ok, "Hub 健康检查", hub_detail or hub_url))
 
