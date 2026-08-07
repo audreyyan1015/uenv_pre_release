@@ -57,6 +57,11 @@ message EpisodeRequest {
     map<string, string> metadata = 21;
     // 结构化模型端点配置；不再从 payload 或旧 model_endpoint 字符串读取。
     ModelEndpoint model_endpoint_config = 22;
+
+    // 调度轻量标签。完整 run/batch policy 由 AdapterCore SchedulingPolicy 承载，
+    // Server 可用 group_id 建立 run/batch 级 admission 状态。
+    string scheduling_group_id = 23;
+    uint32 scheduling_priority = 24;
 }
 // 异步训练使用的 rollout 轨迹字段。
 message RolloutTrace {

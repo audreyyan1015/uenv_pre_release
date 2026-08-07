@@ -19,6 +19,27 @@ message ExecuteBatchRequest {
   string request_id = 1;
   string batch_id = 2;
   repeated SampleEnvelope samples = 3;
+  SchedulingPolicy scheduling_policy = 4;
+}
+
+// Run/batch 级调度意图。Adapter 只负责透传；Server/Worker 负责按硬上限解释和执行。
+message SchedulingPolicy {
+  // 本次 batch/run 同时推进的 episode 上限。
+  uint32 max_episode_concurrency = 1;
+  // 同一 run 允许同时积压的 batch 上限。
+  uint32 max_in_flight_batches = 2;
+  // 希望 Server 为该 run/env_type 对齐的 Worker slot 数。
+  uint32 target_worker_slots = 3;
+  // 单个 Worker 上同一 run/env_type 的并行占用上限。
+  uint32 max_parallel_per_worker = 4;
+  // 是否要求只使用已经预热好的 slot。
+  bool require_warm_slot = 5;
+  // Worker WarmupPool ready 实例目标。
+  uint32 pool_warmup_target = 6;
+  // Agent job 接收侧并发上限。
+  uint32 agent_job_max_concurrency = 7;
+  // Runtime Gateway session 上限。
+  uint32 runtime_gateway_session_limit = 8;
 }
 
 message ExecuteBatchResponse {
