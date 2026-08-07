@@ -435,7 +435,7 @@
         ]),
         s.artifact_bytes !== r.package_artifact_bytes
           ? el("details", { class: "disclose" }, [
-              el("summary", { text: "磁盘实测字节与登记字节不一致（点击查看说明）" }),
+              el("summary", { text: "磁盘实测字节与登记字节不一致（展开说明）" }),
               el("div", {}, [
                 el("p", {
                   style: "margin:0;font-size:12.5px;color:var(--muted-foreground)",
@@ -459,9 +459,9 @@
         el("p", {
           style: "margin:-4px 0 10px;font-size:12.5px;color:var(--muted-foreground)",
           text:
-            "一个 Episode Stack 把「环境契约 + 基准数据集 + Agent 脚手架 + 运行时网关要求」" +
-            "钉成一份可解析的组合。它自己不含字节，只按版本引用下面的构件 —— " +
-            "所以同一份数据配不同脚手架，是两个 Stack，而不是两份数据。",
+            "Episode Stack 将「环境契约 + 基准数据集 + Agent 脚手架 + 运行时网关要求」" +
+            "固定为可解析组合；自身不含字节，仅按版本引用构件。" +
+            "因此同一份数据搭配不同脚手架会形成两个 Stack，而非两份数据副本。",
         }),
         el("div", { class: "grid cols-4" }, [
           clickable(
@@ -637,8 +637,8 @@
 
     const out = el("div", {}, [
       lead(
-        "环境契约定义「一次 reset/step 是什么意思、奖励怎么算」，是能力层面的抽象；" +
-          "具体考哪些题由基准数据集提供，通过契约的 dataset 路由键挂载。",
+        "环境契约定义交互语义（一次 reset/step 的含义与奖励计算方式），属于能力层抽象；" +
+          "具体题目由基准数据集提供，并通过契约的 dataset 路由键挂载。",
       ),
       toolbar,
       card(
@@ -658,13 +658,13 @@
             "已归并的历史名",
             el("div", {}, [
               lead(
-                "这些名字曾被注册成独立环境，实际上是某个契约下的一个基准。" +
-                  "它们仍以 200 + Deprecation 头可解析，Worker 预热不会因改名而失败；" +
-                  "新接入请直接用 superseded_by 指向的契约。",
+                `下表共 ${retired.length} 条历史 env_type：曾作为独立环境注册，实际对应某一正式契约下的基准数据集。` +
+                  "现已标记 deprecated，并由 superseded_by 指向继任契约；旧引用仍返回 HTTP 200 且附带 Deprecation 头，Worker 预热不受影响。" +
+                  "新接入请直接使用继任契约，勿再依赖历史名。",
               ),
-              table(columns, retired, { empty: "无" }),
+              table(columns, retired, { empty: "无已归并历史名" }),
             ]),
-            { tight: true, hint: `${retired.length} 个已归并` },
+            { tight: true, hint: `${retired.length} 条` },
           ),
         ]),
       );
@@ -945,21 +945,21 @@
     const frag = document.createDocumentFragment();
     frag.appendChild(
       el("div", { class: "model-card" }, [
-        el("h3", { text: "怎么读这一页" }),
+        el("h3", { text: "页面说明" }),
         el("ol", { class: "model-steps" }, [
           el("li", {
-            html: "<strong>环境契约</strong>（swe / qa / code）定义「一次 reset/step 是什么、奖励怎么算」。",
+            html: "<strong>环境契约</strong>（swe / qa / code）定义交互语义：一次 reset/step 的含义，以及奖励如何计算。",
           }),
           el("li", {
-            html: "<strong>基准数据集</strong>是契约下的题目与镜像打包，发给 Worker 的内容寻址单元。",
+            html: "<strong>基准数据集</strong>是契约下的题目与镜像打包，作为发给 Worker 的内容寻址分发单元。",
           }),
           el("li", {
-            html: "<strong>变体 / dataset</strong>是契约内的路由键，例如 swe 下的 <code>smith</code>，不是新的环境类型。",
+            html: "<strong>变体 / dataset</strong>是契约内的路由键（例如 swe 下的 <code>smith</code>），不是并列的环境类型。",
           }),
         ]),
         el("p", {
           class: "model-note",
-          text: "Episode Stack 再往上选一层：把「契约 + 某个数据集 + Agent 脚手架」钉成可运行组合。",
+          text: "Episode Stack 位于更上层，将「环境契约 + 基准数据集 + Agent 脚手架」固定为可运行组合。",
         }),
       ]),
     );
@@ -1019,18 +1019,18 @@
       frag.appendChild(
         el("div", { class: "section" }, [
           card(
-            "尚无法归入上述契约",
+            "未归类基准",
             el("div", {}, [
               el("p", {
                 class: "contract-blurb",
                 text:
-                  "这些包有 catalog，但 overlay / 包名都无法映射到 swe、qa、code。" +
-                  "需要补 worker_overlay.env_type 或按命名规范发布。",
+                  `下表共 ${leftovers.length} 个含 catalog 的包，其 overlay 与包名均未能映射到 swe、qa、code。` +
+                  "请补全 worker_overlay.env_type，或按命名约定重新发布后再归入对应契约分区。",
               }),
               table(
                 ["基准包", "最新版本", "描述", "更新时间"],
                 leftovers.map((p) => pkgRow(p)),
-                { empty: "无" },
+                { empty: "无未归类基准" },
               ),
             ]),
             { tight: true, hint: `${leftovers.length} 个` },
@@ -1043,11 +1043,12 @@
       frag.appendChild(
         el("div", { class: "section" }, [
           card(
-            "联调夹具（非训练基准）",
+            "联调夹具",
             el("div", {}, [
               el("p", {
                 class: "contract-blurb",
-                text: "smoke / fixture 包只用于预热与回归，不计入正式基准目录。",
+                text:
+                  `下表共 ${fixtures.length} 个 smoke / fixture 包，仅用于预热与回归验证，不计入正式训练基准目录。`,
               }),
               table(
                 ["包 ID", "归属契约", "最新版本", "描述", "更新时间"],
@@ -1061,10 +1062,10 @@
                     fmtTime(p.updated_at),
                   ],
                 })),
-                { empty: "无" },
+                { empty: "无联调夹具" },
               ),
             ]),
-            { tight: true, hint: `${fixtures.length} 个夹具` },
+            { tight: true, hint: `${fixtures.length} 个` },
           ),
         ]),
       );
@@ -1349,8 +1350,8 @@
       el("p", {
         style: "margin:0 0 14px;color:var(--muted-foreground);font-size:13px",
         text:
-          "Episode Stack 把「任务环境 + Agent 脚手架 + 运行时网关」登记为一个可解析的整体，" +
-          "解析时把所有浮动约束钉到具体版本，并给出一个可写进训练记录的 stack_digest。",
+          "Episode Stack 将「任务环境 + Agent 脚手架 + 运行时网关」登记为可解析整体；" +
+          "解析时会将浮动约束固定到具体版本，并生成可写入训练记录的 stack_digest。",
       }),
       card(
         "Episode Stack 注册表",
@@ -1738,10 +1739,10 @@
     ]);
   };
 
-  // ---------------------------------------------------- 视图：健康与指标
+  // ---------------------------------------------------- 视图：系统状态
 
   routes.health = async () => {
-    setCrumbs("健康与指标", "GET /healthz · /version · /metrics");
+    setCrumbs("系统状态", "GET /healthz · /version · /metrics");
     const [health, version, metricsText] = await Promise.all([
       fetch("/healthz").then((r) => r.json()),
       fetch("/version").then((r) => r.json()),
@@ -1795,12 +1796,12 @@
       card(
         "HTTP 请求分布",
         table([{ label: "方法与路径" }, { label: "累计请求", num: true }, "状态码"], routeRows, {
-          empty: "还没有产生请求指标",
+          empty: "暂无请求指标",
         }),
         { tight: true, hint: "来自 uenv_hub_http_requests_total" },
       ),
       el("div", { class: "section", style: "margin-top:18px" }, [
-        card("原始指标输出", el("pre", { class: "json", text: metricsText })),
+        card("Prometheus 原始输出", el("pre", { class: "json", text: metricsText })),
       ]),
     ]);
   };

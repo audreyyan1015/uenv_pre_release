@@ -143,7 +143,7 @@ Hub 里容易混的名字，按**是什么 / 不是什么 / 在哪看**对齐如
 
 | 分组 | 入口 | 数据来源 | 人话 |
 |---|---|---|---|
-| 运行态 | 总览 / 健康与指标 | `/api/v1/system/overview`、`/healthz`、`/metrics` | 集群现在怎样 |
+| 运行态 | 总览 / 系统状态 | `/api/v1/system/overview`、`/healthz`、`/metrics` | 集群现在怎样 |
 | 可运行 | Episode Stack | `/api/v1/episode-stacks` | 已经钉好、可以直接解析的组合 |
 | 构件 | 基准与数据集 / Agent 脚手架 / 环境契约 | packages（按 kind）+ agent-bridges + envs | Stack 引用的三类原料 |
 | 存储 | 制品与镜像 | 各包 latest manifest 的 artifacts 汇总 | 原料底下的字节 |
@@ -153,9 +153,9 @@ Hub 里容易混的名字，按**是什么 / 不是什么 / 在哪看**对齐如
 
 页面固定三块 + 夹具，不再用「未声明」当第四契约：
 
-1. **怎么读这一页**：契约 → 数据集 → 变体；并说明 Stack 再往上选一层。  
-2. **SWE / QA / Code** 三张契约卡：每张有中文 blurb、包表（基准包 / 变体 / 版本 / 实例数）、跳转契约详情。  
-3. **尚无法归入**（仅当仍有无法映射的 catalog 包时出现）：提示补 `worker_overlay.env_type` 或命名规范。  
+1. **页面说明**：契约 → 数据集 → 变体；并说明 Stack 位于更上层将三者固定为可运行组合。  
+2. **SWE / QA / Code** 三张契约卡：每张有中文说明、包表（基准包 / 变体 / 版本 / 实例数）、跳转契约详情。  
+3. **未归类基准**（仅当仍有无法映射的 catalog 包时出现）：提示补 `worker_overlay.env_type` 或命名规范。  
 4. **联调夹具**：`fixture` kind，不计入正式基准目录。
 
 ### 3.3 API 增量（向后兼容）
