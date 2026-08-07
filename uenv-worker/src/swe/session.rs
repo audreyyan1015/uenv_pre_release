@@ -21,6 +21,7 @@ use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
 use crate::swe::image_cache::{ImageCacheFactory, ImagePullPolicy, resolve_provision_image};
 use crate::swe::pro_eval::try_external_pro_grade;
 use crate::swe::resettable::PodmanResettableInstance;
+use crate::swe::smith_eval::try_external_smith_grade;
 use crate::swe::spec::{ResetObservation, Workspace, build_reset_observation};
 use crate::swe::trajectory::{
     StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore, now_ms,
@@ -163,29 +164,6 @@ impl SweSession {
             .into());
         }
         session.run_pro_setup_at_provision()?;
-
-        // SWE-smith：数据集 `patch` 为造 bug 补丁；镜像默认干净，需在 provision 注入后 Agent 才看到失败测试。
-        if instance.variant() == crate::swe::variant::BenchmarkVariant::Smith
-            && !instance.patch.trim().is_empty()
-        {
-            session.apply_patch(&instance.patch, "smith_bug")?;
-            if let Some(install) = instance.resolved_install_command() {
-                let install_script = format!(
-                    "{}; cd {} && {}",
-                    crate::swe::dataset::CONDA_ACTIVATE,
-                    ws,
-                    install
-                );
-                let ir = session.exec_raw(&install_script)?;
-                if ir.exit_code != 0 {
-                    return Err(format!(
-                        "smith post-bug install failed (code {}): {}\n{}",
-                        ir.exit_code, ir.stdout, ir.stderr
-                    )
-                    .into());
-                }
-            }
-        }
 
         session.record_provision_reset(
             &observation.issue_text,
@@ -494,6 +472,11 @@ impl SweSession {
     /// Agent 不接触/篡改测试文件（对齐官方 harness：model patch → test patch → run）。
     pub fn evaluate(&self) -> Result<EpisodeOutcome, DynErr> {
         let start = Instant::now();
+        let ws = self.instance.workspace_dir();
+        let model_diff = self
+            .exec_raw(&format!("cd {ws} && git diff"))
+            .map(|r| r.stdout)
+            .unwrap_or_default();
         // M1-3：可选 post-patch 依赖安装（实例 `install_cmd` 或全局 UENV_SWE_INSTALL_CMD）。
         // 顺序对齐官方 harness：源码 patch → install → test patch → run。安装失败仅告警
         // （不掩盖后续测试失败的真实根因）。
@@ -528,7 +511,9 @@ impl SweSession {
         let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
 
         // M6-4：Pro 变体且配置 `UENV_SWE_PRO_EVAL_CMD` 时，外部子进程权威评分。
+        // Smith 可配置 `UENV_SWE_SMITH_EVAL_CMD`，将当前 git diff 交给官方 harness 作为最终 reward。
         let is_pro = self.instance.grader_name() == "swebench_pro";
+        let is_smith = self.instance.variant() == crate::swe::variant::BenchmarkVariant::Smith;
         let log_parser = self.instance.log_parser();
         let graded = if is_pro {
             if let Some(ext) = try_external_pro_grade(
@@ -545,6 +530,26 @@ impl SweSession {
                     &self.instance.pass_to_pass,
                 )
             }
+        } else if is_smith {
+            let internal = grader_for_spec(Some("swesmith"), log_parser).grade(
+                &combined,
+                &self.instance.fail_to_pass,
+                &self.instance.pass_to_pass,
+            );
+            if let Some(ext) = try_external_smith_grade(
+                &self.instance,
+                &model_diff,
+                &self.instance.fail_to_pass,
+                &self.instance.pass_to_pass,
+            )? {
+                let mut ext = ext;
+                if ext.per_test.is_empty() {
+                    ext.per_test = internal.per_test;
+                }
+                ext
+            } else {
+                internal
+            }
         } else {
             grader_for_spec(None, log_parser).grade(
                 &combined,
@@ -553,12 +558,6 @@ impl SweSession {
             )
         };
 
-        let ws = self.instance.workspace_dir();
-        let diff = self
-            .exec_raw(&format!("cd {ws} && git diff"))
-            .map(|r| r.stdout)
-            .unwrap_or_default();
-
         let test_results = TestResults {
             passed: graded.resolved,
             raw_output: truncate(&combined, self.policy.max_output_bytes),
@@ -566,7 +565,7 @@ impl SweSession {
         };
         let artifact = EpisodeArtifact::new(&self.episode_id, &self.instance.instance_id)
             .with_reward(graded.reward)
-            .with_git_diff(diff)
+            .with_git_diff(model_diff)
             .with_test_results(test_results);
 
         Ok(EpisodeOutcome {

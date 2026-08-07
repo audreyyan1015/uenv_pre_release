@@ -25,7 +25,7 @@
     ],
     "PASS_TO_PASS": [],
     "benchmark_variant": "smith",
-    "image_cache_key": "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest",
+    "image_cache_key": "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest",
     "test_cmd": null,
     "install_cmd": "pip install -e . -q"
   }

@@ -15,7 +15,10 @@ use crate::swe::variant::BenchmarkVariant;
 /// 官方 Verified 评测镜像前缀（plan §6.2：Pro / Smith 禁止共用此命名空间）。
 pub const VERIFIED_IMAGE_PREFIX: &str = "swebench/sweb.eval.";
 
-/// SWE-smith 镜像命名空间（Docker Hub `jyangballin/swesmith.x86_64.*`）。
+/// SWE-smith 官方镜像命名空间（SWE-smith `RepoProfile.image_name`）。
+pub const SMITH_IMAGE_PREFIX: &str = "swebench/swesmith.";
+/// 历史非官方 SWE-smith 镜像命名空间；读取旧 catalog 时自动归一化到官方前缀。
+pub const LEGACY_SMITH_IMAGE_PREFIX: &str = "jyangballin/swesmith.";
 pub const SMITH_IMAGE_MARKER: &str = "swesmith";
 
 /// 标准 conda 环境激活前缀（SWE-bench 镜像内 `testbed` env）。
@@ -75,7 +78,13 @@ impl SweInstance {
             .as_ref()
             .filter(|s| !s.trim().is_empty())
         {
-            return img.clone();
+            return match self.variant() {
+                BenchmarkVariant::Smith => normalize_swesmith_image_ref(img),
+                _ => img.clone(),
+            };
+        }
+        if self.variant() == BenchmarkVariant::Smith {
+            return smith_image_ref(&self.instance_id);
         }
         image_ref(&self.instance_id)
     }
@@ -171,7 +180,7 @@ impl SweInstance {
 
     /// 镜像命名空间是否与变体一致（plan §6.2 启动校验）：
     /// Verified/Lite 应在 `swebench/sweb.eval.*`；Pro/Smith 不得占用该命名空间；
-    /// Smith 应显式带 `swesmith` 标记（或已提供非 Verified 前缀的 `image_cache_key`）。
+    /// Smith 应使用官方 `swebench/swesmith.*` 镜像；旧 `jyangballin/...` 读取时会归一化。
     pub fn image_namespace_consistent(&self) -> bool {
         let img = self.image_ref();
         match self.variant() {
@@ -179,9 +188,7 @@ impl SweInstance {
                 img.starts_with(VERIFIED_IMAGE_PREFIX)
             }
             BenchmarkVariant::Pro => !img.starts_with(VERIFIED_IMAGE_PREFIX),
-            BenchmarkVariant::Smith => {
-                !img.starts_with(VERIFIED_IMAGE_PREFIX) && img.contains(SMITH_IMAGE_MARKER)
-            }
+            BenchmarkVariant::Smith => img.starts_with(SMITH_IMAGE_PREFIX),
         }
     }
 
@@ -230,6 +237,43 @@ pub fn image_ref(instance_id: &str) -> String {
         "swebench/sweb.eval.x86_64.{}:latest",
         instance_id.replace("__", "_1776_")
     )
+}
+
+/// 官方 SWE-smith 镜像引用：`swebench/swesmith.x86_64.<owner>_1776_<repo>.<commit8>:latest`。
+pub fn smith_image_ref(instance_id: &str) -> String {
+    let Some((owner, rest)) = instance_id.split_once("__") else {
+        return format!("{SMITH_IMAGE_PREFIX}x86_64.{instance_id}:latest").to_lowercase();
+    };
+    let mut parts = rest.split('.');
+    let repo = parts.next().unwrap_or_default();
+    let commit = parts.next().unwrap_or_default();
+    if repo.is_empty() || commit.is_empty() {
+        return format!(
+            "{SMITH_IMAGE_PREFIX}x86_64.{}:latest",
+            instance_id.replace("__", "_1776_")
+        )
+        .to_lowercase();
+    }
+    format!(
+        "{SMITH_IMAGE_PREFIX}x86_64.{owner}_1776_{repo}.{}:latest",
+        &commit[..commit.len().min(8)]
+    )
+    .to_lowercase()
+}
+
+/// 兼容旧 catalog / parquet 中的非官方 namespace，并补齐缺省 latest tag。
+pub fn normalize_swesmith_image_ref(image: &str) -> String {
+    let trimmed = image.trim();
+    let with_official_prefix = trimmed
+        .strip_prefix(LEGACY_SMITH_IMAGE_PREFIX)
+        .map(|tail| format!("{SMITH_IMAGE_PREFIX}{tail}"))
+        .unwrap_or_else(|| trimmed.to_string());
+    let last_segment = with_official_prefix.rsplit('/').next().unwrap_or("");
+    if !with_official_prefix.is_empty() && !last_segment.contains(':') {
+        format!("{with_official_prefix}:latest")
+    } else {
+        with_official_prefix
+    }
 }
 
 /// 实例库：从 JSON 文件加载 instance_id → SweInstance。
@@ -322,6 +366,20 @@ mod tests {
         assert_eq!(
             image_ref("astropy__astropy-7166"),
             "swebench/sweb.eval.x86_64.astropy_1776_astropy-7166:latest"
+        );
+    }
+
+    #[test]
+    fn smith_image_ref_matches_official_profile_name() {
+        assert_eq!(
+            smith_image_ref("oauthlib__oauthlib.1fd52536.combine_file__0fceycuu"),
+            "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest"
+        );
+        assert_eq!(
+            normalize_swesmith_image_ref(
+                "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536"
+            ),
+            "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest"
         );
     }
 
@@ -423,6 +481,10 @@ mod tests {
         assert_eq!(inst.variant(), crate::swe::variant::BenchmarkVariant::Smith);
         assert_eq!(inst.grader_name(), "swesmith");
         assert_eq!(inst.workspace_dir(), "/testbed");
+        assert_eq!(
+            inst.image_ref(),
+            "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest"
+        );
         assert!(inst.image_namespace_consistent());
         assert!(store.image_namespace_violations().is_empty());
         assert_eq!(

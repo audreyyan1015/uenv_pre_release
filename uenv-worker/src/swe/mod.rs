@@ -28,6 +28,7 @@ pub mod pro_eval;
 pub mod repo_specs;
 pub mod resettable;
 pub mod session;
+pub mod smith_eval;
 pub mod spec;
 pub mod trajectory;
 pub mod trajectory_upload;

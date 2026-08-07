@@ -103,11 +103,7 @@ pub fn run_instance(
         None,
     )?;
     if opts.use_gold_patch {
-        if instance.variant() == crate::swe::variant::BenchmarkVariant::Smith {
-            session.apply_patch_reverse(&instance.patch, "gold")?;
-        } else {
-            session.apply_patch(&instance.patch, "gold")?;
-        }
+        session.apply_patch(&instance.patch, "gold")?;
     }
     session.evaluate()
 }

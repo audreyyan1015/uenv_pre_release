@@ -5,6 +5,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   Box,
+  ChevronDown,
+  ChevronUp,
   CircleOff,
   Cpu,
   Layers,
@@ -168,12 +170,17 @@ export function WorkerDetail({
 }) {
   const [runId] = useState<string | null>(initialRunId);
   const [now, setNow] = useState(0);
+  const [showAllPoolSlots, setShowAllPoolSlots] = useState(false);
 
   useEffect(() => {
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), CLOCK_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    setShowAllPoolSlots(false);
+  }, [workerId]);
 
   const {
     chainState,
@@ -248,6 +255,8 @@ export function WorkerDetail({
   const poolCapacity = poolSummary.reduce((sum, item) => sum + (item.capacity ?? 0), 0);
   const envInstanceCount =
     poolSlots.length || worker?.env_instances?.length || projection.envInstances.length;
+  const visiblePoolSlots = showAllPoolSlots ? poolSlots : poolSlots.slice(0, 12);
+  const hiddenPoolSlotCount = Math.max(0, poolSlots.length - visiblePoolSlots.length);
 
   return (
     <main className="min-h-screen bg-[#f7f9fc] text-slate-900">
@@ -403,7 +412,7 @@ export function WorkerDetail({
 
                 {poolSlots.length > 0 ? (
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
-                    {poolSlots.slice(0, 12).map((slot) => {
+                    {visiblePoolSlots.map((slot) => {
                       const slotMeta =
                         poolSlotStatusMeta[slot.status] ?? {
                           label: slot.status || "unknown",
@@ -441,9 +450,24 @@ export function WorkerDetail({
                       );
                     })}
                     {poolSlots.length > 12 && (
-                      <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-6 text-center text-sm text-slate-400">
-                        还有 {poolSlots.length - 12} 个槽位未展开
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowAllPoolSlots((value) => !value)}
+                        className="flex min-h-[72px] items-center justify-center gap-2 rounded-2xl border border-dashed border-blue-200 bg-white px-4 py-5 text-center text-sm font-medium text-blue-600 transition hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                        aria-expanded={showAllPoolSlots}
+                      >
+                        {showAllPoolSlots ? (
+                          <>
+                            <ChevronUp className="h-4 w-4" />
+                            收起槽位列表
+                          </>
+                        ) : (
+                          <>
+                            <ChevronDown className="h-4 w-4" />
+                            还有 {hiddenPoolSlotCount} 个槽位未展开
+                          </>
+                        )}
+                      </button>
                     )}
                   </div>
                 ) : projection.envInstances.length > 0 ? (
