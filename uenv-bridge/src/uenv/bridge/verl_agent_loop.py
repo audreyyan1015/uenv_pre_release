@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_loop_clients import build_agent_loop_episode_client
-from .clients import EpisodeClient
+from .clients import DEFAULT_GRPC_MAX_MESSAGE_BYTES, EpisodeClient
 from .model_gateway import ModelGateway, ModelGatewayConfig, normalize_openai_endpoint
 from . import obs_client
 from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec, request_to_jsonable
@@ -156,6 +156,7 @@ class UEnvAgentLoopConfig:
     endpoint: str = "127.0.0.1:50051"
     timeout_seconds: float = 300.0
     startup_timeout_seconds: float = 30.0
+    max_message_bytes: int = DEFAULT_GRPC_MAX_MESSAGE_BYTES
     auto_start: bool = False
     binary: str | None = None
     fake_reward: float = 1.0
@@ -213,6 +214,7 @@ class UEnvAgentLoop(AgentLoopBase):
         endpoint: str | None = None,
         timeout_seconds: float | None = None,
         startup_timeout_seconds: float | None = None,
+        max_message_bytes: int | None = None,
         auto_start: bool | None = None,
         binary: str | None = None,
         fake_reward: float | None = None,
@@ -258,6 +260,10 @@ class UEnvAgentLoop(AgentLoopBase):
             endpoint=_optional_string(endpoint) or "127.0.0.1:50051",
             timeout_seconds=_float_value(timeout_seconds, 300.0),
             startup_timeout_seconds=_float_value(startup_timeout_seconds, 30.0),
+            max_message_bytes=max(
+                1,
+                _optional_int_value(max_message_bytes) or DEFAULT_GRPC_MAX_MESSAGE_BYTES,
+            ),
             auto_start=_bool_value(auto_start, False),
             binary=_optional_string(binary),
             fake_reward=_float_value(fake_reward, 1.0),
@@ -312,6 +318,7 @@ class UEnvAgentLoop(AgentLoopBase):
             endpoint=self.config_for_uenv.endpoint,
             timeout_seconds=self.config_for_uenv.timeout_seconds,
             startup_timeout_seconds=self.config_for_uenv.startup_timeout_seconds,
+            max_message_bytes=self.config_for_uenv.max_message_bytes,
             auto_start=self.config_for_uenv.auto_start,
             binary=self.config_for_uenv.binary,
             transport_retry_attempts=self.config_for_uenv.batch_retry_attempts,

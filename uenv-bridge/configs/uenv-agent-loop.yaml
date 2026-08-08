@@ -4,6 +4,7 @@
   endpoint: ${oc.env:UENV_ADAPTER_CORE_ENDPOINT,127.0.0.1:50051}
   timeout_seconds: ${oc.env:UENV_AGENT_LOOP_TIMEOUT_SECONDS,300}
   startup_timeout_seconds: ${oc.env:UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS,60}
+  max_message_bytes: ${oc.env:UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES,16777216}
   auto_start: ${oc.env:UENV_ADAPTER_CORE_AUTO_START,false}
   binary: ${oc.env:UENV_ADAPTER_CORE_BINARY,/tmp/uenv-bridge/core/target/debug/uenv-adapter-core}
   fake_reward: ${oc.env:UENV_AGENT_LOOP_FAKE_REWARD,1.0}

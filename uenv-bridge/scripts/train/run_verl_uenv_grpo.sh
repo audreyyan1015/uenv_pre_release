@@ -47,6 +47,8 @@ Common environment overrides:
   UENV_RUNTIME_GATEWAY_SESSION_LIMIT Desired runtime gateway session limit. Default: empty
   UENV_REQUIRE_WARM_SLOT        Require pre-warmed slot hint. Default: false
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
+  UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES
+                                  Python Adapter <-> Rust AdapterCore gRPC max message bytes. Default: 16777216
   UENV_EPISODE_MAX_STEPS_OVERRIDE Runtime max_steps/max_iterations override. Default: empty
   TRAINER_LOGGER                VeRL logger backends. Use "['console','wandb']" to enable wandb. Default: "['console']"
   TRAINER_PROJECT_NAME          VeRL/wandb project name. Default: uenv_bridge_layer4
@@ -204,6 +206,7 @@ UENV_AGENT_JOB_MAX_CONCURRENCY=${UENV_AGENT_JOB_MAX_CONCURRENCY:-}
 UENV_RUNTIME_GATEWAY_SESSION_LIMIT=${UENV_RUNTIME_GATEWAY_SESSION_LIMIT:-}
 UENV_REQUIRE_WARM_SLOT=${UENV_REQUIRE_WARM_SLOT:-false}
 UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-3600}
+UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES=${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES:-16777216}
 UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE:-}
 UENV_OBS_URL=${UENV_OBS_URL:-}
 UENV_OBS_TOKEN=${UENV_OBS_TOKEN:-}
@@ -350,6 +353,7 @@ export UENV_ADAPTER_CORE_AUTO_START=0
 export UENV_ADAPTER_CORE_BINARY=/uenv/uenv-bridge/core/target/debug/uenv-adapter-core
 export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
 export UENV_ADAPTER_CORE_BACKEND=server
+export UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES=${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES}
 export UENV_AGENT_LOOP_REQUEST_RECORD_PATH=\"${AGENT_LOOP_REQUEST_RECORD_PATH}\"
 export UENV_AGENT_LOOP_RESULT_RECORD_PATH=\"${AGENT_LOOP_RESULT_RECORD_PATH}\"
 python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\

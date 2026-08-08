@@ -65,6 +65,17 @@ _SCHEDULING_UINT_FIELDS = (
     "runtime_gateway_session_limit",
 )
 
+DEFAULT_GRPC_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    return int(text)
+
 
 class EpisodeClient(Protocol):
     def submit_episode(self, request: EpisodeRequest) -> EpisodeResult:
@@ -84,10 +95,18 @@ class RustCoreClientConfig:
     streaming: bool = False
     transport_retry_attempts: int = 3
     transport_retry_delay_seconds: float = 1.0
+    max_message_bytes: int = DEFAULT_GRPC_MAX_MESSAGE_BYTES
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "RustCoreClientConfig":
         core = data.get("core") or {}
+        max_message_bytes = _int_or_default(
+            core.get(
+                "max_message_bytes",
+                os.getenv("UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES", DEFAULT_GRPC_MAX_MESSAGE_BYTES),
+            ),
+            DEFAULT_GRPC_MAX_MESSAGE_BYTES,
+        )
         return cls(
             endpoint=str(core.get("endpoint", "127.0.0.1:50051")),
             timeout_seconds=float(core.get("timeout_seconds", 300.0)),
@@ -97,6 +116,7 @@ class RustCoreClientConfig:
             streaming=bool(core.get("streaming", False)),
             transport_retry_attempts=max(1, int(core.get("transport_retry_attempts", 3))),
             transport_retry_delay_seconds=max(0.0, float(core.get("transport_retry_delay_seconds", 1.0))),
+            max_message_bytes=max(1, max_message_bytes),
         )
 
 
@@ -166,7 +186,13 @@ class RustCoreEpisodeClient:
         except Exception:
             return None
         self._core_pb2 = pb2
-        channel = grpc.insecure_channel(self.config.endpoint)
+        channel = grpc.insecure_channel(
+            self.config.endpoint,
+            options=[
+                ("grpc.max_receive_message_length", self.config.max_message_bytes),
+                ("grpc.max_send_message_length", self.config.max_message_bytes),
+            ],
+        )
         self._channel = channel
         return pb2_grpc.AdapterCoreServiceStub(channel)
 
