@@ -200,3 +200,132 @@ Worker 不需要理解内部评分逻辑，只校验返回结构并记录 artifa
 当前框架已经能把 Hub 注册的 `process` / `openenv_http` 未知环境动态拉到 Worker 并执行。要完整支持“环境依赖和浏览器等工具解耦复用”，还需要引入 ToolPackage / RuntimeProfile 作为一等协议对象。
 
 不建议要求用户修改框架代码来接入自定义环境。用户应提供按规范构建的 EnvPackage，并可选提供 ToolPackage 或引用平台内置 ToolPackage。Worker 负责按声明准备、启动、连接和回收这些能力。
+
+## 9. 分布式按需工具调用的目标架构
+
+2026-08-08 进一步讨论的目标是：在某类环境上进行并行测试时，不再为了并行度复制多个完整大环境实例，而是把重型依赖拆成分布式 ToolPackage 服务，由多个 thin env session 按需租用。
+
+推荐把运行时拆成三层：
+
+| 层 | 职责 | 示例 |
+|----|------|------|
+| Thin Env Session | 只保留任务状态、reset/step/score 契约、workspace/session 隔离 | OpenEnv HTTP env、process plugin、轻量 sandbox |
+| Distributed Tool Runtime | 承载可复用重型能力，支持本地 sidecar、远端 service、K8s Deployment/Job 或容器池 | Playwright、grader、artifact uploader、trace recorder、DB/proxy |
+| Resource Broker / Tool Scheduler | 为 episode 同时申请 env、tool、agent、artifact 等多类资源租约 | `WorkerSlotLease`、`ToolLease`、`ToolSessionLease`、`AgentLease` |
+
+并行 episode 的调度不应只检查 Worker 是否有空闲 env slot，而应对 RuntimeProfile 做多资源准入：
+
+```text
+EpisodeRequest
+  -> resolve RuntimeProfile
+  -> acquire scheduling group permit
+  -> acquire WorkerSlotLease
+  -> acquire required ToolLease / ToolSessionLease
+  -> acquire AgentLease
+  -> dispatch episode
+  -> collect trajectory/artifacts
+  -> release all leases
+```
+
+工具调用路径可以先从 Worker 本地代理开始，后续再演进为远端或 K8s 服务：
+
+```text
+Env / Agent
+  -> Worker ToolProxy / Gateway
+  -> Tool Router
+  -> local sidecar 或 remote ToolService
+```
+
+这样 EnvPackage 不需要知道工具运行在哪台机器，也不需要把浏览器、reward runner、artifact store client 等全部打进同一个环境镜像。
+
+## 10. ToolPackage 资源模型
+
+ToolPackage manifest 需要从“声明依赖”升级为“可调度资源声明”。建议补充以下字段：
+
+```json
+{
+  "tool_id": "browser.playwright",
+  "version": "1.0.0",
+  "runtime": "k8s_service | container_pool | worker_sidecar | process",
+  "api_schema": "uenv.tool.browser.v1",
+  "session_model": "stateless | shared_readonly | leased | exclusive | pooled",
+  "isolation": {
+    "profile": "per_session",
+    "filesystem": "ephemeral",
+    "network": "policy_per_session"
+  },
+  "resource_spec": {
+    "cpu": 2,
+    "memory_mb": 4096,
+    "gpu": 0,
+    "max_sessions_per_replica": 4
+  },
+  "pool": {
+    "min_ready": 2,
+    "max_replicas": 16,
+    "queue_timeout_ms": 30000,
+    "scale_metric": "pending_leases"
+  },
+  "healthcheck": {
+    "path": "/health",
+    "interval_ms": 5000
+  },
+  "artifacts": {
+    "schema": "browser_trace_bundle_v1"
+  }
+}
+```
+
+不同工具的并行语义不同，不能统一当成无状态 HTTP 调用：
+
+| 类型 | 示例 | 并行策略 |
+|------|------|----------|
+| `stateless` | schema validator、轻量 parser、format checker | 直接并发调用，按 QPS / CPU 限流 |
+| `shared_readonly` | 只读数据集、镜像缓存、静态 fixture | 多 episode 共享，无需 session |
+| `leased` | browser context、DB schema、workspace mount | 每个 episode 租一个 session，结束回收 |
+| `exclusive` | GPU grader、真实设备、单 license 软件 | 独占 lease，其他 episode 排队等待 |
+| `pooled` | Playwright browser、test runner、sandbox pod | 预热池 + 按 pending leases 扩缩容 |
+
+因此“工具解耦”不等于简单远程调用。核心是让工具成为可声明、可租约、可池化、可观测、可回收的资源。
+
+## 11. 资源排队、池化与故障处理
+
+该设计会引入资源等待和多资源调度问题，尤其是浏览器、GPU grader、数据库、真实设备、代理出口、商业 license 工具等。处理原则如下：
+
+1. 对资源重的工具显式建池，而不是让 episode 直接抢进程或端口。
+2. `min_ready` 控制常驻预热容量，`max_replicas` 控制峰值成本。
+3. Server / Broker 在 episode 开始前拿齐 env、tool、agent leases，避免运行中途才发现关键资源不可用。
+4. pending lease 队列需要 timeout、priority、fairness 和 backpressure。
+5. 工具池按 `pending_leases`、queue wait p95、busy ratio 等指标扩容，按 idle TTL 缩容。
+6. 任何 dispatch、tool session、agent job、reward、artifact 上传失败，都必须补偿释放已持有的租约。
+7. 租约状态应持久化到 Server DB 或 Redis 之类共享状态中，支持 Worker / ToolService 崩溃后的 orphan lease 回收。
+8. artifact、trajectory、reward 输入必须携带 `episode_id`、`tool_session_id`、tool package digest 和 checksum，避免并发串线。
+
+推荐把当前 Worker WarmupPool 从“完整环境实例池”逐步演进为：
+
+```text
+thin env pool
+  + tool pool(browser / grader / artifact / proxy / db)
+  + agent job pool
+  + global resource broker
+```
+
+这样可以同时保留预热降低冷启动的优势，又避免为每个并行 episode 复制完整依赖栈。
+
+## 12. 微软 Orchard 对照
+
+微软开源的 Orchard 与本方案的方向有明显对齐点：它把环境管理做成 thin、Kubernetes-native、harness-agnostic 的服务层，支持大规模隔离 sandbox，目标是让训练、评测和不同 agent harness 复用同一套环境基础设施。
+
+可以借鉴的点：
+
+| Orchard 思路 | 对 UEnv 的启发 |
+|--------------|----------------|
+| K8s-native sandbox lifecycle | ToolService / thin env 可用 K8s Deployment、Job、Pod pool 承载 |
+| orchestrator 与 sandbox 分离 | UEnv Server / Worker / ToolService 也应保持控制面和执行面分离 |
+| 多 orchestrator 共享状态和分布式锁 | Resource Broker 可用 DB / Redis 保存租约、队列和 orphan 回收状态 |
+| harness-agnostic environment service | UEnv RuntimeProfile 应让 OpenHands、自研 agent、VeRL adapter 共用环境与工具 |
+| 热路径绕开重控制面 | 高频 tool call 不应每步都经 Server，Server 负责 lease 和审计，Worker/ToolProxy 负责调用热路径 |
+
+但 Orchard 不能直接覆盖 UEnv 的全部需求。Orchard 更像通用 sandbox / environment service；UEnv 还需要处理 EnvPackage、ToolPackage、RuntimeProfile、reward、trajectory、artifact、训练 run scheduling policy、Worker pool telemetry、Hub package resolution 等更贴近 RL/benchmark 平台的协议对象。
+
+结论：Orchard 证明了“thin environment service + K8s 承载 + 分布式状态”的路线可行。UEnv 应借鉴其底层环境服务化方式，但继续保留并强化面向训练和评测的 ToolPackage / RuntimeProfile / 多资源调度层。
