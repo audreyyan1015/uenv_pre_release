@@ -96,6 +96,8 @@ export UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18088}
 export UENV_MODEL_GATEWAY_PUBLIC_URL=${UENV_MODEL_GATEWAY_PUBLIC_URL:-http://10.10.20.142:${UENV_MODEL_GATEWAY_PORT}/v1}
 export UENV_MODEL_GATEWAY_MAX_TOKENS=${UENV_MODEL_GATEWAY_MAX_TOKENS:-4096}
 
+export UENV_AGENT_LOOP_BATCH_SIZE=1
+
 # SWE/OpenHands 训练需要 worker 回传完整 response trace，默认沿用当前 SWE 训练口径。
 export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
 export UENV_AGENT_LOOP_FAILED_EPISODE_POLICY=${UENV_AGENT_LOOP_FAILED_EPISODE_POLICY:-zero_reward}
@@ -126,7 +128,7 @@ export SWE_AGENT_MODE=${SWE_AGENT_MODE:-llm}
 # 训练与数据参数。
 export TRAINING_STEPS=${TRAINING_STEPS:-null}
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
-export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
+export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
 export PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-2}
 export PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 export ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}
@@ -171,7 +173,7 @@ if [ -z "${EXTRA_VERL_ARGS:-}" ]; then
   EXTRA_VERL_ARG_LIST=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGGING_LEVEL=INFO"
     "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL=INFO"
-    "+actor_rollout_ref.rollout.max_model_len=131072"
+    "+actor_rollout_ref.rollout.max_model_len=262144"
     "actor_rollout_ref.rollout.max_num_batched_tokens=65536"
     "actor_rollout_ref.rollout.multi_stage_wake_up=True"
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True"
