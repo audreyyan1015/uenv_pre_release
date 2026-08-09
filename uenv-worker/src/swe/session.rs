@@ -164,6 +164,7 @@ impl SweSession {
             .into());
         }
         session.run_pro_setup_at_provision()?;
+        session.run_smith_bug_setup_at_provision()?;
 
         session.record_provision_reset(
             &observation.issue_text,
@@ -588,6 +589,34 @@ impl SweSession {
                 )
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    /// SWE-smith stores bug-inducing patches in `patch`. Agent sessions must start
+    /// from that bug state, while `evaluate()` needs `git diff` to represent the
+    /// model's fix relative to the bug state for the official harness.
+    fn run_smith_bug_setup_at_provision(&self) -> Result<(), DynErr> {
+        if self.instance.variant() != crate::swe::variant::BenchmarkVariant::Smith
+            || self.instance.patch.trim().is_empty()
+        {
+            return Ok(());
+        }
+        self.apply_patch(&self.instance.patch, "smith_bug")?;
+        let ws = self.instance.workspace_dir();
+        let r = self.exec_raw(&format!(
+            "cd {ws} && \
+             git add -A && \
+             git -c user.email=uenv-worker@example.invalid \
+                 -c user.name=uenv-worker \
+                 commit -m 'uenv smith bug baseline'"
+        ))?;
+        if r.exit_code != 0 {
+            return Err(format!(
+                "smith bug baseline commit failed (code {}): {}\n{}",
+                r.exit_code, r.stdout, r.stderr
+            )
+            .into());
         }
         Ok(())
     }

@@ -102,7 +102,9 @@ pub fn run_instance(
         harness_tar.as_deref(),
         None,
     )?;
-    if opts.use_gold_patch {
+    if opts.use_gold_patch && instance.variant() == crate::swe::variant::BenchmarkVariant::Smith {
+        session.apply_patch_reverse(&instance.patch, "gold")?;
+    } else if opts.use_gold_patch {
         session.apply_patch(&instance.patch, "gold")?;
     }
     session.evaluate()

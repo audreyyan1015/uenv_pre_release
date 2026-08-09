@@ -305,6 +305,7 @@ function LaunchPreview({
 }) {
   const serverHref = `/server${runId ? `?run=${encodeURIComponent(runId)}` : ""}`;
   const opsHref = `/ops${runId ? `?run=${encodeURIComponent(runId)}` : ""}`;
+  const systemHref = `/system${runId ? `?run=${encodeURIComponent(runId)}` : ""}`;
   const demoMeta: Record<DemoRunState, { label: string; className: string; dot: string }> = {
     idle: {
       label: "待启动",
@@ -378,7 +379,14 @@ function LaunchPreview({
             终止{demoLabel}
           </button>
         </div>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-3 gap-2">
+          <a
+            href={systemHref}
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+          >
+            <Workflow className="h-4 w-4" />
+            系统拓扑
+          </a>
           <a
             href={serverHref}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
@@ -455,6 +463,7 @@ function ObservePanel({
 }) {
   const serverHref = `/server${runId ? `?run=${encodeURIComponent(runId)}` : ""}`;
   const opsHref = `/ops${runId ? `?run=${encodeURIComponent(runId)}` : ""}`;
+  const systemHref = `/system${runId ? `?run=${encodeURIComponent(runId)}` : ""}`;
 
   return (
     <div className="grid gap-5">
@@ -471,7 +480,19 @@ function ObservePanel({
             className="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
           />
         </label>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <a
+            href={systemHref}
+            className="flex h-24 items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 transition hover:border-blue-200 hover:bg-blue-50"
+          >
+            <span>
+              <span className="block text-sm font-semibold text-slate-900">系统拓扑</span>
+              <span className="mt-1 block text-xs text-slate-500">
+                adapter / server / worker / hub
+              </span>
+            </span>
+            <ArrowUpRight className="h-4 w-4 text-slate-400" />
+          </a>
           <a
             href={serverHref}
             className="flex h-24 items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-4 transition hover:border-blue-200 hover:bg-blue-50"

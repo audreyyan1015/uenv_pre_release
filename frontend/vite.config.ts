@@ -10,6 +10,7 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 // pressure runs can override this process-local target without changing .env.
 const obsProxyTarget = process.env.VITE_OBS_PROXY_TARGET ?? "http://127.0.0.1:50053";
 const fleetProxyTarget = process.env.VITE_FLEET_PROXY_TARGET ?? "http://127.0.0.1:50052";
+const hubProxyTarget = process.env.VITE_HUB_PROXY_TARGET ?? "http://127.0.0.1:8088";
 
 export default defineConfig({
   vite: {
@@ -26,6 +27,11 @@ export default defineConfig({
           target: fleetProxyTarget,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/fleet/, ""),
+        },
+        "/hub": {
+          target: hubProxyTarget,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/hub/, ""),
         },
       },
     },
