@@ -113,7 +113,7 @@ pub fn chat_completions_url_for_endpoint(endpoint: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_llm_endpoint, LlmConfig};
+    use super::{LlmConfig, is_valid_llm_endpoint};
 
     #[test]
     fn default_config_is_unconfigured() {
@@ -151,7 +151,10 @@ mod tests {
     #[test]
     fn http_local_endpoint_ready_without_api_key() {
         let llm = LlmConfig::default();
-        assert!(LlmConfig::llm_call_ready("http://10.10.20.142:8004/v1", &llm));
+        assert!(LlmConfig::llm_call_ready(
+            "http://10.10.20.142:8004/v1",
+            &llm
+        ));
     }
 
     #[test]

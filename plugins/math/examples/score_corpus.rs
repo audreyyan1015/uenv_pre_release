@@ -35,9 +35,21 @@ fn main() -> io::Result<()> {
         }
         let mut row: Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("line {}: invalid json: {e}", idx + 1));
-        let dataset = row.get("dataset").and_then(Value::as_str).unwrap_or("").to_string();
-        let action = row.get("action").and_then(Value::as_str).unwrap_or("").to_string();
-        let target = row.get("target").and_then(Value::as_str).unwrap_or("").to_string();
+        let dataset = row
+            .get("dataset")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let action = row
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let target = row
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let reward = score_action(&dataset, &action, &target);
         row.as_object_mut()
             .expect("corpus rows must be json objects")

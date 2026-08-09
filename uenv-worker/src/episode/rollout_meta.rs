@@ -44,7 +44,9 @@ impl AsyncRolloutError {
                 "missing rollout_param_version or rollout_policy_version".to_string()
             }
             Self::RolloutLogprobsMissing => "missing rollout_log_probs".to_string(),
-            Self::ModelLogprobsUnsupported => "model endpoint does not support logprobs".to_string(),
+            Self::ModelLogprobsUnsupported => {
+                "model endpoint does not support logprobs".to_string()
+            }
             Self::LogprobsLengthMismatch { expected, actual } => {
                 format!("rollout_log_probs length mismatch: expected={expected}, actual={actual}")
             }
@@ -150,7 +152,10 @@ pub fn parse_model_version_from_response(
 }
 
 pub fn parse_logprobs_from_chat_response(body: &Value) -> Result<Vec<f32>, AsyncRolloutError> {
-    if let Some(content) = body.pointer("/choices/0/logprobs/content").and_then(Value::as_array) {
+    if let Some(content) = body
+        .pointer("/choices/0/logprobs/content")
+        .and_then(Value::as_array)
+    {
         if !content.is_empty() {
             let mut logprobs = Vec::with_capacity(content.len());
             for item in content {
@@ -185,14 +190,20 @@ pub fn parse_logprobs_from_chat_response(body: &Value) -> Result<Vec<f32>, Async
 }
 
 pub fn parse_response_ids_from_chat_response(body: &Value) -> Vec<i64> {
-    if let Some(ids) = body.get("uenv_response_ids").or_else(|| body.get("response_ids")) {
+    if let Some(ids) = body
+        .get("uenv_response_ids")
+        .or_else(|| body.get("response_ids"))
+    {
         let parsed = parse_i64_list(Some(ids));
         if !parsed.is_empty() {
             return parsed;
         }
     }
 
-    let Some(content) = body.pointer("/choices/0/logprobs/content").and_then(Value::as_array) else {
+    let Some(content) = body
+        .pointer("/choices/0/logprobs/content")
+        .and_then(Value::as_array)
+    else {
         return Vec::new();
     };
 
@@ -251,11 +262,7 @@ pub fn apply_async_to_result(
         result.rollout_param_version = meta.rollout_param_version;
         result.rollout_policy_version = meta.rollout_policy_version.clone();
         result.rollout_log_probs = meta.rollout_log_probs.clone();
-        if let Some(step) = result
-            .trajectory
-            .as_mut()
-            .and_then(|t| t.steps.last_mut())
-        {
+        if let Some(step) = result.trajectory.as_mut().and_then(|t| t.steps.last_mut()) {
             if !meta.response_ids.is_empty() || !meta.response_mask.is_empty() {
                 step.rollout_trace = Some(crate::proto::v1::RolloutTrace {
                     response_ids: meta.response_ids.clone(),
@@ -267,7 +274,10 @@ pub fn apply_async_to_result(
 
     for (key, value) in &episode.metadata {
         if !is_protocol_metadata_key(key) {
-            result.metadata.entry(key.clone()).or_insert_with(|| value.clone());
+            result
+                .metadata
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
         }
     }
 
@@ -327,10 +337,7 @@ where
     } else {
         raw.as_array().cloned()
     };
-    arr.unwrap_or_default()
-        .iter()
-        .filter_map(f)
-        .collect()
+    arr.unwrap_or_default().iter().filter_map(f).collect()
 }
 
 fn parse_i64_value(value: Option<&Value>) -> Option<i64> {
@@ -360,7 +367,9 @@ mod tests {
             AsyncRolloutError::RolloutLogprobsMissing
         );
         assert_eq!(
-            AsyncRolloutError::from_message("missing rollout_param_version or rollout_policy_version"),
+            AsyncRolloutError::from_message(
+                "missing rollout_param_version or rollout_policy_version"
+            ),
             AsyncRolloutError::ModelVersionMissing
         );
     }

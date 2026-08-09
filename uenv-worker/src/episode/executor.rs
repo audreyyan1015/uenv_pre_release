@@ -4,22 +4,24 @@ use std::time::Instant;
 use sha2::{Digest, Sha256};
 
 use crate::episode::async_context::{
-    extract_parallel_mode, is_async_mode, unix_ts_now, UnsupportedParallelMode,
+    UnsupportedParallelMode, extract_parallel_mode, is_async_mode, unix_ts_now,
 };
 use crate::episode::model_client::{ModelClient, ModelInferError};
-use crate::episode::rollout_meta::{
-    apply_async_to_result, build_failed_async_result, validate_async_completed, AsyncRolloutError,
-    RolloutModelMeta,
-};
-use crate::llm::LlmConfig;
 use crate::episode::payload::build_reset_config;
 use crate::episode::reward_engine::RewardEngine;
+use crate::episode::rollout_meta::{
+    AsyncRolloutError, RolloutModelMeta, apply_async_to_result, build_failed_async_result,
+    validate_async_completed,
+};
+use crate::llm::LlmConfig;
 use crate::plugin::host::PluginHost;
 use crate::pool::warmup_pool::WarmupPool;
-use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReportType, StepRecord, StreamReport, Trajectory};
+use crate::proto::v1::{
+    EpisodeRequest, EpisodeResult, ReportType, StepRecord, StreamReport, Trajectory,
+};
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
-use crate::swe::harness::{run_instance, ContainerRuntime, RunOptions};
+use crate::swe::harness::{ContainerRuntime, RunOptions, run_instance};
 use crate::swe::instance_pool::SweInstancePool;
 
 /// SWE-bench episode 的 env_type（DispatchEpisode 路由键）。
@@ -70,7 +72,11 @@ impl EpisodeExecutor {
     }
 
     /// 注入 SWE-bench 实例目录与容器运行时（运行时从 Hub/本地加载）。
-    pub fn with_swe_catalog(mut self, store: Arc<InstanceStore>, runtime: ContainerRuntime) -> Self {
+    pub fn with_swe_catalog(
+        mut self,
+        store: Arc<InstanceStore>,
+        runtime: ContainerRuntime,
+    ) -> Self {
         self.swe_store = store;
         self.swe_runtime = runtime;
         self
@@ -131,7 +137,13 @@ impl EpisodeExecutor {
             .acquire(&episode.env_type)
             .await
             .map_err(|err| {
-                log_phase_error(&trace_id, &episode.episode_id, "acquire", "ERR_POOL_ACQUIRE_FAILED", &*err);
+                log_phase_error(
+                    &trace_id,
+                    &episode.episode_id,
+                    "acquire",
+                    "ERR_POOL_ACQUIRE_FAILED",
+                    &*err,
+                );
                 err
             })?;
         tracing::info!(
@@ -144,13 +156,20 @@ impl EpisodeExecutor {
             msg = "episode_phase"
         );
 
-        let reset_config = build_reset_config(&episode.payload, &episode.reward_config, episode.seed)?;
+        let reset_config =
+            build_reset_config(&episode.payload, &episode.reward_config, episode.seed)?;
         let observation = self
             .plugin_host
             .reset(&lease.instance_id, episode.seed, Some(&reset_config))
             .await
             .map_err(|err| {
-                log_phase_error(&trace_id, &episode.episode_id, "reset", "ERR_ENV_RESET_FAILED", &*err);
+                log_phase_error(
+                    &trace_id,
+                    &episode.episode_id,
+                    "reset",
+                    "ERR_ENV_RESET_FAILED",
+                    &*err,
+                );
                 err
             })?;
 
@@ -229,10 +248,20 @@ impl EpisodeExecutor {
             );
 
             let step_start = Instant::now();
-            let step = match self.plugin_host.step(&lease.instance_id, action.clone()).await {
+            let step = match self
+                .plugin_host
+                .step(&lease.instance_id, action.clone())
+                .await
+            {
                 Ok(step) => step,
                 Err(err) => {
-                    log_phase_error(&trace_id, &episode.episode_id, "step", "ERR_ENV_STEP_FAILED", &*err);
+                    log_phase_error(
+                        &trace_id,
+                        &episode.episode_id,
+                        "step",
+                        "ERR_ENV_STEP_FAILED",
+                        &*err,
+                    );
                     let _ = self.warmup_pool.release(lease.clone()).await;
                     return Err(err);
                 }
@@ -240,11 +269,9 @@ impl EpisodeExecutor {
             let step_duration_ms = step_start.elapsed().as_millis() as u64;
             env_step_duration_ms += step_duration_ms;
 
-            let reward = self.reward_engine.resolve_reward(
-                &action,
-                &episode.reward_config,
-                step.reward,
-            )?;
+            let reward =
+                self.reward_engine
+                    .resolve_reward(&action, &episode.reward_config, step.reward)?;
             total_reward += reward;
             last_reward = reward;
 
@@ -305,10 +332,19 @@ impl EpisodeExecutor {
             }
         }
 
-        self.warmup_pool.release(lease.clone()).await.map_err(|err| {
-            log_phase_error(&trace_id, &episode.episode_id, "release", "ERR_POOL_RELEASE_FAILED", &*err);
-            err
-        })?;
+        self.warmup_pool
+            .release(lease.clone())
+            .await
+            .map_err(|err| {
+                log_phase_error(
+                    &trace_id,
+                    &episode.episode_id,
+                    "release",
+                    "ERR_POOL_RELEASE_FAILED",
+                    &*err,
+                );
+                err
+            })?;
 
         let total_steps = steps.len() as i32;
         let trajectory = Trajectory {
@@ -398,13 +434,18 @@ impl EpisodeExecutor {
         let payload: serde_json::Value = if episode.payload.is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_slice(&episode.payload)
-                .map_err(|err| Box::<dyn std::error::Error + Send + Sync>::from(format!("invalid swe payload: {err}")))?
+            serde_json::from_slice(&episode.payload).map_err(|err| {
+                Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                    "invalid swe payload: {err}"
+                ))
+            })?
         };
         let instance_id = payload
             .get("instance_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from("swe payload missing instance_id"))?
+            .ok_or_else(|| {
+                Box::<dyn std::error::Error + Send + Sync>::from("swe payload missing instance_id")
+            })?
             .to_string();
         let use_gold = payload
             .get("use_gold_patch")
@@ -456,16 +497,28 @@ impl EpisodeExecutor {
             format!("run-native-{}", episode.episode_id)
         };
         let (outcome, pool_trajectory_ref) = if let Some(pool) = self.swe_pool.clone() {
-            let gold = if use_gold { Some(instance.patch.clone()) } else { None };
+            let gold = if use_gold {
+                Some(instance.patch.clone())
+            } else {
+                None
+            };
             let id = instance_id.clone();
             let rid = native_run_id.clone();
             let submit = tokio::task::spawn_blocking(move || {
                 pool.run_episode(&id, variant, policy, gold.as_deref(), &rid)
             })
             .await
-            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
+            .map_err(|e| {
+                Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}"))
+            })?
             .map_err(|err| {
-                log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
+                log_phase_error(
+                    &trace_id,
+                    &episode.episode_id,
+                    "swe_run",
+                    "ERR_SWE_RUN_FAILED",
+                    &*err,
+                );
                 err
             })?;
             (submit.outcome, submit.trajectory_ref)
@@ -476,13 +529,24 @@ impl EpisodeExecutor {
                 keep_container: false,
                 policy,
             };
-            let oc = tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
-                .await
-                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!("swe join error: {e}")))?
-                .map_err(|err| {
-                    log_phase_error(&trace_id, &episode.episode_id, "swe_run", "ERR_SWE_RUN_FAILED", &*err);
-                    err
-                })?;
+            let oc =
+                tokio::task::spawn_blocking(move || run_instance(&instance, &episode_id, &opts))
+                    .await
+                    .map_err(|e| {
+                        Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                            "swe join error: {e}"
+                        ))
+                    })?
+                    .map_err(|err| {
+                        log_phase_error(
+                            &trace_id,
+                            &episode.episode_id,
+                            "swe_run",
+                            "ERR_SWE_RUN_FAILED",
+                            &*err,
+                        );
+                        err
+                    })?;
             (oc, None)
         };
 
@@ -506,7 +570,10 @@ impl EpisodeExecutor {
         info.insert("instance_id".to_string(), instance_id.clone());
         info.insert("resolved".to_string(), outcome.resolved.to_string());
         info.insert("use_gold_patch".to_string(), use_gold.to_string());
-        info.insert("benchmark_variant".to_string(), variant.as_str().to_string());
+        info.insert(
+            "benchmark_variant".to_string(),
+            variant.as_str().to_string(),
+        );
         if let Some(tr) = &outcome.artifact.test_results {
             let passed = tr.per_test.iter().filter(|(_, ok)| *ok).count();
             info.insert("tests_passed".to_string(), passed.to_string());
@@ -529,7 +596,11 @@ impl EpisodeExecutor {
         let step = StepRecord {
             step_index: 1,
             observation: Vec::new(),
-            action: if use_gold { b"gold_patch".to_vec() } else { Vec::new() },
+            action: if use_gold {
+                b"gold_patch".to_vec()
+            } else {
+                Vec::new()
+            },
             reward,
             terminated: true,
             truncated: false,

@@ -9,12 +9,25 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SystemRouteImport } from './routes/system'
 import { Route as ServerRouteImport } from './routes/server'
+import { Route as OpsRouteImport } from './routes/ops'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ServerWorkerRouteImport } from './routes/server_.worker'
 
+const SystemRoute = SystemRouteImport.update({
+  id: '/system',
+  path: '/system',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ServerRoute = ServerRouteImport.update({
   id: '/server',
   path: '/server',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OpsRoute = OpsRouteImport.update({
+  id: '/ops',
+  path: '/ops',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -22,40 +35,71 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ServerWorkerRoute = ServerWorkerRouteImport.update({
+  id: '/server_/worker',
+  path: '/server/worker',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/ops': typeof OpsRoute
   '/server': typeof ServerRoute
+  '/system': typeof SystemRoute
+  '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/ops': typeof OpsRoute
   '/server': typeof ServerRoute
+  '/system': typeof SystemRoute
+  '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/ops': typeof OpsRoute
   '/server': typeof ServerRoute
+  '/system': typeof SystemRoute
+  '/server_/worker': typeof ServerWorkerRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/server'
+  fullPaths: '/' | '/ops' | '/server' | '/system' | '/server/worker'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/server'
-  id: '__root__' | '/' | '/server'
+  to: '/' | '/ops' | '/server' | '/system' | '/server/worker'
+  id: '__root__' | '/' | '/ops' | '/server' | '/system' | '/server_/worker'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  OpsRoute: typeof OpsRoute
   ServerRoute: typeof ServerRoute
+  SystemRoute: typeof SystemRoute
+  ServerWorkerRoute: typeof ServerWorkerRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/system': {
+      id: '/system'
+      path: '/system'
+      fullPath: '/system'
+      preLoaderRoute: typeof SystemRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/server': {
       id: '/server'
       path: '/server'
       fullPath: '/server'
       preLoaderRoute: typeof ServerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ops': {
+      id: '/ops'
+      path: '/ops'
+      fullPath: '/ops'
+      preLoaderRoute: typeof OpsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -65,12 +109,22 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/server_/worker': {
+      id: '/server_/worker'
+      path: '/server/worker'
+      fullPath: '/server/worker'
+      preLoaderRoute: typeof ServerWorkerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  OpsRoute: OpsRoute,
   ServerRoute: ServerRoute,
+  SystemRoute: SystemRoute,
+  ServerWorkerRoute: ServerWorkerRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

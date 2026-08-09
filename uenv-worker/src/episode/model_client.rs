@@ -3,14 +3,14 @@ use std::time::Instant;
 
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
-use serde_json::{json, Value};
-use tokio::time::{sleep, Duration};
+use serde_json::{Value, json};
+use tokio::time::{Duration, sleep};
 
 use crate::episode::rollout_meta::{
-    parse_logprobs_from_chat_response, parse_model_version_from_response,
-    parse_response_ids_from_chat_response, AsyncRolloutError, RolloutModelMeta,
+    AsyncRolloutError, RolloutModelMeta, parse_logprobs_from_chat_response,
+    parse_model_version_from_response, parse_response_ids_from_chat_response,
 };
-use crate::llm::{chat_completions_url_for_endpoint, is_valid_llm_endpoint, LlmConfig};
+use crate::llm::{LlmConfig, chat_completions_url_for_endpoint, is_valid_llm_endpoint};
 use crate::proto::v1::ModelEndpoint;
 
 #[derive(Debug, Clone)]
@@ -130,8 +130,9 @@ impl ModelClient {
             let reward_json: Value = if reward_config.is_empty() {
                 Value::Null
             } else {
-                serde_json::from_slice(reward_config)
-                    .map_err(|err| ModelInferError::Other(format!("invalid reward_config json: {err}")))?
+                serde_json::from_slice(reward_config).map_err(|err| {
+                    ModelInferError::Other(format!("invalid reward_config json: {err}"))
+                })?
             };
             if reward_json.get("type").and_then(Value::as_str) == Some("rule_reward") {
                 if let Some(target) = reward_json.get("target").and_then(Value::as_str) {
@@ -200,14 +201,17 @@ impl ModelClient {
                     if status.is_success() {
                         let headers = response_headers(&resp);
                         let resp_json: Value = resp.json().await.map_err(|err| {
-                            ModelInferError::Other(format!("model client: invalid response json: {err}"))
+                            ModelInferError::Other(format!(
+                                "model client: invalid response json: {err}"
+                            ))
                         })?;
                         let content = resp_json
                             .pointer("/choices/0/message/content")
                             .and_then(Value::as_str)
                             .ok_or_else(|| {
                                 ModelInferError::Other(
-                                    "model client: response missing choices[0].message.content".to_string(),
+                                    "model client: response missing choices[0].message.content"
+                                        .to_string(),
                                 )
                             })?;
                         let model_ms = model_start.elapsed().as_millis() as u64;
@@ -256,7 +260,11 @@ impl ModelClient {
                     );
                 }
                 Err(e) => {
-                    last_err = format!("model client connection error (attempt {}): {}", attempt + 1, e);
+                    last_err = format!(
+                        "model client connection error (attempt {}): {}",
+                        attempt + 1,
+                        e
+                    );
                 }
             }
             sleep(Duration::from_secs(2)).await;
@@ -398,15 +406,14 @@ struct LlmTarget {
 }
 
 fn resolve_llm_target(llm: &LlmConfig, model_endpoint: Option<&ModelEndpoint>) -> LlmTarget {
-    let typed_url = model_endpoint.map(|endpoint| endpoint.url.trim()).unwrap_or("");
+    let typed_url = model_endpoint
+        .map(|endpoint| endpoint.url.trim())
+        .unwrap_or("");
     let endpoint_base = if is_valid_llm_endpoint(typed_url) {
         typed_url.to_string()
     } else {
         if !typed_url.is_empty() {
-            tracing::warn!(
-                model_endpoint = typed_url,
-                "worker_model_endpoint_invalid"
-            );
+            tracing::warn!(model_endpoint = typed_url, "worker_model_endpoint_invalid");
         }
         llm.endpoint.trim().to_string()
     };
@@ -447,10 +454,45 @@ mod tests {
     use super::{build_model_messages, resolve_llm_target, LlmTarget, ModelClient};
     use crate::llm::LlmConfig;
     use crate::proto::v1::ModelEndpoint;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// 读满整条 HTTP 请求（头 + Content-Length 指定的全部 body）。
+    ///
+    /// 单次 `read()` 只能拿到内核当次交付的字节：header 与 body 是否落在同一个
+    /// TCP 段由协议栈决定，Linux 上常合并、macOS 上常拆开。断言请求体的测试若只读
+    /// 一次，就变成了在断言操作系统的分段行为，会平台性假失败。
+    async fn read_full_request(stream: &mut TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut chunk = vec![0u8; 8192];
+        loop {
+            let n = stream.read(&mut chunk).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+
+            let text = String::from_utf8_lossy(&raw);
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                continue; // 头还没收全
+            };
+            let content_length = text[..head_end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if raw.len() >= head_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&raw).to_string()
+    }
 
     #[test]
     fn uses_typed_model_endpoint_override() {
@@ -624,11 +666,7 @@ mod tests {
     async fn rule_reward_short_circuit_without_llm_or_question() {
         let client = ModelClient::new();
         let action = client
-            .infer_action(
-                br#"{}"#,
-                br#"{"type":"rule_reward","target":"20"}"#,
-                1,
-            )
+            .infer_action(br#"{}"#, br#"{"type":"rule_reward","target":"20"}"#, 1)
             .await
             .expect("infer");
         assert_eq!(action, b"20");
@@ -661,11 +699,9 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 8192];
-            let n = stream.read(&mut buffer).await.expect("read");
-            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-            *captured_for_task.lock().expect("lock") = request;
-            let body = b"{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
+            let body =
+                b"{\"choices\":[{\"message\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
                 body.len(),
@@ -682,7 +718,11 @@ mod tests {
         });
         let payload = r#"{"question":"ping","model_name":"deepseek-v4-flash"}"#;
         let action = client
-            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"x"}"#, 1)
+            .infer_action(
+                payload.as_bytes(),
+                br#"{"type":"rule_reward","target":"x"}"#,
+                1,
+            )
             .await
             .expect("infer");
 
@@ -700,10 +740,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 16384];
-            let n = stream.read(&mut buffer).await.expect("read");
-            *captured_for_task.lock().expect("lock") =
-                String::from_utf8_lossy(&buffer[..n]).to_string();
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
             let body = b"{\"choices\":[{\"message\":{\"content\":\"def add(a,b): return a+b\"}}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -749,10 +786,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 8192];
-            let n = stream.read(&mut buffer).await.expect("read");
-            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-            *captured_for_task.lock().expect("lock") = request;
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
             let body = b"{\"choices\":[{\"message\":{\"content\":\"#### 4\"},\"finish_reason\":\"stop\"}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -769,7 +803,11 @@ mod tests {
         });
         let payload = r#"{"question":"2+2?","generation_config":{"max_new_tokens":16}}"#;
         let action = client
-            .infer_action(payload.as_bytes(), br#"{"type":"rule_reward","target":"4"}"#, 1)
+            .infer_action(
+                payload.as_bytes(),
+                br#"{"type":"rule_reward","target":"4"}"#,
+                1,
+            )
             .await
             .expect("infer");
 
@@ -789,10 +827,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let mut buffer = vec![0; 8192];
-            let n = stream.read(&mut buffer).await.expect("read");
-            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
-            *captured_for_task.lock().expect("lock") = request;
+            *captured_for_task.lock().expect("lock") = read_full_request(&mut stream).await;
             let body = b"{\"choices\":[{\"message\":{\"content\":\"#### 4\"},\"finish_reason\":\"stop\"}]}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",

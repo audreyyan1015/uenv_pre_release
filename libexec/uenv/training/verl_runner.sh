@@ -79,6 +79,13 @@ run 选项：
   --print-effective-config 打印合并后的覆盖列表并退出
   --dry-run                完成校验并打印容器命令，不启动训练
 
+可选调度环境变量（空值表示不发送提示）：
+  UENV_MAX_EPISODE_CONCURRENCY、UENV_MAX_IN_FLIGHT_BATCHES
+  UENV_TARGET_WORKER_SLOTS、UENV_POOL_WARMUP_TARGET
+  UENV_MAX_PARALLEL_PER_WORKER、UENV_AGENT_JOB_MAX_CONCURRENCY
+  UENV_RUNTIME_GATEWAY_SESSION_LIMIT、UENV_REQUIRE_WARM_SLOT
+  UENV_EXPECTED_WORKER_PARALLELISM、UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES
+
 此入口固定 VeRL 源码到 v0.7.1 / bec9ef74768dd201881cd4e54cd0385e87caae27，
 不会修改 VeRL 源码。训练依赖本地 Worker catalog，不需要 UEnv Hub。
 EOF
@@ -113,6 +120,7 @@ write_agent_loop_config() {
   mode: ${oc.env:UENV_AGENT_LOOP_CLIENT,rust_core}
   endpoint: ${oc.env:UENV_ADAPTER_CORE_ENDPOINT,127.0.0.1:50051}
   timeout_seconds: ${oc.env:UENV_AGENT_LOOP_TIMEOUT_SECONDS,3600}
+  max_message_bytes: ${oc.env:UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES,16777216}
   startup_timeout_seconds: 60
   auto_start: false
   default_env_type: ${oc.env:UENV_DEFAULT_ENV_TYPE,""}
@@ -131,6 +139,15 @@ write_agent_loop_config() {
   require_swe_response_trace: true
   failed_episode_policy: raise
   parallel_mode: sync
+  expected_worker_parallelism: ${oc.env:UENV_EXPECTED_WORKER_PARALLELISM,""}
+  max_episode_concurrency: ${oc.env:UENV_MAX_EPISODE_CONCURRENCY,""}
+  max_in_flight_batches: ${oc.env:UENV_MAX_IN_FLIGHT_BATCHES,""}
+  target_worker_slots: ${oc.env:UENV_TARGET_WORKER_SLOTS,""}
+  pool_warmup_target: ${oc.env:UENV_POOL_WARMUP_TARGET,""}
+  max_parallel_per_worker: ${oc.env:UENV_MAX_PARALLEL_PER_WORKER,""}
+  agent_job_max_concurrency: ${oc.env:UENV_AGENT_JOB_MAX_CONCURRENCY,""}
+  runtime_gateway_session_limit: ${oc.env:UENV_RUNTIME_GATEWAY_SESSION_LIMIT,""}
+  require_warm_slot: ${oc.env:UENV_REQUIRE_WARM_SLOT,false}
   batch_size: 0
 EOF
 }
@@ -641,6 +658,27 @@ run_training() {
   fi
   [[ "$gateway_bind" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "--gateway-bind 不是合法主机或 IP"
 
+  local scheduling_var scheduling_value
+  for scheduling_var in \
+    UENV_EXPECTED_WORKER_PARALLELISM \
+    UENV_MAX_EPISODE_CONCURRENCY \
+    UENV_MAX_IN_FLIGHT_BATCHES \
+    UENV_TARGET_WORKER_SLOTS \
+    UENV_POOL_WARMUP_TARGET \
+    UENV_MAX_PARALLEL_PER_WORKER \
+    UENV_AGENT_JOB_MAX_CONCURRENCY \
+    UENV_RUNTIME_GATEWAY_SESSION_LIMIT; do
+    scheduling_value="${!scheduling_var:-}"
+    [[ -z "$scheduling_value" || "$scheduling_value" =~ ^[0-9]+$ ]] \
+      || fail "$scheduling_var 必须为空或非负整数"
+  done
+  case "${UENV_REQUIRE_WARM_SLOT:-false}" in
+    true|false|1|0|yes|no|on|off) ;;
+    *) fail "UENV_REQUIRE_WARM_SLOT 必须是 true/false" ;;
+  esac
+  [[ "${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES:-16777216}" =~ ^[1-9][0-9]*$ ]] \
+    || fail "UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES 必须是正整数"
+
   WORK_DIR="$(mkdir -p "$WORK_DIR" && cd "$WORK_DIR" && printf '%s\n' "$PWD")"
   if [[ -n "$BUNDLE" || -n "$UENV_RELEASE" || -n "$BRIDGE_WHEEL" || ! -f "$WORK_DIR/assets/state.env" ]]; then
     stage_gpu_assets "$WORK_DIR" "$BUNDLE" "$UENV_RELEASE" "$BRIDGE_WHEEL"
@@ -749,6 +787,16 @@ run_training() {
     -e "UENV_MODEL_GATEWAY_PORT=$gateway_port"
     -e "UENV_MODEL_GATEWAY_BIND_HOST=$gateway_bind"
     -e "UENV_MODEL_GATEWAY_PUBLIC_URL=$gateway_url"
+    -e "UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM:-}"
+    -e "UENV_MAX_EPISODE_CONCURRENCY=${UENV_MAX_EPISODE_CONCURRENCY:-}"
+    -e "UENV_MAX_IN_FLIGHT_BATCHES=${UENV_MAX_IN_FLIGHT_BATCHES:-}"
+    -e "UENV_TARGET_WORKER_SLOTS=${UENV_TARGET_WORKER_SLOTS:-}"
+    -e "UENV_POOL_WARMUP_TARGET=${UENV_POOL_WARMUP_TARGET:-}"
+    -e "UENV_MAX_PARALLEL_PER_WORKER=${UENV_MAX_PARALLEL_PER_WORKER:-}"
+    -e "UENV_AGENT_JOB_MAX_CONCURRENCY=${UENV_AGENT_JOB_MAX_CONCURRENCY:-}"
+    -e "UENV_RUNTIME_GATEWAY_SESSION_LIMIT=${UENV_RUNTIME_GATEWAY_SESSION_LIMIT:-}"
+    -e "UENV_REQUIRE_WARM_SLOT=${UENV_REQUIRE_WARM_SLOT:-false}"
+    -e "UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES=${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES:-16777216}"
   )
   if [[ -n "$UENV_VERL_RUNNER" ]]; then
     [[ -f "$UENV_VERL_RUNNER" ]] || fail "VeRL 启动器不存在：$UENV_VERL_RUNNER"

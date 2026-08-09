@@ -74,7 +74,9 @@ fn make_bundle(store: &TrajectoryStore, run_id: &str) -> TrajectoryBundle {
         steps: vec![
             StepTrace {
                 step_index: 0,
-                action: StepAction::Exec { command: "pytest -x".into() },
+                action: StepAction::Exec {
+                    command: "pytest -x".into(),
+                },
                 observation: StepObservation {
                     stdout: "1 passed".into(),
                     exit_code: Some(0),
@@ -90,7 +92,10 @@ fn make_bundle(store: &TrajectoryStore, run_id: &str) -> TrajectoryBundle {
                     path: "/app/fix.py".into(),
                     content: "patch".into(),
                 },
-                observation: StepObservation { write_ok: Some(true), ..Default::default() },
+                observation: StepObservation {
+                    write_ok: Some(true),
+                    ..Default::default()
+                },
                 timestamp_ms: 1100,
                 duration_ms: 5,
                 rollout_trace: None,
@@ -107,7 +112,10 @@ fn make_bundle(store: &TrajectoryStore, run_id: &str) -> TrajectoryBundle {
 fn worker_uploader_to_real_server_e2e() {
     let bin = adapter_bin();
     if !bin.exists() {
-        panic!("adapter-core 二进制不存在：{}（先 cargo build -p uenv-adapter-core）", bin.display());
+        panic!(
+            "adapter-core 二进制不存在：{}（先 cargo build -p uenv-adapter-core）",
+            bin.display()
+        );
     }
 
     // 隔离目录：server 数据 + worker artifact 各一份
@@ -127,7 +135,10 @@ fn worker_uploader_to_real_server_e2e() {
         .env("UENV_ADDR", GRPC_ADDR)
         .env("UENV_CONFIG_PATH", &cfg_path)
         .env("UENV_TRAJECTORY_ENABLED", "1")
-        .env("UENV_TRAJECTORY_HTTP_LISTEN", format!("127.0.0.1:{TRJ_PORT}"))
+        .env(
+            "UENV_TRAJECTORY_HTTP_LISTEN",
+            format!("127.0.0.1:{TRJ_PORT}"),
+        )
         .env("UENV_TRAJECTORY_DATA_DIR", &srv_data)
         .env("UENV_TRAJECTORY_TOKEN", TOKEN)
         .env("RUST_LOG", "warn")
@@ -138,13 +149,19 @@ fn worker_uploader_to_real_server_e2e() {
     let _guard = ServerGuard(child);
 
     let client = reqwest::blocking::Client::new();
-    assert!(wait_health(&client, Duration::from_secs(25)), "轨迹服务未就绪");
+    assert!(
+        wait_health(&client, Duration::from_secs(25)),
+        "轨迹服务未就绪"
+    );
 
     // ── 配置真 Worker 上传器（env 驱动）──
     // SAFETY: 测试单线程顺序执行，设置进程级 env。
     unsafe {
         std::env::set_var("UENV_SWE_ARTIFACT_DIR", &worker_art);
-        std::env::set_var("UENV_TRAJECTORY_ENDPOINT", format!("http://127.0.0.1:{TRJ_PORT}"));
+        std::env::set_var(
+            "UENV_TRAJECTORY_ENDPOINT",
+            format!("http://127.0.0.1:{TRJ_PORT}"),
+        );
         std::env::set_var("UENV_TRAJECTORY_TOKEN", TOKEN);
     }
 

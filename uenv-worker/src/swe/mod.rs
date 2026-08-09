@@ -28,6 +28,7 @@ pub mod pro_eval;
 pub mod repo_specs;
 pub mod resettable;
 pub mod session;
+pub mod smith_eval;
 pub mod spec;
 pub mod trajectory;
 pub mod trajectory_upload;
@@ -36,25 +37,27 @@ pub mod variant;
 pub use artifact::{EpisodeArtifact, TestResults};
 pub use artifact_store::ArtifactStore;
 pub use command_policy::{CommandPolicy, CommandPolicyConfig};
-pub use dataset::{image_ref, InstanceStore, SweInstance};
+pub use dataset::{InstanceStore, SweInstance, image_ref};
 pub use env_package::EnvPackageDir;
 pub use grader::{
-    grader_for, grader_for_spec, GradeResult, Grader, SwebenchGrader, SwebenchProGrader,
-    SwesmithGrader,
+    GradeResult, Grader, SwebenchGrader, SwebenchProGrader, SwesmithGrader, grader_for,
+    grader_for_spec,
 };
-pub use harness::{run_instance, ContainerRuntime, EpisodeOutcome, RunOptions};
+pub use harness::{ContainerRuntime, EpisodeOutcome, RunOptions, run_instance};
 pub use hub_config::SweDefaultConfig;
 pub use image_cache::{ImageCacheFactory, ImageState};
 pub use instance_pool::SweInstancePool;
-pub use repo_specs::{spec_for, LogParser, RepoSpec, TestRunner};
-pub use resettable::{PodmanResettableInstance, ResettableInstance, ResettableSession, SnapshotResettableInstance};
+pub use repo_specs::{LogParser, RepoSpec, TestRunner, spec_for};
+pub use resettable::{
+    PodmanResettableInstance, ResettableInstance, ResettableSession, SnapshotResettableInstance,
+};
 pub use session::{ExecResult, SubmitOutcome, SweSession};
-pub use trajectory_upload::TrajectoryUploader;
+pub use spec::{
+    AttachmentRef, EvaluationSpec, InstanceSpec, IssueRef, ResetObservation, TaskSpec, Workspace,
+    build_reset_observation,
+};
 pub use trajectory::{
     StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryRef, TrajectoryStore,
 };
-pub use spec::{
-    build_reset_observation, AttachmentRef, EvaluationSpec, InstanceSpec, IssueRef,
-    ResetObservation, TaskSpec, Workspace,
-};
+pub use trajectory_upload::TrajectoryUploader;
 pub use variant::BenchmarkVariant;

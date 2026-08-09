@@ -74,6 +74,8 @@ See [`errors.md`](errors.md) for the full code ↔ HTTP-status table.
 | 1 | Health | GET | `/healthz` | public |
 | 2 | Health | GET | `/metrics` | public (intranet) |
 | 3 | Health | GET | `/version` | public |
+| 3b | Overview | GET | `/api/v1/system/overview` | reader |
+| 3c | Console | GET | `/` → `/console`, `/console`, `/console/app.{css,js}` | public |
 | 4 | Query | GET | `/api/v1/envs` | reader |
 | 5 | Sync | GET | `/api/v1/envs?since={ts}` | reader |
 | 6 | Query | GET | `/api/v1/envs/{env_type}` | reader |
@@ -122,6 +124,82 @@ intranet at the network layer. Exposes `uenv_hub_http_requests_total` and
 ```json
 { "name": "uenv-hub", "version": "0.1.0", "git_sha": null }
 ```
+
+### `GET /api/v1/system/overview` (role: reader)
+
+One-shot projection of the Hub: identity, registry inventory, on-disk
+footprint, host resources and startup posture. A console assembling this from
+the individual list endpoints would issue a dozen requests and still not see the
+storage or host dimensions, which are exposed nowhere else.
+
+`200 OK` — `HubOverview`:
+
+```json
+{
+  "service": { "name": "uenv-hub", "version": "0.1.0", "git_sha": null },
+  "started_at": 1754000000,
+  "uptime_seconds": 3600,
+  "server_time": 1754003600,
+  "db_up": true,
+  "registry": {
+    "envs": 6, "env_versions": 9, "yanked_env_versions": 0, "deprecated_envs": 1,
+    "packages": 5, "package_versions": 5, "yanked_package_versions": 0,
+    "package_artifacts": 18, "package_artifact_bytes": 1048576,
+    "stacks": 3, "stack_versions": 3, "yanked_stack_versions": 0,
+    "agent_bridges": 2, "templates": 5, "active_tokens": 1, "audit_entries": 12
+  },
+  "storage": {
+    "artifact_dir": "data/artifacts", "artifact_dir_exists": true,
+    "artifact_files": 18, "artifact_bytes": 1048576,
+    "database_url": "sqlite://uenv-hub.db", "database_bytes": 262144
+  },
+  "host": {
+    "os": "linux", "arch": "x86_64", "cpu_cores": 4,
+    "cpu_usage_percent": 3.2, "load_average": [0.14, 0.09, 0.05],
+    "memory_total_bytes": 16482000000, "memory_available_bytes": 12900000000,
+    "process_resident_bytes": 41000000
+  },
+  "posture": {
+    "require_token": true, "rate_limit_enabled": true,
+    "requests_per_second": 50, "burst": 100,
+    "cors_allow_origins": ["*"], "seed_examples": true,
+    "catalog_seed_dir": "config/swe"
+  }
+}
+```
+
+Notes:
+
+- **Counts are computed per request** with `COUNT(*)` rather than kept as
+  incrementally-maintained gauges. The registry is a low-write system, and a
+  counter that can drift from the tables it describes is worse than one that
+  costs a few milliseconds.
+- **Soft-deleted** envs/packages/stacks are excluded so the numbers match the
+  list endpoints; **yanked versions are counted, and also reported separately** —
+  a yanked version is still served and still occupies disk.
+- `storage.artifact_bytes` is measured on disk;
+  `registry.package_artifact_bytes` is the sum recorded at publish time. The
+  content-addressed store deduplicates by digest, so *recorded ≥ measured* is
+  normal; the reverse gap indicates an interrupted publish or externally
+  deleted artifacts.
+- Every `host` field beyond `os`/`arch`/`cpu_cores` comes from Linux `/proc` and
+  is **absent on other platforms** rather than reported as `0`.
+
+### Operator console
+
+The Hub serves its own read-only console. Assets are compiled into the binary,
+so a Hub host needs nothing but the Hub itself, and the console can never drift
+from the API version it draws.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/` | `307` redirect to `/console` |
+| GET | `/console` | HTML shell (public; contains no data) |
+| GET | `/console/app.css`, `/console/app.js` | assets, `max-age=300` |
+
+The shell is public because it carries no data; every request the console makes
+is authorised by the same middleware as any other API client, using a token the
+operator stores in browser `localStorage`.
 
 ---
 

@@ -11,6 +11,8 @@ import pandas as pd
 
 DEFAULT_INPUT_DIR = Path("/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data")
 DEFAULT_OUTPUT_DIR = Path("/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith_train")
+OFFICIAL_SWESMITH_PREFIX = "swebench/swesmith."
+LEGACY_SWESMITH_PREFIX = "jyangballin/swesmith."
 
 SYSTEM_PROMPT = (
     "You are fixing a real software issue in a checked-out repository. "
@@ -35,8 +37,23 @@ def _list_value(row: dict[str, Any], key: str) -> list[str]:
     return [str(value)]
 
 
+def _smith_image_from_instance_id(instance_id: str) -> str:
+    if "__" not in instance_id:
+        return ""
+    owner, rest = instance_id.split("__", 1)
+    parts = rest.split(".")
+    if len(parts) < 2 or not owner or not parts[0] or not parts[1]:
+        return ""
+    repo, commit = parts[0], parts[1][:8]
+    return f"{OFFICIAL_SWESMITH_PREFIX}x86_64.{owner}_1776_{repo}.{commit}:latest".lower()
+
+
 def _image_name(row: dict[str, Any]) -> str:
     image = str(row.get("image_cache_key") or row.get("image_name") or "").strip()
+    if image.startswith(LEGACY_SWESMITH_PREFIX):
+        image = OFFICIAL_SWESMITH_PREFIX + image[len(LEGACY_SWESMITH_PREFIX) :]
+    if not image:
+        image = _smith_image_from_instance_id(str(row.get("instance_id") or ""))
     if image and ":" not in image.rsplit("/", 1)[-1]:
         image = f"{image}:latest"
     return image

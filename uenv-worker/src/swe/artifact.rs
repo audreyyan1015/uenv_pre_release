@@ -102,7 +102,10 @@ mod tests {
 
     #[test]
     fn test_results_failed_when_any_test_fails() {
-        let r = TestResults::from_per_test("raw", vec![("t1".to_string(), true), ("t2".to_string(), false)]);
+        let r = TestResults::from_per_test(
+            "raw",
+            vec![("t1".to_string(), true), ("t2".to_string(), false)],
+        );
         assert!(!r.passed);
     }
 

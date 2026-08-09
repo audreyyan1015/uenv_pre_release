@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -13,8 +13,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use super::event::{ObservabilityEvent, SsePayload};
 use super::ObsHandle;
+use super::event::{ObservabilityEvent, SsePayload};
 
 #[derive(Clone)]
 struct AppState {

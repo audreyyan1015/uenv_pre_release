@@ -9,7 +9,8 @@ use axum::routing::get;
 use tonic::transport::Server;
 
 use crate::control_plane::client::{
-    ControlPlane, SchedulerControlPlaneClient, SchedulerMode, detect_resource_spec,
+    ControlPlane, SchedulerControlPlaneClient, SchedulerMode, SharedWorkerCapabilities,
+    detect_resource_spec,
 };
 use crate::episode::executor::EpisodeExecutor;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
@@ -222,6 +223,18 @@ impl WorkerRuntime {
         let worker_id = self.worker_id.clone();
         let gw_public = gateway_public_url(&self.gateway_listen);
         let mut synced_packages = load_synced_env_packages(&self.swe_env_package_dirs);
+        let package_states = synced_packages
+            .iter()
+            .map(|p| crate::proto::scheduler::v1::EnvPackageState {
+                package_id: p.package_id.clone(),
+                version: p.version.clone(),
+                bundle_digest: p.bundle_digest.clone(),
+                state: "ready".to_string(),
+                env_type: "swe".to_string(),
+                backend_kind: "swe_instance_pool".to_string(),
+                message: "loaded from configured EnvPackage directory".to_string(),
+            })
+            .collect();
         if let Some(dir) = self.package_plugin_dir.as_deref() {
             for package in load_active_plugin_packages(std::path::Path::new(dir)) {
                 if !synced_packages.iter().any(|existing| {
@@ -232,18 +245,21 @@ impl WorkerRuntime {
                 }
             }
         }
-        let control_plane: Arc<dyn ControlPlane> = Arc::new(SchedulerControlPlaneClient::new(
+        let capabilities = SharedWorkerCapabilities::new(effective_env_types, package_states);
+        let control_client = SchedulerControlPlaneClient::new(
             scheduler_mode,
             self.server_endpoint.clone(),
             register_endpoint,
-            effective_env_types,
+            capabilities.clone(),
             self.max_concurrent,
             worker_id.clone(),
             detect_resource_spec(),
             metrics.clone(),
             gw_public.clone(),
             synced_packages,
-        ));
+        )
+        .with_warmup_pool(warmup_pool.clone());
+        let control_plane: Arc<dyn ControlPlane> = Arc::new(control_client);
         if let Err(err) = control_plane.register().await {
             if allow_degraded_start() {
                 tracing::warn!(
@@ -361,6 +377,7 @@ impl WorkerRuntime {
                 .with_swe_pool(swe_pool),
             metrics.clone(),
             warmup_pool,
+            capabilities,
             self.max_concurrent.max(1),
             wal,
             self.disconnect_dispatch_policy,

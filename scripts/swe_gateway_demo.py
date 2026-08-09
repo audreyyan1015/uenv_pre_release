@@ -70,7 +70,7 @@ def main():
     workspace = args.workspace or ("/app" if variant == "pro" else "/testbed")
     reverse_gold = args.reverse_gold
     if reverse_gold is None:
-        reverse_gold = variant in ("smith", "swe-smith", "swe-bench-smith", "swesmith")
+        reverse_gold = False
 
     base = args.endpoint
     print(f"[1] POST /sessions  instance={args.instance} variant={variant} mode={args.command_mode}")

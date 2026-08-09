@@ -4,11 +4,7 @@ use super::EvaluationResult;
 
 /// 根据评测结果计算 reward（全部通过 → 1.0，否则 0.0）。
 pub fn reward_from_result(result: &EvaluationResult) -> f64 {
-    if result.passed {
-        1.0
-    } else {
-        0.0
-    }
+    if result.passed { 1.0 } else { 0.0 }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -27,7 +23,12 @@ pub struct StepInfo {
 }
 
 impl StepInfo {
-    pub fn from_result(result: &EvaluationResult, dataset: &str, task_id: &str, library: &str) -> Self {
+    pub fn from_result(
+        result: &EvaluationResult,
+        dataset: &str,
+        task_id: &str,
+        library: &str,
+    ) -> Self {
         Self {
             dataset: dataset.to_string(),
             task_id: task_id.to_string(),

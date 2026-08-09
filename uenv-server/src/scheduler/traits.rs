@@ -24,7 +24,45 @@ pub trait Scheduler: Send + 'static {
     fn release(&mut self, worker_id: &str);
 }
 
+#[derive(Clone, Default)]
+pub struct EnvPackageStateInfo {
+    pub package_id: String,
+    pub version: String,
+    pub bundle_digest: String,
+    pub state: String,
+    pub env_type: String,
+    pub backend_kind: String,
+    pub message: String,
+}
+
+#[derive(Clone, Default)]
+pub struct WorkerPoolSummaryInfo {
+    pub env_type: String,
+    pub variant: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub backend_kind: String,
+    pub ready: i32,
+    pub busy: i32,
+    pub warming: i32,
+    pub capacity: i32,
+}
+
+#[derive(Clone, Default)]
+pub struct WorkerPoolSlotInfo {
+    pub slot_id: String,
+    pub status: String,
+    pub env_type: String,
+    pub variant: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub backend_kind: String,
+    pub episode_id: String,
+    pub session_id: String,
+}
+
 /// 调度器内部保存的 worker 状态。
+#[derive(Default)]
 pub struct WorkerInfo {
     /// worker 的稳定标识，来自 RegisterWorker 请求。
     pub worker_id: String,
@@ -52,6 +90,13 @@ pub struct WorkerInfo {
     pub gateway_public_url: String,
     /// worker 已同步的环境包列表。带 env_package 的请求必须匹配这里的 package 和版本。
     pub synced_env_packages: Vec<SyncedEnvPackageInfo>,
+    pub platform_features: Vec<String>,
+    pub backend_kinds: Vec<String>,
+    pub trajectory_schemas: Vec<String>,
+    pub tool_schemas: Vec<String>,
+    pub package_states: Vec<EnvPackageStateInfo>,
+    pub pool_summary: Vec<WorkerPoolSummaryInfo>,
+    pub pool_slots: Vec<WorkerPoolSlotInfo>,
 }
 
 /// worker 注册对调度器容量产生的实际影响。
@@ -95,4 +140,6 @@ pub enum ScheduleError {
     AllWorkersAtCapacity,
     #[error("no worker has synced the requested env_package")]
     NoMatchingEnvPackage,
+    #[error("no worker can prepare the requested environment")]
+    NoPreparableWorker,
 }

@@ -100,15 +100,16 @@ classDiagram
 
 ### 2.4 `swe` 补登记为任务环境
 
-`seed_envs` 新增 `swe@0.1.0`（`lifecycle=canonical`，`compat_aliases=["swebench"]`，`supported_backends=["container"]`，无 process entrypoint）。`config_schema.dataset` 枚举 `swe-bench-verified` / `swe-bench-pro`，与 EnvPackage id 及 Worker 的 `swe.benchmark_variant` overlay 对齐；Action/Observation/State 沿用 SWE EnvPackage 的 interface，只去掉 `benchmark_variant` 的 per-variant `const`（注册表条目描述能力类，变体是配置值）。
+`seed_envs` 新增 `swe@0.1.0`（`lifecycle=canonical`，`compat_aliases=["swebench"]`，`supported_backends=["container"]`，无 process entrypoint）。`config_schema.dataset` 枚举 `swe-bench-verified` / `swe-bench-pro` / `swe-bench-smith`，与 EnvPackage id 及 Worker 的 `swe.benchmark_variant` overlay 对齐；Action/Observation/State 沿用 SWE EnvPackage 的 interface，只去掉 `benchmark_variant` 的 per-variant `const`（注册表条目描述能力类，变体是配置值）。
 
-### 2.5 seed 的两个参考栈
+### 2.5 seed 的参考栈
 
 `seed_episode_stacks` 在包 seed 之后运行，覆盖执行模式这条轴：
 
 | stack_id | mode | task_env | scaffold | gateway | env_packages |
 |---|---|---|---|---|---|
 | `swe-bench-verified-openhands@1.0.0` | agent | `swe@latest` / `swe-bench-verified` | `uenv-agent-openhands@latest`（openhands / openhands-agent） | required, `runtime/v1`, api_key | `swe-bench-verified@1.0.0` |
+| `swe-bench-smith-openhands@1.0.0` | agent | `swe@latest` / `swe-bench-smith` | `uenv-agent-openhands@latest`（openhands / openhands-agent） | required, `runtime/v1`, api_key | `swe-bench-smith@0.1.0` |
 | `qa-gsm8k-native@1.0.0` | native | `qa@latest` / `gsm8k` | — | — | — |
 
 seed 走的是与 API 完全相同的 `validate` + `cross_check`：一个连发布接口都会拒绝的栈，不该由 seed 塞进库里。组件缺失时跳过并 warn（部分 checkout 仍能启动），而不是失败。
@@ -218,7 +219,7 @@ CLI：`uenv stack list | show | resolve | publish`。
 |---|---|
 | `domain::stack` 单测 | agent 无 scaffold / native 带 scaffold / 包未钉版本 / scaffold 与环境不匹配 / agent_kind 不符 / consumer 未发布 / dataset 不被接受 / gateway 绑定漏配 / 被拦版本 exact vs latest / deprecated 环境提示后继者 / `stack_digest` 顺序无关且版本敏感 |
 | `domain::conformance` C13 单测 | 无 rubric skip / 仅库名 warn / 齐备 pass / 无 entrypoint 或无 requires warn / digest 不可解析 fail |
-| server e2e | 发布→列表→解析（`latest` 被钉死、scaffold digest 与 `bundle_digest` 一致、`stack_digest` 生成）；五类不合法组合被拒且未落库；`swe` 已注册且 Action 契约含 `exec` |
+| server e2e | 发布→列表→解析（`latest` 被钉死、scaffold digest 与 `bundle_digest` 一致、`stack_digest` 生成）；五类不合法组合被拒且未落库；`swe` 已注册且声明 Smith；`swe-bench-smith` 包及 OpenHands 栈可解析 |
 | client 单测 | `--scorer-ref`/`--scorer` 钉住 digest；半配置被拒；报告 digest 与本地模块不一致被拒 |
 
 `cargo test --workspace` 在 `uenv` 与 `uenv/uenv-hub` 两个 workspace 均全绿。

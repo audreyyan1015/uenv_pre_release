@@ -9,16 +9,29 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 // Keep the normal development proxy on the production read endpoint. Isolated
 // pressure runs can override this process-local target without changing .env.
 const obsProxyTarget = process.env.VITE_OBS_PROXY_TARGET ?? "http://127.0.0.1:50053";
+const fleetProxyTarget = process.env.VITE_FLEET_PROXY_TARGET ?? "http://127.0.0.1:50052";
+const hubProxyTarget = process.env.VITE_HUB_PROXY_TARGET ?? "http://127.0.0.1:8088";
 
 export default defineConfig({
   vite: {
     server: {
       // 浏览器同源访问 /obs/*；压测可用 VITE_OBS_PROXY_TARGET 指向隔离 Obs。
+      // /fleet/* 代理 Server admin 只读舰队快照，供 Worker 详情实时名册（不改控制面）。
       proxy: {
         "/obs": {
           target: obsProxyTarget,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/obs/, ""),
+        },
+        "/fleet": {
+          target: fleetProxyTarget,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/fleet/, ""),
+        },
+        "/hub": {
+          target: hubProxyTarget,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/hub/, ""),
         },
       },
     },

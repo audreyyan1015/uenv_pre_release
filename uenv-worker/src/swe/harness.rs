@@ -102,12 +102,10 @@ pub fn run_instance(
         harness_tar.as_deref(),
         None,
     )?;
-    if opts.use_gold_patch {
-        if instance.variant() == crate::swe::variant::BenchmarkVariant::Smith {
-            session.apply_patch_reverse(&instance.patch, "gold")?;
-        } else {
-            session.apply_patch(&instance.patch, "gold")?;
-        }
+    if opts.use_gold_patch && instance.variant() == crate::swe::variant::BenchmarkVariant::Smith {
+        session.apply_patch_reverse(&instance.patch, "gold")?;
+    } else if opts.use_gold_patch {
+        session.apply_patch(&instance.patch, "gold")?;
     }
     session.evaluate()
 }
@@ -155,7 +153,10 @@ pub fn decide_reward(
     fail_to_pass: &[String],
     pass_to_pass: &[String],
 ) -> (bool, f64) {
-    let all_pass = |ids: &[String]| ids.iter().all(|id| report.get(id).copied().unwrap_or(false));
+    let all_pass = |ids: &[String]| {
+        ids.iter()
+            .all(|id| report.get(id).copied().unwrap_or(false))
+    };
     let resolved = all_pass(fail_to_pass) && all_pass(pass_to_pass);
     (resolved, if resolved { 1.0 } else { 0.0 })
 }
@@ -170,8 +171,14 @@ mod tests {
 
     #[test]
     fn runtime_parse() {
-        assert_eq!(ContainerRuntime::parse("docker"), Some(ContainerRuntime::Docker));
-        assert_eq!(ContainerRuntime::parse("Podman"), Some(ContainerRuntime::Podman));
+        assert_eq!(
+            ContainerRuntime::parse("docker"),
+            Some(ContainerRuntime::Docker)
+        );
+        assert_eq!(
+            ContainerRuntime::parse("Podman"),
+            Some(ContainerRuntime::Podman)
+        );
         assert_eq!(ContainerRuntime::parse("lxc"), None);
     }
 
@@ -199,7 +206,8 @@ mod tests {
     #[test]
     fn parse_pytest_report_extracts_verbose_format() {
         // 旧版 pytest verbose：状态在 nodeid 之后，带百分比。
-        let out = "a/b.py::test_ok PASSED                 [ 50%]\na/b.py::test_bad FAILED  [100%]\n";
+        let out =
+            "a/b.py::test_ok PASSED                 [ 50%]\na/b.py::test_bad FAILED  [100%]\n";
         let m = parse_pytest_report(out);
         assert_eq!(m.get("a/b.py::test_ok"), Some(&true));
         assert_eq!(m.get("a/b.py::test_bad"), Some(&false));

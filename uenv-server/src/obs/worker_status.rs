@@ -31,8 +31,9 @@ impl WorkerStatusSyncConfig {
 
 /// 启动 Worker fleet 状态同步。
 ///
-/// 状态只在状态/原因/负载/容量等展示字段变化时写入 Obs。Worker 的最新心跳时间继续由
-/// WORKER_HEARTBEAT 事件维护，避免每个扫描周期重复写入一份完整 fleet 快照。
+/// 状态只在状态/原因/负载/容量等展示字段变化时写入 Obs。每次快照都会带上
+/// 由 scheduler Instant 推算的 `last_heartbeat_ts` 与当前 active episode 名册，
+/// 避免仅依赖可能被 Obs 队列丢弃的 WORKER_HEARTBEAT 事件。
 pub fn spawn_worker_status_sync(state: Arc<ServerState>, config: WorkerStatusSyncConfig) {
     let Some(obs) = state.obs.get().cloned() else {
         return;
@@ -47,14 +48,27 @@ pub fn spawn_worker_status_sync(state: Arc<ServerState>, config: WorkerStatusSyn
             interval.tick().await;
             let now = now_ms();
             let snapshots = state.scheduler.read().list_workers();
+            let mut episodes_by_worker: HashMap<String, Vec<String>> = HashMap::new();
+            for entry in state.active_episodes.iter() {
+                episodes_by_worker
+                    .entry(entry.worker_id.clone())
+                    .or_default()
+                    .push(entry.episode_id.clone());
+            }
             let mut seen = HashSet::with_capacity(snapshots.len());
             let mut changed = Vec::new();
 
             for snapshot in snapshots {
                 seen.insert(snapshot.worker_id.clone());
                 let previous = known.get(&snapshot.worker_id);
-                let observation = project_worker_status(&snapshot, previous, config, now);
-                if previous != Some(&observation) {
+                let active_episodes = episodes_by_worker
+                    .remove(&snapshot.worker_id)
+                    .unwrap_or_default();
+                let observation =
+                    project_worker_status(&snapshot, previous, config, now, active_episodes);
+                // 心跳墙钟会每秒变化；不要因此刷爆 Obs。仅在业务字段或名册变化时写入，
+                // 并附带最新推算的 last_heartbeat_ts。
+                if previous.map_or(true, |old| worker_observation_changed(old, &observation)) {
                     changed.push(observation.clone());
                 }
                 known.insert(observation.worker_id.clone(), observation);
@@ -78,6 +92,8 @@ pub fn spawn_worker_status_sync(state: Arc<ServerState>, config: WorkerStatusSyn
                     status_reason: "UNREGISTERED".into(),
                     status_changed_ts: now,
                     current_load: 0,
+                    active_episodes: Vec::new(),
+                    last_heartbeat_ts: previous.last_heartbeat_ts,
                     ..previous
                 };
                 changed.push(offline.clone());
@@ -101,6 +117,7 @@ fn project_worker_status(
     previous: Option<&WorkerStatusObservation>,
     config: WorkerStatusSyncConfig,
     now: i64,
+    active_episodes: Vec<String>,
 ) -> WorkerStatusObservation {
     let heartbeat_age = worker.last_heartbeat_at.map(|at| at.elapsed().as_secs());
     let report_age = worker.last_report_at.map(|at| at.elapsed().as_secs());
@@ -136,16 +153,35 @@ fn project_worker_status(
         .filter(|ts| *ts > 0)
         .unwrap_or(now);
 
+    let last_heartbeat_ts = heartbeat_age
+        .map(|age| now.saturating_sub((age as i64).saturating_mul(1000)))
+        .unwrap_or(0);
+
     WorkerStatusObservation {
         worker_id: worker.worker_id.clone(),
         status: status.into(),
         status_reason: reason.into(),
         status_changed_ts,
+        last_heartbeat_ts,
         current_load: worker.current_load,
         capacity: worker.capacity,
         endpoint: worker.endpoint.clone(),
         supported_env_types: worker.supported_env_types.clone(),
+        active_episodes,
     }
+}
+
+fn worker_observation_changed(
+    previous: &WorkerStatusObservation,
+    next: &WorkerStatusObservation,
+) -> bool {
+    previous.status != next.status
+        || previous.status_reason != next.status_reason
+        || previous.current_load != next.current_load
+        || previous.capacity != next.capacity
+        || previous.endpoint != next.endpoint
+        || previous.supported_env_types != next.supported_env_types
+        || previous.active_episodes != next.active_episodes
 }
 
 #[cfg(test)]
@@ -183,33 +219,72 @@ mod tests {
     fn projects_busy_idle_attention_and_offline() {
         let now = now_ms();
         assert_eq!(
-            project_worker_status(&snapshot(1, 2, 1, 1), None, config(), now).status,
+            project_worker_status(
+                &snapshot(1, 2, 1, 1),
+                None,
+                config(),
+                now,
+                vec!["ep-1".into()]
+            )
+            .status,
             "BUSY"
         );
         assert_eq!(
-            project_worker_status(&snapshot(0, 2, 1, 1), None, config(), now).status,
+            project_worker_status(&snapshot(0, 2, 1, 1), None, config(), now, Vec::new()).status,
             "IDLE"
         );
-        let attention = project_worker_status(&snapshot(0, 2, 45, 1), None, config(), now);
+        let attention =
+            project_worker_status(&snapshot(0, 2, 45, 1), None, config(), now, Vec::new());
         assert_eq!(attention.status, "ATTENTION");
         assert_eq!(attention.status_reason, "HEARTBEAT_LATE");
-        let offline = project_worker_status(&snapshot(0, 2, 120, 1), None, config(), now);
+        let offline =
+            project_worker_status(&snapshot(0, 2, 120, 1), None, config(), now, Vec::new());
         assert_eq!(offline.status, "OFFLINE");
         assert_eq!(offline.status_reason, "HEARTBEAT_TIMEOUT");
     }
 
     #[test]
     fn reports_stalled_busy_worker_as_attention() {
-        let observation = project_worker_status(&snapshot(1, 2, 1, 500), None, config(), now_ms());
+        let observation = project_worker_status(
+            &snapshot(1, 2, 1, 500),
+            None,
+            config(),
+            now_ms(),
+            vec!["ep-1".into()],
+        );
         assert_eq!(observation.status, "ATTENTION");
         assert_eq!(observation.status_reason, "REPORT_STALLED");
     }
 
     #[test]
     fn preserves_status_changed_timestamp_while_state_is_stable() {
-        let first = project_worker_status(&snapshot(0, 2, 1, 1), None, config(), 100);
-        let second = project_worker_status(&snapshot(0, 2, 2, 2), Some(&first), config(), 200);
+        let first = project_worker_status(&snapshot(0, 2, 1, 1), None, config(), 100, Vec::new());
+        let second = project_worker_status(
+            &snapshot(0, 2, 2, 2),
+            Some(&first),
+            config(),
+            200,
+            Vec::new(),
+        );
         assert_eq!(second.status_changed_ts, 100);
-        assert_eq!(first, second);
+        assert!(!worker_observation_changed(&first, &second));
+    }
+
+    #[test]
+    fn detects_active_episode_roster_changes() {
+        let first =
+            project_worker_status(&snapshot(1, 2, 1, 1), None, config(), 100, vec!["a".into()]);
+        let second = project_worker_status(
+            &snapshot(1, 2, 1, 1),
+            Some(&first),
+            config(),
+            200,
+            vec!["a".into(), "b".into()],
+        );
+        assert!(worker_observation_changed(&first, &second));
+        assert_eq!(
+            second.active_episodes,
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 }

@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "uenv-worker", about = "UEnv Worker — environment episode executor")]
+#[command(
+    name = "uenv-worker",
+    about = "UEnv Worker — environment episode executor"
+)]
 pub struct Cli {
     #[arg(long)]
     pub config: Option<String>,

@@ -53,14 +53,23 @@ fn gold_patch_reaches_reward_one_via_shared_pool() {
         .expect("instance present")
         .patch
         .clone();
-    assert!(!gold.trim().is_empty(), "instance {instance_id} has no gold patch");
+    assert!(
+        !gold.trim().is_empty(),
+        "instance {instance_id} has no gold patch"
+    );
 
     let pool = Arc::new(SweInstancePool::new(Arc::new(store), runtime_from_env(), 2));
     // FullShell：与 native/gateway 默认一致（对标 SWE-bench harness 宽容策略）。
     let policy = CommandPolicyConfig::default().with_mode(CommandPolicy::FullShell);
 
     let submit = pool
-        .run_episode(&instance_id, BenchmarkVariant::default(), policy, Some(&gold), "swe-docker-it")
+        .run_episode(
+            &instance_id,
+            BenchmarkVariant::default(),
+            policy,
+            Some(&gold),
+            "swe-docker-it",
+        )
         .expect("run_episode");
 
     // run_episode now returns SubmitOutcome { outcome, trajectory_ref } (v2.2).
@@ -85,7 +94,8 @@ fn ensure_image_with_tar_loads_from_hosted_tar() {
 
     let runtime = runtime_from_env();
     let cli = runtime.cli();
-    let image = std::env::var("UENV_SWE_IT_TAR_IMAGE").unwrap_or_else(|_| "hello-world:latest".into());
+    let image =
+        std::env::var("UENV_SWE_IT_TAR_IMAGE").unwrap_or_else(|_| "hello-world:latest".into());
     let factory = ImageCacheFactory::with_policy(runtime, ImagePullPolicy::AllowPublic);
 
     // Ensure we have the image, then export it to a tar (the Hub "pre-store" step).
@@ -106,5 +116,8 @@ fn ensure_image_with_tar_loads_from_hosted_tar() {
     local_only
         .ensure_image_with_tar(&image, Some(&tar))
         .expect("load image from hosted tar");
-    assert!(local_only.image_present(&image), "image not present after docker load");
+    assert!(
+        local_only.image_present(&image),
+        "image not present after docker load"
+    );
 }

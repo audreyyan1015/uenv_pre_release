@@ -26,7 +26,10 @@ fn extract_fenced_block(text: &str, lang: &str) -> Option<String> {
     while let Some(start) = text[search_from..].find(&open) {
         let abs_start = search_from + start + open.len();
         let rest = &text[abs_start..];
-        if let Some(after_newline) = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n")) {
+        if let Some(after_newline) = rest
+            .strip_prefix('\n')
+            .or_else(|| rest.strip_prefix("\r\n"))
+        {
             if let Some(end) = after_newline.find("```") {
                 return Some(after_newline[..end].trim_end().to_string());
             }

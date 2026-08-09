@@ -27,6 +27,8 @@ pub mod episode_context;
 pub mod episode_coordinator;
 /// 根据请求选择 native worker 后端或 SWE agent 后端。
 pub mod execution_backend;
+/// 可视化观测聚合（Obs）：事件 ingest、ChainState、REST/SSE。
+pub mod obs;
 /// Server 运行状态 SQLite 持久化、迁移和恢复记录。
 pub mod persistence;
 /// 外部 RPC/HTTP 调用封装，service 层通过它访问 worker 和 gateway。
@@ -43,8 +45,6 @@ pub mod service;
 pub mod state;
 /// trajectory 上传、查询和存储服务。
 pub mod trajectory;
-/// 可视化观测聚合（Obs）：事件 ingest、ChainState、REST/SSE。
-pub mod obs;
 
 use std::sync::Arc;
 

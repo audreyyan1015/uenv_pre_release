@@ -9,9 +9,9 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
-use tonic::{Request, Response, Status};
 #[cfg(unix)]
 use tonic::transport::Server;
+use tonic::{Request, Response, Status};
 use uenv_math_env::score_action;
 use uenv_worker::proto::plugin::v1::plugin_service_server::PluginService;
 #[cfg(unix)]
@@ -79,9 +79,7 @@ impl PluginService for MathPlugin {
         s.question = config
             .question
             .filter(|q| !q.is_empty())
-            .unwrap_or_else(|| {
-                "If 3 books cost $12, what is the cost of 5 books?".to_string()
-            });
+            .unwrap_or_else(|| "If 3 books cost $12, what is the cost of 5 books?".to_string());
         s.dataset = config.dataset.unwrap_or_else(|| "gsm8k".to_string());
         s.answer = config
             .target

@@ -7,9 +7,7 @@ pub fn score_action(dataset: &str, action: &str, expected: &str) -> f64 {
         "gsm8k" => gsm8k::answers_match(action, expected),
         "pubmedqa" => pubmedqa::answers_match(action, expected),
         "scitab" => scitab::answers_match(action, expected),
-        "olymmath" | "olymmath-easy" | "olymmath-hard" => {
-            olymmath::answers_match(action, expected)
-        }
+        "olymmath" | "olymmath-easy" | "olymmath-hard" => olymmath::answers_match(action, expected),
         _ => action.trim() == expected.trim(),
     };
     if matched { 1.0 } else { 0.0 }

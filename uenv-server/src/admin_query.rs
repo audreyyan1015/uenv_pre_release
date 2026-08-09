@@ -2,8 +2,8 @@
 // 主要功能：构造 worker、active episode、Agent pool、pending/in-flight AgentJob 等 DTO。
 // 大致工作流：admin HTTP 或 gRPC admin 调用 AdminQueryService，服务读取内存状态并生成稳定的只读快照。
 
-use std::collections::HashMap;
 use crate::state::ServerState;
+use std::collections::HashMap;
 
 /// Admin 接口返回的 active episode 摘要。
 #[derive(Clone)]
@@ -22,6 +22,13 @@ pub struct WorkerDto {
     pub worker_id: String,
     pub endpoint: String,
     pub supported_env_types: Vec<String>,
+    pub platform_features: Vec<String>,
+    pub backend_kinds: Vec<String>,
+    pub trajectory_schemas: Vec<String>,
+    pub tool_schemas: Vec<String>,
+    pub package_states: Vec<crate::scheduler::traits::EnvPackageStateInfo>,
+    pub pool_summary: Vec<crate::scheduler::traits::WorkerPoolSummaryInfo>,
+    pub pool_slots: Vec<crate::scheduler::traits::WorkerPoolSlotInfo>,
     pub status: String,
     pub load: u32,
     pub capacity: u32,
@@ -130,6 +137,13 @@ impl<'a> AdminQueryService<'a> {
                     worker_id: w.worker_id,
                     endpoint: w.endpoint,
                     supported_env_types: w.supported_env_types,
+                    platform_features: w.platform_features,
+                    backend_kinds: w.backend_kinds,
+                    trajectory_schemas: w.trajectory_schemas,
+                    tool_schemas: w.tool_schemas,
+                    package_states: w.package_states,
+                    pool_summary: w.pool_summary,
+                    pool_slots: w.pool_slots,
                     status: if w.draining {
                         "draining"
                     } else if w.degraded {
@@ -258,6 +272,13 @@ mod tests {
             last_heartbeat_at: Some(Instant::now()),
             gateway_public_url: String::new(),
             synced_env_packages: Vec::new(),
+            platform_features: Vec::new(),
+            backend_kinds: Vec::new(),
+            trajectory_schemas: Vec::new(),
+            tool_schemas: Vec::new(),
+            package_states: Vec::new(),
+            pool_summary: Vec::new(),
+            pool_slots: Vec::new(),
         });
         state.active_episodes.insert(
             "ep-admin".to_string(),

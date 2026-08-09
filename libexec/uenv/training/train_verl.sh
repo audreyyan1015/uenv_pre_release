@@ -63,6 +63,12 @@ SWE 任务（catalog 和实例选择必须显式）：
   --print-effective-config   打印最终 Hydra 配置并退出，不启动训练
   --dry-run                  只准备并打印训练命令
 
+可选调度提示可通过 UENV_MAX_EPISODE_CONCURRENCY、
+UENV_MAX_IN_FLIGHT_BATCHES、UENV_TARGET_WORKER_SLOTS、
+UENV_POOL_WARMUP_TARGET、UENV_MAX_PARALLEL_PER_WORKER、
+UENV_AGENT_JOB_MAX_CONCURRENCY、UENV_RUNTIME_GATEWAY_SESSION_LIMIT 和
+UENV_REQUIRE_WARM_SLOT 传入；空值表示不发送。
+
 run-task 必填任务选项：
   --input FILE               Episode JSONL
   --env-type NAME            环境类型

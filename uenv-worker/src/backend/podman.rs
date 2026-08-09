@@ -9,7 +9,7 @@
 use std::process::Command;
 
 use crate::backend::{
-    BackendError, BackendHandle, BackendKind, SandboxSpec, SandboxProvisioner, SnapshotId,
+    BackendError, BackendHandle, BackendKind, SandboxProvisioner, SandboxSpec, SnapshotId,
 };
 use crate::swe::command_policy::CommandPolicy;
 
@@ -93,9 +93,10 @@ impl PodmanBackend {
 impl SandboxProvisioner for PodmanBackend {
     fn create(&self, spec: &SandboxSpec) -> Result<BackendHandle, BackendError> {
         let args = Self::build_run_args(spec);
-        let output = Command::new("podman").args(&args).output().map_err(|e| {
-            format!("failed to spawn podman: {e}")
-        })?;
+        let output = Command::new("podman")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("failed to spawn podman: {e}"))?;
         if !output.status.success() {
             return Err(format!(
                 "podman run failed: {}",
@@ -115,10 +116,7 @@ impl SandboxProvisioner for PodmanBackend {
     }
 
     fn destroy(&self, handle: &BackendHandle) -> Result<(), BackendError> {
-        let target = handle
-            .container_id
-            .as_deref()
-            .unwrap_or(handle.id.as_str());
+        let target = handle.container_id.as_deref().unwrap_or(handle.id.as_str());
         let output = Command::new("podman")
             .args(["rm", "-f", target])
             .output()
@@ -134,10 +132,7 @@ impl SandboxProvisioner for PodmanBackend {
     }
 
     fn snapshot(&self, handle: &BackendHandle) -> Result<SnapshotId, BackendError> {
-        let target = handle
-            .container_id
-            .as_deref()
-            .unwrap_or(handle.id.as_str());
+        let target = handle.container_id.as_deref().unwrap_or(handle.id.as_str());
         let image = snapshot_image_name(handle);
         let args = commit_args(target, &image);
         let output = Command::new("podman")
@@ -182,7 +177,13 @@ pub fn snapshot_image_name(handle: &BackendHandle) -> String {
     let id: String = handle
         .id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("uenv-snap-{id}-{}", restore_suffix())
 }
@@ -237,7 +238,10 @@ mod tests {
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--cap-drop=ALL".to_string()));
         assert!(args.contains(&"--network=none".to_string()));
-        assert!(args.iter().any(|a| a.contains("seccomp=") && a.contains("restricted.json")));
+        assert!(
+            args.iter()
+                .any(|a| a.contains("seccomp=") && a.contains("restricted.json"))
+        );
         assert!(args.contains(&"no-new-privileges".to_string()));
         // bash -lc 包装常驻入口
         assert!(args.contains(&"-lc".to_string()));
@@ -248,7 +252,10 @@ mod tests {
     fn full_shell_allows_bridge_network() {
         let args = PodmanBackend::build_run_args(&spec(CommandPolicy::FullShell));
         assert!(args.contains(&"--network=bridge".to_string()));
-        assert!(args.iter().any(|a| a.contains("seccomp=") && a.contains("full.json")));
+        assert!(
+            args.iter()
+                .any(|a| a.contains("seccomp=") && a.contains("full.json"))
+        );
         assert!(!args.contains(&"--cap-drop=ALL".to_string()));
         assert!(!args.contains(&"--network=none".to_string()));
     }
@@ -293,7 +300,15 @@ mod tests {
         );
         assert_eq!(
             restore_run_args("restored-1", "uenv-snap-swe-1"),
-            vec!["run", "-d", "--name", "restored-1", "uenv-snap-swe-1", "sleep", "infinity"]
+            vec![
+                "run",
+                "-d",
+                "--name",
+                "restored-1",
+                "uenv-snap-swe-1",
+                "sleep",
+                "infinity"
+            ]
         );
         assert!(snapshot_image_name(&handle).starts_with("uenv-snap-swe-1-"));
     }

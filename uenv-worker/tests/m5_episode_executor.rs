@@ -4,12 +4,12 @@ use std::fs;
 use std::path::Path;
 
 use prost::Message;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use uenv_worker::episode::executor::{EpisodeExecutor, ExecuteContext};
 use uenv_worker::plugin::host::PluginHost;
 use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
 use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult, ModelEndpoint};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn m5_single_round_qa_matches_expected_reward_and_status() {
@@ -44,7 +44,10 @@ async fn m5_single_round_qa_matches_expected_reward_and_status() {
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept mock llm");
         let mut buffer = vec![0; 8192];
-        let _ = stream.read(&mut buffer).await.expect("read mock llm request");
+        let _ = stream
+            .read(&mut buffer)
+            .await
+            .expect("read mock llm request");
         let body = b"{\"choices\":[{\"message\":{\"content\":\"20\"},\"finish_reason\":\"stop\"}]}";
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -58,7 +61,8 @@ async fn m5_single_round_qa_matches_expected_reward_and_status() {
     });
 
     let expected_bytes = fs::read(expected_path).expect("read expected fixture");
-    let expected = EpisodeResult::decode(expected_bytes.as_slice()).expect("decode expected result");
+    let expected =
+        EpisodeResult::decode(expected_bytes.as_slice()).expect("decode expected result");
 
     let host = PluginHost::load_from_dir(plugin_dir).expect("load plugin host");
     let pool = WarmupPool::new(

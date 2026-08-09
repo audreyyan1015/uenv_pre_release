@@ -64,7 +64,9 @@ impl UploadConfig {
         self.artifact_dir.join("bodies").join(format!("{id}.json"))
     }
     fn index_path(&self, id: &str) -> PathBuf {
-        self.artifact_dir.join("index/by-id").join(format!("{id}.json"))
+        self.artifact_dir
+            .join("index/by-id")
+            .join(format!("{id}.json"))
     }
     fn pending_dir(&self) -> PathBuf {
         self.artifact_dir.join("spool").join("pending")
@@ -101,7 +103,10 @@ impl TrajectoryUploader {
             .build()
             .map_err(|e| tracing::error!(error = %e, "trajectory_uploader_client_build_failed"))
             .ok()?;
-        let uploader = Self { cfg: Arc::new(cfg), client };
+        let uploader = Self {
+            cfg: Arc::new(cfg),
+            client,
+        };
         uploader.spawn_drainer();
         tracing::info!(
             endpoint = %uploader.cfg.endpoint,
@@ -118,7 +123,8 @@ impl TrajectoryUploader {
     /// 登记一条待上传轨迹：只写 marker（同步、极快），正文复用 bodies/{id}.json。
     pub fn enqueue(&self, trajectory_id: &str) {
         let marker = self.cfg.pending_dir().join(format!("{trajectory_id}.json"));
-        let payload = serde_json::to_vec(&SpoolMarker::default()).unwrap_or_else(|_| b"{}".to_vec());
+        let payload =
+            serde_json::to_vec(&SpoolMarker::default()).unwrap_or_else(|_| b"{}".to_vec());
         if let Err(e) = std::fs::write(&marker, payload) {
             tracing::warn!(trajectory_id, error = %e, "trajectory_spool_write_failed");
         }
@@ -128,11 +134,13 @@ impl TrajectoryUploader {
         let me = self.clone();
         std::thread::Builder::new()
             .name("trj-uploader".into())
-            .spawn(move || loop {
-                if let Err(e) = me.drain_once() {
-                    tracing::debug!(error = %e, "trajectory_drain_error");
+            .spawn(move || {
+                loop {
+                    if let Err(e) = me.drain_once() {
+                        tracing::debug!(error = %e, "trajectory_drain_error");
+                    }
+                    std::thread::sleep(UPLOAD_POLL);
                 }
-                std::thread::sleep(UPLOAD_POLL);
             })
             .ok();
     }
@@ -150,13 +158,19 @@ impl TrajectoryUploader {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+            else {
                 continue;
             };
             match self.try_upload_one(&id, &path) {
                 Ok(true) => acked += 1,
                 Ok(false) => {}
-                Err(e) => tracing::debug!(trajectory_id = %id, error = %e, "trajectory_upload_attempt_err"),
+                Err(e) => {
+                    tracing::debug!(trajectory_id = %id, error = %e, "trajectory_upload_attempt_err")
+                }
             }
         }
         Ok(acked)
@@ -190,12 +204,16 @@ impl TrajectoryUploader {
                 marker.last_error = e.to_string();
                 if marker.attempts >= UPLOAD_MAX_RETRIES {
                     let failed = self.cfg.failed_dir().join(format!("{id}.json"));
-                    let _ = std::fs::write(&failed, serde_json::to_vec(&marker).unwrap_or_default());
+                    let _ =
+                        std::fs::write(&failed, serde_json::to_vec(&marker).unwrap_or_default());
                     let _ = std::fs::remove_file(marker_path);
                     tracing::warn!(trajectory_id = %id, attempts = marker.attempts, error = %e,
                         "trajectory_upload_failed_giveup");
                 } else {
-                    let _ = std::fs::write(marker_path, serde_json::to_vec(&marker).unwrap_or_default());
+                    let _ = std::fs::write(
+                        marker_path,
+                        serde_json::to_vec(&marker).unwrap_or_default(),
+                    );
                 }
                 Ok(false)
             }
@@ -231,8 +249,8 @@ impl TrajectoryUploader {
 
 /// gzip 压缩。
 fn gzip(data: &[u8]) -> Result<Vec<u8>, DynErr> {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());
     enc.write_all(data)?;

@@ -137,9 +137,9 @@ async fn check_health(listen: &str) -> Result<(), Box<dyn std::error::Error>> {
 async fn dispatch_swe(
     args: uenv_worker::cli::SweDispatchArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use uenv_worker::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
-    use uenv_worker::proto::worker::v1::DispatchEpisodeRequest;
     use uenv_worker::proto::v1::EpisodeRequest;
+    use uenv_worker::proto::worker::v1::DispatchEpisodeRequest;
+    use uenv_worker::proto::worker::v1::worker_grpc_service_client::WorkerGrpcServiceClient;
 
     let payload = serde_json::json!({
         "instance_id": args.instance,
@@ -157,10 +157,15 @@ async fn dispatch_swe(
     };
 
     let url = format!("http://{}", args.endpoint);
-    println!("dispatching env_type=swe instance={} gold={} -> {url}", args.instance, args.gold);
+    println!(
+        "dispatching env_type=swe instance={} gold={} -> {url}",
+        args.instance, args.gold
+    );
     let mut client = WorkerGrpcServiceClient::connect(url).await?;
     let mut stream = client
-        .dispatch_episode(DispatchEpisodeRequest { episode: Some(episode) })
+        .dispatch_episode(DispatchEpisodeRequest {
+            episode: Some(episode),
+        })
         .await?
         .into_inner();
 
@@ -189,9 +194,9 @@ async fn dispatch_swe(
 async fn run_swe(
     args: uenv_worker::cli::SweRunArgs,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use uenv_worker::swe::{InstanceStore, RunOptions};
     use uenv_worker::swe::command_policy::CommandPolicyConfig;
     use uenv_worker::swe::harness::ContainerRuntime;
+    use uenv_worker::swe::{InstanceStore, RunOptions};
 
     let store = InstanceStore::from_json_file(&args.instances_file)?;
     let Some(instance_id) = args.instance.clone() else {
@@ -201,9 +206,12 @@ async fn run_swe(
         }
         return Ok(());
     };
-    let instance = store
-        .get(&instance_id)
-        .ok_or_else(|| format!("instance_id `{instance_id}` not found in {}", args.instances_file))?;
+    let instance = store.get(&instance_id).ok_or_else(|| {
+        format!(
+            "instance_id `{instance_id}` not found in {}",
+            args.instances_file
+        )
+    })?;
     let runtime = ContainerRuntime::parse(&args.runtime)
         .ok_or_else(|| format!("invalid runtime `{}` (docker|podman)", args.runtime))?;
 
@@ -213,7 +221,8 @@ async fn run_swe(
         keep_container: args.keep,
         // SWE-bench 对标默认 FullShell（bridge network，对齐官方 harness 与 gRPC 路径）；
         // RestrictedShell 为 RL/runtime 默认，不用于 harness 评测。
-        policy: CommandPolicyConfig::default().with_mode(uenv_worker::swe::CommandPolicy::FullShell),
+        policy: CommandPolicyConfig::default()
+            .with_mode(uenv_worker::swe::CommandPolicy::FullShell),
     };
 
     // 容器编排为阻塞调用，放到 blocking 线程。

@@ -22,7 +22,7 @@ impl ProcessBackend {
             .unwrap_or_default()
             .eq_ignore_ascii_case("sh")
         {
-            let mut c = Command::new("bash");
+            let mut c = Command::new("/bin/bash");
             c.arg(entry);
             c
         } else {
@@ -40,7 +40,8 @@ impl ProcessBackend {
             // 最后一道保险：Child 句柄被 drop 时由 tokio 向子进程发送 kill，
             // 避免任何遗漏的关闭路径导致插件进程泄漏成孤儿。
             .kill_on_drop(true)
-            .spawn()?;
+            .spawn()
+            .map_err(|err| format!("failed to spawn plugin entry {}: {err}", entry.display()))?;
         Ok(child)
     }
 }

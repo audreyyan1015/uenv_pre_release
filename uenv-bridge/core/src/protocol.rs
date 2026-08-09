@@ -78,6 +78,8 @@ pub struct ExecuteBatchRequest {
     pub batch_id: String,
     /// 批次中的所有样本，每个样本对应一次模型 rollout。
     pub samples: Vec<SampleEnvelope>,
+    /// 本次 batch/run 的调度意图；实际硬上限由 Server/Worker 再解释。
+    pub scheduling_policy: Option<SchedulingPolicy>,
 }
 
 /// 一次批量执行的响应，包含每个样本对应的执行结果。
@@ -89,6 +91,18 @@ pub struct ExecuteBatchResponse {
     pub batch_id: String,
     /// 每个样本的执行结果，顺序与输入的 samples 保持一致。
     pub results: Vec<SampleResult>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SchedulingPolicy {
+    pub max_episode_concurrency: u32,
+    pub max_in_flight_batches: u32,
+    pub target_worker_slots: u32,
+    pub max_parallel_per_worker: u32,
+    pub require_warm_slot: bool,
+    pub pool_warmup_target: u32,
+    pub agent_job_max_concurrency: u32,
+    pub runtime_gateway_session_limit: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -184,7 +198,23 @@ impl TryFrom<pb::ExecuteBatchRequest> for ExecuteBatchRequest {
             request_id: value.request_id,
             batch_id: value.batch_id,
             samples,
+            scheduling_policy: value.scheduling_policy.map(Into::into),
         })
+    }
+}
+
+impl From<pb::SchedulingPolicy> for SchedulingPolicy {
+    fn from(value: pb::SchedulingPolicy) -> Self {
+        Self {
+            max_episode_concurrency: value.max_episode_concurrency,
+            max_in_flight_batches: value.max_in_flight_batches,
+            target_worker_slots: value.target_worker_slots,
+            max_parallel_per_worker: value.max_parallel_per_worker,
+            require_warm_slot: value.require_warm_slot,
+            pool_warmup_target: value.pool_warmup_target,
+            agent_job_max_concurrency: value.agent_job_max_concurrency,
+            runtime_gateway_session_limit: value.runtime_gateway_session_limit,
+        }
     }
 }
 

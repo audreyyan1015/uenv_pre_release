@@ -102,7 +102,12 @@ impl ImageCacheFactory {
             }
         }
         let pull_enabled = std::env::var("UENV_SWE_IMAGE_PULL")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false);
         Self::new(runtime, pull_enabled)
     }
@@ -245,7 +250,11 @@ impl ImageCacheFactory {
 
 /// `image inspect <image>` 的 argv（纯函数，便于单测）。
 pub fn inspect_args(image: &str) -> Vec<String> {
-    vec!["image".to_string(), "inspect".to_string(), image.to_string()]
+    vec![
+        "image".to_string(),
+        "inspect".to_string(),
+        image.to_string(),
+    ]
 }
 
 /// `pull <image>` 的 argv。
@@ -351,14 +360,24 @@ pub fn digest_matches(local: &str, expected: &str) -> bool {
 pub fn warm_tag(instance_id: &str) -> String {
     let id: String = instance_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("cache/swe-{id}:warm")
 }
 
 /// provision 时优先选用 warm tag（M0-3 / M4-3）：本地存在 `cache/swe-<id>:warm` 则用之，
 /// 否则回退 base 镜像（已 ensure 就绪）。
-pub fn resolve_provision_image(factory: &ImageCacheFactory, base_image: &str, instance_id: &str) -> String {
+pub fn resolve_provision_image(
+    factory: &ImageCacheFactory,
+    base_image: &str,
+    instance_id: &str,
+) -> String {
     let tag = warm_tag(instance_id);
     if factory.image_present(&tag) {
         tag
@@ -395,13 +414,19 @@ mod tests {
         // "pre-cache / sync EnvPackage" error rather than attempting a pull.
         let f =
             ImageCacheFactory::with_policy(ContainerRuntime::Docker, ImagePullPolicy::LocalOnly);
-        let err = f.ensure_image_with_tar("repo/x:y", None).unwrap_err().to_string();
+        let err = f
+            .ensure_image_with_tar("repo/x:y", None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not present locally"), "unexpected: {err}");
     }
 
     #[test]
     fn warm_tag_sanitizes_double_underscore() {
-        assert_eq!(warm_tag("astropy__astropy-7166"), "cache/swe-astropy--astropy-7166:warm");
+        assert_eq!(
+            warm_tag("astropy__astropy-7166"),
+            "cache/swe-astropy--astropy-7166:warm"
+        );
         assert_eq!(
             warm_tag("swebench/sweb.eval.x86_64.x:latest"),
             "cache/swe-swebench-sweb.eval.x86-64.x-latest:warm"
@@ -428,22 +453,40 @@ mod tests {
 
     #[test]
     fn pull_policy_parse_and_allows() {
-        assert_eq!(ImagePullPolicy::parse("local_only"), Some(ImagePullPolicy::LocalOnly));
-        assert_eq!(ImagePullPolicy::parse("MIRROR"), Some(ImagePullPolicy::Mirror));
-        assert_eq!(ImagePullPolicy::parse("allow_public"), Some(ImagePullPolicy::AllowPublic));
+        assert_eq!(
+            ImagePullPolicy::parse("local_only"),
+            Some(ImagePullPolicy::LocalOnly)
+        );
+        assert_eq!(
+            ImagePullPolicy::parse("MIRROR"),
+            Some(ImagePullPolicy::Mirror)
+        );
+        assert_eq!(
+            ImagePullPolicy::parse("allow_public"),
+            Some(ImagePullPolicy::AllowPublic)
+        );
         assert_eq!(ImagePullPolicy::parse("nonsense"), None);
         assert!(!ImagePullPolicy::LocalOnly.allows_pull());
         assert!(ImagePullPolicy::Mirror.allows_pull());
         assert!(ImagePullPolicy::AllowPublic.allows_pull());
         // local_only factory must refuse to pull.
-        assert!(!ImageCacheFactory::with_policy(ContainerRuntime::Docker, ImagePullPolicy::LocalOnly).pull_enabled());
+        assert!(
+            !ImageCacheFactory::with_policy(ContainerRuntime::Docker, ImagePullPolicy::LocalOnly)
+                .pull_enabled()
+        );
     }
 
     #[test]
     fn digest_args_and_matching() {
         assert_eq!(
             digest_args("a:b"),
-            vec!["image", "inspect", "--format", "{{index .RepoDigests 0}}", "a:b"]
+            vec![
+                "image",
+                "inspect",
+                "--format",
+                "{{index .RepoDigests 0}}",
+                "a:b"
+            ]
         );
         // bare sha vs repo@sha
         assert!(digest_matches("repo/x@sha256:abc", "sha256:abc"));

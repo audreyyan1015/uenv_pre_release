@@ -34,9 +34,14 @@ secrets/*
 !/scripts/deploy-pro-python-openhands-7143.sh
 !/scripts/pull-pro-image-7143.sh
 !/scripts/hub-stage-image-package.sh
+!/scripts/publish_swesmith_hub_package.py
+!/scripts/build_swesmith_envpackage.py
 !/scripts/deploy-openhands-20877.sh
 !/scripts/run-openhands-pro-20877.sh
 !/scripts/restart-worker-gateway-28097-7143.sh
+!/scripts/test-hub-swesmith-e2e.sh
+!/scripts/verify-hub-console-e2e.sh
+!/scripts/hub-console-contrast-audit.mjs
 !/scripts/deploy-adapter-core-75157.sh
 !/scripts/deploy-trajectory-chain.sh
 !/scripts/verify-openhands-trajectory-e2e-20877.sh
@@ -107,3 +112,9 @@ server-state/
 /logs/
 uenv-bridge/build/
 *.egg-info/
+
+# Playwright CLI local page snapshots
+.playwright-cli/
+
+# 本地联调截图/导出产物（非仓库产物）
+/output/

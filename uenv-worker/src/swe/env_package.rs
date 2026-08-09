@@ -241,10 +241,16 @@ mod tests {
         assert_eq!(pkg.version, "0.1.0");
         assert_eq!(pkg.variant.as_deref(), Some("pro"));
         assert_eq!(pkg.image_pull_policy, Some(ImagePullPolicy::LocalOnly));
-        assert_eq!(pkg.images.get("swe-pro__example-go-1").unwrap().digest, "sha256:abc");
+        assert_eq!(
+            pkg.images.get("swe-pro__example-go-1").unwrap().digest,
+            "sha256:abc"
+        );
 
         // Hosted image tarball resolves by instance id and by image ref.
-        assert!(pkg.image_tar_for_instance("swe-pro__example-go-1").is_some());
+        assert!(
+            pkg.image_tar_for_instance("swe-pro__example-go-1")
+                .is_some()
+        );
         assert!(pkg.image_tar_for_ref("registry.example.com/x:y").is_some());
         assert_eq!(pkg.image_tars().len(), 1);
         assert!(pkg.image_tar_for_instance("missing").is_none());

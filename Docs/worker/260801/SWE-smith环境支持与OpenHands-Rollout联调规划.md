@@ -1,9 +1,9 @@
 # SWE-smith 环境支持与 OpenHands Rollout 联调规划
 
-> 日期：2026-08-01  
-> 状态：规划（Phase 1–3 已在实机验证，见 [联调记录](./SWE-smith-7143联调记录.md)、[变更与联调报告](./SWE-smith变更与联调报告.md)；Hub 待续）  
-> 范围：Worker 侧 SWE-smith 环境接入 → 多机功能服务全链路联调 → Rollout 训练可用性验证  
-> 实机拓扑：[secrets/README.md](../../../secrets/README.md)  
+> 日期：2026-08-01
+> 状态：Phase 1–3 已在实机验证；Hub EnvPackage / Episode Stack 注册及隔离联调已补齐，生产部署与全量 image tar 仍待运维
+> 范围：Worker 侧 SWE-smith 环境接入 → 多机功能服务全链路联调 → Rollout 训练可用性验证
+> 实机拓扑：[secrets/README.md](../../../secrets/README.md)
 > 前置参考：[SWE-bench Pro + OpenHands 集成方案](../../older/260627-swe-openhands-integration-plan.md)、[SWE-bench-Pro UEnv 联调依赖说明](../260713/SWE-bench-Pro-UEnv联调依赖说明.md)、[五类 Benchmark Worker 支持现状](../260709/五类Benchmark-Worker支持现状与跨层调整.md)
 
 ---
@@ -27,7 +27,7 @@ UEnv 侧已具备 `env_type=swe` + OpenHands Agent 池（208.77）+ Worker Runti
 
 ### 0.3 非目标（本规划不做）
 
-- Hub 正式注册 `swe-bench-smith` EnvPackage、全量 `image_tar` 入库与 `env sync` 生产化（**Phase Hub，后续交接**）。
+- Hub 已正式注册 `swe-bench-smith` EnvPackage 并验证 `env sync`；全量 `image_tar` 入库与生产部署仍属运维后续。
 - 一次性导入全部 ~52k instance / 250+ repo 镜像。
 - 替换现有 SWE-bench-Pro 评测主路径。
 - 在 Worker 内重写 SWE-smith 官方 harness；优先复用 / wrap `swesmith.harness.eval` 语义。
@@ -45,7 +45,7 @@ Phase 2  多机功能服务全链路联调（Server / Worker / OpenHands / Adapt
 Phase 3  Rollout 产出与训练可用性验证（7142 训练侧消费或离线校验）
     │
     ▼
-Phase Hub（后续）  环境注册到 Hub → Hub 模块适配拉取 / 分发（本规划只定义接口）
+Phase Hub（已补齐注册） 环境注册到 Hub → Hub 模块拉取 / 分发隔离联调
 ```
 
 **原则**：初期以 Worker 本机制品打通链路与训练验证为先；Hub 注册与拉取适配不阻塞 Phase 1–3。
@@ -75,9 +75,9 @@ Phase Hub（后续）  环境注册到 Hub → Hub 模块适配拉取 / 分发�
 
 **推荐启动顺序（目标架构，与 secrets §1.2 SWE+Agent 一致）**：
 
-1. Server `8.130.75.157:8088` 就绪  
-2. Worker 7143 Register（含 `gateway_public_url`，加载 Smith catalog）  
-3. 208.77 Agent Register（`OPENHANDS_AGENT_POLL=1`）  
+1. Server `8.130.75.157:8088` 就绪
+2. Worker 7143 Register（含 `gateway_public_url`，加载 Smith catalog）
+3. 208.77 Agent Register（`OPENHANDS_AGENT_POLL=1`）
 4. Adapter / 脚本 `SubmitEpisode(swe, execution_mode=agent, benchmark_variant=smith)`
 
 旁路调试仍可用 208.77 runner `:8888` + Gateway 隧道，不经 AgentJob。
@@ -184,9 +184,9 @@ runtime_gateway:
 
 ### 3.4 Phase 1 验收
 
-- [ ] `BenchmarkVariant::parse("smith")` 单测通过  
-- [ ] 本地 catalog 加载后 Gateway `POST /runtime/v1/sessions` 成功  
-- [ ] gold patch（若有）或最小 write → `submit` → `resolved` 可判定  
+- [ ] `BenchmarkVariant::parse("smith")` 单测通过
+- [ ] 本地 catalog 加载后 Gateway `POST /runtime/v1/sessions` 成功
+- [ ] gold patch（若有）或最小 write → `submit` → `resolved` 可判定
 - [ ] `TrajectoryBundle` 落盘且 `benchmark_variant=smith`
 
 ---
@@ -281,7 +281,7 @@ Worker TrajectoryStore
 
 ---
 
-## 6. Phase Hub — 后续交接（不在本期实施）
+## 6. Phase Hub — 原后续交接（现已补齐注册与隔离联调）
 
 > 由 Hub 模块负责人适配；Worker / 联调侧只冻结契约。
 
@@ -297,15 +297,15 @@ Worker TrajectoryStore
 
 ### 6.2 交接清单（给 Hub）
 
-1. Phase 1 本地目录中已验证的 catalog / overlay / 镜像命名规则。  
-2. Worker 已支持的 `benchmark_variant` 别名表。  
-3. 镜像体积与拉取策略（`local_only` vs Hub tar）。  
-4. 与 Pro 包的隔离要求（禁止混用 catalog / grader）。  
+1. Phase 1 本地目录中已验证的 catalog / overlay / 镜像命名规则。
+2. Worker 已支持的 `benchmark_variant` 别名表。
+3. 镜像体积与拉取策略（`local_only` vs Hub tar）。
+4. 与 Pro 包的隔离要求（禁止混用 catalog / grader）。
 5. 联调通过的最小子集 instance 列表（作为 Hub seed 候选）。
 
 ### 6.3 Worker 侧预留
 
-- 继续通过既有 `EnvPackageDir` / `hub` pull 路径消费未来 Hub 包。  
+- 继续通过既有 `EnvPackageDir` / `hub` pull 路径消费未来 Hub 包。
 - Phase 1–3 使用的本地路径可在 Hub 就绪后改为 `env sync` 目标目录，避免二次改调度键。
 
 ---
@@ -386,9 +386,9 @@ Worker TrajectoryStore
 
 ## 10. 参考链接
 
-- SWE-smith 仓库：https://github.com/SWE-bench/SWE-smith  
-- 训练指南：https://swesmith.com/guides/train_swe_agent/  
-- 数据集：https://huggingface.co/datasets/SWE-bench/SWE-smith  
-- 环境镜像资产：https://github.com/SWE-bench/SWE-smith-envs（`jyangballin/swesmith.x86_64.*`）  
-- 本仓实机说明：`secrets/README.md`  
+- SWE-smith 仓库：https://github.com/SWE-bench/SWE-smith
+- 训练指南：https://swesmith.com/guides/train_swe_agent/
+- 数据集：https://huggingface.co/datasets/SWE-bench/SWE-smith
+- 环境镜像资产：https://github.com/SWE-bench/SWE-smith-envs（`jyangballin/swesmith.x86_64.*`）
+- 本仓实机说明：`secrets/README.md`
 - 既有 Pro+OpenHands：`Docs/older/260627-swe-openhands-integration-plan.md`

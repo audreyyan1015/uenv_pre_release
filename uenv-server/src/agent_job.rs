@@ -16,8 +16,8 @@
 //   - in-flight 表用 job_id 关联，complete 时取出 Sender 发送。
 
 use std::collections::VecDeque;
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
@@ -222,11 +222,7 @@ impl AgentJobQueue {
             replacement.run_id = format!("{}:reclaim:{}", previous_run_id, uuid::Uuid::new_v4());
             let persisted = match self.persistence.get() {
                 Some(store) => match store
-                    .requeue_agent_job(
-                        replacement.clone(),
-                        &previous_agent_id,
-                        &previous_run_id,
-                    )
+                    .requeue_agent_job(replacement.clone(), &previous_agent_id, &previous_run_id)
                     .await
                 {
                     Ok(requeued) => requeued,
@@ -250,7 +246,8 @@ impl AgentJobQueue {
                 .in_flight
                 .get_mut(&job_id)
                 .map(|mut inflight| {
-                    if inflight.agent_id != previous_agent_id || inflight.run_id != previous_run_id {
+                    if inflight.agent_id != previous_agent_id || inflight.run_id != previous_run_id
+                    {
                         return false;
                     }
                     inflight.agent_id.clear();

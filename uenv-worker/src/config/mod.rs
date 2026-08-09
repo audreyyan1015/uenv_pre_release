@@ -74,7 +74,11 @@ impl SweSection {
     /// 解析全部 EnvPackage 目录：`env_package_dir` 在前，随后 `env_package_dirs`，去重保序。
     pub fn all_env_package_dirs(&self) -> Vec<String> {
         let mut dirs = Vec::new();
-        if let Some(d) = self.env_package_dir.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(d) = self
+            .env_package_dir
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
             dirs.push(d.clone());
         }
         for d in &self.env_package_dirs {
@@ -296,14 +300,16 @@ pub struct CliOverrides {
 }
 
 impl WorkerConfig {
-    pub fn load(overrides: &CliOverrides) -> Result<LoadedWorkerConfig, Box<dyn std::error::Error>> {
+    pub fn load(
+        overrides: &CliOverrides,
+    ) -> Result<LoadedWorkerConfig, Box<dyn std::error::Error>> {
         let mut cfg = if let Some(p) = resolve_config_path(overrides.config.as_deref()) {
             load_from_file(&p)?
         } else {
             Self::default()
         };
-        let llm_env_path = std::env::var("UENV_WORKER_LLM_ENV")
-            .unwrap_or_else(|_| cfg.llm.env_file.clone());
+        let llm_env_path =
+            std::env::var("UENV_WORKER_LLM_ENV").unwrap_or_else(|_| cfg.llm.env_file.clone());
         load_env_file_if_exists(&llm_env_path)?;
         cfg.apply_env();
         cfg.resolve_hub_token()?;
@@ -481,7 +487,8 @@ impl WorkerConfig {
             self.runtime_gateway.enabled = true;
         }
         if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_ENABLED") {
-            self.runtime_gateway.enabled = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+            self.runtime_gateway.enabled =
+                matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
         }
         if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_CAPACITY") {
             if let Ok(p) = v.parse::<u32>() {
@@ -514,7 +521,8 @@ impl WorkerConfig {
             }
         }
         if let Ok(v) = std::env::var("UENV_SWE_WARM_TAG") {
-            self.swe.warm_tag = matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            self.swe.warm_tag =
+                matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
         }
         if let Ok(v) = std::env::var("UENV_SWE_SECCOMP_DIR") {
             if !v.trim().is_empty() {
@@ -697,7 +705,10 @@ trajectory_upload:
   endpoint: "http://10.0.0.5:8077"
 "#;
         let cfg: WorkerConfig = serde_yaml::from_str(yaml).expect("parse yaml");
-        assert_eq!(cfg.trajectory_upload.endpoint.as_deref(), Some("http://10.0.0.5:8077"));
+        assert_eq!(
+            cfg.trajectory_upload.endpoint.as_deref(),
+            Some("http://10.0.0.5:8077")
+        );
         assert!(cfg.trajectory_upload.token.is_none());
     }
 

@@ -36,7 +36,19 @@ Common environment overrides:
   UENV_AGENT_LOOP_BATCH         Batch episodes before Python -> Rust core RPC. Default: 1
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
   UENV_AGENT_LOOP_PARALLEL_MODE Adapter metadata parallel mode. Default: sync
+  UENV_EXPECTED_WORKER_PARALLELISM
+                                  Expected UEnv Worker execution slots for observability only. Default: empty
+  UENV_MAX_EPISODE_CONCURRENCY  Run/batch episode concurrency hint sent to AdapterCore. Default: empty
+  UENV_MAX_IN_FLIGHT_BATCHES    Run-level in-flight batch hint sent to AdapterCore. Default: empty
+  UENV_TARGET_WORKER_SLOTS      Desired Worker slots for this run/env. Default: empty
+  UENV_POOL_WARMUP_TARGET       Desired Worker warm pool ready slots. Default: empty
+  UENV_MAX_PARALLEL_PER_WORKER  Desired per-Worker episode limit for this run/env. Default: empty
+  UENV_AGENT_JOB_MAX_CONCURRENCY Desired Agent job concurrency for this run/env. Default: empty
+  UENV_RUNTIME_GATEWAY_SESSION_LIMIT Desired runtime gateway session limit. Default: empty
+  UENV_REQUIRE_WARM_SLOT        Require pre-warmed slot hint. Default: false
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
+  UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES
+                                  Python Adapter <-> Rust AdapterCore gRPC max message bytes. Default: 16777216
   UENV_EPISODE_MAX_STEPS_OVERRIDE Runtime max_steps/max_iterations override. Default: empty
   TRAINER_LOGGER                VeRL logger backends. Use "['console','wandb']" to enable wandb. Default: "['console']"
   TRAINER_PROJECT_NAME          VeRL/wandb project name. Default: uenv_bridge_layer4
@@ -184,7 +196,17 @@ UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
 UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
 UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
 UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
+UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM:-}
+UENV_MAX_EPISODE_CONCURRENCY=${UENV_MAX_EPISODE_CONCURRENCY:-}
+UENV_MAX_IN_FLIGHT_BATCHES=${UENV_MAX_IN_FLIGHT_BATCHES:-}
+UENV_TARGET_WORKER_SLOTS=${UENV_TARGET_WORKER_SLOTS:-}
+UENV_POOL_WARMUP_TARGET=${UENV_POOL_WARMUP_TARGET:-}
+UENV_MAX_PARALLEL_PER_WORKER=${UENV_MAX_PARALLEL_PER_WORKER:-}
+UENV_AGENT_JOB_MAX_CONCURRENCY=${UENV_AGENT_JOB_MAX_CONCURRENCY:-}
+UENV_RUNTIME_GATEWAY_SESSION_LIMIT=${UENV_RUNTIME_GATEWAY_SESSION_LIMIT:-}
+UENV_REQUIRE_WARM_SLOT=${UENV_REQUIRE_WARM_SLOT:-false}
 UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-3600}
+UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES=${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES:-16777216}
 UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE:-}
 UENV_OBS_URL=${UENV_OBS_URL:-}
 UENV_OBS_TOKEN=${UENV_OBS_TOKEN:-}
@@ -254,6 +276,12 @@ run_verl_training() {
   fi
   echo "AgentLoop request records: ${SERVICE_DIR}/agent-loop-requests.jsonl"
   echo "AgentLoop result records: ${SERVICE_DIR}/agent-loop-results.jsonl"
+  if [ -n "${UENV_EXPECTED_WORKER_PARALLELISM}" ]; then
+    echo "Expected UEnv worker parallelism: ${UENV_EXPECTED_WORKER_PARALLELISM}"
+  fi
+  if [ -n "${UENV_MAX_EPISODE_CONCURRENCY}" ]; then
+    echo "UEnv max episode concurrency: ${UENV_MAX_EPISODE_CONCURRENCY}"
+  fi
   if [ -n "${UENV_OBS_URL}" ]; then
     echo "Frontend run: ${UENV_OBS_URL%/obs}/?run=${UENV_TRAINING_RUN_ID}"
   fi
@@ -294,6 +322,15 @@ export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
 export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
 export UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS}
 export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE}
+export UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM}
+export UENV_MAX_EPISODE_CONCURRENCY=${UENV_MAX_EPISODE_CONCURRENCY}
+export UENV_MAX_IN_FLIGHT_BATCHES=${UENV_MAX_IN_FLIGHT_BATCHES}
+export UENV_TARGET_WORKER_SLOTS=${UENV_TARGET_WORKER_SLOTS}
+export UENV_POOL_WARMUP_TARGET=${UENV_POOL_WARMUP_TARGET}
+export UENV_MAX_PARALLEL_PER_WORKER=${UENV_MAX_PARALLEL_PER_WORKER}
+export UENV_AGENT_JOB_MAX_CONCURRENCY=${UENV_AGENT_JOB_MAX_CONCURRENCY}
+export UENV_RUNTIME_GATEWAY_SESSION_LIMIT=${UENV_RUNTIME_GATEWAY_SESSION_LIMIT}
+export UENV_REQUIRE_WARM_SLOT=${UENV_REQUIRE_WARM_SLOT}
 export UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS}
 export UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE}
 export UENV_OBS_URL=\"${UENV_OBS_URL}\"
@@ -316,6 +353,7 @@ export UENV_ADAPTER_CORE_AUTO_START=0
 export UENV_ADAPTER_CORE_BINARY=/uenv/uenv-bridge/core/target/debug/uenv-adapter-core
 export UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS=60
 export UENV_ADAPTER_CORE_BACKEND=server
+export UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES=${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES}
 export UENV_AGENT_LOOP_REQUEST_RECORD_PATH=\"${AGENT_LOOP_REQUEST_RECORD_PATH}\"
 export UENV_AGENT_LOOP_RESULT_RECORD_PATH=\"${AGENT_LOOP_RESULT_RECORD_PATH}\"
 python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
@@ -362,7 +400,7 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.enable_chunked_prefill=True \\
   actor_rollout_ref.rollout.free_cache_engine=${ROLLOUT_FREE_CACHE_ENGINE} \\
   +actor_rollout_ref.rollout.enable_sleep_mode=${ROLLOUT_ENABLE_SLEEP_MODE} \\
-  actor_rollout_ref.rollout.max_num_seqs=4 \\
+  actor_rollout_ref.rollout.max_num_seqs=8 \\
   actor_rollout_ref.rollout.max_num_batched_tokens=2048 \\
   actor_rollout_ref.rollout.calculate_log_probs=${ROLLOUT_CALCULATE_LOG_PROBS} \\
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \\

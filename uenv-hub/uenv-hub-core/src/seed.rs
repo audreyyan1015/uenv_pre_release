@@ -108,7 +108,7 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
         store,
         EnvIdentity {
             env_type: "swe",
-            description: "SweEnv — 仓库级缺陷修复任务环境 (SWE-bench Verified / Pro，容器内 FullShell)",
+            description: "SweEnv — 仓库级缺陷修复任务环境 (SWE-bench Verified / Pro / Smith，容器内 FullShell)",
             tags: &["swe", "code", "agent", "multi-turn", "container"],
             lifecycle: dto::EnvLifecycle::Canonical,
             superseded_by: None,
@@ -131,6 +131,59 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
     )
     .await?;
     ensure_env_version(store, "agent", simple_manifest("agent", "0.1.0")).await?;
+
+    retire_benchmarks_registered_as_environments(store).await?;
+    Ok(())
+}
+
+/// Benchmarks that were published as if they were capability classes.
+///
+/// Each entry is already an enumerated `dataset` value of the environment it maps
+/// to — `pubmedqa`/`scitab`/`olymmath` under `qa`, `dscodebench` under `code`,
+/// `swebenchpro` under `swe`'s `swe-bench-pro`. Holding both spellings made the
+/// registry claim two different things about one benchmark, and the console had no
+/// way to show the hierarchy because the data did not encode one.
+const BENCHMARKS_MISFILED_AS_ENVS: &[(&str, &str)] = &[
+    ("swebenchpro", "swe"),
+    ("dscodebench", "code"),
+    ("olymmath", "qa"),
+    ("scitab", "qa"),
+    ("pubmedqa", "qa"),
+];
+
+/// Label misfiled benchmark environments as deprecated aliases of their real
+/// capability class.
+///
+/// This only touches rows that already exist: a fresh Hub should not gain five
+/// deprecated entries for names it never published. Retirement uses the same
+/// lifecycle labels as the `math` → `qa` rename, so the old `env_type` keeps
+/// resolving with a 200 plus a `Deprecation` header, and no Worker prewarm breaks.
+async fn retire_benchmarks_registered_as_environments(store: &SqliteStore) -> Result<()> {
+    for (env_type, successor) in BENCHMARKS_MISFILED_AS_ENVS {
+        let Some(existing) = store.find_env_row(env_type).await? else {
+            continue;
+        };
+        if existing.lifecycle() == dto::EnvLifecycle::Deprecated
+            && existing.superseded_by.as_deref() == Some(*successor)
+        {
+            continue;
+        }
+        store
+            .update_env(
+                env_type,
+                crate::models::EnvPatch {
+                    lifecycle: Some(dto::EnvLifecycle::Deprecated),
+                    superseded_by: Some((*successor).to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        tracing::info!(
+            env_type,
+            successor,
+            "retired benchmark that was registered as an environment"
+        );
+    }
     Ok(())
 }
 
@@ -272,7 +325,8 @@ pub async fn seed_all(store: &SqliteStore) -> Result<()> {
 // EnvPackages (design 260629-hub-env-package-design.md)
 // ---------------------------------------------------------------------------
 
-/// Seed the example SWE EnvPackages (`swe-bench-verified`, `swe-bench-pro`) from
+/// Seed the example SWE EnvPackages (`swe-bench-verified`, `swe-bench-pro`,
+/// `swe-bench-smith`) from
 /// the on-disk catalog files, if not already present. Tolerant: a missing
 /// catalog file is logged and skipped rather than failing startup.
 ///
@@ -304,6 +358,17 @@ pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_di
         "SWE-bench Pro smoke catalog (pro-python-smoke.json) for 7143/OpenHands联调.",
     )
     .await?;
+    seed_swe_package(
+        store,
+        artifact_root,
+        catalog_dir,
+        "swe-bench-smith",
+        "0.1.0",
+        "smith",
+        "swesmith",
+        "SWE-smith smoke catalog for bug-introducing patch reversal and OpenHands training.",
+    )
+    .await?;
     seed_agent_bridge_openhands(store, artifact_root, catalog_dir).await?;
     seed_agent_bridge_toolenv(store, artifact_root, catalog_dir).await?;
     seed_qa_rubric_scorer(store, artifact_root, catalog_dir).await?;
@@ -312,7 +377,7 @@ pub async fn seed_packages(store: &SqliteStore, artifact_root: &Path, catalog_di
     Ok(())
 }
 
-/// Seed the two reference Episode Stacks, one per execution mode.
+/// Seed the reference Episode Stacks for native and agent execution modes.
 ///
 /// Runs after the packages because a stack is only meaningful once the things it
 /// composes exist — the same reason the publish path rejects a stack naming an
@@ -356,6 +421,54 @@ async fn seed_episode_stacks(store: &SqliteStore) -> Result<()> {
         ],
     };
     ensure_stack(store, "swe-bench-verified-openhands", swe_stack).await?;
+
+    // 1.0.0 钉住 smoke 包；1.1.0 钉住 repo-complete 包（Hub 托管镜像 tar）。
+    // ensure_stack 按版本跳过已存在行，两者可并存，latest 取最高 semver。
+    let smith_stack_smoke = dto::PublishStackRequest {
+        version: "1.0.0".into(),
+        publisher: Some("org-uenv-hub".into()),
+        description: Some(
+            "SWE-smith × OpenHands — /testbed 中修复造 bug 补丁，命令经 Worker Runtime Gateway 路由"
+                .into(),
+        ),
+        changelog: Some(
+            "初版：swe@0.1.0 + swe-bench-smith@0.1.0（smoke）+ uenv-agent-openhands@1.0.0"
+                .into(),
+        ),
+        execution_mode: dto::ExecutionMode::Agent,
+        task_env: dto::TaskEnvRef {
+            env_type: "swe".into(),
+            version: "latest".into(),
+            dataset: Some("swe-bench-smith".into()),
+        },
+        agent_scaffold: Some(dto::AgentScaffoldRef {
+            package_id: "uenv-agent-openhands".into(),
+            version: "latest".into(),
+            agent_kind: Some("openhands".into()),
+            consumer: Some(dto::CONSUMER_OPENHANDS_AGENT.into()),
+        }),
+        runtime_gateway: dto::RuntimeGatewayReq {
+            required: true,
+            api: Some("runtime/v1".into()),
+            api_key_required: true,
+        },
+        env_packages: vec!["swe-bench-smith@0.1.0".into()],
+        required_worker_features: vec![
+            "runtime_gateway".into(),
+            "swe_instance_pool".into(),
+            "trajectory_v2_2".into(),
+        ],
+    };
+    ensure_stack(store, "swe-bench-smith-openhands", smith_stack_smoke.clone()).await?;
+
+    let mut smith_stack_full = smith_stack_smoke;
+    smith_stack_full.version = "1.1.0".into();
+    smith_stack_full.changelog = Some(
+        "钉住 swe-bench-smith@0.2.0（10 仓库全量实例 + Hub 托管 image_tar，消费侧零外拉）"
+            .into(),
+    );
+    smith_stack_full.env_packages = vec!["swe-bench-smith@0.2.0".into()];
+    ensure_stack(store, "swe-bench-smith-openhands", smith_stack_full).await?;
 
     let qa_stack = dto::PublishStackRequest {
         version: "1.0.0".into(),
@@ -713,16 +826,15 @@ async fn seed_swe_package(
             return Ok(());
         }
     }
-    let catalog_path = if variant == "pro" {
-        let smoke = catalog_dir.join("pro-python-smoke.json");
-        if smoke.is_file() {
-            smoke
-        } else {
-            catalog_dir.join(format!("{variant}.json"))
-        }
-    } else {
-        catalog_dir.join(format!("{variant}.json"))
+    let smoke_catalog = match variant {
+        "pro" => Some("pro-python-smoke.json"),
+        "smith" => Some("smith-smoke.json"),
+        _ => None,
     };
+    let catalog_path = smoke_catalog
+        .map(|name| catalog_dir.join(name))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| catalog_dir.join(format!("{variant}.json")));
     let catalog_raw = match std::fs::read_to_string(&catalog_path) {
         Ok(s) => s,
         Err(e) => {
@@ -771,8 +883,13 @@ async fn seed_swe_package(
         "log_parser": if variant == "pro" { "multi_runner" } else { "pytest" },
         "variant": variant
     });
+    let driver_entrypoint = match variant {
+        "pro" => "run_swebenchpro_official.py",
+        "smith" => "run_swesmith_official.py",
+        _ => "run_swebench.py",
+    };
     let agent_defaults = json!({
-        "driver_entrypoint": if variant == "pro" { "run_swebenchpro_official.py" } else { "run_swebench.py" },
+        "driver_entrypoint": driver_entrypoint,
         "workspace_dir": if variant == "pro" { "/app" } else { "/testbed" },
         "tools": ["terminal", "file_editor"],
         "max_iterations_default": 30,
@@ -1382,7 +1499,8 @@ fn qa_rubric_manifest() -> NewManifest {
 
 /// Benchmark variants the `swe` Task Environment routes, matching the EnvPackage
 /// ids seeded by [`seed_packages`] and the Worker's `benchmark_variant` overlay.
-const SWE_DATASETS: &[&str] = &["swe-bench-verified", "swe-bench-pro"];
+const SWE_DATASETS: &[&str] =
+    &["swe-bench-verified", "swe-bench-pro", "swe-bench-smith"];
 
 /// The `swe` env registry manifest (v0.1.0).
 ///
@@ -1398,7 +1516,7 @@ fn swe_manifest() -> NewManifest {
         version: "0.1.0".into(),
         changelog: Some(
             "v0.1.0: 把 swe 登记为一等任务环境（此前仅以 EnvPackage 存在，Episode Stack 无法引用）; \
-             Action/Observation/State 对齐 swe-bench-verified/pro 包的 interface"
+             Action/Observation/State 对齐 swe-bench-verified/pro/smith 包的 interface"
                 .into(),
         ),
         entrypoint: None,

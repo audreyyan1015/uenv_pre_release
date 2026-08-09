@@ -24,6 +24,8 @@ use uenv_server::proto::v1::{EpisodeRequest, EpisodeResult, StepRecord, Trajecto
 use uenv_server::service::AdminServiceImpl;
 use uenv_server::{EpisodeService, EpisodeServiceError, UEnvEpisodeService};
 
+const DEFAULT_GRPC_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path =
@@ -45,6 +47,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     init_tracing();
+    let max_message_bytes = env_usize_default(
+        "UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES",
+        DEFAULT_GRPC_MAX_MESSAGE_BYTES,
+    );
     let binary_path = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -63,13 +69,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         package_version,
         build_git_sha,
         build_time,
+        max_message_bytes,
         "uenv_adapter_core_startup"
     );
     if backend == "static_rollout" {
         let core = AdapterCore::new(StaticRolloutEpisodeService::from_env());
         let adapter_service = AdapterCoreServiceImpl::new(core);
+        let adapter_grpc_service = AdapterCoreServiceServer::new(adapter_service)
+            .max_decoding_message_size(max_message_bytes)
+            .max_encoding_message_size(max_message_bytes);
         Server::builder()
-            .add_service(AdapterCoreServiceServer::new(adapter_service))
+            .add_service(adapter_grpc_service)
             .serve(addr)
             .await?;
         return Ok(());
@@ -145,9 +155,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let core = AdapterCore::new(UEnvEpisodeService::new(Arc::clone(&state)));
     let adapter_service = AdapterCoreServiceImpl::new(core);
+    let adapter_grpc_service = AdapterCoreServiceServer::new(adapter_service)
+        .max_decoding_message_size(max_message_bytes)
+        .max_encoding_message_size(max_message_bytes);
 
     Server::builder()
-        .add_service(AdapterCoreServiceServer::new(adapter_service))
+        .add_service(adapter_grpc_service)
         .add_service(ControlPlaneServiceServer::new(ControlPlaneServiceImpl {
             state: Arc::clone(&state),
         }))
@@ -335,4 +348,11 @@ fn env_bool(key: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+fn env_usize_default(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
 }

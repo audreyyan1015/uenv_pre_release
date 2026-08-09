@@ -47,13 +47,19 @@ async fn m4_close_terminates_plugin_process() {
     let pid = instance.pid;
 
     // spawn 后进程应存活。
-    assert!(pid_alive(pid), "plugin pid {pid} should be alive after spawn");
+    assert!(
+        pid_alive(pid),
+        "plugin pid {pid} should be alive after spawn"
+    );
 
     host.close(&instance.instance_id).await.expect("close");
 
     // close 返回后进程必须已被终止并回收。
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!pid_alive(pid), "plugin pid {pid} must be terminated after close");
+    assert!(
+        !pid_alive(pid),
+        "plugin pid {pid} must be terminated after close"
+    );
 }
 
 fn pid_alive(pid: u32) -> bool {

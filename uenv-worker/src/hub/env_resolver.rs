@@ -65,11 +65,33 @@ impl EnvResolver {
                 }
                 self.plugin_host.register_manifest(manifest).await?;
             }
+        } else if !summary
+            .supported_backends
+            .iter()
+            .any(|b| {
+                b == "process"
+                    || b == "openenv_http"
+                    || b == "openenv_http_container"
+                    || b == "generic_openenv_plugin"
+            })
+        {
+            tracing::info!(
+                trace_id = "env_resolver",
+                episode_id = "-",
+                worker_id = "worker",
+                env_type = %summary.env_type,
+                version = %summary.version,
+                backends = %summary.supported_backends.join(","),
+                msg = "hub_manifest_skipped_non_process_plugin"
+            );
         } else {
             self.pull_from_hub_and_register(&summary.env_type).await?;
             return Ok(());
         }
-        self.hub_synced.lock().await.insert(summary.env_type.clone());
+        self.hub_synced
+            .lock()
+            .await
+            .insert(summary.env_type.clone());
         Ok(())
     }
 
@@ -111,12 +133,8 @@ impl EnvResolver {
                 return Ok(());
             }
         }
-        let summary = super::pull_env_manifest(
-            endpoint,
-            env_type,
-            self.hub_token.as_deref(),
-        )
-        .await?;
+        let summary =
+            super::pull_env_manifest(endpoint, env_type, self.hub_token.as_deref()).await?;
         self.apply_hub_summary(&summary).await?;
         tracing::info!(
             trace_id = "env_resolver",
@@ -176,7 +194,9 @@ mod tests {
 
     #[test]
     fn reads_local_entry_from_math_plugin() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("repo");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo");
         let entry = read_local_manifest_entry(&repo.join("plugins/math"));
         assert_eq!(entry.as_deref(), Some("./run.sh"));
     }
@@ -259,6 +279,9 @@ mod tests {
                 version: "2.1.0".into(),
                 entrypoint: Some("./run.sh".into()),
                 supported_backends: vec!["process".into()],
+                worker_overlay: serde_json::Value::Null,
+                contracts: serde_json::Value::Null,
+                platform: serde_json::Value::Null,
             })
             .await
             .unwrap();

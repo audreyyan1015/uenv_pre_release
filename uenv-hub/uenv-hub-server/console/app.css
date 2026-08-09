@@ -1,0 +1,929 @@
+/*
+ * UEnv Hub 控制台样式。
+ *
+ * 色板与圆角直接沿用 frontend/src/styles.css 的 oklch 设计令牌（其 `:root` 浅色
+ * 主题），使 Hub 控制台与训练观测台在同一视觉体系内；这里不引入 Tailwind，
+ * 因为控制台随 Hub 二进制分发，必须零构建步骤。
+ */
+
+:root {
+  --radius: 0.375rem;
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-lg: calc(var(--radius) + 4px);
+
+  /* 与 frontend/src/styles.css `:root` 逐条对齐 */
+  --background: oklch(0.985 0.003 240);
+  --foreground: oklch(0.18 0.02 250);
+  --card: oklch(1 0 0);
+  --muted-foreground: oklch(0.5 0.02 250);
+  --border: oklch(0.9 0.012 245);
+  --input: oklch(0.92 0.01 245);
+  --ring: oklch(0.55 0.2 255);
+
+  --primary: oklch(0.55 0.2 255);
+  --primary-foreground: oklch(0.99 0 0);
+  --success: oklch(0.58 0.16 160);
+  --warning: oklch(0.7 0.17 70);
+  --danger: oklch(0.58 0.22 28);
+  --info: oklch(0.6 0.17 235);
+  --pending: oklch(0.72 0.015 250);
+
+  /* 控制台特有：卡面之上的次级底色与更实的分隔线 */
+  --card-2: oklch(0.965 0.008 245); /* = frontend --muted */
+  --muted: oklch(0.94 0.03 250); /* = frontend --accent */
+  --border-strong: oklch(0.84 0.014 245);
+
+  /*
+   * 提升对比的方向色。深色主题下"更醒目"意味着朝白色混，浅色主题下相反。
+   * 把方向抽成令牌，hover 与强调文字才不用各自硬编码 white / black。
+   */
+  --contrast-ink: oklch(0.14 0.02 250);
+
+  /*
+   * 状态色分两用：填充/描边用基色，文字用压深过的 ink 变体。
+   * 浅底上 --warning(L=0.7) 作文字只有约 2.2:1，远不够；L≈0.46 的 ink 变体约 5:1。
+   */
+  --success-ink: oklch(0.46 0.14 160);
+  --warning-ink: oklch(0.48 0.12 70);
+  --danger-ink: oklch(0.48 0.19 28);
+  --info-ink: oklch(0.46 0.15 235);
+  --primary-ink: oklch(0.40 0.17 255);
+
+  --shadow-sm: 0 1px 2px oklch(0.18 0.02 250 / 5%);
+  --shadow-md: 0 1px 3px oklch(0.18 0.02 250 / 7%), 0 4px 12px oklch(0.18 0.02 250 / 5%);
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", Roboto, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  border-color: var(--border);
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+kbd,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ------------------------------------------------------------------ layout */
+
+.app {
+  display: grid;
+  grid-template-columns: 244px 1fr;
+  height: 100%;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 16px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand-mark {
+  color: var(--primary);
+  display: flex;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  min-width: 0;
+}
+
+.brand-text strong {
+  font-size: 15px;
+  letter-spacing: 0.2px;
+}
+
+.brand-text span {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav {
+  padding: 10px 8px;
+  flex: 1;
+}
+
+.nav-group {
+  font-size: 10.5px;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  padding: 14px 8px 6px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  color: color-mix(in oklab, var(--foreground) 82%, transparent);
+  font-size: 13.5px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nav-item .ico {
+  width: 15px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.nav-item em {
+  margin-left: auto;
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.nav-item:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.nav-item.active {
+  background: color-mix(in oklab, var(--primary) 22%, transparent);
+  color: var(--foreground);
+}
+
+.nav-item.active .ico {
+  color: var(--primary-ink);
+}
+
+.nav-item.active em {
+  color: color-mix(in oklab, var(--foreground) 72%, transparent);
+}
+
+.sidebar-foot {
+  border-top: 1px solid var(--border);
+  padding: 10px 14px 14px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.foot-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.foot-row code {
+  color: color-mix(in oklab, var(--foreground) 75%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  height: 54px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--card) 55%, var(--background));
+  flex: none;
+}
+
+.crumbs {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.crumbs small {
+  font-weight: 400;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.topbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.content {
+  padding: 20px 22px 48px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* ----------------------------------------------------------- atoms */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.pill.muted {
+  color: var(--muted-foreground);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pending);
+  flex: none;
+}
+
+.dot-ok {
+  background: var(--success);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 22%, transparent);
+}
+.dot-warn {
+  background: var(--warning);
+}
+.dot-bad {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--danger) 22%, transparent);
+}
+.dot-pending {
+  background: var(--pending);
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  background: var(--muted);
+  color: var(--foreground);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.btn:hover {
+  background: color-mix(in oklab, var(--primary) 24%, var(--muted));
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border-strong));
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.btn.primary:hover {
+  background: color-mix(in oklab, var(--primary) 85%, var(--contrast-ink));
+}
+
+.btn.sm {
+  padding: 3px 9px;
+  font-size: 11.5px;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  accent-color: var(--primary);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select,
+textarea {
+  background: var(--input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  min-width: 0;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: color-mix(in oklab, var(--primary) 60%, var(--border-strong));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
+select option {
+  background: var(--card);
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--border-strong);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.badge.ok {
+  color: var(--success-ink);
+  border-color: color-mix(in oklab, var(--success) 40%, transparent);
+  background: color-mix(in oklab, var(--success) 14%, transparent);
+}
+.badge.warn {
+  color: var(--warning-ink);
+  border-color: color-mix(in oklab, var(--warning) 40%, transparent);
+  background: color-mix(in oklab, var(--warning) 14%, transparent);
+}
+.badge.bad {
+  color: var(--danger-ink);
+  border-color: color-mix(in oklab, var(--danger) 40%, transparent);
+  background: color-mix(in oklab, var(--danger) 14%, transparent);
+}
+.badge.info {
+  color: var(--info-ink);
+  border-color: color-mix(in oklab, var(--info) 40%, transparent);
+  background: color-mix(in oklab, var(--info) 14%, transparent);
+}
+
+/* ----------------------------------------------------------- cards */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.card > header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 15px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--card-2) 60%, var(--card));
+}
+
+.card > header h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.card > header .spacer {
+  margin-left: auto;
+}
+
+.card > header .hint {
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}
+
+.card-body {
+  padding: 14px 15px;
+}
+
+.card-body.tight {
+  padding: 0;
+}
+
+.grid {
+  display: grid;
+  gap: 14px;
+}
+
+.grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.grid.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 1180px) {
+  .grid.cols-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid.cols-3,
+  .grid.cols-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.section {
+  margin-bottom: 18px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.section-title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* 基准页：契约层级说明 */
+.model-card {
+  background: color-mix(in oklab, var(--primary) 6%, var(--card));
+  border: 1px solid color-mix(in oklab, var(--primary) 22%, var(--border));
+  border-radius: var(--radius-lg);
+  padding: 14px 16px 12px;
+  margin: 0 0 16px;
+}
+
+.model-card h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.model-steps {
+  margin: 0 0 8px;
+  padding-left: 1.25em;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--foreground);
+}
+
+.model-steps li + li {
+  margin-top: 4px;
+}
+
+.model-steps code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--muted);
+}
+
+.model-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+
+.contract-blurb {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+/* --------------------------------------------------------- stat tiles */
+
+.stat {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 13px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.stat .label {
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  letter-spacing: 0.3px;
+}
+
+.stat .value {
+  font-size: 25px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  line-height: 1.15;
+  letter-spacing: -0.5px;
+}
+
+.stat .sub {
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted);
+  overflow: hidden;
+  margin-top: 7px;
+}
+
+.meter > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 0.4s ease;
+}
+
+.meter.ok > i {
+  background: var(--success);
+}
+.meter.warn > i {
+  background: var(--warning);
+}
+.meter.bad > i {
+  background: var(--danger);
+}
+
+/* ------------------------------------------------------------- tables */
+
+table.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.tbl th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  background: color-mix(in oklab, var(--card-2) 45%, var(--card));
+}
+
+table.tbl td {
+  padding: 9px 14px;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  vertical-align: top;
+}
+
+table.tbl tbody tr:last-child td {
+  border-bottom: none;
+}
+
+table.tbl tbody tr.clickable {
+  cursor: pointer;
+}
+
+table.tbl tbody tr.clickable:hover {
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+}
+
+table.tbl td.num {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: minmax(120px, 190px) 1fr;
+  gap: 2px 14px;
+  font-size: 13px;
+}
+
+.kv dt {
+  color: var(--muted-foreground);
+  padding: 4px 0;
+  font-size: 12.5px;
+}
+
+.kv dd {
+  margin: 0;
+  padding: 4px 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.digest {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  padding: 26px 16px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.err {
+  border: 1px solid color-mix(in oklab, var(--danger) 45%, transparent);
+  background: color-mix(in oklab, var(--danger) 12%, transparent);
+  color: var(--danger-ink);
+  border-radius: var(--radius);
+  padding: 11px 14px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+
+.err code {
+  color: inherit;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.toolbar .grow {
+  flex: 1;
+  min-width: 160px;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 15px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}
+
+.pager .spacer {
+  margin-left: auto;
+}
+
+pre.json {
+  margin: 0;
+  padding: 12px 14px;
+  background: color-mix(in oklab, var(--background) 65%, var(--card));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: auto;
+  max-height: 420px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: color-mix(in oklab, var(--foreground) 88%, transparent);
+}
+
+.tok-key {
+  color: var(--info-ink);
+}
+.tok-str {
+  color: var(--success-ink);
+}
+.tok-num {
+  color: var(--warning-ink);
+}
+.tok-bool {
+  color: var(--danger-ink);
+}
+.tok-null {
+  color: var(--muted-foreground);
+}
+
+details.disclose {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 10px;
+  background: color-mix(in oklab, var(--background) 40%, var(--card));
+}
+
+details.disclose > summary {
+  cursor: pointer;
+  padding: 8px 13px;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  user-select: none;
+}
+
+details.disclose > summary:hover {
+  color: var(--foreground);
+}
+
+details.disclose[open] > summary {
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
+}
+
+details.disclose > div {
+  padding: 12px 13px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+  overflow-x: auto;
+}
+
+.tab {
+  padding: 7px 13px;
+  font-size: 13px;
+  color: var(--muted-foreground);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  font-family: inherit;
+}
+
+.tab:hover {
+  color: var(--foreground);
+}
+
+.tab.active {
+  color: var(--foreground);
+  border-bottom-color: var(--primary);
+}
+
+.backlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  margin-bottom: 10px;
+}
+
+.backlink:hover {
+  color: var(--foreground);
+}
+
+.title-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.title-row h2 {
+  margin: 0;
+  font-size: 19px;
+  letter-spacing: -0.2px;
+}
+
+.title-row p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  flex-basis: 100%;
+}
+
+.skeleton {
+  height: 84px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: linear-gradient(
+    90deg,
+    var(--card) 0%,
+    color-mix(in oklab, var(--card-2) 70%, var(--card)) 50%,
+    var(--card) 100%
+  );
+  background-size: 220% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -20% 0;
+  }
+}
+
+/* ------------------------------------------------------------- toasts */
+
+.toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 60;
+}
+
+.toast {
+  background: var(--card-2);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius);
+  padding: 9px 14px;
+  font-size: 12.5px;
+  max-width: 420px;
+  box-shadow: var(--shadow-md);
+  animation: rise 0.18s ease;
+}
+
+.toast.bad {
+  border-left-color: var(--danger);
+}
+.toast.ok {
+  border-left-color: var(--success);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

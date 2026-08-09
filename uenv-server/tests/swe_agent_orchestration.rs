@@ -9,8 +9,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::post, Json, Router};
-use serde_json::{json, Value};
+use axum::{Json, Router, routing::post};
+use serde_json::{Value, json};
 use tonic::Request;
 
 use uenv_server::agent_pool::{AgentInfo, SyncedAgentBridgeInfo};
@@ -58,25 +58,29 @@ async fn swe_agent_episode_full_orchestration() {
     let gateway_url = spawn_mock_gateway().await;
 
     // ── 注册 Worker（带 gateway_public_url + synced_env_packages）────────────
-    state.scheduler.write().register_worker(SchedulerWorkerInfo {
-        worker_id: "w-7143".to_string(),
-        endpoint: "127.0.0.1:50052".to_string(),
-        supported_env_types: vec!["swe".to_string()],
-        capacity: 4,
-        current_load: 0,
-        reserved_load: 0,
-        reported_load: 0,
-        resource: None,
-        draining: false,
-        last_report_at: Some(std::time::Instant::now()),
-        last_heartbeat_at: Some(std::time::Instant::now()),
-        gateway_public_url: gateway_url.clone(),
-        synced_env_packages: vec![SyncedEnvPackageInfo {
-            package_id: "swe-bench-pro".to_string(),
-            version: "0.2.0".to_string(),
-            bundle_digest: "sha256:pkg".to_string(),
-        }],
-    });
+    state
+        .scheduler
+        .write()
+        .register_worker(SchedulerWorkerInfo {
+            worker_id: "w-7143".to_string(),
+            endpoint: "127.0.0.1:50052".to_string(),
+            supported_env_types: vec!["swe".to_string()],
+            capacity: 4,
+            current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
+            resource: None,
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: gateway_url.clone(),
+            synced_env_packages: vec![SyncedEnvPackageInfo {
+                package_id: "swe-bench-pro".to_string(),
+                version: "0.2.0".to_string(),
+                bundle_digest: "sha256:pkg".to_string(),
+            }],
+            ..Default::default()
+        });
 
     // ── 注册 Agent（带 synced_agent_bridges）─────────────────────────────────
     state.agent_registry.register(AgentInfo {
@@ -167,8 +171,8 @@ async fn swe_agent_episode_full_orchestration() {
             reward: 1.0,
             trajectory_id: "trj-xyz".to_string(),
             error_message: String::new(),
-                        agent_id: "a-20877".to_string(),
-                        ..Default::default()
+            agent_id: "a-20877".to_string(),
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -195,25 +199,29 @@ async fn swe_agent_rejects_unsynced_env_package() {
     let state = uenv_server::create_default_state();
 
     // Worker 只 sync 了 0.1.0，请求要 0.2.0 → 应报 select worker failed。
-    state.scheduler.write().register_worker(SchedulerWorkerInfo {
-        worker_id: "w1".to_string(),
-        endpoint: "127.0.0.1:1".to_string(),
-        supported_env_types: vec!["swe".to_string()],
-        capacity: 1,
-        current_load: 0,
-        reserved_load: 0,
-        reported_load: 0,
-        resource: None,
-        draining: false,
-        last_report_at: Some(std::time::Instant::now()),
-        last_heartbeat_at: Some(std::time::Instant::now()),
-        gateway_public_url: "http://127.0.0.1:9".to_string(),
-        synced_env_packages: vec![SyncedEnvPackageInfo {
-            package_id: "swe-bench-pro".to_string(),
-            version: "0.1.0".to_string(),
-            bundle_digest: String::new(),
-        }],
-    });
+    state
+        .scheduler
+        .write()
+        .register_worker(SchedulerWorkerInfo {
+            worker_id: "w1".to_string(),
+            endpoint: "127.0.0.1:1".to_string(),
+            supported_env_types: vec!["swe".to_string()],
+            capacity: 1,
+            current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
+            resource: None,
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: "http://127.0.0.1:9".to_string(),
+            synced_env_packages: vec![SyncedEnvPackageInfo {
+                package_id: "swe-bench-pro".to_string(),
+                version: "0.1.0".to_string(),
+                bundle_digest: String::new(),
+            }],
+            ..Default::default()
+        });
     state.agent_registry.register(AgentInfo {
         agent_id: "a1".to_string(),
         agent_pool_id: "openhands-default".to_string(),
@@ -260,25 +268,29 @@ async fn swe_agent_timeout_cleans_up() {
     let state = uenv_server::create_default_state();
     let gateway_url = spawn_mock_gateway().await;
 
-    state.scheduler.write().register_worker(SchedulerWorkerInfo {
-        worker_id: "w1".to_string(),
-        endpoint: "127.0.0.1:1".to_string(),
-        supported_env_types: vec!["swe".to_string()],
-        capacity: 2,
-        current_load: 0,
-        reserved_load: 0,
-        reported_load: 0,
-        resource: None,
-        draining: false,
-        last_report_at: Some(std::time::Instant::now()),
-        last_heartbeat_at: Some(std::time::Instant::now()),
-        gateway_public_url: gateway_url,
-        synced_env_packages: vec![SyncedEnvPackageInfo {
-            package_id: "swe-bench-pro".to_string(),
-            version: "0.2.0".to_string(),
-            bundle_digest: String::new(),
-        }],
-    });
+    state
+        .scheduler
+        .write()
+        .register_worker(SchedulerWorkerInfo {
+            worker_id: "w1".to_string(),
+            endpoint: "127.0.0.1:1".to_string(),
+            supported_env_types: vec!["swe".to_string()],
+            capacity: 2,
+            current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
+            resource: None,
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: gateway_url,
+            synced_env_packages: vec![SyncedEnvPackageInfo {
+                package_id: "swe-bench-pro".to_string(),
+                version: "0.2.0".to_string(),
+                bundle_digest: String::new(),
+            }],
+            ..Default::default()
+        });
     state.agent_registry.register(AgentInfo {
         agent_id: "a1".to_string(),
         agent_pool_id: "openhands-default".to_string(),
@@ -351,25 +363,29 @@ async fn swe_agent_admission_caps_concurrency() {
     let state = uenv_server::create_default_state();
     let gateway_url = spawn_mock_gateway().await;
 
-    state.scheduler.write().register_worker(SchedulerWorkerInfo {
-        worker_id: "w1".to_string(),
-        endpoint: "127.0.0.1:1".to_string(),
-        supported_env_types: vec!["swe".to_string()],
-        capacity: 100, // Worker 容量充足，瓶颈只在 agent 池
-        current_load: 0,
-        reserved_load: 0,
-        reported_load: 0,
-        resource: None,
-        draining: false,
-        last_report_at: Some(std::time::Instant::now()),
-        last_heartbeat_at: Some(std::time::Instant::now()),
-        gateway_public_url: gateway_url,
-        synced_env_packages: vec![SyncedEnvPackageInfo {
-            package_id: "swe-bench-pro".to_string(),
-            version: "0.2.0".to_string(),
-            bundle_digest: String::new(),
-        }],
-    });
+    state
+        .scheduler
+        .write()
+        .register_worker(SchedulerWorkerInfo {
+            worker_id: "w1".to_string(),
+            endpoint: "127.0.0.1:1".to_string(),
+            supported_env_types: vec!["swe".to_string()],
+            capacity: 100, // Worker 容量充足，瓶颈只在 agent 池
+            current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
+            resource: None,
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: gateway_url,
+            synced_env_packages: vec![SyncedEnvPackageInfo {
+                package_id: "swe-bench-pro".to_string(),
+                version: "0.2.0".to_string(),
+                bundle_digest: String::new(),
+            }],
+            ..Default::default()
+        });
     // 单 Agent，容量 1 → 池 admission 容量 1。
     state.agent_registry.register(AgentInfo {
         agent_id: "a1".to_string(),
@@ -387,7 +403,13 @@ async fn swe_agent_admission_caps_concurrency() {
         last_heartbeat_at: std::time::Instant::now(),
         labels: Default::default(),
     });
-    assert_eq!(state.agent_registry.pool_semaphore("openhands-default").available_permits(), 1);
+    assert_eq!(
+        state
+            .agent_registry
+            .pool_semaphore("openhands-default")
+            .available_permits(),
+        1
+    );
 
     let mk_req = || {
         let payload = json!({
@@ -419,7 +441,10 @@ async fn swe_agent_admission_caps_concurrency() {
     // 且至多 1 个 job 进入队列（其余卡在信号量，尚未 enqueue/建 session）。
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
-        state.agent_registry.pool_semaphore("openhands-default").available_permits(),
+        state
+            .agent_registry
+            .pool_semaphore("openhands-default")
+            .available_permits(),
         0,
         "唯一 permit 应被一个 episode 占用"
     );
@@ -436,7 +461,10 @@ async fn swe_agent_admission_caps_concurrency() {
 
     // 收尾：permit 全部归还，active/in-flight 清空。
     assert_eq!(
-        state.agent_registry.pool_semaphore("openhands-default").available_permits(),
+        state
+            .agent_registry
+            .pool_semaphore("openhands-default")
+            .available_permits(),
         1,
         "全部结束后 permit 应归还"
     );
@@ -455,25 +483,29 @@ async fn workers_more_than_agents_no_worker_oversubscription() {
     let gateway_url = spawn_mock_gateway().await;
 
     // 单 Worker，capacity=1（故意小，用于暴露超卖）。
-    state.scheduler.write().register_worker(SchedulerWorkerInfo {
-        worker_id: "w1".to_string(),
-        endpoint: "127.0.0.1:1".to_string(),
-        supported_env_types: vec!["swe".to_string()],
-        capacity: 1,
-        current_load: 0,
-        reserved_load: 0,
-        reported_load: 0,
-        resource: None,
-        draining: false,
-        last_report_at: Some(std::time::Instant::now()),
-        last_heartbeat_at: Some(std::time::Instant::now()),
-        gateway_public_url: gateway_url,
-        synced_env_packages: vec![SyncedEnvPackageInfo {
-            package_id: "swe-bench-pro".to_string(),
-            version: "0.2.0".to_string(),
-            bundle_digest: String::new(),
-        }],
-    });
+    state
+        .scheduler
+        .write()
+        .register_worker(SchedulerWorkerInfo {
+            worker_id: "w1".to_string(),
+            endpoint: "127.0.0.1:1".to_string(),
+            supported_env_types: vec!["swe".to_string()],
+            capacity: 1,
+            current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
+            resource: None,
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: gateway_url,
+            synced_env_packages: vec![SyncedEnvPackageInfo {
+                package_id: "swe-bench-pro".to_string(),
+                version: "0.2.0".to_string(),
+                bundle_digest: String::new(),
+            }],
+            ..Default::default()
+        });
     // 单 Agent，max_concurrent=1 → 池容量 1，吞吐瓶颈。
     state.agent_registry.register(AgentInfo {
         agent_id: "a1".to_string(),
@@ -527,7 +559,10 @@ async fn workers_more_than_agents_no_worker_oversubscription() {
             .iter()
             .map(|w| w.current_load)
             .sum();
-        assert!(load <= 1, "worker load {load} exceeded capacity 1 (oversubscription)");
+        assert!(
+            load <= 1,
+            "worker load {load} exceeded capacity 1 (oversubscription)"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -560,25 +595,29 @@ async fn agents_more_than_workers_no_permit_hostage() {
     let gateway_url = spawn_mock_gateway().await;
 
     // 单 Worker，capacity=1 → Worker 是瓶颈。
-    state.scheduler.write().register_worker(SchedulerWorkerInfo {
-        worker_id: "w1".to_string(),
-        endpoint: "127.0.0.1:1".to_string(),
-        supported_env_types: vec!["swe".to_string()],
-        capacity: 1,
-        current_load: 0,
-        reserved_load: 0,
-        reported_load: 0,
-        resource: None,
-        draining: false,
-        last_report_at: Some(std::time::Instant::now()),
-        last_heartbeat_at: Some(std::time::Instant::now()),
-        gateway_public_url: gateway_url,
-        synced_env_packages: vec![SyncedEnvPackageInfo {
-            package_id: "swe-bench-pro".to_string(),
-            version: "0.2.0".to_string(),
-            bundle_digest: String::new(),
-        }],
-    });
+    state
+        .scheduler
+        .write()
+        .register_worker(SchedulerWorkerInfo {
+            worker_id: "w1".to_string(),
+            endpoint: "127.0.0.1:1".to_string(),
+            supported_env_types: vec!["swe".to_string()],
+            capacity: 1,
+            current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
+            resource: None,
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: gateway_url,
+            synced_env_packages: vec![SyncedEnvPackageInfo {
+                package_id: "swe-bench-pro".to_string(),
+                version: "0.2.0".to_string(),
+                bundle_digest: String::new(),
+            }],
+            ..Default::default()
+        });
     // Agent 池富余：max_concurrent=10。
     state.agent_registry.register(AgentInfo {
         agent_id: "a1".to_string(),
@@ -597,7 +636,10 @@ async fn agents_more_than_workers_no_permit_hostage() {
         labels: Default::default(),
     });
     assert_eq!(
-        state.agent_registry.pool_semaphore("openhands-default").available_permits(),
+        state
+            .agent_registry
+            .pool_semaphore("openhands-default")
+            .available_permits(),
         10
     );
 
@@ -662,7 +704,10 @@ async fn agents_more_than_workers_no_permit_hostage() {
 
     // 收尾：permit 全部归还、Worker 负载清零。
     assert_eq!(
-        state.agent_registry.pool_semaphore("openhands-default").available_permits(),
+        state
+            .agent_registry
+            .pool_semaphore("openhands-default")
+            .available_permits(),
         10,
         "全部结束后 permit 应全部归还"
     );
@@ -684,25 +729,29 @@ async fn swe_agent_batch_all_complete() {
     let state = uenv_server::create_default_state();
     let gateway_url = spawn_mock_gateway().await;
 
-    state.scheduler.write().register_worker(SchedulerWorkerInfo {
-        worker_id: "w1".to_string(),
-        endpoint: "127.0.0.1:1".to_string(),
-        supported_env_types: vec!["swe".to_string()],
-        capacity: 8,
-        current_load: 0,
-        reserved_load: 0,
-        reported_load: 0,
-        resource: None,
-        draining: false,
-        last_report_at: Some(std::time::Instant::now()),
-        last_heartbeat_at: Some(std::time::Instant::now()),
-        gateway_public_url: gateway_url,
-        synced_env_packages: vec![SyncedEnvPackageInfo {
-            package_id: "swe-bench-pro".to_string(),
-            version: "0.2.0".to_string(),
-            bundle_digest: String::new(),
-        }],
-    });
+    state
+        .scheduler
+        .write()
+        .register_worker(SchedulerWorkerInfo {
+            worker_id: "w1".to_string(),
+            endpoint: "127.0.0.1:1".to_string(),
+            supported_env_types: vec!["swe".to_string()],
+            capacity: 8,
+            current_load: 0,
+            reserved_load: 0,
+            reported_load: 0,
+            resource: None,
+            draining: false,
+            last_report_at: Some(std::time::Instant::now()),
+            last_heartbeat_at: Some(std::time::Instant::now()),
+            gateway_public_url: gateway_url,
+            synced_env_packages: vec![SyncedEnvPackageInfo {
+                package_id: "swe-bench-pro".to_string(),
+                version: "0.2.0".to_string(),
+                bundle_digest: String::new(),
+            }],
+            ..Default::default()
+        });
     // Agent 池容量 3，够并发跑完 3 个批量任务。
     state.agent_registry.register(AgentInfo {
         agent_id: "a1".to_string(),
@@ -799,5 +848,3 @@ async fn swe_agent_batch_all_complete() {
     assert!(state.active_episodes.is_empty());
     assert_eq!(state.agent_job_queue.in_flight_len(), 0);
 }
-
-

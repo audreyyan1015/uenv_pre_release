@@ -25,6 +25,7 @@ fuser -k 28888/tcp 2>/dev/null || true
 sleep 2
 source /root/.uenv-worker.env 2>/dev/null || true
 source /root/.uenv-trajectory.env 2>/dev/null || true
+export UENV_OPENENV_PLUGIN_BIN="${UENV_OPENENV_PLUGIN_BIN:-/root/UEnv/target/release/uenv-openenv-plugin}"
 export UENV_WORKER_ALLOW_DEGRADED_START=1
 # 长耗时 math/OlymMATH：与 Server default_timeout、LLM HTTP 超时对齐到分钟级
 export UENV_WORKER_EPISODE_TIMEOUT_SECS="${UENV_WORKER_EPISODE_TIMEOUT_SECS:-600}"
@@ -64,6 +65,12 @@ export UENV_SWE_INSTANCES="${UENV_SWE_INSTANCES:-/root/UEnv/config/swe/pro.json}
 export UENV_SWE_RUNTIME=docker
 # 本机已预拉 / docker load 的镜像走 local；缺图时再由运维拉，不在重启脚本里强制公网 pull
 export UENV_SWE_IMAGE_PULL_POLICY="${UENV_SWE_IMAGE_PULL_POLICY:-local_only}"
+if [[ -x /tmp/uenv-swesmith-official-check/venv/bin/python &&
+      -d /tmp/uenv-swesmith-official-check/SWE-smith &&
+      -f /root/UEnv/scripts/eval_swesmith_official_reward.py ]]; then
+  export UENV_SWESMITH_REPO="${UENV_SWESMITH_REPO:-/tmp/uenv-swesmith-official-check/SWE-smith}"
+  export UENV_SWE_SMITH_EVAL_CMD="${UENV_SWE_SMITH_EVAL_CMD:-/tmp/uenv-swesmith-official-check/venv/bin/python /root/UEnv/scripts/eval_swesmith_official_reward.py}"
+fi
 
 echo "== starting worker (SWE_ENV_PACKAGE=$UENV_SWE_ENV_PACKAGE SWE_ENV_PACKAGES=${UENV_SWE_ENV_PACKAGES:-} DSCODE_ROOT=${UENV_DSCODEBENCH_ROOT:-unset}) =="
 nohup ./target/release/uenv-worker --config config/uenv-worker.deploy-7143-swe-pro.yaml serve \

@@ -2,13 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::Semaphore;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
 use crate::control_plane::client::ControlPlane;
+use crate::control_plane::client::SharedWorkerCapabilities;
 use crate::episode::async_context::build_idempotency_key;
 use crate::episode::executor::{EpisodeExecutor, ExecuteContext};
 use crate::metrics::MetricsExporter;
@@ -17,7 +18,7 @@ use crate::proto::v1::{EpisodeRequest, EpisodeResult, ReportType, StreamReport};
 use crate::proto::worker::v1::worker_grpc_service_server::WorkerGrpcService;
 use crate::proto::worker::v1::{
     CancelWorkerEpisodeRequest, CancelWorkerEpisodeResponse, DispatchEpisodeRequest,
-    HealthCheckRequest, HealthCheckResponse,
+    HealthCheckRequest, HealthCheckResponse, PrepareEnvironmentRequest, PrepareEnvironmentResponse,
 };
 use crate::wal::WalWriter;
 
@@ -109,6 +110,7 @@ pub struct WorkerGrpcServiceImpl {
     executor: EpisodeExecutor,
     metrics: MetricsExporter,
     warmup_pool: WarmupPool,
+    capabilities: SharedWorkerCapabilities,
     semaphore: Arc<Semaphore>,
     max_concurrent: u32,
     active_leases: Arc<Mutex<HashMap<(String, u32), String>>>,
@@ -124,6 +126,7 @@ impl WorkerGrpcServiceImpl {
         executor: EpisodeExecutor,
         metrics: MetricsExporter,
         warmup_pool: WarmupPool,
+        capabilities: SharedWorkerCapabilities,
         max_concurrent: u32,
         wal: WalWriter,
         disconnect_policy: DisconnectDispatchPolicy,
@@ -133,6 +136,7 @@ impl WorkerGrpcServiceImpl {
             executor,
             metrics,
             warmup_pool,
+            capabilities,
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             max_concurrent,
             active_leases: Arc::new(Mutex::new(HashMap::new())),
@@ -327,8 +331,7 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             };
             tokio::pin!(execute);
 
-            let mut heartbeat =
-                tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
             heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             heartbeat.tick().await; // 跳过立即触发的首 tick（已发 running）
 
@@ -475,7 +478,10 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                 );
                 if let Err(err) = persisted {
                     tracing::error!(error = %err, msg = "wal_persist_failed");
-                    active.lock().await.remove(&(episode_id.clone(), attempt_id));
+                    active
+                        .lock()
+                        .await
+                        .remove(&(episode_id.clone(), attempt_id));
                     cancellations.lock().await.remove(&(episode_id, attempt_id));
                     return;
                 }
@@ -551,6 +557,61 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
             ok: true,
             status: "ok".to_string(),
         }))
+    }
+
+    async fn prepare_environment(
+        &self,
+        request: Request<PrepareEnvironmentRequest>,
+    ) -> Result<Response<PrepareEnvironmentResponse>, Status> {
+        let req = request.into_inner();
+        if req.env_type.trim().is_empty() {
+            return Err(Status::invalid_argument("missing env_type"));
+        }
+        let worker_features = [
+            "hub_dynamic_env",
+            "trajectory_v2_2",
+            "artifact_uri",
+            "reward_adapter_v1",
+        ];
+        for feature in &req.required_features {
+            if !worker_features.iter().any(|f| f == feature) {
+                return Ok(Response::new(PrepareEnvironmentResponse {
+                    ready: false,
+                    env_type: req.env_type,
+                    backend_kind: String::new(),
+                    package_state: "failed".to_string(),
+                    message: format!("missing worker feature: {feature}"),
+                }));
+            }
+        }
+        match self.warmup_pool.prepare_env(&req.env_type).await {
+            Ok(()) => {
+                self.capabilities
+                    .mark_env_ready(
+                        &req.env_type,
+                        &req.env_package_id,
+                        &req.env_package_version,
+                        &req.expected_bundle_digest,
+                        "process_plugin",
+                        "prepared by worker on demand",
+                    )
+                    .await;
+                Ok(Response::new(PrepareEnvironmentResponse {
+                    ready: true,
+                    env_type: req.env_type,
+                    backend_kind: "process_plugin".to_string(),
+                    package_state: "ready".to_string(),
+                    message: "prepared".to_string(),
+                }))
+            }
+            Err(err) => Ok(Response::new(PrepareEnvironmentResponse {
+                ready: false,
+                env_type: req.env_type,
+                backend_kind: "process_plugin".to_string(),
+                package_state: "failed".to_string(),
+                message: err.to_string(),
+            })),
+        }
     }
 }
 
@@ -637,6 +698,7 @@ mod tests {
             EpisodeExecutor::new(host, pool.clone(), crate::llm::LlmConfig::default()),
             MetricsExporter::new(),
             pool,
+            SharedWorkerCapabilities::new(vec!["math".to_string(), "code".to_string()], vec![]),
             1,
             wal,
             policy,

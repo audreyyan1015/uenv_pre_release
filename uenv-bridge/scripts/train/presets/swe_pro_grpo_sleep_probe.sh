@@ -37,19 +37,19 @@ export UENV_MODEL_GATEWAY_MAX_TOKENS=${UENV_MODEL_GATEWAY_MAX_TOKENS:-4096}
 # 模型与数据挂载。宿主机路径挂到容器内固定路径，供 VeRL Hydra 参数引用
 export MODEL_PATH=${MODEL_PATH:-/data/ronghao/models/modelscope/Qwen/Qwen3___6-35B-A3B}
 export CONTAINER_MODEL_PATH=${CONTAINER_MODEL_PATH:-/models/modelscope/Qwen/Qwen3___6-35B-A3B}
-export DATA_DIR=${DATA_DIR:-${REPO_DIR}/data/benchmarks/swebenchpro_train_smoke_10}
-export CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/swebenchpro_train_smoke_10}
+export DATA_DIR=${DATA_DIR:-${REPO_DIR}/data/benchmarks/swebenchpro}
+export CONTAINER_DATA_DIR=${CONTAINER_DATA_DIR:-/data/swebenchpro}
 
 # SWE/OpenHands 数据准备参数。
 # SWE_TRAJECTORY_MAX_STEPS 既用于生成数据，也默认作为运行时 episode 步数覆盖值；
 # 如需完全使用数据集 extra_info 中的 max_steps/max_iterations，可显式传入：
 #   UENV_EPISODE_MAX_STEPS_OVERRIDE=
 export SWE_PREPARE_DATA=${SWE_PREPARE_DATA:-1}
-export SWE_SAMPLE_LIMIT=${SWE_SAMPLE_LIMIT:-10}
+export SWE_SAMPLE_LIMIT=${SWE_SAMPLE_LIMIT:-731}
 export SWE_SAMPLE_OFFSET=${SWE_SAMPLE_OFFSET:-0}
 export SWE_WORKSPACE_DIR=${SWE_WORKSPACE_DIR:-/app}
 export SWE_LLM_CONFIG_PATH=${SWE_LLM_CONFIG_PATH:-/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json}
-export SWE_TRAJECTORY_MAX_STEPS=${SWE_TRAJECTORY_MAX_STEPS:-10}
+export SWE_TRAJECTORY_MAX_STEPS=${SWE_TRAJECTORY_MAX_STEPS:-30}
 if [ -z "${UENV_EPISODE_MAX_STEPS_OVERRIDE+x}" ]; then
   export UENV_EPISODE_MAX_STEPS_OVERRIDE=${SWE_TRAJECTORY_MAX_STEPS}
 fi
@@ -57,7 +57,7 @@ export SWE_ENV_PACKAGE_VERSION=${SWE_ENV_PACKAGE_VERSION:-0.3.4}
 export SWE_AGENT_MODE=${SWE_AGENT_MODE:-llm}
 
 # 训练与 batch 参数
-export TRAINING_STEPS=${TRAINING_STEPS:-5}
+export TRAINING_STEPS=${TRAINING_STEPS:-500}
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 export PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-2}
@@ -70,6 +70,15 @@ export ROLLOUT_N=${ROLLOUT_N:-4}
 export ROLLOUT_TP=${ROLLOUT_TP:-8}
 export NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 export AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
+export UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM:-8}
+export UENV_MAX_EPISODE_CONCURRENCY=${UENV_MAX_EPISODE_CONCURRENCY:-${UENV_EXPECTED_WORKER_PARALLELISM}}
+export UENV_MAX_IN_FLIGHT_BATCHES=${UENV_MAX_IN_FLIGHT_BATCHES:-1}
+export UENV_TARGET_WORKER_SLOTS=${UENV_TARGET_WORKER_SLOTS:-${UENV_EXPECTED_WORKER_PARALLELISM}}
+export UENV_POOL_WARMUP_TARGET=${UENV_POOL_WARMUP_TARGET:-${UENV_EXPECTED_WORKER_PARALLELISM}}
+export UENV_MAX_PARALLEL_PER_WORKER=${UENV_MAX_PARALLEL_PER_WORKER:-4}
+export UENV_AGENT_JOB_MAX_CONCURRENCY=${UENV_AGENT_JOB_MAX_CONCURRENCY:-${UENV_MAX_PARALLEL_PER_WORKER}}
+export UENV_RUNTIME_GATEWAY_SESSION_LIMIT=${UENV_RUNTIME_GATEWAY_SESSION_LIMIT:-${UENV_MAX_PARALLEL_PER_WORKER}}
+export UENV_REQUIRE_WARM_SLOT=${UENV_REQUIRE_WARM_SLOT:-false}
 export PODMAN_GPU_ARGS=${PODMAN_GPU_ARGS:-nvidia.com/gpu=all}
 export CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-0,1,2,3,4,5,6,7}
 
@@ -96,7 +105,7 @@ if [ -z "${EXTRA_VERL_ARGS:-}" ]; then
   EXTRA_VERL_ARG_LIST=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGGING_LEVEL=INFO"
     "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL=INFO"
-    "+actor_rollout_ref.rollout.max_model_len=65536"
+    "+actor_rollout_ref.rollout.max_model_len=131072"
     "actor_rollout_ref.rollout.max_num_batched_tokens=65536"
     "actor_rollout_ref.rollout.multi_stage_wake_up=True"
     "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True"

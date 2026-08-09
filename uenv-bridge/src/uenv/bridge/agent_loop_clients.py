@@ -5,7 +5,12 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from .clients import EpisodeClient, RustCoreClientConfig, RustCoreEpisodeClient
+from .clients import (
+    DEFAULT_GRPC_MAX_MESSAGE_BYTES,
+    EpisodeClient,
+    RustCoreClientConfig,
+    RustCoreEpisodeClient,
+)
 from .protocol import EpisodeRequest, EpisodeResult, EpisodeSummary, StepRecord, Trajectory
 
 
@@ -20,6 +25,7 @@ class AgentLoopClientConfig:
     streaming: bool = False
     transport_retry_attempts: int = 3
     transport_retry_delay_seconds: float = 1.0
+    max_message_bytes: int = DEFAULT_GRPC_MAX_MESSAGE_BYTES
     fake_reward: float = 1.0
     fake_response_text: str = ""
 
@@ -36,6 +42,7 @@ class AgentLoopClientConfig:
         streaming: bool | None = None,
         transport_retry_attempts: int | None = None,
         transport_retry_delay_seconds: float | None = None,
+        max_message_bytes: int | None = None,
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
     ) -> "AgentLoopClientConfig":
@@ -73,6 +80,17 @@ class AgentLoopClientConfig:
                     transport_retry_delay_seconds
                     if transport_retry_delay_seconds is not None
                     else os.getenv("UENV_ADAPTER_CORE_TRANSPORT_RETRY_DELAY_SECONDS", "1")
+                ),
+            ),
+            max_message_bytes=max(
+                1,
+                int(
+                    str(
+                        max_message_bytes
+                        if max_message_bytes is not None
+                        else os.getenv("UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES", str(DEFAULT_GRPC_MAX_MESSAGE_BYTES))
+                    ).strip()
+                    or str(DEFAULT_GRPC_MAX_MESSAGE_BYTES)
                 ),
             ),
             fake_reward=float(fake_reward if fake_reward is not None else os.getenv("UENV_AGENT_LOOP_FAKE_REWARD", "1.0")),
@@ -141,6 +159,7 @@ def build_agent_loop_episode_client(
     streaming: bool | None = None,
     transport_retry_attempts: int | None = None,
     transport_retry_delay_seconds: float | None = None,
+    max_message_bytes: int | None = None,
     fake_reward: float | None = None,
     fake_response_text: str | None = None,
 ) -> EpisodeClient:
@@ -154,6 +173,7 @@ def build_agent_loop_episode_client(
         streaming=streaming,
         transport_retry_attempts=transport_retry_attempts,
         transport_retry_delay_seconds=transport_retry_delay_seconds,
+        max_message_bytes=max_message_bytes,
         fake_reward=fake_reward,
         fake_response_text=fake_response_text,
     )
@@ -170,6 +190,7 @@ def build_agent_loop_episode_client(
                 streaming=config.streaming,
                 transport_retry_attempts=config.transport_retry_attempts,
                 transport_retry_delay_seconds=config.transport_retry_delay_seconds,
+                max_message_bytes=config.max_message_bytes,
             )
         )
     raise ValueError(f"Unsupported UENV_AGENT_LOOP_CLIENT={config.mode!r}; expected fake or rust_core")

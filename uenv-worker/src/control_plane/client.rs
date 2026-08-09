@@ -10,8 +10,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 
 use crate::metrics::MetricsExporter;
+use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::scheduler::v1::control_plane_service_client::ControlPlaneServiceClient;
-use crate::proto::scheduler::v1::{HeartbeatRequest, RegisterWorkerRequest, ReportResultRequest, SyncedEnvPackage};
+use crate::proto::scheduler::v1::{
+    EnvPackageState, HeartbeatRequest, RegisterWorkerRequest, ReportResultRequest, SyncedEnvPackage,
+};
 use crate::proto::v1::{EpisodeResult, ResourceSpec};
 use crate::wal::WalWriter;
 
@@ -19,6 +22,64 @@ use crate::wal::WalWriter;
 pub struct RuntimeIdentity {
     pub worker_id: String,
     pub server_epoch: u64,
+}
+
+#[derive(Clone)]
+pub struct SharedWorkerCapabilities {
+    supported_env_types: Arc<RwLock<Vec<String>>>,
+    package_states: Arc<RwLock<Vec<EnvPackageState>>>,
+}
+
+impl SharedWorkerCapabilities {
+    pub fn new(supported_env_types: Vec<String>, package_states: Vec<EnvPackageState>) -> Self {
+        Self {
+            supported_env_types: Arc::new(RwLock::new(supported_env_types)),
+            package_states: Arc::new(RwLock::new(package_states)),
+        }
+    }
+
+    pub async fn supported_env_types(&self) -> Vec<String> {
+        self.supported_env_types.read().await.clone()
+    }
+
+    pub async fn package_states(&self) -> Vec<EnvPackageState> {
+        self.package_states.read().await.clone()
+    }
+
+    pub async fn mark_env_ready(
+        &self,
+        env_type: &str,
+        env_package_id: &str,
+        env_package_version: &str,
+        bundle_digest: &str,
+        backend_kind: &str,
+        message: &str,
+    ) {
+        {
+            let mut envs = self.supported_env_types.write().await;
+            if !envs.iter().any(|v| v == env_type) {
+                envs.push(env_type.to_string());
+                envs.sort();
+            }
+        }
+        if !env_package_id.is_empty() || !env_type.is_empty() {
+            let mut packages = self.package_states.write().await;
+            packages.retain(|p| {
+                !(p.env_type == env_type
+                    && p.package_id == env_package_id
+                    && p.version == env_package_version)
+            });
+            packages.push(EnvPackageState {
+                package_id: env_package_id.to_string(),
+                version: env_package_version.to_string(),
+                bundle_digest: bundle_digest.to_string(),
+                state: "ready".to_string(),
+                env_type: env_type.to_string(),
+                backend_kind: backend_kind.to_string(),
+                message: message.to_string(),
+            });
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +119,7 @@ pub trait ControlPlane: Send + Sync {
 pub struct SchedulerControlPlaneClient {
     endpoint: String,
     register_endpoint: String,
-    supported_env_types: Vec<String>,
+    capabilities: SharedWorkerCapabilities,
     max_concurrent: u32,
     resource: ResourceSpec,
     metrics: MetricsExporter,
@@ -66,6 +127,7 @@ pub struct SchedulerControlPlaneClient {
     connected: Arc<AtomicBool>,
     gateway_public_url: String,
     synced_env_packages: Vec<SyncedEnvPackage>,
+    warmup_pool: Option<WarmupPool>,
 }
 
 pub fn detect_resource_spec() -> ResourceSpec {
@@ -117,7 +179,7 @@ impl SchedulerControlPlaneClient {
         mode: SchedulerMode,
         endpoint: String,
         register_endpoint: String,
-        supported_env_types: Vec<String>,
+        capabilities: SharedWorkerCapabilities,
         max_concurrent: u32,
         worker_id: String,
         resource: ResourceSpec,
@@ -136,7 +198,7 @@ impl SchedulerControlPlaneClient {
         Self {
             endpoint,
             register_endpoint,
-            supported_env_types,
+            capabilities,
             max_concurrent,
             resource,
             metrics,
@@ -147,23 +209,57 @@ impl SchedulerControlPlaneClient {
             connected: Arc::new(AtomicBool::new(false)),
             gateway_public_url,
             synced_env_packages,
+            warmup_pool: None,
         }
+    }
+
+    pub fn with_warmup_pool(mut self, warmup_pool: WarmupPool) -> Self {
+        self.warmup_pool = Some(warmup_pool);
+        self
+    }
+
+    async fn platform_features(&self) -> Vec<String> {
+        vec![
+            "hub_dynamic_env".to_string(),
+            "trajectory_v2_2".to_string(),
+            "artifact_uri".to_string(),
+            "reward_adapter_v1".to_string(),
+        ]
+    }
+
+    async fn backend_kinds(&self) -> Vec<String> {
+        vec![
+            "process_plugin".to_string(),
+            "generic_openenv_plugin".to_string(),
+        ]
+    }
+
+    async fn trajectory_schemas(&self) -> Vec<String> {
+        vec!["v2.2".to_string(), "artifact_uri".to_string()]
+    }
+
+    async fn tool_schemas(&self) -> Vec<String> {
+        vec!["runtime/v1".to_string(), "browser-tools/v1".to_string()]
     }
 
     async fn register_once(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Server hung with an ESTABLISHED TCP but no gRPC reply used to block worker
         // startup before Gateway bind; bound the whole register attempt.
-        let timeout_secs =
-            bounded_env_u64("UENV_WORKER_REGISTER_TIMEOUT_SECS", 10, 1, 300);
+        let timeout_secs = bounded_env_u64("UENV_WORKER_REGISTER_TIMEOUT_SECS", 10, 1, 300);
         let fut = async {
             let mut client =
                 ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
             let identity = self.identity.read().await.clone();
             let active_load = self.metrics.active_episode_count() as i32;
+            let (pool_summary, pool_slots) = if let Some(pool) = &self.warmup_pool {
+                pool.snapshot().await
+            } else {
+                (Vec::new(), Vec::new())
+            };
             let response = client
                 .register_worker(RegisterWorkerRequest {
                     worker_id: identity.worker_id.clone(),
-                    supported_env_types: self.supported_env_types.clone(),
+                    supported_env_types: self.capabilities.supported_env_types().await,
                     resource: Some(self.resource.clone()),
                     endpoint: self.register_endpoint.clone(),
                     max_concurrent: self.max_concurrent,
@@ -171,6 +267,13 @@ impl SchedulerControlPlaneClient {
                     synced_env_packages: self.synced_env_packages.clone(),
                     load: active_load,
                     max_load: self.max_concurrent as i32,
+                    platform_features: self.platform_features().await,
+                    backend_kinds: self.backend_kinds().await,
+                    trajectory_schemas: self.trajectory_schemas().await,
+                    tool_schemas: self.tool_schemas().await,
+                    package_states: self.capabilities.package_states().await,
+                    pool_summary,
+                    pool_slots,
                 })
                 .await?
                 .into_inner();
@@ -259,11 +362,19 @@ impl SchedulerControlPlaneClient {
     /// 如果回包的 server_epoch 与本地记录不同，说明 server 已重启，
     /// 立即触发 re-register（重新将自己注册到新 server 实例）。
     /// re-register 失败时向上传播错误，由 spawn_heartbeat_loop 捕获后重试。
-    async fn heartbeat_once(&self) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
+    async fn heartbeat_once(
+        &self,
+    ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut client =
+            ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let (tx, rx) = mpsc::channel(4);
         let identity = self.identity.read().await.clone();
         let prev_epoch = identity.server_epoch;
+        let (pool_summary, pool_slots) = if let Some(pool) = &self.warmup_pool {
+            pool.snapshot().await
+        } else {
+            (Vec::new(), Vec::new())
+        };
         tx.send(HeartbeatRequest {
             worker_id: identity.worker_id,
             load: self.metrics.active_episode_count() as i32,
@@ -273,6 +384,14 @@ impl SchedulerControlPlaneClient {
                 .unwrap_or_default()
                 .as_millis() as i64,
             server_epoch: prev_epoch,
+            supported_env_types: self.capabilities.supported_env_types().await,
+            platform_features: self.platform_features().await,
+            backend_kinds: self.backend_kinds().await,
+            trajectory_schemas: self.trajectory_schemas().await,
+            tool_schemas: self.tool_schemas().await,
+            package_states: self.capabilities.package_states().await,
+            pool_summary,
+            pool_slots,
         })
         .await?;
         drop(tx);
@@ -322,7 +441,8 @@ impl SchedulerControlPlaneClient {
         dispatch_lease_id: String,
         dispatch_token: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
+        let mut client =
+            ControlPlaneServiceClient::connect(format!("http://{}", self.endpoint)).await?;
         let identity = self.identity.read().await.clone();
         let worker_id_for_log = identity.worker_id.clone();
         let response = client

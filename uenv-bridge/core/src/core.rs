@@ -25,6 +25,7 @@ use uenv_server::proto::v1::{
 
 use crate::protocol::{
     CoreError, ExecuteBatchRequest, ExecuteBatchResponse, SampleEnvelope, SampleResult,
+    SchedulingPolicy,
 };
 use crate::server_api::EpisodeService;
 
@@ -49,11 +50,10 @@ where
         let episode_requests = request
             .samples
             .into_iter()
-            .map(sample_to_episode_request)
+            .map(|sample| sample_to_episode_request(sample, request.batch_id.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
         let episode_results = self
-            .episode_service
-            .submit_episode_batch(episode_requests)
+            .submit_episode_requests(episode_requests, request.scheduling_policy.as_ref())
             .await?;
         validate_episode_results(&episode_results, &sample_context)?;
         let results = episode_results
@@ -70,7 +70,7 @@ where
     pub async fn execute_sample(&self, sample: SampleEnvelope) -> Result<SampleResult, CoreError> {
         validate_batch(std::slice::from_ref(&sample))?;
         let sample_context = sample_context_by_request_id(std::slice::from_ref(&sample));
-        let episode_request = sample_to_episode_request(sample)?;
+        let episode_request = sample_to_episode_request(sample, "")?;
         let episode_results = self
             .episode_service
             .submit_episode_batch(vec![episode_request])
@@ -83,6 +83,33 @@ where
         results.pop().ok_or_else(|| {
             CoreError::InvalidEpisodeResult("EpisodeService returned no result".to_string())
         })
+    }
+
+    async fn submit_episode_requests(
+        &self,
+        episode_requests: Vec<ProtoEpisodeRequest>,
+        scheduling_policy: Option<&SchedulingPolicy>,
+    ) -> Result<Vec<ProtoEpisodeResult>, CoreError> {
+        let max_episode_concurrency = scheduling_policy
+            .map(|policy| policy.max_episode_concurrency as usize)
+            .unwrap_or(0);
+        if max_episode_concurrency == 0 || episode_requests.len() <= max_episode_concurrency {
+            return self
+                .episode_service
+                .submit_episode_batch(episode_requests)
+                .await
+                .map_err(Into::into);
+        }
+
+        let mut episode_results = Vec::with_capacity(episode_requests.len());
+        for chunk in episode_requests.chunks(max_episode_concurrency) {
+            episode_results.extend(
+                self.episode_service
+                    .submit_episode_batch(chunk.to_vec())
+                    .await?,
+            );
+        }
+        Ok(episode_results)
     }
 }
 
@@ -166,7 +193,10 @@ fn validate_episode_results(
 
 // SampleEnvelope uses structured fields. Legacy payload_json/meta_json/model_output_json
 // are ignored by the internal protocol layer and are not read here.
-fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeRequest, CoreError> {
+fn sample_to_episode_request(
+    sample: SampleEnvelope,
+    fallback_scheduling_group_id: &str,
+) -> Result<ProtoEpisodeRequest, CoreError> {
     let env_cfg = json_from_bytes(&sample.env_config_json).unwrap_or(Value::Null);
     let episode_cfg = json_from_bytes(&sample.episode_config_json).unwrap_or(Value::Null);
     let reward_cfg = json_from_bytes(&sample.reward_config_json).unwrap_or(Value::Null);
@@ -174,8 +204,11 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
     let sample_context = contextual_metadata(&raw_sample_context);
     let parallel_mode = sample_parallel_mode(&sample)?;
     let model_endpoint_config = sample_model_endpoint_config(&sample);
-    let correlation_id = non_empty_string(&sample.correlation_id)
-        .unwrap_or_else(|| sample.batch_id.clone());
+    let correlation_id =
+        non_empty_string(&sample.correlation_id).unwrap_or_else(|| sample.batch_id.clone());
+    let scheduling_group_id = non_empty_string(&sample.batch_id)
+        .or_else(|| non_empty_string(fallback_scheduling_group_id))
+        .unwrap_or_else(|| correlation_id.clone());
     let worker_payload = sample_to_worker_payload(&sample, &env_cfg, &sample_context);
     let env_package_id = env_package_field(
         &sample.env_package_id,
@@ -201,7 +234,9 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
             metadata.insert("batch_id".to_string(), v.to_string());
         }
         if let Some(v) = obj.get("run_id").and_then(|x| x.as_str()) {
-            metadata.entry("training_run_id".to_string()).or_insert_with(|| v.to_string());
+            metadata
+                .entry("training_run_id".to_string())
+                .or_insert_with(|| v.to_string());
         }
     }
     if !sample.batch_id.is_empty() {
@@ -222,11 +257,13 @@ fn sample_to_episode_request(sample: SampleEnvelope) -> Result<ProtoEpisodeReque
         } else {
             300
         },
-        reward_config: serde_json::to_vec(&sample_to_worker_reward_config(&reward_cfg)).unwrap_or_default(),
+        reward_config: serde_json::to_vec(&sample_to_worker_reward_config(&reward_cfg))
+            .unwrap_or_default(),
         parallel_mode,
         env_package_id,
         env_package_version,
         model_endpoint_config,
+        scheduling_group_id,
         metadata,
         ..Default::default()
     })
@@ -240,8 +277,7 @@ fn json_from_bytes(bytes: &[u8]) -> Option<Value> {
 }
 
 fn raw_sample_context_from_sample(sample: &SampleEnvelope) -> Value {
-    json_from_bytes(&sample.sample_context_json)
-        .unwrap_or(Value::Null)
+    json_from_bytes(&sample.sample_context_json).unwrap_or(Value::Null)
 }
 
 fn sample_parallel_mode(sample: &SampleEnvelope) -> Result<String, CoreError> {
@@ -262,13 +298,16 @@ fn normalize_parallel_mode(raw: &str) -> Result<String, CoreError> {
 }
 
 fn sample_model_endpoint_config(sample: &SampleEnvelope) -> Option<ProtoModelEndpoint> {
-    sample.model_endpoint.as_ref().map(|endpoint| ProtoModelEndpoint {
-        endpoint_type: endpoint.endpoint_type.clone(),
-        url: endpoint.url.clone(),
-        model_name: endpoint.model_name.clone(),
-        generation_config_json: endpoint.generation_config_json.clone(),
-        max_retries: endpoint.max_retries,
-    })
+    sample
+        .model_endpoint
+        .as_ref()
+        .map(|endpoint| ProtoModelEndpoint {
+            endpoint_type: endpoint.endpoint_type.clone(),
+            url: endpoint.url.clone(),
+            model_name: endpoint.model_name.clone(),
+            generation_config_json: endpoint.generation_config_json.clone(),
+            max_retries: endpoint.max_retries,
+        })
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
@@ -314,6 +353,17 @@ fn is_protocol_metadata_key(key: &str) -> bool {
             | "server_latency_ms"
             | "worker_latency_ms"
             | "model_latency_ms"
+            | "scheduling_policy"
+            | "scheduling_group_id"
+            | "scheduling_priority"
+            | "max_episode_concurrency"
+            | "max_in_flight_batches"
+            | "target_worker_slots"
+            | "pool_warmup_target"
+            | "max_parallel_per_worker"
+            | "agent_job_max_concurrency"
+            | "runtime_gateway_session_limit"
+            | "require_warm_slot"
     )
 }
 
@@ -329,11 +379,7 @@ fn contextual_metadata(metadata: &Value) -> Value {
     Value::Object(filtered)
 }
 
-fn sample_to_worker_payload(
-    sample: &SampleEnvelope,
-    env_cfg: &Value,
-    metadata: &Value,
-) -> Value {
+fn sample_to_worker_payload(sample: &SampleEnvelope, env_cfg: &Value, metadata: &Value) -> Value {
     let extra_info = metadata.get("extra_info").unwrap_or(&Value::Null);
 
     let question = json_string(extra_info, "question")
@@ -362,10 +408,16 @@ fn sample_to_worker_payload(
         }
         if let Some(endpoint) = sample.model_endpoint.as_ref() {
             if !endpoint.url.trim().is_empty() {
-                obj.insert("model_endpoint".to_string(), Value::String(endpoint.url.clone()));
+                obj.insert(
+                    "model_endpoint".to_string(),
+                    Value::String(endpoint.url.clone()),
+                );
             }
             if !endpoint.model_name.trim().is_empty() {
-                obj.insert("model_name".to_string(), Value::String(endpoint.model_name.clone()));
+                obj.insert(
+                    "model_name".to_string(),
+                    Value::String(endpoint.model_name.clone()),
+                );
             }
             if let Some(generation_config) = json_from_bytes(&endpoint.generation_config_json) {
                 obj.insert("generation_config".to_string(), generation_config);
@@ -376,7 +428,12 @@ fn sample_to_worker_payload(
     // image and grade (the generic mapping above only carries question/dataset).
     if sample.env_type == "swe" {
         if let Some(obj) = worker_payload.as_object_mut() {
-            for key in ["instance_id", "benchmark_variant", "use_gold_patch", "command_mode"] {
+            for key in [
+                "instance_id",
+                "benchmark_variant",
+                "use_gold_patch",
+                "command_mode",
+            ] {
                 if let Some(v) = env_cfg.get(key) {
                     obj.insert(key.to_string(), v.clone());
                 }
@@ -524,10 +581,7 @@ fn build_trajectory_json(
     if has_trajectory_id || has_metadata {
         let mut envelope = serde_json::Map::new();
         envelope.insert("steps".to_string(), serde_json::Value::Array(vec![]));
-        envelope.insert(
-            "total_reward".to_string(),
-            serde_json::json!(total_reward),
-        );
+        envelope.insert("total_reward".to_string(), serde_json::json!(total_reward));
         envelope.insert("total_steps".to_string(), serde_json::json!(total_steps));
         if has_trajectory_id {
             envelope.insert(
@@ -536,10 +590,7 @@ fn build_trajectory_json(
             );
         }
         if has_metadata {
-            envelope.insert(
-                "metadata".to_string(),
-                serde_json::json!(result.metadata),
-            );
+            envelope.insert("metadata".to_string(), serde_json::json!(result.metadata));
         }
         return serde_json::to_vec(&serde_json::Value::Object(envelope)).map_err(|err| {
             CoreError::InvalidEpisodeResult(format!("failed to encode trajectory_json: {err}"))
@@ -757,7 +808,10 @@ mod tests {
     fn make_sample(request_id: &str, sample_index: u32, payload: &[u8]) -> SampleEnvelope {
         let payload = json_from_bytes(payload).unwrap_or(Value::Null);
         let env_cfg = payload.get("env_config").cloned().unwrap_or(Value::Null);
-        let episode_cfg = payload.get("episode_config").cloned().unwrap_or(Value::Null);
+        let episode_cfg = payload
+            .get("episode_config")
+            .cloned()
+            .unwrap_or(Value::Null);
         let reward_cfg = payload.get("reward_config").cloned().unwrap_or(Value::Null);
         let metadata = payload.get("metadata").cloned().unwrap_or(Value::Null);
         SampleEnvelope {
@@ -805,7 +859,8 @@ mod tests {
             return None;
         }
         Some(ModelEndpoint {
-            endpoint_type: json_string(value, "endpoint_type").unwrap_or_else(|| "http".to_string()),
+            endpoint_type: json_string(value, "endpoint_type")
+                .unwrap_or_else(|| "http".to_string()),
             url,
             model_name,
             generation_config_json: json_bytes(&generation_config),
@@ -821,6 +876,7 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![make_sample("episode-1", 0, b"{\"framework\":\"verl\"}")],
+                scheduling_policy: None,
             })
             .await
             .unwrap();
@@ -867,6 +923,7 @@ mod tests {
                     7,
                     b"{\"episode_config\":{\"max_steps\":12,\"seed\":99},\"model_endpoint\":{\"url\":\"http://vllm:8000/v1\"}}",
                 )],
+                scheduling_policy: None,
             })
             .await
             .unwrap();
@@ -883,6 +940,40 @@ mod tests {
             "http://vllm:8000/v1"
         );
         assert_eq!(response.results[0].sample_index, 7);
+    }
+
+    #[tokio::test]
+    async fn execute_batch_applies_scheduling_policy_group_and_chunk_limit() {
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let core = AdapterCore::new(RecordingEpisodeService {
+            requests: Arc::clone(&recorded),
+        });
+        let samples = (0..3)
+            .map(|index| {
+                let mut sample = make_sample(&format!("episode-{}", index + 1), index, b"{}");
+                sample.batch_id = "batch-schedule".to_string();
+                sample
+            })
+            .collect();
+
+        core.execute_batch(ExecuteBatchRequest {
+            request_id: "request-1".to_string(),
+            batch_id: "batch-schedule".to_string(),
+            samples,
+            scheduling_policy: Some(SchedulingPolicy {
+                max_episode_concurrency: 2,
+                ..Default::default()
+            }),
+        })
+        .await
+        .unwrap();
+
+        let calls = recorded.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].len(), 2);
+        assert_eq!(calls[1].len(), 1);
+        assert_eq!(calls[0][0].scheduling_group_id, "batch-schedule");
+        assert_eq!(calls[1][0].scheduling_group_id, "batch-schedule");
     }
 
     #[tokio::test]
@@ -909,6 +1000,7 @@ mod tests {
             request_id: "request-1".to_string(),
             batch_id: "batch-1".to_string(),
             samples: vec![make_sample("episode-1", 0, payload)],
+            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -933,7 +1025,10 @@ mod tests {
             serde_json::from_slice(&model_endpoint_config.generation_config_json)
                 .expect("generation config json");
         assert_eq!(generation_config["max_new_tokens"], 8);
-        assert_eq!(worker_payload["model_endpoint"], "http://127.0.0.1:18080/v1");
+        assert_eq!(
+            worker_payload["model_endpoint"],
+            "http://127.0.0.1:18080/v1"
+        );
         assert_eq!(worker_payload["model_name"], "mock-policy");
         assert_eq!(worker_payload["generation_config"]["max_new_tokens"], 8);
         assert_eq!(worker_reward["type"], "rule_reward");
@@ -1039,6 +1134,7 @@ mod tests {
                 sample.parallel_mode = "one_step_off_policy".to_string();
                 vec![sample]
             },
+            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -1078,6 +1174,7 @@ mod tests {
             request_id: "request-1".to_string(),
             batch_id: "batch-swe".to_string(),
             samples: vec![sample],
+            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -1110,6 +1207,7 @@ mod tests {
             request_id: "request-1".to_string(),
             batch_id: "batch-1".to_string(),
             samples: vec![sample],
+            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -1133,10 +1231,13 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![sample],
+                scheduling_policy: None,
             })
             .await
             .unwrap_err();
-        assert!(matches!(err, CoreError::InvalidEnvelope(message) if message.contains("unsupported parallel_mode")));
+        assert!(
+            matches!(err, CoreError::InvalidEnvelope(message) if message.contains("unsupported parallel_mode"))
+        );
     }
 
     #[tokio::test]
@@ -1147,6 +1248,7 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![make_sample("episode-1", 0, b"{\"framework\":\"verl\"}")],
+                scheduling_policy: None,
             })
             .await
             .unwrap();
@@ -1158,8 +1260,14 @@ mod tests {
         assert_eq!(response.results[0].rollout_policy_version, "actor-step-11");
         assert_eq!(response.results[0].rollout_log_probs, vec![-0.1, -0.2]);
         assert_eq!(trajectory["steps"][0]["action"], "42");
-        assert_eq!(trajectory["steps"][0]["rollout_trace"]["response_ids"], json!([101, 102]));
-        assert_eq!(trajectory["steps"][0]["rollout_trace"]["response_mask"], json!([1, 1]));
+        assert_eq!(
+            trajectory["steps"][0]["rollout_trace"]["response_ids"],
+            json!([101, 102])
+        );
+        assert_eq!(
+            trajectory["steps"][0]["rollout_trace"]["response_mask"],
+            json!([1, 1])
+        );
     }
 
     #[tokio::test]
@@ -1170,6 +1278,7 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![make_sample("episode-1", 0, b"{\"framework\":\"verl\"}")],
+                scheduling_policy: None,
             })
             .await
             .unwrap_err();
@@ -1187,6 +1296,7 @@ mod tests {
                     make_sample("episode-1", 0, b"{\"framework\":\"verl\"}"),
                     make_sample("episode-2", 1, b"{\"framework\":\"verl\"}"),
                 ],
+                scheduling_policy: None,
             })
             .await
             .unwrap_err();

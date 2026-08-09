@@ -90,9 +90,9 @@ impl RepoSpec {
             TestRunner::Django => format!(
                 "{conda_activate}; cd {testbed} && ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 {ids}"
             ),
-            TestRunner::SympyBinTest => format!(
-                "{conda_activate}; cd {testbed} && bin/test -C --verbose {ids}"
-            ),
+            TestRunner::SympyBinTest => {
+                format!("{conda_activate}; cd {testbed} && bin/test -C --verbose {ids}")
+            }
         }
     }
 }
@@ -111,7 +111,9 @@ pub fn spec_for(repo: &str, version: &str) -> Option<RepoSpec> {
         "django/django" => RepoSpec::django(),
 
         // 需 editable install 的仓库（镜像未必预装当前源码）。
-        "scikit-learn/scikit-learn" => RepoSpec::pytest(Some("pip install -e . --no-build-isolation")),
+        "scikit-learn/scikit-learn" => {
+            RepoSpec::pytest(Some("pip install -e . --no-build-isolation"))
+        }
         "matplotlib/matplotlib" => RepoSpec::pytest(Some("pip install -e .")),
         "pydata/xarray" => RepoSpec::pytest(Some("pip install -e .")),
 
@@ -171,17 +173,34 @@ mod tests {
 
     #[test]
     fn sympy_version_selects_bin_test_for_old_releases() {
-        assert_eq!(spec_for("sympy/sympy", "1.8").unwrap().runner, TestRunner::SympyBinTest);
-        assert_eq!(spec_for("sympy/sympy", "1.12").unwrap().runner, TestRunner::Pytest);
+        assert_eq!(
+            spec_for("sympy/sympy", "1.8").unwrap().runner,
+            TestRunner::SympyBinTest
+        );
+        assert_eq!(
+            spec_for("sympy/sympy", "1.12").unwrap().runner,
+            TestRunner::Pytest
+        );
     }
 
     #[test]
     fn known_repo_resolves_runner() {
-        assert_eq!(spec_for("django/django", "4.1").unwrap().runner, TestRunner::Django);
-        assert_eq!(spec_for("Django/Django", "").unwrap().log_parser, LogParser::Django);
-        assert_eq!(spec_for("astropy/astropy", "5.0").unwrap().runner, TestRunner::Pytest);
         assert_eq!(
-            spec_for("scikit-learn/scikit-learn", "1.3").unwrap().install,
+            spec_for("django/django", "4.1").unwrap().runner,
+            TestRunner::Django
+        );
+        assert_eq!(
+            spec_for("Django/Django", "").unwrap().log_parser,
+            LogParser::Django
+        );
+        assert_eq!(
+            spec_for("astropy/astropy", "5.0").unwrap().runner,
+            TestRunner::Pytest
+        );
+        assert_eq!(
+            spec_for("scikit-learn/scikit-learn", "1.3")
+                .unwrap()
+                .install,
             Some("pip install -e . --no-build-isolation")
         );
     }
@@ -229,7 +248,12 @@ mod tests {
             runner: TestRunner::SympyBinTest,
             ..DEFAULT_SPEC
         };
-        let cmd = spec.build_test_command("source activate", "/testbed", &["sympy/x.py::test_a".to_string()], &[]);
+        let cmd = spec.build_test_command(
+            "source activate",
+            "/testbed",
+            &["sympy/x.py::test_a".to_string()],
+            &[],
+        );
         assert!(cmd.contains("bin/test -C --verbose"));
     }
 }

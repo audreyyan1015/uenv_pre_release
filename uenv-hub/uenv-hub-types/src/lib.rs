@@ -993,6 +993,206 @@ pub struct PackageSummary {
     pub latest_version: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// What role this package plays, derived from its latest manifest.
+    #[serde(default)]
+    pub kind: PackageKind,
+    /// For [`PackageKind::Benchmark`], the Task Environment it supplies data to
+    /// (`swe`, `qa`, …). Lets a client group benchmarks under their contract
+    /// instead of listing every dataset as if it were a top-level concept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_type: Option<String>,
+    /// Dataset / variant key under that contract, e.g. `smith` under `swe`,
+    /// or `dscodebench` under `code`. Distinct from [`Self::package_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+    /// Number of task instances the benchmark declares, when its manifest says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_count: Option<i64>,
+}
+
+/// The role an EnvPackage plays, so that one flat table does not have to stand in
+/// for five unrelated kinds of thing.
+///
+/// A package is a *distribution unit*: versioned bytes plus the contract needed to
+/// consume them. That says nothing about what those bytes are for, and in practice
+/// the registry holds task data, Agent scaffolds, scoring contracts and raw image
+/// tarballs side by side. Listing them together is what made the console read as
+/// an undifferentiated pile. The kind is derived rather than stored so existing
+/// packages classify without a republish; [`PackageKind::classify`] is the single
+/// definition both the API and the console rely on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageKind {
+    /// Task data for a Task Environment: catalog + eval spec (+ optional images).
+    Benchmark,
+    /// An Agent scaffold; declares `agent_defaults.agent_kind`.
+    AgentScaffold,
+    /// A scoring contract (rubric / alignment evidence) with no task catalog.
+    Rubric,
+    /// Nothing but `docker load` inputs — image bytes with no task data.
+    ImageBundle,
+    /// Smoke or regression fixtures kept for tests rather than for training.
+    Fixture,
+    #[default]
+    Other,
+}
+
+impl PackageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Benchmark => "benchmark",
+            Self::AgentScaffold => "agent_scaffold",
+            Self::Rubric => "rubric",
+            Self::ImageBundle => "image_bundle",
+            Self::Fixture => "fixture",
+            Self::Other => "other",
+        }
+    }
+
+    /// Derive the role of a package from its manifest.
+    ///
+    /// Order matters: a scaffold may ship fixtures, and a smoke fixture may ship a
+    /// tiny catalog, so the most specific declaration wins. Package-id suffixes
+    /// (`fixture` / `smoke` / `rubric`) are consulted only after structure.
+    pub fn classify(manifest: &EnvPackageManifest) -> Self {
+        let has_agent_kind = manifest
+            .agent_defaults
+            .get("agent_kind")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if has_agent_kind {
+            return Self::AgentScaffold;
+        }
+
+        let id = manifest.package_id.to_ascii_lowercase();
+        let fixture_flag = manifest
+            .worker_overlay
+            .pointer("/math/fixture_package")
+            .or_else(|| manifest.worker_overlay.get("fixture_package"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        // Smoke / fixture packages often carry a small catalog; the name and the
+        // explicit flag are what mark them as non-training material.
+        if fixture_flag || id.contains("fixture") || id.contains("smoke") {
+            return Self::Fixture;
+        }
+
+        let artifact_kind = |k: &str| manifest.artifacts.iter().any(|a| a.kind == k);
+        if artifact_kind("catalog") {
+            return Self::Benchmark;
+        }
+
+        let tar_kinds = ["image_tar", "images_tar", "image"];
+        if !manifest.artifacts.is_empty()
+            && manifest
+                .artifacts
+                .iter()
+                .all(|a| tar_kinds.contains(&a.kind.as_str()) || a.name.ends_with(".tar"))
+        {
+            return Self::ImageBundle;
+        }
+
+        if id.contains("rubric") {
+            return Self::Rubric;
+        }
+        Self::Other
+    }
+
+    /// The Task Environment a benchmark supplies data to.
+    ///
+    /// Resolution order:
+    /// 1. explicit `env_type` in the overlay;
+    /// 2. a well-formed contract subtree (`swe.benchmark_variant`, `code.*`, `qa`/`math`);
+    /// 3. package-id conventions (`swe-bench-*` → `swe`, `olymmath` → `qa`, …).
+    ///
+    /// Step 3 exists because several production packages were published with a
+    /// copy-pasted `{"swe":{"image_pull_policy":"local_only"}}` overlay that does
+    /// not describe their real contract. Guessing from the id is preferable to
+    /// dumping them under "undeclared" in the console.
+    pub fn benchmark_env_type(manifest: &EnvPackageManifest) -> Option<String> {
+        let overlay = &manifest.worker_overlay;
+        for path in [
+            &["env_type"][..],
+            &["swe", "env_type"][..],
+            &["qa", "env_type"][..],
+            &["code", "env_type"][..],
+            &["math", "env_type"][..],
+        ] {
+            let mut cur = Some(overlay);
+            for seg in path {
+                cur = cur.and_then(|v| v.get(*seg));
+            }
+            if let Some(s) = cur.and_then(Value::as_str) {
+                if !s.trim().is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        if overlay
+            .get("swe")
+            .and_then(|s| s.get("benchmark_variant"))
+            .is_some()
+        {
+            return Some("swe".to_string());
+        }
+        if overlay.get("code").is_some() {
+            return Some("code".to_string());
+        }
+        if overlay.get("qa").is_some() || overlay.get("math").is_some() {
+            return Some("qa".to_string());
+        }
+        Self::infer_env_from_package_id(&manifest.package_id)
+    }
+
+    /// Dataset / variant key under the contract (e.g. `smith`, `dscodebench`).
+    pub fn benchmark_dataset(manifest: &EnvPackageManifest) -> Option<String> {
+        let overlay = &manifest.worker_overlay;
+        for path in [
+            &["swe", "benchmark_variant"][..],
+            &["code", "dataset"][..],
+            &["qa", "dataset"][..],
+            &["math", "dataset"][..],
+            &["dataset"][..],
+        ] {
+            let mut cur = Some(overlay);
+            for seg in path {
+                cur = cur.and_then(|v| v.get(*seg));
+            }
+            if let Some(s) = cur.and_then(Value::as_str) {
+                if !s.trim().is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        let id = &manifest.package_id;
+        if let Some(rest) = id.strip_prefix("swe-bench-") {
+            return Some(rest.to_string());
+        }
+        // For single-dataset packages the package id is the dataset name.
+        match Self::infer_env_from_package_id(id) {
+            Some(_) => Some(id.clone()),
+            None => None,
+        }
+    }
+
+    fn infer_env_from_package_id(package_id: &str) -> Option<String> {
+        let id = package_id.to_ascii_lowercase();
+        if id.starts_with("swe-bench") || id.contains("swesmith") || id == "swebenchpro" {
+            return Some("swe".into());
+        }
+        if id == "dscodebench" || id.starts_with("dscode") {
+            return Some("code".into());
+        }
+        if matches!(
+            id.as_str(),
+            "olymmath" | "pubmedqa" | "scitab" | "gsm8k"
+        ) || id.contains("olymmath")
+            || id.starts_with("math-")
+        {
+            return Some("qa".into());
+        }
+        None
+    }
 }
 
 /// One file the consumer must fetch when syncing a package.
@@ -1274,4 +1474,241 @@ pub struct ResolvedEpisodeStack {
     /// promotion, or a scaffold that declares no `agent_kind`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Hub overview — a single-request projection of "what this Hub currently is"
+// ---------------------------------------------------------------------------
+
+/// Counters over everything the registry currently holds.
+///
+/// These are computed with `COUNT(*)` against the live tables rather than kept
+/// as incrementally-maintained gauges, because the registry is a low-write
+/// system and a counter that can drift from the tables it claims to describe is
+/// worse than one that costs a few milliseconds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegistryStats {
+    pub envs: i64,
+    pub env_versions: i64,
+    pub yanked_env_versions: i64,
+    pub deprecated_envs: i64,
+    pub packages: i64,
+    pub package_versions: i64,
+    pub yanked_package_versions: i64,
+    pub package_artifacts: i64,
+    /// Sum of `env_package_artifacts.size_bytes` as recorded at publish time.
+    pub package_artifact_bytes: i64,
+    pub stacks: i64,
+    pub stack_versions: i64,
+    pub yanked_stack_versions: i64,
+    pub agent_bridges: i64,
+    pub templates: i64,
+    pub active_tokens: i64,
+    pub audit_entries: i64,
+    /// How many packages play each role (see [`PackageKind`]), keyed by its
+    /// serialized name. Lets a client size "benchmarks" against "scaffolds"
+    /// without walking the whole package list first.
+    #[serde(default)]
+    pub packages_by_kind: BTreeMap<String, i64>,
+    /// Environments still serving as capability contracts, i.e. not deprecated.
+    /// `envs` counts every row including retired aliases; this is the live set.
+    #[serde(default)]
+    pub active_envs: i64,
+}
+
+/// Physical footprint of the Hub on its host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageStats {
+    pub artifact_dir: String,
+    /// `false` when the directory has not been created yet (nothing published).
+    pub artifact_dir_exists: bool,
+    /// Files actually present under the content-addressed artifact store.
+    pub artifact_files: u64,
+    /// Bytes actually on disk, which can differ from
+    /// [`RegistryStats::package_artifact_bytes`] if a publish was interrupted.
+    pub artifact_bytes: u64,
+    pub database_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_bytes: Option<u64>,
+}
+
+/// Host resource snapshot, collected at request time.
+///
+/// Every field beyond `os`/`arch`/`cpu_cores` is optional: the values come from
+/// Linux `/proc`, and on a non-Linux host (a developer laptop) they are simply
+/// absent rather than fabricated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostStats {
+    pub os: String,
+    pub arch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<u64>,
+    /// Whole-host CPU busy percentage sampled over a short window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_percent: Option<f64>,
+    /// 1 / 5 / 15 minute load averages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_average: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_available_bytes: Option<u64>,
+    /// Resident set size of the Hub process itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_resident_bytes: Option<u64>,
+}
+
+/// The security / operating posture the Hub was started with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubPosture {
+    pub require_token: bool,
+    pub rate_limit_enabled: bool,
+    pub requests_per_second: u64,
+    pub burst: u32,
+    pub cors_allow_origins: Vec<String>,
+    pub seed_examples: bool,
+    pub catalog_seed_dir: String,
+}
+
+/// Response for `GET /api/v1/system/overview`.
+///
+/// One round trip returns identity, registry inventory, on-disk footprint, host
+/// resources and startup posture. A console that had to assemble this from the
+/// individual list endpoints would issue a dozen requests and still not see the
+/// storage or host dimensions, which are not exposed anywhere else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubOverview {
+    pub service: VersionInfo,
+    /// Unix epoch seconds at which this process finished starting up.
+    pub started_at: i64,
+    pub uptime_seconds: i64,
+    /// Server clock, so a console can render relative times without trusting
+    /// the browser's clock.
+    pub server_time: i64,
+    pub db_up: bool,
+    pub registry: RegistryStats,
+    pub storage: StorageStats,
+    pub host: HostStats,
+    pub posture: HubPosture,
+}
+
+
+#[cfg(test)]
+mod package_kind_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn bare_manifest(id: &str) -> EnvPackageManifest {
+        EnvPackageManifest {
+            package_id: id.into(),
+            version: "0.1.0".into(),
+            published_at: 0,
+            publisher: None,
+            changelog: None,
+            platform: PackagePlatform::default(),
+            artifacts: vec![],
+            worker_overlay: Value::Null,
+            agent_defaults: Value::Null,
+            contracts: PackageContracts::default(),
+            interface: InterfaceSchema::default(),
+        }
+    }
+
+    #[test]
+    fn classify_marks_catalog_as_benchmark() {
+        let mut m = bare_manifest("swe-bench-smith");
+        m.artifacts.push(PackageArtifactRef {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            url: String::new(),
+            digest: "sha256:00".into(),
+            size_bytes: Some(1),
+            sync_mode: "inline".into(),
+            media_type: None,
+            target_rel_path: "catalog.json".into(),
+        });
+        m.worker_overlay = json!({"swe": {"benchmark_variant": "smith"}});
+        assert_eq!(PackageKind::classify(&m), PackageKind::Benchmark);
+        assert_eq!(PackageKind::benchmark_env_type(&m).as_deref(), Some("swe"));
+    }
+
+    #[test]
+    fn classify_prefers_agent_scaffold_over_catalog() {
+        let mut m = bare_manifest("uenv-agent-openhands");
+        m.agent_defaults = json!({"agent_kind": "openhands"});
+        m.artifacts.push(PackageArtifactRef {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            url: String::new(),
+            digest: "sha256:00".into(),
+            size_bytes: Some(1),
+            sync_mode: "inline".into(),
+            media_type: None,
+            target_rel_path: "catalog.json".into(),
+        });
+        assert_eq!(PackageKind::classify(&m), PackageKind::AgentScaffold);
+    }
+
+    #[test]
+    fn classify_image_only_bundle() {
+        let mut m = bare_manifest("echo-container-image");
+        m.artifacts.push(PackageArtifactRef {
+            name: "x.tar".into(),
+            kind: "image_tar".into(),
+            url: String::new(),
+            digest: "sha256:00".into(),
+            size_bytes: Some(1),
+            sync_mode: "inline".into(),
+            media_type: None,
+            target_rel_path: "x.tar".into(),
+        });
+        assert_eq!(PackageKind::classify(&m), PackageKind::ImageBundle);
+    }
+    #[test]
+    fn olymmath_with_copy_pasted_swe_overlay_still_maps_to_qa() {
+        let mut m = bare_manifest("olymmath");
+        m.artifacts.push(PackageArtifactRef {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            url: String::new(),
+            digest: "sha256:00".into(),
+            size_bytes: Some(1),
+            sync_mode: "inline".into(),
+            media_type: None,
+            target_rel_path: "catalog.json".into(),
+        });
+        // Production residue: overlay claims swe.image_pull_policy but the package
+        // is a QA dataset — package id must win over the misleading subtree.
+        m.worker_overlay = json!({"swe": {"image_pull_policy": "local_only"}});
+        assert_eq!(PackageKind::classify(&m), PackageKind::Benchmark);
+        assert_eq!(PackageKind::benchmark_env_type(&m).as_deref(), Some("qa"));
+        assert_eq!(PackageKind::benchmark_dataset(&m).as_deref(), Some("olymmath"));
+    }
+
+    #[test]
+    fn smoke_fixture_is_not_a_training_benchmark() {
+        let mut m = bare_manifest("math-smoke-fixtures");
+        m.artifacts.push(PackageArtifactRef {
+            name: "catalog.json".into(),
+            kind: "catalog".into(),
+            url: String::new(),
+            digest: "sha256:00".into(),
+            size_bytes: Some(1),
+            sync_mode: "inline".into(),
+            media_type: None,
+            target_rel_path: "catalog.json".into(),
+        });
+        m.worker_overlay = json!({"math": {"datasets": ["gsm8k"], "fixture_package": true}});
+        assert_eq!(PackageKind::classify(&m), PackageKind::Fixture);
+        assert_eq!(PackageKind::benchmark_env_type(&m).as_deref(), Some("qa"));
+    }
+
+    #[test]
+    fn swe_bench_id_yields_variant_dataset() {
+        let mut m = bare_manifest("swe-bench-smith");
+        m.worker_overlay = json!({"swe": {"benchmark_variant": "smith", "instance_count": 10}});
+        assert_eq!(PackageKind::benchmark_env_type(&m).as_deref(), Some("swe"));
+        assert_eq!(PackageKind::benchmark_dataset(&m).as_deref(), Some("smith"));
+    }
+
 }

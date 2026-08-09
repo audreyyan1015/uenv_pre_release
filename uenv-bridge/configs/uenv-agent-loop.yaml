@@ -4,6 +4,7 @@
   endpoint: ${oc.env:UENV_ADAPTER_CORE_ENDPOINT,127.0.0.1:50051}
   timeout_seconds: ${oc.env:UENV_AGENT_LOOP_TIMEOUT_SECONDS,300}
   startup_timeout_seconds: ${oc.env:UENV_ADAPTER_CORE_STARTUP_TIMEOUT_SECONDS,60}
+  max_message_bytes: ${oc.env:UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES,16777216}
   auto_start: ${oc.env:UENV_ADAPTER_CORE_AUTO_START,false}
   binary: ${oc.env:UENV_ADAPTER_CORE_BINARY,/tmp/uenv-bridge/core/target/debug/uenv-adapter-core}
   fake_reward: ${oc.env:UENV_AGENT_LOOP_FAKE_REWARD,1.0}
@@ -32,6 +33,15 @@
   require_swe_response_trace: ${oc.env:UENV_REQUIRE_SWE_RESPONSE_TRACE,true}
   failed_episode_policy: ${oc.env:UENV_AGENT_LOOP_FAILED_EPISODE_POLICY,raise}
   parallel_mode: ${oc.env:UENV_AGENT_LOOP_PARALLEL_MODE,sync}
+  expected_worker_parallelism: ${oc.env:UENV_EXPECTED_WORKER_PARALLELISM,""}
+  max_episode_concurrency: ${oc.env:UENV_MAX_EPISODE_CONCURRENCY,""}
+  max_in_flight_batches: ${oc.env:UENV_MAX_IN_FLIGHT_BATCHES,""}
+  target_worker_slots: ${oc.env:UENV_TARGET_WORKER_SLOTS,""}
+  pool_warmup_target: ${oc.env:UENV_POOL_WARMUP_TARGET,""}
+  max_parallel_per_worker: ${oc.env:UENV_MAX_PARALLEL_PER_WORKER,""}
+  agent_job_max_concurrency: ${oc.env:UENV_AGENT_JOB_MAX_CONCURRENCY,""}
+  runtime_gateway_session_limit: ${oc.env:UENV_RUNTIME_GATEWAY_SESSION_LIMIT,""}
+  require_warm_slot: ${oc.env:UENV_REQUIRE_WARM_SLOT,false}
   batch_size: ${oc.env:UENV_AGENT_LOOP_BATCH_SIZE,0}
   batch_retry_attempts: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS,3}
   batch_retry_delay_seconds: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS,5}

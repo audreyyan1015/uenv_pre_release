@@ -19,8 +19,8 @@ impl PluginRpcClient {
         path: &Path,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         use hyper_util::rt::TokioIo;
-        use tonic::transport::{Endpoint, Uri};
         use tokio::net::UnixStream;
+        use tonic::transport::{Endpoint, Uri};
         use tower::service_fn;
 
         let uds = path.to_path_buf();

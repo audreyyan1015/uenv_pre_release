@@ -1,9 +1,9 @@
 # SWE-smith 变更与联调报告（2026-08-01）
 
-> 日期：2026-08-01～2026-08-02  
-> 范围：Worker 支持 SWE-smith → OpenHands / Adapter 全链路 → Rollout 导出 → 7142 DeepSeek vLLM 真实 LLM Agent 正式轨迹  
-> 规划：[SWE-smith环境支持与OpenHands-Rollout联调规划](./SWE-smith环境支持与OpenHands-Rollout联调规划.md)  
-> 过程记录：[SWE-smith-7143联调记录](./SWE-smith-7143联调记录.md)  
+> 日期：2026-08-01～2026-08-02
+> 范围：Worker 支持 SWE-smith → OpenHands / Adapter 全链路 → Rollout 导出 → 7142 DeepSeek vLLM 真实 LLM Agent 正式轨迹
+> 规划：[SWE-smith环境支持与OpenHands-Rollout联调规划](./SWE-smith环境支持与OpenHands-Rollout联调规划.md)
+> 过程记录：[SWE-smith-7143联调记录](./SWE-smith-7143联调记录.md)
 > 拓扑：[secrets/README.md](../../../secrets/README.md)
 
 ---
@@ -16,7 +16,7 @@
 | **Phase 2** | Server / Worker / OpenHands 目标架构联调 | ✅ `SubmitEpisode` gold：`resolved=true reward=1.0` |
 | **Phase 3** | Rollout 导出与训练可读校验 | ✅ `chat_sft*.jsonl` + 7142 `schema_ok` |
 | **LLM** | 拉起 vLLM + 真实 Agent 正式 seal 轨迹 | ✅ DeepSeek-V3 AWQ；轨迹 `…00045`（`resolved=false`，但正式产出） |
-| **Hub** | EnvPackage 正式注册 | ⏳ 后置，不阻塞本期 |
+| **Hub** | EnvPackage + Episode Stack 正式注册 | ✅ `swe-bench-smith@0.1.0`，隔离 HTTP/CLI 联调通过 |
 
 **一句话**：Smith 环境契约与 Pro 共用 Gateway/Agent 栈已打通；gold 与真实 LLM 均可产出带 `benchmark_variant=smith` 的正式 TrajectoryBundle，并可导出训练侧可读 JSONL。
 
@@ -70,15 +70,23 @@
 | `fixtures/swe/smith_smoke_sample.json` | 缩略 instance fixture |
 | `Docs/worker/260801/*` | 规划、联调记录、本报告、artifacts |
 
+### 2.5 Hub（后续补齐）
+
+| 文件 | 变更摘要 |
+|------|----------|
+| `uenv-hub/uenv-hub-core/src/seed.rs` | 注册 `swe-bench-smith@0.1.0`，声明 Smith overlay、grader、OpenHands 驱动和 `/testbed`；将 Smith 加入 `swe` Task Environment；注册 `swe-bench-smith-openhands@1.0.0` |
+| `uenv-hub/uenv-hub-server/tests/e2e.rs` | 验证 Smith EnvPackage 制品、环境声明与 Episode Stack 可解析 |
+| `scripts/test-hub-swesmith-e2e.sh` | 独立数据库/回环端口启动 Hub，校验 HTTP、sync-plan、CLI sync、bundle digest、catalog、镜像索引和 eval spec |
+
 ---
 
 ## 3. 关键语义冻结（务必保留）
 
 1. **调度键**：`env_type=swe` + `benchmark_variant=smith`（别名：`swe-smith` / `swesmith` / `swe-bench-smith`）。
 2. **工作区**：`/testbed`（禁止硬编码 Pro 的 `/app`）。
-3. **Smith `patch`**：数据集字段 = **造 bug 补丁**。  
-   - provision：`git apply`（正向）+ `pip install -e .`  
-   - gold：`git apply -R` + 常需 reinstall  
+3. **Smith `patch`**：数据集字段 = **造 bug 补丁**。
+   - provision：`git apply`（正向）+ `pip install -e .`
+   - gold：`git apply -R` + 常需 reinstall
 4. **grader**：`swesmith`（勿误用 `swebench_pro`）。
 5. **Phase 1–3 不经 Hub**：本地 EnvPackage `/var/lib/uenv/envs/swe-bench-smith/0.1.0-local`。
 
@@ -143,7 +151,7 @@ python3 scripts/export_swe_rollout_jsonl.py \
   --output-dir /var/lib/uenv/rollouts/swesmith-phase3-smoke
 ```
 
-仓库样例：[`artifacts/swesmith-rollout-smoke/`](./artifacts/swesmith-rollout-smoke/)  
+仓库样例：[`artifacts/swesmith-rollout-smoke/`](./artifacts/swesmith-rollout-smoke/)
 （gold 轨迹 `trj-…00004` → `chat_sft.resolved.jsonl`，`reward=1.0`）
 
 7142：
@@ -180,7 +188,7 @@ python3 scripts/train_smoke_rollout_jsonl.py \
 
 | 项 | 说明 |
 |----|------|
-| Hub 注册 | `swe-bench-smith` EnvPackage / 镜像分发由 Hub 模块承接 |
+| Hub 生产部署 | 代码与隔离联调已完成；生产 `:8088` 尚未替换。包默认 `local_only`，正式运行前须在 Worker 预载 Smith 镜像，或在 Hub 预置对应 image tar |
 | 全量 Smith | 本期仅本地 5 条 oauthlib 子集；7143 磁盘约 92%，扩集前需空间 |
 | LLM `resolved` | 真实 Agent smoke 未修好 bug（正常）；正式轨迹链路已验证 |
 | SubmitEpisode(llm) | Agent 池常被外部 Pro 任务占用；本期 LLM 用旁路验证，目标架构可在池空闲时复跑 |
@@ -240,6 +248,6 @@ bash /root/UEnv/scripts/uenv-llm-gateway/smoke-test-7142.sh
 | 目标架构 SubmitEpisode ≥1 条 | ✅ gold |
 | TrajectoryBundle 导出 + resolved 过滤 JSONL | ✅ |
 | 7142 可读 + 字段校验 | ✅ |
-| Hub 注册 | ⏳ 后续 |
+| Hub 注册 | ✅ `swe-bench-smith@0.1.0` + `swe-bench-smith-openhands@1.0.0` |
 
 **报告完。**

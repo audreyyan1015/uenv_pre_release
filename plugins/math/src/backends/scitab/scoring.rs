@@ -42,8 +42,8 @@ pub fn answers_match(action: &str, target: &str) -> bool {
         Some(label) => label,
         None => return false,
     };
-    let predicted = canonical_label(action)
-        .or_else(|| extract_canonical_label(action, PHRASES, WORDS));
+    let predicted =
+        canonical_label(action).or_else(|| extract_canonical_label(action, PHRASES, WORDS));
     predicted.as_ref() == Some(&expected)
 }
 

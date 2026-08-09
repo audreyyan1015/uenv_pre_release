@@ -85,6 +85,68 @@ impl WarmupPool {
         Ok(())
     }
 
+    pub async fn prepare_env(
+        &self,
+        env_type: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.ensure_env_ready(env_type).await
+    }
+
+    pub async fn snapshot(
+        &self,
+    ) -> (
+        Vec<crate::proto::scheduler::v1::WorkerPoolSummary>,
+        Vec<crate::proto::scheduler::v1::WorkerPoolSlot>,
+    ) {
+        let state = self.state.lock().await;
+        let mut by_env: HashMap<String, (i32, i32, i32)> = HashMap::new();
+        let mut slots = Vec::new();
+        for tracked in state.tracked.values() {
+            let status = match tracked.status {
+                InstanceStatus::Creating => "warming",
+                InstanceStatus::Warm | InstanceStatus::Idle => "ready",
+                InstanceStatus::Active => "busy",
+                InstanceStatus::Cooling => "warming",
+                InstanceStatus::Evicting | InstanceStatus::Destroyed => "failed",
+            };
+            let entry = by_env.entry(tracked.instance.env_type.clone()).or_default();
+            match status {
+                "ready" => entry.0 += 1,
+                "busy" => entry.1 += 1,
+                "warming" => entry.2 += 1,
+                _ => {}
+            }
+            slots.push(crate::proto::scheduler::v1::WorkerPoolSlot {
+                slot_id: tracked.instance.instance_id.clone(),
+                status: status.to_string(),
+                env_type: tracked.instance.env_type.clone(),
+                variant: String::new(),
+                package_id: String::new(),
+                package_version: String::new(),
+                backend_kind: "process_plugin".to_string(),
+                episode_id: String::new(),
+                session_id: String::new(),
+            });
+        }
+        let summary = by_env
+            .into_iter()
+            .map(|(env_type, (ready, busy, warming))| {
+                crate::proto::scheduler::v1::WorkerPoolSummary {
+                    env_type,
+                    variant: String::new(),
+                    package_id: String::new(),
+                    package_version: String::new(),
+                    backend_kind: "process_plugin".to_string(),
+                    ready,
+                    busy,
+                    warming,
+                    capacity: ready + busy + warming,
+                }
+            })
+            .collect();
+        (summary, slots)
+    }
+
     pub async fn prewarm(
         &self,
         env_types: &[String],
@@ -110,7 +172,12 @@ impl WarmupPool {
             };
 
             if let Some(instance_id) = candidate {
-                if self.plugin_host.health_check(&instance_id).await.unwrap_or(false) {
+                if self
+                    .plugin_host
+                    .health_check(&instance_id)
+                    .await
+                    .unwrap_or(false)
+                {
                     let mut state = self.state.lock().await;
                     if state.active.contains(&instance_id) {
                         return Err(format!("double allocation detected for {instance_id}").into());
@@ -161,7 +228,10 @@ impl WarmupPool {
         }
     }
 
-    pub async fn release(&self, lease: WarmLease) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn release(
+        &self,
+        lease: WarmLease,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let should_destroy = {
             let mut state = self.state.lock().await;
             if !state.active.remove(&lease.instance_id) {
@@ -244,7 +314,11 @@ impl WarmupPool {
         loop {
             let warm_size = {
                 let state = self.state.lock().await;
-                state.warm_queues.get(env_type).map(|q| q.len()).unwrap_or(0)
+                state
+                    .warm_queues
+                    .get(env_type)
+                    .map(|q| q.len())
+                    .unwrap_or(0)
             };
             if warm_size >= target {
                 return Ok(());

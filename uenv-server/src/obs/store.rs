@@ -1,7 +1,7 @@
 //! SQLite append-only event log for Obs.
 
 use super::event::{Disposition, ObservabilityEvent};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -12,8 +12,7 @@ pub struct ObsStore {
 impl ObsStore {
     pub fn open(db_path: &Path) -> Result<Self, String> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create obs data dir: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("create obs data dir: {e}"))?;
         }
         let conn = Connection::open(db_path).map_err(|e| format!("open obs.db: {e}"))?;
         conn.execute_batch(
@@ -137,8 +136,7 @@ impl ObsStore {
         let mut out = Vec::new();
         for r in rows {
             let (body, ingest_ts, disposition) = r.map_err(|e| e.to_string())?;
-            let ev: ObservabilityEvent =
-                serde_json::from_str(&body).map_err(|e| e.to_string())?;
+            let ev: ObservabilityEvent = serde_json::from_str(&body).map_err(|e| e.to_string())?;
             out.push((ev, ingest_ts, disposition));
         }
         Ok(out)

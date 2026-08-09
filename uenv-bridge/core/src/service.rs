@@ -21,9 +21,9 @@ type ResultStream = Pin<Box<dyn Stream<Item = Result<pb::SampleResult, Status>> 
 
 fn core_error_to_status(err: CoreError) -> Status {
     match err {
-        CoreError::InvalidEnvelope(message) => Status::invalid_argument(format!(
-            "invalid envelope: {message}"
-        )),
+        CoreError::InvalidEnvelope(message) => {
+            Status::invalid_argument(format!("invalid envelope: {message}"))
+        }
         other => Status::internal(other.to_string()),
     }
 }

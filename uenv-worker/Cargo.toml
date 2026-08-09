@@ -16,6 +16,10 @@ path = "src/bin/uenv-math-plugin.rs"
 name = "uenv-code-plugin"
 path = "src/bin/uenv-code-plugin.rs"
 
+[[bin]]
+name = "uenv-openenv-plugin"
+path = "src/bin/uenv-openenv-plugin.rs"
+
 [dependencies]
 uenv-math-env = { path = "../plugins/math" }
 uenv-code-env = { path = "../plugins/code" }

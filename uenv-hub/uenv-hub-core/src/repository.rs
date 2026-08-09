@@ -1067,12 +1067,64 @@ impl SqliteStore {
         .bind(offset as i64)
         .fetch_all(&self.pool)
         .await?;
+        let mut items: Vec<dto::PackageSummary> =
+            rows.iter().map(convert::package_summary).collect();
+        for (item, row) in items.iter_mut().zip(rows.iter()) {
+            self.annotate_package_kind(item, row).await?;
+        }
         Ok(dto::Page {
-            items: rows.iter().map(convert::package_summary).collect(),
+            items,
             page,
             per_page,
             total: total.0 as u64,
         })
+    }
+
+    /// Fill in the derived role fields of a package summary from its latest
+    /// manifest.
+    ///
+    /// A package whose latest version is missing or yanked keeps the default
+    /// `other` kind rather than borrowing the classification of an older version:
+    /// the summary describes what the registry currently serves.
+    async fn annotate_package_kind(
+        &self,
+        item: &mut dto::PackageSummary,
+        row: &EnvPackageRow,
+    ) -> Result<()> {
+        let Some(latest) = row.latest_version.clone() else {
+            return Ok(());
+        };
+        let version = sqlx::query_as::<_, PackageVersionRow>(
+            "SELECT * FROM env_package_versions \
+             WHERE package_db_id = ? AND version = ? AND is_yanked = 0",
+        )
+        .bind(row.id)
+        .bind(&latest)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(version) = version else {
+            return Ok(());
+        };
+        let manifest: dto::EnvPackageManifest = serde_json::from_str(&version.manifest_json)?;
+        item.kind = dto::PackageKind::classify(&manifest);
+        if matches!(
+            item.kind,
+            dto::PackageKind::Benchmark | dto::PackageKind::Fixture
+        ) {
+            item.env_type = dto::PackageKind::benchmark_env_type(&manifest);
+            item.dataset = dto::PackageKind::benchmark_dataset(&manifest);
+            item.instance_count = manifest
+                .worker_overlay
+                .get("instance_count")
+                .or_else(|| {
+                    manifest
+                        .worker_overlay
+                        .get("swe")
+                        .and_then(|s| s.get("instance_count"))
+                })
+                .and_then(serde_json::Value::as_i64);
+        }
+        Ok(())
     }
 
     /// The Agent-bridge catalog: the latest non-yanked version of every package
@@ -1637,6 +1689,102 @@ impl SqliteStore {
             stack_digest,
             notes,
         })
+    }
+
+    // ------------------------------------------------------------- overview
+
+    /// Count everything the registry currently holds, in one pass.
+    ///
+    /// Soft-deleted envs / packages / stacks are excluded so the numbers match
+    /// what the list endpoints return; yanked *versions* are counted separately
+    /// rather than excluded, because a yanked version is still served and an
+    /// operator needs to see how much of the catalog is in that state.
+    pub async fn registry_stats(&self) -> Result<dto::RegistryStats> {
+        async fn scalar(store: &SqliteStore, sql: &str) -> Result<i64> {
+            let row: (i64,) = sqlx::query_as(sql).fetch_one(&store.pool).await?;
+            Ok(row.0)
+        }
+        let scalar = |sql: &'static str| scalar(self, sql);
+
+        Ok(dto::RegistryStats {
+            envs: scalar("SELECT COUNT(*) FROM envs WHERE is_deleted = 0").await?,
+            env_versions: scalar(
+                "SELECT COUNT(*) FROM env_versions v \
+                 JOIN envs e ON e.id = v.env_id WHERE e.is_deleted = 0",
+            )
+            .await?,
+            yanked_env_versions: scalar(
+                "SELECT COUNT(*) FROM env_versions v \
+                 JOIN envs e ON e.id = v.env_id WHERE e.is_deleted = 0 AND v.is_yanked = 1",
+            )
+            .await?,
+            deprecated_envs: scalar(
+                "SELECT COUNT(*) FROM envs WHERE is_deleted = 0 AND lifecycle = 'deprecated'",
+            )
+            .await?,
+            packages: scalar("SELECT COUNT(*) FROM env_packages WHERE is_deleted = 0").await?,
+            package_versions: scalar(
+                "SELECT COUNT(*) FROM env_package_versions pv \
+                 JOIN env_packages p ON p.id = pv.package_db_id WHERE p.is_deleted = 0",
+            )
+            .await?,
+            yanked_package_versions: scalar(
+                "SELECT COUNT(*) FROM env_package_versions pv \
+                 JOIN env_packages p ON p.id = pv.package_db_id \
+                 WHERE p.is_deleted = 0 AND pv.is_yanked = 1",
+            )
+            .await?,
+            package_artifacts: scalar("SELECT COUNT(*) FROM env_package_artifacts").await?,
+            package_artifact_bytes: scalar(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM env_package_artifacts",
+            )
+            .await?,
+            stacks: scalar("SELECT COUNT(*) FROM episode_stacks WHERE is_deleted = 0").await?,
+            stack_versions: scalar(
+                "SELECT COUNT(*) FROM episode_stack_versions sv \
+                 JOIN episode_stacks s ON s.id = sv.stack_db_id WHERE s.is_deleted = 0",
+            )
+            .await?,
+            yanked_stack_versions: scalar(
+                "SELECT COUNT(*) FROM episode_stack_versions sv \
+                 JOIN episode_stacks s ON s.id = sv.stack_db_id \
+                 WHERE s.is_deleted = 0 AND sv.is_yanked = 1",
+            )
+            .await?,
+            // Agent bridges are identified by an `agent_kind` inside the
+            // manifest JSON, so there is no column to count — reuse the catalog
+            // query that defines the concept in the first place.
+            agent_bridges: self.list_agent_bridges().await?.len() as i64,
+            templates: scalar("SELECT COUNT(*) FROM env_templates").await?,
+            active_tokens: scalar("SELECT COUNT(*) FROM api_tokens WHERE is_revoked = 0").await?,
+            audit_entries: scalar("SELECT COUNT(*) FROM audit_log").await?,
+            packages_by_kind: self.count_packages_by_kind().await?,
+            active_envs: scalar(
+                "SELECT COUNT(*) FROM envs WHERE is_deleted = 0 AND lifecycle != 'deprecated'",
+            )
+            .await?,
+        })
+    }
+
+    /// Tally packages by the role their latest manifest implies.
+    ///
+    /// `kind` is derived, not stored, so this parses each package's latest
+    /// manifest. The registry holds packages in the tens, and the overview is not
+    /// a hot path, so a correct count is worth more here than a cached one that
+    /// can disagree with the list endpoint.
+    async fn count_packages_by_kind(&self) -> Result<std::collections::BTreeMap<String, i64>> {
+        let rows = sqlx::query_as::<_, EnvPackageRow>(
+            "SELECT * FROM env_packages WHERE is_deleted = 0",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = std::collections::BTreeMap::new();
+        for row in &rows {
+            let mut summary = convert::package_summary(row);
+            self.annotate_package_kind(&mut summary, row).await?;
+            *out.entry(summary.kind.as_str().to_string()).or_insert(0) += 1;
+        }
+        Ok(out)
     }
 }
 
