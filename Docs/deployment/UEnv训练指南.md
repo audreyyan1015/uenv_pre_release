@@ -466,11 +466,3 @@ VeRL v0.7.1 的上游配置位于：
 ```
 
 VeRL 完成模型更新步骤后，可继续为正式训练配置训练集、验证集、训练检查点和恢复测试，并监控得分分布、Episode 失败率和 VeRL 训练指标。
-
-## 9. UEnv Hub 与其他训练框架
-
-UEnv Hub 用于发布环境版本，并让多台 UEnv Worker 同步相同的 process plugin 和环境文件。训练命令向 Adapter 提交 Episode，Adapter 将 Episode 分配给 UEnv Worker。
-
-UEnv Hub 的部署、发布、同步和回滚步骤见 [UEnv Hub 使用指南](./UEnv%20Hub使用指南.md)。
-
-接入其他训练框架时，实现该框架的 UEnv Bridge：将训练任务样本转换为 `EpisodeRequest`，再将 `EpisodeResult` 中的模型输出、得分和交互轨迹转换回训练框架所需的格式。当前 UEnv 版本中的 VeRL 集成可作为实现参考。

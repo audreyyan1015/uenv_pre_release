@@ -499,10 +499,21 @@ sudo uenv evaluate run-swe \
 
 ## 9. 离线主机需要额外准备的文件
 
-`run-task` 使用 UEnv Bridge 向 Adapter 提交 Episode。UEnv Bridge 是评测程序连接 Adapter 的 Python 组件。
+`run-task` 通过 UEnv Bridge（评测程序连接 Adapter 的 Python 组件）提交 Episode。首次执行 `run-task` 时，脚本会在当前用户目录下自动创建独立的 Python 虚拟环境（venv），并从 Python 包索引（PyPI）下载安装 UEnv Bridge 的依赖。
 
-首次执行时，脚本会在当前用户的目录中创建独立 Python 虚拟环境（venv），并安装 UEnv Bridge 的 Python 依赖。在可访问 Python 包索引的主机上，该过程自动完成。
+**在无法访问 PyPI 的离线主机上，这一步自动安装会失败**，需要提前准备以下文件。
 
-离线主机需要事先准备与该主机的 Linux、CPU 架构和 Python 版本匹配的 Python 离线依赖目录（wheelhouse）。执行前设置 `UENV_EVAL_WHEELHOUSE` 为该目录，并在 `run-task` 命令末尾增加 `--offline`。
+### 9.1 离线 Python 依赖目录（wheelhouse）
 
-SWE 离线评测还需要事先导入本次评测需要的 SWE 实例镜像，并在 `prepare-swe` 命令中使用 `--image-policy local_only`。
+先在一台能联网、且与离线主机的 **Linux 版本、CPU 架构和 Python 版本一致** 的机器上，把 UEnv Bridge 的全部 Python 依赖下载为 `.whl` 文件，组成离线依赖目录（wheelhouse），再整体拷贝到离线主机。三者任一不匹配，安装都可能失败。
+
+执行评测前完成两步：
+
+1. 将环境变量 `UENV_EVAL_WHEELHOUSE` 设置为该目录；
+2. 在 `run-task` 命令末尾增加 `--offline`。
+
+脚本随后会从 wheelhouse 本地安装依赖，不再访问网络。
+
+### 9.2 SWE 实例镜像（仅 SWE 离线评测需要）
+
+离线主机无法从容器镜像仓库（OCI Registry）拉取镜像，需要事先把本次评测用到的 SWE 实例镜像导入本机，并在 `prepare-swe` 时使用 `--image-policy local_only`。具体要求见 7.1 节。

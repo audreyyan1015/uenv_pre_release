@@ -1,0 +1,118 @@
+name: Notify website of deployment docs changes
+
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - "Docs/deployment/**"
+  workflow_dispatch:
+
+# The job authenticates to the target repository with WEBSITE_DISPATCH_TOKEN,
+# so the workflow's own GITHUB_TOKEN does not need any repository permissions.
+permissions: {}
+
+concurrency:
+  group: notify-website-docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    name: Dispatch website rebuild
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Document token requirement
+        shell: bash
+        run: |
+          {
+            echo "## Website documentation rebuild"
+            echo
+            echo "This workflow requires the repository secret \`WEBSITE_DISPATCH_TOKEN\`."
+            echo "Create it from a fine-grained personal access token limited to"
+            echo "\`audreyyan1015/uenv_website\` with **Contents: write** permission."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify dispatch token is configured
+        shell: bash
+        env:
+          DISPATCH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+        run: |
+          if [[ -z "$DISPATCH_TOKEN" ]]; then
+            echo "::error title=Missing repository secret::Configure WEBSITE_DISPATCH_TOKEN as a fine-grained PAT for audreyyan1015/uenv_website with Contents: write permission."
+            exit 1
+          fi
+
+      - name: Trigger website documentation rebuild
+        shell: bash
+        env:
+          DISPATCH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+          TARGET_REPOSITORY: audreyyan1015/uenv_website
+        run: |
+          set -euo pipefail
+
+          payload="$({
+            jq -n \
+              --arg source_repository "$GITHUB_REPOSITORY" \
+              --arg source_sha "$GITHUB_SHA" \
+              --arg source_ref "$GITHUB_REF_NAME" \
+              --arg source_run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              '{
+                event_type: "deployment-docs-updated",
+                client_payload: {
+                  source_repository: $source_repository,
+                  source_sha: $source_sha,
+                  source_ref: $source_ref,
+                  source_run_url: $source_run_url
+                }
+              }'
+          })"
+
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+
+          set +e
+          http_code="$(
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --retry 3 \
+              --retry-delay 2 \
+              --retry-all-errors \
+              --connect-timeout 10 \
+              --max-time 60 \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $DISPATCH_TOKEN" \
+              --header "Content-Type: application/json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$GITHUB_API_URL/repos/$TARGET_REPOSITORY/dispatches" \
+              --data "$payload"
+          )"
+          curl_exit=$?
+          set -e
+
+          if (( curl_exit != 0 )); then
+            echo "::error title=Dispatch request failed::curl exited with status $curl_exit."
+            if [[ -s "$response_file" ]]; then
+              cat "$response_file" >&2
+            fi
+            exit "$curl_exit"
+          fi
+
+          if [[ "$http_code" != "204" ]]; then
+            echo "::error title=Website dispatch rejected::GitHub API returned HTTP $http_code (expected 204)."
+            if [[ -s "$response_file" ]]; then
+              cat "$response_file" >&2
+            fi
+            exit 1
+          fi
+
+          {
+            echo
+            echo "Sent \`deployment-docs-updated\` to \`$TARGET_REPOSITORY\`."
+            echo "Source commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
