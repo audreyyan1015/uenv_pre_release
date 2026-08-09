@@ -15,13 +15,15 @@ use std::time::Instant;
 
 use crate::swe::artifact::{EpisodeArtifact, TestResults};
 use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
+use crate::swe::contract_eval::try_external_contract_grade;
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for_spec;
 use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
 use crate::swe::image_cache::{ImageCacheFactory, ImagePullPolicy, resolve_provision_image};
-use crate::swe::pro_eval::try_external_pro_grade;
+use crate::swe::pro_eval::try_external_pro_grade_from_env;
 use crate::swe::resettable::PodmanResettableInstance;
-use crate::swe::smith_eval::try_external_smith_grade;
+use crate::swe::runtime_contract::{PatchMode, RewardAdapterKind};
+use crate::swe::smith_eval::try_external_smith_grade_from_env;
 use crate::swe::spec::{ResetObservation, Workspace, build_reset_observation};
 use crate::swe::trajectory::{
     StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore, now_ms,
@@ -164,7 +166,7 @@ impl SweSession {
             .into());
         }
         session.run_pro_setup_at_provision()?;
-        session.run_smith_bug_setup_at_provision()?;
+        session.apply_initial_state_contract()?;
 
         session.record_provision_reset(
             &observation.issue_text,
@@ -181,6 +183,8 @@ impl SweSession {
             seccomp = %seccomp.as_deref().unwrap_or("default"),
             network = %if policy_mode == CommandPolicy::FullShell { "bridge" } else { "none" },
             issue_chars = observation.issue_text.len(),
+            patch_semantics = ?instance.runtime_contract().initial_state.patch_semantics,
+            provision_patch = ?instance.runtime_contract().initial_state.provision_patch,
             msg = "swe_session_provisioned"
         );
         Ok((session, observation))
@@ -511,18 +515,35 @@ impl SweSession {
         let test_run = self.exec_raw(&test_cmd)?;
         let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
 
-        // M6-4：Pro 变体且配置 `UENV_SWE_PRO_EVAL_CMD` 时，外部子进程权威评分。
-        // Smith 可配置 `UENV_SWE_SMITH_EVAL_CMD`，将当前 git diff 交给官方 harness 作为最终 reward。
+        // M6-4 / runtime contract：外部 reward adapter 可成为权威评分，Rust pytest
+        // parser 作为 fallback / diagnostic path。
         let is_pro = self.instance.grader_name() == "swebench_pro";
         let is_smith = self.instance.variant() == crate::swe::variant::BenchmarkVariant::Smith;
+        let contract = self.instance.runtime_contract();
         let log_parser = self.instance.log_parser();
+        let use_external = matches!(
+            contract.reward.adapter,
+            RewardAdapterKind::ExternalCommand | RewardAdapterKind::InternalWithExternalOverride
+        );
+        let external_command_env = contract.reward.command_env.as_deref();
         let graded = if is_pro {
-            if let Some(ext) = try_external_pro_grade(
-                &self.instance.instance_id,
-                &combined,
-                &self.instance.fail_to_pass,
-                &self.instance.pass_to_pass,
-            )? {
+            let external = if use_external {
+                external_command_env
+                    .map(|env| {
+                        try_external_pro_grade_from_env(
+                            env,
+                            &self.instance.instance_id,
+                            &combined,
+                            &self.instance.fail_to_pass,
+                            &self.instance.pass_to_pass,
+                        )
+                    })
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
+            if let Some(ext) = external {
                 ext
             } else {
                 grader_for_spec(Some("swebench_pro"), log_parser).grade(
@@ -537,12 +558,23 @@ impl SweSession {
                 &self.instance.fail_to_pass,
                 &self.instance.pass_to_pass,
             );
-            if let Some(ext) = try_external_smith_grade(
-                &self.instance,
-                &model_diff,
-                &self.instance.fail_to_pass,
-                &self.instance.pass_to_pass,
-            )? {
+            let external = if use_external {
+                external_command_env
+                    .map(|env| {
+                        try_external_smith_grade_from_env(
+                            env,
+                            &self.instance,
+                            &model_diff,
+                            &self.instance.fail_to_pass,
+                            &self.instance.pass_to_pass,
+                        )
+                    })
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
+            if let Some(ext) = external {
                 let mut ext = ext;
                 if ext.per_test.is_empty() {
                     ext.per_test = internal.per_test;
@@ -552,11 +584,24 @@ impl SweSession {
                 internal
             }
         } else {
-            grader_for_spec(None, log_parser).grade(
+            let internal = grader_for_spec(None, log_parser).grade(
                 &combined,
                 &self.instance.fail_to_pass,
                 &self.instance.pass_to_pass,
-            )
+            );
+            if use_external {
+                try_external_contract_grade(
+                    &self.instance,
+                    &model_diff,
+                    &combined,
+                    &self.instance.fail_to_pass,
+                    &self.instance.pass_to_pass,
+                    external_command_env,
+                )?
+                .unwrap_or(internal)
+            } else {
+                internal
+            }
         };
 
         let test_results = TestResults {
@@ -593,27 +638,48 @@ impl SweSession {
         Ok(())
     }
 
-    /// SWE-smith stores bug-inducing patches in `patch`. Agent sessions must start
-    /// from that bug state, while `evaluate()` needs `git diff` to represent the
-    /// model's fix relative to the bug state for the official harness.
-    fn run_smith_bug_setup_at_provision(&self) -> Result<(), DynErr> {
-        if self.instance.variant() != crate::swe::variant::BenchmarkVariant::Smith
-            || self.instance.patch.trim().is_empty()
-        {
-            return Ok(());
+    fn apply_initial_state_contract(&self) -> Result<(), DynErr> {
+        let contract = self.instance.runtime_contract();
+        self.apply_dataset_patch_mode(
+            contract.initial_state.provision_patch,
+            "provision_baseline",
+        )?;
+        if contract.initial_state.commit_after_provision && !self.instance.patch.trim().is_empty() {
+            self.commit_baseline("uenv benchmark baseline")?;
         }
-        self.apply_patch(&self.instance.patch, "smith_bug")?;
+        Ok(())
+    }
+
+    pub fn apply_gold_contract(&self, patch: &str) -> Result<(), DynErr> {
+        let contract = self.instance.runtime_contract();
+        self.apply_patch_mode(contract.gold.patch_mode, patch, "gold")
+    }
+
+    fn apply_dataset_patch_mode(&self, mode: PatchMode, label: &str) -> Result<(), DynErr> {
+        self.apply_patch_mode(mode, &self.instance.patch, label)
+    }
+
+    fn apply_patch_mode(&self, mode: PatchMode, patch: &str, label: &str) -> Result<(), DynErr> {
+        match mode {
+            PatchMode::None => Ok(()),
+            PatchMode::ApplyDatasetPatch => self.apply_patch(patch, label),
+            PatchMode::ReverseDatasetPatch => self.apply_patch_reverse(patch, label),
+        }
+    }
+
+    fn commit_baseline(&self, message: &str) -> Result<(), DynErr> {
         let ws = self.instance.workspace_dir();
+        let quoted_message = single_quote(message);
         let r = self.exec_raw(&format!(
             "cd {ws} && \
              git add -A && \
              git -c user.email=uenv-worker@example.invalid \
                  -c user.name=uenv-worker \
-                 commit -m 'uenv smith bug baseline'"
+                 commit -m {quoted_message}"
         ))?;
         if r.exit_code != 0 {
             return Err(format!(
-                "smith bug baseline commit failed (code {}): {}\n{}",
+                "benchmark baseline commit failed (code {}): {}\n{}",
                 r.exit_code, r.stdout, r.stderr
             )
             .into());
@@ -671,6 +737,7 @@ impl crate::swe::resettable::ResettableSession for SweSession {
             .into());
         }
         self.run_pro_setup_at_provision()?;
+        self.apply_initial_state_contract()?;
         tracing::info!(
             session_id = %self.episode_id,
             instance_id = %self.instance.instance_id,

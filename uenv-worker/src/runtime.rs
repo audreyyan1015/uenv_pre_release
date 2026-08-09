@@ -554,7 +554,10 @@ async fn load_swe_catalog(
     for dir in resolve_env_package_dirs(env_package_dirs) {
         match crate::swe::env_package::EnvPackageDir::load(std::path::Path::new(&dir)) {
             Ok(pkg) => match InstanceStore::from_json_file(&pkg.catalog_path) {
-                Ok(store) => {
+                Ok(mut store) => {
+                    if let Some(contract) = &pkg.runtime_contract {
+                        store.apply_default_runtime_contract(contract);
+                    }
                     tracing::info!(
                         trace_id = "runtime",
                         worker_id = "worker",
@@ -563,6 +566,7 @@ async fn load_swe_catalog(
                         version = %pkg.version,
                         variant = pkg.variant.as_deref().unwrap_or("-"),
                         image_pull_policy = ?pkg.image_pull_policy,
+                        runtime_contract = %pkg.runtime_contract.is_some(),
                         images = pkg.images.len(),
                         count = store.len(),
                         path = %pkg.catalog_path.display(),

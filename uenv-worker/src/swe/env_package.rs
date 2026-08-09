@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::swe::image_cache::ImagePullPolicy;
+use crate::swe::runtime_contract::BenchmarkRuntimeContract;
 
 /// One image entry from `images.manifest.json`.
 #[derive(Debug, Clone)]
@@ -37,6 +38,9 @@ pub struct EnvPackageDir {
     pub variant: Option<String>,
     /// `worker_overlay.swe.image_pull_policy`, if declared.
     pub image_pull_policy: Option<ImagePullPolicy>,
+    /// Package-level SWE runtime contract default, if declared in
+    /// `worker_overlay.swe.benchmark_runtime` or `.runtime_contract`.
+    pub runtime_contract: Option<BenchmarkRuntimeContract>,
     /// Path to the bundled `catalog.json`.
     pub catalog_path: PathBuf,
     /// instance_id -> image/digest from `images.manifest.json`.
@@ -85,6 +89,12 @@ impl EnvPackageDir {
             .and_then(|o| o.pointer("/swe/image_pull_policy"))
             .and_then(|v| v.as_str())
             .and_then(ImagePullPolicy::parse);
+        let runtime_contract = overlay
+            .and_then(|o| {
+                o.pointer("/swe/benchmark_runtime")
+                    .or_else(|| o.pointer("/swe/runtime_contract"))
+            })
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         let catalog_path = dir.join("catalog.json");
         if !catalog_path.is_file() {
@@ -99,6 +109,7 @@ impl EnvPackageDir {
             version,
             variant,
             image_pull_policy,
+            runtime_contract,
             catalog_path,
             images,
         })
@@ -221,7 +232,17 @@ mod tests {
             r#"{
               "package_id": "swe-bench-pro",
               "version": "0.1.0",
-              "worker_overlay": {"swe": {"benchmark_variant": "pro", "image_pull_policy": "local_only"}}
+              "worker_overlay": {"swe": {
+                "benchmark_variant": "pro",
+                "image_pull_policy": "local_only",
+                "benchmark_runtime": {
+                  "kind": "swe",
+                  "workspace_dir": "/app",
+                  "initial_state": {"patch_semantics": "bug_to_fix", "provision_patch": "none"},
+                  "gold": {"patch_mode": "apply_dataset_patch"},
+                  "reward": {"adapter": "internal_with_external_override", "command_env": "UENV_SWE_PRO_EVAL_CMD"}
+                }
+              }}
             }"#,
         )
         .unwrap();
@@ -241,6 +262,12 @@ mod tests {
         assert_eq!(pkg.version, "0.1.0");
         assert_eq!(pkg.variant.as_deref(), Some("pro"));
         assert_eq!(pkg.image_pull_policy, Some(ImagePullPolicy::LocalOnly));
+        assert_eq!(
+            pkg.runtime_contract
+                .as_ref()
+                .and_then(|c| c.workspace_dir.as_deref()),
+            Some("/app")
+        );
         assert_eq!(
             pkg.images.get("swe-pro__example-go-1").unwrap().digest,
             "sha256:abc"

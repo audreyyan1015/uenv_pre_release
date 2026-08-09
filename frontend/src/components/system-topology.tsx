@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type PointerEvent,
+} from "react";
 import {
   Activity,
   Boxes,
@@ -38,7 +46,8 @@ import {
 const STATE_POLL_INTERVAL_MS = 3_000;
 const CLOCK_REFRESH_INTERVAL_MS = 2_000;
 const CANVAS_WIDTH = 1230;
-const CANVAS_HEIGHT = 910;
+const CANVAS_HEIGHT = 1060;
+const DRAG_THRESHOLD_PX = 4;
 
 const stageLabels: Record<WorkflowStage, string> = {
   SUBMIT: "Submit",
@@ -59,7 +68,13 @@ const statusTone: Record<NodeStatus, string> = {
 };
 
 type FlowKind = "data" | "control" | "infer" | "duplex";
+type FlowProgress = "done" | "active" | "pending" | "failed";
 type ModuleTone = "blue" | "green" | "amber" | "purple" | "slate";
+
+interface Position {
+  x: number;
+  y: number;
+}
 
 interface DiagramModule {
   id: string;
@@ -87,6 +102,7 @@ interface FlowEdge {
   active?: boolean;
   dashed?: boolean;
   bidirectional?: boolean;
+  progress?: FlowProgress;
 }
 
 function compactId(id: string, max = 18): string {
@@ -175,6 +191,32 @@ function flowColor(kind: FlowKind) {
   return "#334155";
 }
 
+function progressColor(progress: FlowProgress | undefined, kind: FlowKind) {
+  if (progress === "done") return "#059669";
+  if (progress === "active") return flowColor(kind);
+  if (progress === "failed") return "#dc2626";
+  return "#94a3b8";
+}
+
+function progressDash(progress: FlowProgress | undefined, kind: FlowKind, dashed?: boolean) {
+  if (progress === "pending") return "3 8";
+  if (progress === "failed") return "2 6";
+  return flowDash(kind, dashed);
+}
+
+function progressOpacity(progress: FlowProgress | undefined) {
+  if (progress === "done") return 0.72;
+  if (progress === "active") return 0.98;
+  if (progress === "failed") return 0.9;
+  return 0.24;
+}
+
+function progressWidth(progress: FlowProgress | undefined) {
+  if (progress === "active") return 3;
+  if (progress === "done" || progress === "failed") return 2;
+  return 1.35;
+}
+
 function flowDash(kind: FlowKind, dashed?: boolean) {
   if (dashed || kind === "control" || kind === "infer") return "7 7";
   return undefined;
@@ -217,8 +259,48 @@ function statusLabel(status?: NodeStatus) {
   return "等待";
 }
 
-function ModuleCard({ module }: { module: DiagramModule }) {
+function workflowProgress(
+  activeStageName: WorkflowStage | undefined,
+  target: WorkflowStage,
+): FlowProgress {
+  if (activeStageName === "FAILED") return "failed";
+  const order: Record<WorkflowStage, number> = {
+    SUBMIT: 0,
+    DISPATCH: 1,
+    EXECUTE: 2,
+    REPORT: 3,
+    DONE: 4,
+    FAILED: 5,
+  };
+  const current = activeStageName ? order[activeStageName] : 0;
+  const targetIndex = order[target];
+  if (current > targetIndex || activeStageName === "DONE") return "done";
+  if (current === targetIndex) return "active";
+  return "pending";
+}
+
+function activityProgress(active: boolean, done = false): FlowProgress {
+  if (active) return "active";
+  return done ? "done" : "pending";
+}
+
+function ModuleCard({
+  module,
+  onMove,
+}: {
+  module: DiagramModule;
+  onMove: (id: string, position: Position, moved: boolean) => void;
+}) {
   const Icon = module.icon;
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    moved: boolean;
+  } | null>(null);
+  const lastDragEndAtRef = useRef(0);
   const toneClass: Record<ModuleTone, string> = {
     blue: "border-blue-300 bg-blue-50 text-blue-700",
     green: "border-emerald-300 bg-emerald-50 text-emerald-700",
@@ -226,12 +308,82 @@ function ModuleCard({ module }: { module: DiagramModule }) {
     purple: "border-violet-300 bg-violet-50 text-violet-700",
     slate: "border-slate-300 bg-slate-50 text-slate-700",
   };
-  const body = (
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: module.x,
+      originY: module.y,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    const moved = drag.moved || Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX;
+    drag.moved = moved;
+    if (!moved) return;
+    event.preventDefault();
+    onMove(
+      module.id,
+      {
+        x: Math.max(0, Math.min(CANVAS_WIDTH - module.w, drag.originX + dx)),
+        y: Math.max(0, Math.min(CANVAS_HEIGHT - module.h, drag.originY + dy)),
+      },
+      true,
+    );
+  };
+  const handlePointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.moved) lastDragEndAtRef.current = Date.now();
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const navigate = () => {
+    if (!module.href) return;
+    if (module.external) {
+      window.open(module.href, "_blank", "noreferrer");
+      return;
+    }
+    window.location.href = module.href;
+  };
+  const handleClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (Date.now() - lastDragEndAtRef.current < 250) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    navigate();
+  };
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!module.href || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    navigate();
+  };
+  return (
     <div
-      className={`absolute rounded-md border bg-white p-3 shadow-sm transition hover:z-20 hover:border-blue-300 hover:shadow-md ${
+      className={`absolute cursor-grab touch-none select-none rounded-md border bg-white p-3 shadow-sm transition hover:z-20 hover:border-blue-300 hover:shadow-md active:cursor-grabbing ${
         module.active ? "ring-2 ring-blue-300" : ""
       }`}
       style={{ left: module.x, top: module.y, width: module.w, height: module.h }}
+      role={module.href ? "link" : undefined}
+      tabIndex={module.href ? 0 : undefined}
+      aria-label={module.title}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onClick={module.href ? handleClick : undefined}
+      onKeyDown={module.href ? handleKeyDown : undefined}
+      onDragStart={(event) => event.preventDefault()}
+      title="拖动调整位置；点击进入详情"
     >
       <div className="flex items-start gap-2">
         <span
@@ -265,18 +417,6 @@ function ModuleCard({ module }: { module: DiagramModule }) {
         )}
       </div>
     </div>
-  );
-
-  if (!module.href) return body;
-  return (
-    <a
-      href={module.href}
-      target={module.external ? "_blank" : undefined}
-      rel={module.external ? "noreferrer" : undefined}
-      aria-label={module.title}
-    >
-      {body}
-    </a>
   );
 }
 
@@ -336,7 +476,7 @@ function FlowLayer({ modules, edges }: { modules: DiagramModule[]; edges: FlowEd
         const to = moduleMap.get(edge.to);
         if (!from || !to) return null;
         const path = edgePath(from, to);
-        const color = flowColor(edge.kind);
+        const color = progressColor(edge.progress, edge.kind);
         const mid = {
           x: (center(from).x + center(to).x) / 2,
           y: (center(from).y + center(to).y) / 2,
@@ -347,11 +487,11 @@ function FlowLayer({ modules, edges }: { modules: DiagramModule[]; edges: FlowEd
               d={path}
               fill="none"
               stroke={color}
-              strokeWidth={edge.active ? 2.8 : 1.5}
-              strokeDasharray={flowDash(edge.kind, edge.dashed)}
+              strokeWidth={progressWidth(edge.progress)}
+              strokeDasharray={progressDash(edge.progress, edge.kind, edge.dashed)}
               markerEnd={`url(#arrow-${edge.kind})`}
-              opacity={edge.active ? 0.95 : 0.32}
-              className={edge.active ? "animate-pulse" : ""}
+              opacity={progressOpacity(edge.progress)}
+              className={edge.progress === "active" ? "animate-pulse" : ""}
             />
             {edge.bidirectional && (
               <path
@@ -359,9 +499,9 @@ function FlowLayer({ modules, edges }: { modules: DiagramModule[]; edges: FlowEd
                 fill="none"
                 stroke={color}
                 strokeWidth={1.5}
-                strokeDasharray="4 8"
+                strokeDasharray={edge.progress === "pending" ? "3 8" : "4 8"}
                 markerEnd={`url(#arrow-${edge.kind})`}
-                opacity={edge.active ? 0.65 : 0.22}
+                opacity={edge.progress === "active" ? 0.65 : edge.progress === "done" ? 0.42 : 0.18}
               />
             )}
             <text
@@ -369,6 +509,7 @@ function FlowLayer({ modules, edges }: { modules: DiagramModule[]; edges: FlowEd
               y={mid.y - 6}
               textAnchor="middle"
               className="fill-slate-600 text-[11px] font-medium"
+              style={{ paintOrder: "stroke", stroke: "white", strokeWidth: 4 }}
             >
               {edge.label}
             </text>
@@ -380,22 +521,28 @@ function FlowLayer({ modules, edges }: { modules: DiagramModule[]; edges: FlowEd
 }
 
 function Legend() {
-  const items: Array<{ label: string; kind: FlowKind; dashed?: boolean }> = [
-    { label: "数据流 / 调用流", kind: "data" },
-    { label: "控制流 / 状态上报", kind: "control", dashed: true },
-    { label: "推理旁路 / Infer", kind: "infer", dashed: true },
-    { label: "双向通信", kind: "duplex" },
-  ];
+  const items: Array<{ label: string; kind: FlowKind; dashed?: boolean; progress?: FlowProgress }> =
+    [
+      { label: "当前步骤", kind: "data", progress: "active" },
+      { label: "已完成", kind: "data", progress: "done" },
+      { label: "待执行", kind: "data", progress: "pending" },
+      { label: "异常", kind: "data", progress: "failed" },
+      { label: "控制流", kind: "control", dashed: true },
+      { label: "推理旁路", kind: "infer", dashed: true },
+      { label: "双向通信", kind: "duplex" },
+    ];
   return (
-    <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-4 rounded-md border border-slate-200 bg-white/95 px-4 py-2 text-[11px] text-slate-600 shadow-sm">
+    <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-md border border-slate-200 bg-white/95 px-4 py-2 text-[11px] text-slate-600 shadow-sm">
       {items.map((item) => (
         <span key={item.label} className="flex items-center gap-1.5">
           <span
-            className="h-px w-8"
+            className="h-px w-8 rounded-full"
             style={{
-              background: item.dashed
-                ? `repeating-linear-gradient(to right, ${flowColor(item.kind)} 0 6px, transparent 6px 11px)`
-                : flowColor(item.kind),
+              height: item.progress === "active" ? 3 : 2,
+              background:
+                item.dashed || item.progress === "pending" || item.progress === "failed"
+                  ? `repeating-linear-gradient(to right, ${progressColor(item.progress, item.kind)} 0 6px, transparent 6px 11px)`
+                  : progressColor(item.progress, item.kind),
             }}
           />
           {item.label}
@@ -419,7 +566,7 @@ function ProgressRail({
   const completed = done + failed;
   const ratio = total > 0 ? Math.round((completed / total) * 100) : 0;
   return (
-    <div className="absolute right-5 top-5 w-[310px] rounded-md border border-slate-200 bg-white/95 p-3 shadow-sm">
+    <div className="absolute right-4 top-9 w-[250px] rounded-md border border-slate-200 bg-white/95 p-3 shadow-sm">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
           <Play className="h-4 w-4 text-emerald-600" />
@@ -430,7 +577,7 @@ function ProgressRail({
       <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
         <div className="h-full rounded-full bg-emerald-500" style={{ width: `${ratio}%` }} />
       </div>
-      <div className="mt-3 grid grid-cols-4 gap-2 text-center text-[11px]">
+      <div className="mt-3 grid grid-cols-2 gap-2 text-center text-[11px]">
         <span className="rounded-md bg-slate-50 px-2 py-1 text-slate-600">
           总计 <b className="tabular-nums">{total}</b>
         </span>
@@ -491,10 +638,10 @@ function buildDiagram({
       id: "training",
       title: "Training Framework",
       subtitle: "VeRL / 评测脚本",
-      x: 24,
-      y: 48,
-      w: 145,
-      h: 160,
+      x: 32,
+      y: 62,
+      w: 160,
+      h: 128,
       icon: Code2,
       tone: "blue",
       status: state?.run_state ?? "PENDING",
@@ -506,8 +653,8 @@ function buildDiagram({
       id: "bridge",
       title: "uenv-bridge",
       subtitle: "EpisodeRequest 转换",
-      x: 300,
-      y: 70,
+      x: 270,
+      y: 88,
       w: 190,
       h: 76,
       icon: GitBranch,
@@ -521,8 +668,8 @@ function buildDiagram({
       id: "adapter",
       title: "adapter-core",
       subtitle: "gRPC AdapterCoreService",
-      x: 610,
-      y: 70,
+      x: 520,
+      y: 88,
       w: 175,
       h: 76,
       icon: Cpu,
@@ -536,8 +683,8 @@ function buildDiagram({
       id: "server",
       title: "uenv-server",
       subtitle: "Scheduler / Control Plane",
-      x: 570,
-      y: 215,
+      x: 750,
+      y: 88,
       w: 190,
       h: 72,
       icon: Server,
@@ -551,8 +698,8 @@ function buildDiagram({
       id: "scheduler",
       title: "scheduler",
       subtitle: "选 Worker / Dispatch",
-      x: 250,
-      y: 305,
+      x: 230,
+      y: 292,
       w: 150,
       h: 72,
       icon: Workflow,
@@ -566,8 +713,8 @@ function buildDiagram({
       id: "control",
       title: "control_plane",
       subtitle: "Register / HB / Report",
-      x: 425,
-      y: 305,
+      x: 420,
+      y: 292,
       w: 165,
       h: 72,
       icon: Radio,
@@ -582,7 +729,7 @@ function buildDiagram({
       title: "execution_backend",
       subtitle: "native / swe-agent",
       x: 620,
-      y: 305,
+      y: 292,
       w: 165,
       h: 72,
       icon: Layers3,
@@ -597,7 +744,7 @@ function buildDiagram({
       title: "agent_job / pool",
       subtitle: "AgentJob queue",
       x: 815,
-      y: 305,
+      y: 292,
       w: 160,
       h: 72,
       icon: BrainCircuit,
@@ -611,8 +758,8 @@ function buildDiagram({
       id: "trajectory",
       title: "trajectory",
       subtitle: "结果 / trace 存储",
-      x: 985,
-      y: 305,
+      x: 1010,
+      y: 292,
       w: 140,
       h: 72,
       icon: Database,
@@ -626,9 +773,9 @@ function buildDiagram({
       id: "worker",
       title: "uenv-worker",
       subtitle: "DispatchEpisode gRPC",
-      x: 190,
-      y: 470,
-      w: 150,
+      x: 195,
+      y: 482,
+      w: 160,
       h: 76,
       icon: Server,
       tone: "amber",
@@ -641,8 +788,8 @@ function buildDiagram({
       id: "executor",
       title: "EpisodeExecutor",
       subtitle: "reset / step / close",
-      x: 370,
-      y: 470,
+      x: 395,
+      y: 482,
       w: 160,
       h: 76,
       icon: Play,
@@ -656,8 +803,8 @@ function buildDiagram({
       id: "pool",
       title: "资源池 / Pool",
       subtitle: "WarmupPool / SwelnstancePool",
-      x: 560,
-      y: 450,
+      x: 600,
+      y: 462,
       w: 250,
       h: 104,
       icon: Boxes,
@@ -671,8 +818,8 @@ function buildDiagram({
       id: "workspace",
       title: "Workspace",
       subtitle: "缓存 / 运行态",
-      x: 855,
-      y: 442,
+      x: 900,
+      y: 452,
       w: 150,
       h: 66,
       icon: Package,
@@ -685,8 +832,8 @@ function buildDiagram({
       id: "gateway",
       title: "Runtime Gateway",
       subtitle: "HTTP /runtime/v1",
-      x: 855,
-      y: 535,
+      x: 900,
+      y: 560,
       w: 150,
       h: 66,
       icon: Link2,
@@ -699,8 +846,8 @@ function buildDiagram({
       id: "plugin",
       title: "plugin host",
       subtitle: "UDS reset / step / close",
-      x: 560,
-      y: 585,
+      x: 600,
+      y: 602,
       w: 185,
       h: 70,
       icon: Layers3,
@@ -713,8 +860,8 @@ function buildDiagram({
       id: "math",
       title: "plugins/math",
       subtitle: "Verifier / dataset",
-      x: 360,
-      y: 675,
+      x: 335,
+      y: 712,
       w: 160,
       h: 64,
       icon: Activity,
@@ -726,8 +873,8 @@ function buildDiagram({
       id: "code",
       title: "plugins/code",
       subtitle: "harness 执行",
-      x: 555,
-      y: 675,
+      x: 550,
+      y: 712,
       w: 160,
       h: 64,
       icon: Code2,
@@ -739,8 +886,8 @@ function buildDiagram({
       id: "swe",
       title: "plugins/swe",
       subtitle: "Docker + pytest",
-      x: 750,
-      y: 675,
+      x: 765,
+      y: 712,
       w: 160,
       h: 64,
       icon: Boxes,
@@ -753,7 +900,7 @@ function buildDiagram({
       title: "uenv-hub",
       subtitle: "EnvPackage 元数据 / 镜像",
       x: 285,
-      y: 770,
+      y: 890,
       w: 245,
       h: 58,
       icon: Package,
@@ -766,10 +913,10 @@ function buildDiagram({
       id: "agent",
       title: "Agent Scaffold",
       subtitle: "OpenHands / CodeAct",
-      x: 1085,
-      y: 285,
-      w: 125,
-      h: 160,
+      x: 1070,
+      y: 442,
+      w: 140,
+      h: 138,
       icon: Hand,
       tone: "purple",
       status: agentCount > 0 ? "online" : "waiting",
@@ -781,9 +928,9 @@ function buildDiagram({
       id: "model",
       title: "Model Gateway",
       subtitle: "vLLM / remote API",
-      x: 1085,
-      y: 535,
-      w: 125,
+      x: 1070,
+      y: 632,
+      w: 140,
       h: 98,
       icon: BrainCircuit,
       tone: "purple",
@@ -807,6 +954,7 @@ function buildDiagram({
       label: "pre-rollout",
       kind: "control",
       active: activeSubmit,
+      progress: workflowProgress(activeStageName, "SUBMIT"),
     },
     {
       id: "bridge-adapter",
@@ -816,6 +964,7 @@ function buildDiagram({
       kind: "duplex",
       bidirectional: true,
       active: activeSubmit,
+      progress: workflowProgress(activeStageName, "SUBMIT"),
     },
     {
       id: "bridge-server",
@@ -825,6 +974,9 @@ function buildDiagram({
       kind: "duplex",
       bidirectional: true,
       active: activeSubmit || activeReport,
+      progress: activeReport
+        ? workflowProgress(activeStageName, "REPORT")
+        : workflowProgress(activeStageName, "SUBMIT"),
     },
     {
       id: "server-scheduler",
@@ -833,6 +985,7 @@ function buildDiagram({
       label: "select",
       kind: "data",
       active: activeDispatch,
+      progress: workflowProgress(activeStageName, "DISPATCH"),
     },
     {
       id: "server-control",
@@ -841,6 +994,7 @@ function buildDiagram({
       label: "Register / HB",
       kind: "control",
       active: activeWorkers > 0,
+      progress: activityProgress(activeWorkers > 0, workers.length > 0),
     },
     {
       id: "server-backend",
@@ -849,6 +1003,7 @@ function buildDiagram({
       label: "execute",
       kind: "data",
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "server-agentjob",
@@ -857,6 +1012,7 @@ function buildDiagram({
       label: "AgentJob",
       kind: "data",
       active: activeAgent,
+      progress: activityProgress(activeAgent, Boolean(agents?.agent_count)),
     },
     {
       id: "server-trajectory",
@@ -865,6 +1021,7 @@ function buildDiagram({
       label: "store",
       kind: "data",
       active: activeReport,
+      progress: workflowProgress(activeStageName, "REPORT"),
     },
     {
       id: "scheduler-worker",
@@ -873,6 +1030,7 @@ function buildDiagram({
       label: "DispatchEpisode",
       kind: "data",
       active: activeDispatch || activeExecute,
+      progress: activeExecute ? "done" : workflowProgress(activeStageName, "DISPATCH"),
     },
     {
       id: "worker-control",
@@ -881,6 +1039,7 @@ function buildDiagram({
       label: "status up",
       kind: "control",
       active: activeWorkers > 0,
+      progress: activityProgress(activeWorkers > 0, workers.length > 0),
     },
     {
       id: "worker-executor",
@@ -889,6 +1048,7 @@ function buildDiagram({
       label: "run",
       kind: "data",
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "executor-pool",
@@ -898,6 +1058,7 @@ function buildDiagram({
       kind: "duplex",
       bidirectional: true,
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "pool-workspace",
@@ -906,6 +1067,7 @@ function buildDiagram({
       label: "workspace",
       kind: "data",
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "pool-gateway",
@@ -914,6 +1076,7 @@ function buildDiagram({
       label: "session",
       kind: "data",
       active: activeAgent,
+      progress: activityProgress(activeAgent, Boolean(agents?.agent_count)),
     },
     {
       id: "pool-plugin",
@@ -923,6 +1086,7 @@ function buildDiagram({
       kind: "duplex",
       bidirectional: true,
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "plugin-math",
@@ -931,6 +1095,7 @@ function buildDiagram({
       label: "math",
       kind: "infer",
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "plugin-code",
@@ -939,6 +1104,7 @@ function buildDiagram({
       label: "code",
       kind: "infer",
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "plugin-swe",
@@ -947,6 +1113,7 @@ function buildDiagram({
       label: "swe",
       kind: "infer",
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "hub-worker",
@@ -956,6 +1123,7 @@ function buildDiagram({
       kind: "control",
       dashed: true,
       active: workers.length > 0,
+      progress: activityProgress(false, workers.length > 0),
     },
     {
       id: "agent-runtime",
@@ -964,6 +1132,7 @@ function buildDiagram({
       label: "HTTP",
       kind: "data",
       active: activeAgent,
+      progress: activityProgress(activeAgent, Boolean(agents?.agent_count)),
     },
     {
       id: "agent-model",
@@ -972,6 +1141,7 @@ function buildDiagram({
       label: "LLM",
       kind: "infer",
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "model-plugin",
@@ -981,6 +1151,7 @@ function buildDiagram({
       kind: "infer",
       dashed: true,
       active: activeExecute,
+      progress: workflowProgress(activeStageName, "EXECUTE"),
     },
     {
       id: "worker-training",
@@ -990,6 +1161,7 @@ function buildDiagram({
       kind: "control",
       dashed: true,
       active: activeReport,
+      progress: workflowProgress(activeStageName, "REPORT"),
     },
   ];
 
@@ -998,6 +1170,7 @@ function buildDiagram({
 
 export function SystemTopology({ initialRunId = null }: { initialRunId?: string | null }) {
   const [now, setNow] = useState(0);
+  const [modulePositions, setModulePositions] = useState<Record<string, Position>>({});
   const {
     chainState,
     connection,
@@ -1039,6 +1212,20 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
       }),
     [chainState, effectiveRunId, liveMode, nowLabel, telemetry.agents, telemetry.fleet, workers],
   );
+  const displayedDiagram = useMemo(
+    () => ({
+      ...diagram,
+      modules: diagram.modules.map((module) => {
+        const position = modulePositions[module.id];
+        return position ? { ...module, ...position } : module;
+      }),
+    }),
+    [diagram, modulePositions],
+  );
+  const moveModule = (id: string, position: Position, moved: boolean) => {
+    if (!moved) return;
+    setModulePositions((current) => ({ ...current, [id]: position }));
+  };
   const updatedAt = clientReady
     ? formatTime(telemetry.fetchedAt ?? chainState?.updated_at)
     : "同步中";
@@ -1072,6 +1259,13 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
               <RefreshCw className="h-3.5 w-3.5" />
               {updatedAt}
             </span>
+            <button
+              type="button"
+              onClick={() => setModulePositions({})}
+              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-600 transition hover:border-blue-300 hover:text-blue-700"
+            >
+              恢复布局
+            </button>
           </div>
         </div>
         {(error || telemetry.error || telemetry.hub.error) && liveMode && (
@@ -1089,50 +1283,50 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
           >
             <LayerFrame
               title="Layer 4 · Training Adapter"
-              x={225}
-              y={18}
-              w={845}
-              h={150}
+              x={220}
+              y={24}
+              w={760}
+              h={170}
               tone="border-blue-200 bg-blue-50/35"
             />
             <LayerFrame
               title="Layer 3 · Scheduler / Control Plane"
-              x={225}
-              y={190}
-              w={920}
-              h={220}
+              x={205}
+              y={225}
+              w={950}
+              h={185}
               tone="border-emerald-200 bg-emerald-50/35"
             />
             <LayerFrame
               title="Layer 2 · Env Execution"
               x={170}
               y={430}
-              w={890}
-              h={235}
+              w={895}
+              h={250}
               tone="border-amber-200 bg-amber-50/35"
             />
             <LayerFrame
               title="Task Environment 插件"
-              x={330}
-              y={660}
-              w={610}
-              h={92}
+              x={315}
+              y={690}
+              w={630}
+              h={88}
               tone="border-violet-200 bg-violet-50/35"
             />
             <LayerFrame
               title="Layer 1 · Env Registry"
               x={260}
-              y={762}
+              y={842}
               w={300}
-              h={72}
+              h={130}
               tone="border-slate-200 bg-slate-50"
             />
-            <div className="absolute left-[1040px] top-[250px] h-[410px] w-[180px] rounded-lg border border-violet-200 bg-violet-50/30 px-3 py-2">
+            <div className="absolute left-[1048px] top-[420px] h-[330px] w-[172px] rounded-lg border border-violet-200 bg-violet-50/30 px-3 py-2">
               <div className="text-sm font-semibold text-slate-900">Agent Scaffold（策略侧）</div>
             </div>
-            <FlowLayer modules={diagram.modules} edges={diagram.edges} />
-            {diagram.modules.map((module) => (
-              <ModuleCard key={module.id} module={module} />
+            <FlowLayer modules={displayedDiagram.modules} edges={displayedDiagram.edges} />
+            {displayedDiagram.modules.map((module) => (
+              <ModuleCard key={module.id} module={module} onMove={moveModule} />
             ))}
             <ProgressRail
               total={episodes.total}
