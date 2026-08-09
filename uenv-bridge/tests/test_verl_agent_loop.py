@@ -1124,6 +1124,47 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
         self.assertEqual([result.summary.total_reward for result in results], [0.0, 1.0, 2.0])
 
+    def test_rust_core_client_forwards_scheduling_policy_to_execute_batch(self) -> None:
+        stub = FakeCoreBatchStub()
+        client = RustCoreEpisodeClient(RustCoreClientConfig(), stub=stub)
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=client,
+            max_episode_concurrency=8,
+            max_in_flight_batches=1,
+            target_worker_slots=8,
+            pool_warmup_target=8,
+            max_parallel_per_worker=4,
+            agent_job_max_concurrency=4,
+            runtime_gateway_session_limit=4,
+            require_warm_slot=True,
+        )
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt="question",
+            sample_kwargs={"extra_info": {"batch_id": "batch-schedule", "sample_index": 0}},
+        )
+
+        list(client.submit_episode_stream([request]))
+
+        self.assertEqual(
+            stub.last_request["scheduling_policy"],
+            {
+                "max_episode_concurrency": 8,
+                "max_in_flight_batches": 1,
+                "target_worker_slots": 8,
+                "pool_warmup_target": 8,
+                "max_parallel_per_worker": 4,
+                "agent_job_max_concurrency": 4,
+                "runtime_gateway_session_limit": 4,
+                "require_warm_slot": True,
+            },
+        )
+        context = json.loads(stub.last_request["samples"][0]["sample_context_json"].decode("utf-8"))
+        self.assertNotIn("scheduling_policy", context)
+        self.assertNotIn("scheduling_group_id", context)
+
     def test_rust_core_client_filters_protocol_keys_from_sample_context(self) -> None:
         stub = FakeCoreBatchStub()
         client = RustCoreEpisodeClient(RustCoreClientConfig(), stub=stub)

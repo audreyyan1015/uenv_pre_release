@@ -17,6 +17,8 @@ use crate::proto::worker::v1::{
 };
 use crate::service::{ForEpisodeSession, SweAgentSpec};
 
+const DEFAULT_GRPC_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 /// worker gRPC 调用边界。
 ///
 /// service 层只关心“把 episode 发给 worker”和“通知 worker 取消 episode”这两个动作。
@@ -71,8 +73,7 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             // endpoint 来自 worker 注册信息，不包含协议前缀；tonic 需要 http:// 前缀。
-            let mut client: WorkerGrpcServiceClient<Channel> =
-                WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
+            let mut client = connect_worker_grpc_client(endpoint).await?;
             let dispatch = DispatchEpisodeRequest {
                 episode: Some(request.clone()),
             };
@@ -110,8 +111,7 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
         >,
     > {
         Box::pin(async move {
-            let mut client: WorkerGrpcServiceClient<Channel> =
-                WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
+            let mut client = connect_worker_grpc_client(endpoint).await?;
             // 取消 RPC 设置短超时，避免 cancel API 被异常 worker 长时间阻塞。
             let resp = tokio::time::timeout(Duration::from_secs(5), client.cancel_episode(request))
                 .await??;
@@ -125,14 +125,34 @@ impl WorkerDispatchPort for TonicWorkerDispatchClient {
         request: PrepareEnvironmentRequest,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<PrepareEnvironmentResponse>> + Send + 'a>> {
         Box::pin(async move {
-            let mut client: WorkerGrpcServiceClient<Channel> =
-                WorkerGrpcServiceClient::connect(format!("http://{endpoint}")).await?;
+            let mut client = connect_worker_grpc_client(endpoint).await?;
             let resp =
                 tokio::time::timeout(Duration::from_secs(60), client.prepare_environment(request))
                     .await??;
             Ok(resp.into_inner())
         })
     }
+}
+
+async fn connect_worker_grpc_client(
+    endpoint: &str,
+) -> anyhow::Result<WorkerGrpcServiceClient<Channel>> {
+    let max_message_bytes = grpc_max_message_bytes();
+    let client = WorkerGrpcServiceClient::connect(format!("http://{endpoint}"))
+        .await?
+        .max_decoding_message_size(max_message_bytes)
+        .max_encoding_message_size(max_message_bytes);
+    Ok(client)
+}
+
+fn grpc_max_message_bytes() -> usize {
+    env_usize("UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES")
+        .or_else(|| env_usize("UENV_WORKER_GRPC_MAX_MESSAGE_BYTES"))
+        .unwrap_or(DEFAULT_GRPC_MAX_MESSAGE_BYTES)
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok()?.trim().parse::<usize>().ok()
 }
 
 /// Runtime Gateway session 调用边界。

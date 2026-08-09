@@ -93,3 +93,18 @@ Worker slot、环境资源和调度策略决定。
 目前该字段只能表示“期望并行度”，不能替代 Worker 侧的真实指标。后续如需
 精确判断并发瓶颈，还需要 Server/Worker 上报 active episode、queued episode、
 available slots 和 worker_id 等运行时信息。
+
+## 6. 2026-08-07 补充：SchedulingPolicy 字段
+
+在 Worker 侧 `Docs/worker/260807/Episode并行调度与预热池参数梳理.md` 的基础上，
+adapter 已新增 `SchedulingPolicy` 透传字段，用于表达更完整的 run/batch 调度意图。
+
+`UENV_EXPECTED_WORKER_PARALLELISM` 仍保留为观测口径；实际新增的策略字段包括
+`UENV_MAX_EPISODE_CONCURRENCY`、`UENV_MAX_IN_FLIGHT_BATCHES`、
+`UENV_TARGET_WORKER_SLOTS`、`UENV_POOL_WARMUP_TARGET`、
+`UENV_MAX_PARALLEL_PER_WORKER`、`UENV_AGENT_JOB_MAX_CONCURRENCY`、
+`UENV_RUNTIME_GATEWAY_SESSION_LIMIT` 和 `UENV_REQUIRE_WARM_SLOT`。
+
+详细字段含义、传递链路和当前 Server/Worker 待消费项见：
+
+`Docs/adapter/20260807-UENV-SchedulingPolicy调度字段接入说明.md`

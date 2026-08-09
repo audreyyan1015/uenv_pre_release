@@ -250,3 +250,14 @@ max_parallel_episodes = 4
 当前框架已经能并发调度 episode，并且 Server 有动态 admission、Worker 有容量和预热池。但它缺少 Adapter 显式传入的 run/batch 并行策略。
 
 为提高训练效率且避免资源误配，需要新增多参数调度协议：run 级 `max_episode_concurrency`、Worker pool 级 `warmup_target`、Worker busy 级 `max_parallel_episodes`、Agent/Gateway 级上限。Server 应按这些参数显式并行调度，而不是只依赖 batch 大小和 Worker 默认配置。
+
+## 8. Adapter 侧落实状态（2026-08-07）
+
+Adapter 已按本文推荐补齐第一阶段字段：
+
+- `ExecuteBatchRequest.scheduling_policy`：承载 `max_episode_concurrency`、`max_in_flight_batches`、`target_worker_slots`、`pool_warmup_target`、`max_parallel_per_worker`、`agent_job_max_concurrency`、`runtime_gateway_session_limit` 和 `require_warm_slot`。
+- `EpisodeRequest.scheduling_group_id` / `scheduling_priority`：作为轻量调度标签下发给 Server/Worker。
+- SWE 训练脚本已暴露对应 `UENV_*` 环境变量，并通过 `configs/uenv-agent-loop.yaml` 传入 `UEnvAgentLoop`。
+- adapter-core 当前已用 `max_episode_concurrency` 对单个 batch 做保守分块，并把 `scheduling_group_id` 写为 batch id。
+
+仍需 Server/Worker 后续消费的部分：run 级 in-flight batch admission、Worker slot 对齐、WarmupPool 目标、单 Worker 并行上限、AgentJob 并发和 Runtime Gateway session 上限。详细 adapter 侧说明见 `Docs/adapter/20260807-UENV-SchedulingPolicy调度字段接入说明.md`。

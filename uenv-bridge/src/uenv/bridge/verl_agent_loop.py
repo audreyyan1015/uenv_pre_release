@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_loop_clients import build_agent_loop_episode_client
-from .clients import EpisodeClient
+from .clients import DEFAULT_GRPC_MAX_MESSAGE_BYTES, EpisodeClient
 from .model_gateway import ModelGateway, ModelGatewayConfig, normalize_openai_endpoint
 from . import obs_client
 from .protocol import EpisodeRequest, EpisodeResult, MODE_MULTI, ResourceSpec, request_to_jsonable
@@ -156,6 +156,7 @@ class UEnvAgentLoopConfig:
     endpoint: str = "127.0.0.1:50051"
     timeout_seconds: float = 300.0
     startup_timeout_seconds: float = 30.0
+    max_message_bytes: int = DEFAULT_GRPC_MAX_MESSAGE_BYTES
     auto_start: bool = False
     binary: str | None = None
     fake_reward: float = 1.0
@@ -183,6 +184,14 @@ class UEnvAgentLoopConfig:
     require_swe_response_trace: bool = True
     parallel_mode: str = "sync"
     expected_worker_parallelism: int | None = None
+    max_episode_concurrency: int | None = None
+    max_in_flight_batches: int | None = None
+    target_worker_slots: int | None = None
+    pool_warmup_target: int | None = None
+    max_parallel_per_worker: int | None = None
+    agent_job_max_concurrency: int | None = None
+    runtime_gateway_session_limit: int | None = None
+    require_warm_slot: bool = False
     failed_episode_policy: str = "raise"
 
 
@@ -205,6 +214,7 @@ class UEnvAgentLoop(AgentLoopBase):
         endpoint: str | None = None,
         timeout_seconds: float | None = None,
         startup_timeout_seconds: float | None = None,
+        max_message_bytes: int | None = None,
         auto_start: bool | None = None,
         binary: str | None = None,
         fake_reward: float | None = None,
@@ -232,6 +242,14 @@ class UEnvAgentLoop(AgentLoopBase):
         require_swe_response_trace: bool | None = None,
         parallel_mode: str = "sync",
         expected_worker_parallelism: int | None = None,
+        max_episode_concurrency: int | None = None,
+        max_in_flight_batches: int | None = None,
+        target_worker_slots: int | None = None,
+        pool_warmup_target: int | None = None,
+        max_parallel_per_worker: int | None = None,
+        agent_job_max_concurrency: int | None = None,
+        runtime_gateway_session_limit: int | None = None,
+        require_warm_slot: bool | None = None,
         failed_episode_policy: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -242,6 +260,10 @@ class UEnvAgentLoop(AgentLoopBase):
             endpoint=_optional_string(endpoint) or "127.0.0.1:50051",
             timeout_seconds=_float_value(timeout_seconds, 300.0),
             startup_timeout_seconds=_float_value(startup_timeout_seconds, 30.0),
+            max_message_bytes=max(
+                1,
+                _optional_int_value(max_message_bytes) or DEFAULT_GRPC_MAX_MESSAGE_BYTES,
+            ),
             auto_start=_bool_value(auto_start, False),
             binary=_optional_string(binary),
             fake_reward=_float_value(fake_reward, 1.0),
@@ -269,6 +291,14 @@ class UEnvAgentLoop(AgentLoopBase):
             require_swe_response_trace=_bool_value(require_swe_response_trace, True),
             parallel_mode=_optional_string(parallel_mode) or "sync",
             expected_worker_parallelism=_optional_int_value(expected_worker_parallelism),
+            max_episode_concurrency=_optional_int_value(max_episode_concurrency),
+            max_in_flight_batches=_optional_int_value(max_in_flight_batches),
+            target_worker_slots=_optional_int_value(target_worker_slots),
+            pool_warmup_target=_optional_int_value(pool_warmup_target),
+            max_parallel_per_worker=_optional_int_value(max_parallel_per_worker),
+            agent_job_max_concurrency=_optional_int_value(agent_job_max_concurrency),
+            runtime_gateway_session_limit=_optional_int_value(runtime_gateway_session_limit),
+            require_warm_slot=_bool_value(require_warm_slot, False),
             failed_episode_policy=_failed_episode_policy(failed_episode_policy),
         )
         self.model_gateway = ModelGateway(
@@ -288,6 +318,7 @@ class UEnvAgentLoop(AgentLoopBase):
             endpoint=self.config_for_uenv.endpoint,
             timeout_seconds=self.config_for_uenv.timeout_seconds,
             startup_timeout_seconds=self.config_for_uenv.startup_timeout_seconds,
+            max_message_bytes=self.config_for_uenv.max_message_bytes,
             auto_start=self.config_for_uenv.auto_start,
             binary=self.config_for_uenv.binary,
             transport_retry_attempts=self.config_for_uenv.batch_retry_attempts,
@@ -756,6 +787,10 @@ class UEnvAgentLoop(AgentLoopBase):
         metadata.update(parallel_metadata)
         if self.config_for_uenv.expected_worker_parallelism is not None:
             metadata["expected_worker_parallelism"] = self.config_for_uenv.expected_worker_parallelism
+        scheduling_policy = self._scheduling_policy()
+        if scheduling_policy:
+            metadata["scheduling_policy"] = scheduling_policy
+            metadata["scheduling_group_id"] = batch_id
         generation_config = {
             "temperature": sampling_params.get("temperature"),
             "top_p": sampling_params.get("top_p"),
@@ -911,6 +946,24 @@ class UEnvAgentLoop(AgentLoopBase):
                     "trajectory": self._trajectory_to_jsonable(result),
                 }
                 file.write(json.dumps(to_jsonable(record), ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    def _scheduling_policy(self) -> dict[str, Any]:
+        config = self.config_for_uenv
+        policy: dict[str, Any] = {}
+        for key, value in {
+            "max_episode_concurrency": config.max_episode_concurrency,
+            "max_in_flight_batches": config.max_in_flight_batches,
+            "target_worker_slots": config.target_worker_slots,
+            "pool_warmup_target": config.pool_warmup_target,
+            "max_parallel_per_worker": config.max_parallel_per_worker,
+            "agent_job_max_concurrency": config.agent_job_max_concurrency,
+            "runtime_gateway_session_limit": config.runtime_gateway_session_limit,
+        }.items():
+            if value is not None and value > 0:
+                policy[key] = int(value)
+        if config.require_warm_slot:
+            policy["require_warm_slot"] = True
+        return policy
 
     def _payload_dict(self, request: EpisodeRequest) -> dict[str, Any]:
         try:
