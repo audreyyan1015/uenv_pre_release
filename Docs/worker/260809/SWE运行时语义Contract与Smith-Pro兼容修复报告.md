@@ -206,6 +206,67 @@ create session
   -> save trajectory/artifacts
 ```
 
+## Adapter 发起训练的注意事项
+
+后续从 adapter 层发起 SWE-bench Pro / SWE-smith 训练时，需要跟随本 contract 协议调整训练样本、EnvPackage 和部署配置，但不应在 adapter 中继续复制 Worker 生命周期特判。
+
+### 1. 训练样本和 EnvPackage 必须能触发正确 contract
+
+adapter 生成训练 parquet / episode payload 时，应保证以下字段与目标环境一致：
+
+- `benchmark_variant`
+- `env_package_id` / `env_package_version`
+- `dataset` / `data_source`
+- `instance_id`
+- EnvPackage manifest 中的 `worker_overlay.swe.benchmark_runtime`（如使用包级覆盖）
+- catalog 单实例中的 `runtime_contract` / `benchmark_runtime`（如使用实例级覆盖）
+
+对 SWE-smith，如果不显式写 `benchmark_runtime`，也必须保证 `benchmark_variant=smith`，这样 Worker 会使用 Smith 默认 contract：
+
+- `initial_state.patch_semantics=clean_to_buggy`
+- `initial_state.provision_patch=apply_dataset_patch`
+- `initial_state.commit_after_provision=true`
+- `gold.patch_mode=reverse_dataset_patch`
+- `reward.command_env=UENV_SWE_SMITH_EVAL_CMD`
+
+对 SWE-bench Pro，默认 contract 依赖 `benchmark_variant=pro`：
+
+- `workspace_dir=/app`
+- `initial_state.provision_patch=none`
+- `gold.patch_mode=apply_dataset_patch`
+- `reward.command_env=UENV_SWE_PRO_EVAL_CMD`
+
+### 2. adapter 不再承担 patch 方向和 buggy 状态特判
+
+adapter / bridge 侧不应再手写如下逻辑：
+
+- Smith 正向 apply 数据集 patch 造 buggy 状态。
+- Smith gold patch 反向 apply。
+- Pro / Smith workspace 目录的临时分支判断。
+- 根据 Pro / Smith 在 adapter 内选择 reward patch 方向。
+
+这些语义已由 Worker 的 `BenchmarkRuntimeContract` 统一驱动。adapter 只负责把足够的语义字段传给 Worker；如果 adapter 再做一层 patch 方向转换，容易造成双重 apply / reverse apply，重新引入 reward 全 0 或初始环境非 buggy 的问题。
+
+### 3. 官方 reward adapter 仍需要部署环境变量
+
+contract 只声明外部 reward adapter 的入口名，真正命令仍由 Worker 运行环境提供：
+
+- SWE-bench Pro 默认读取 `UENV_SWE_PRO_EVAL_CMD`
+- SWE-smith 默认读取 `UENV_SWE_SMITH_EVAL_CMD`
+- 自定义环境读取 contract 中的 `reward.command_env`
+
+因此 adapter 发起训练前，部署脚本 / Worker service 环境需要确认相应 env var 已注入。若 EnvPackage 或 catalog 使用自定义 `reward.command_env`，adapter 不需要理解命令内容，但训练部署必须提供同名环境变量。
+
+### 4. 联调检查清单
+
+从 adapter 侧重新发起训练前，建议至少检查：
+
+- Worker 日志中加载 EnvPackage 时 `runtime_contract=true`，或实例按 `benchmark_variant` 派生默认 contract。
+- 首个 Smith session provision 后存在 baseline commit，agent diff 是 `buggy -> fixed`。
+- gold 验证统一走 `SweSession::apply_gold_contract()`。
+- `agent-loop-results.jsonl` 中 trajectory / reward 字段正常落盘。
+- 如果使用官方 harness，外部 reward 命令 stdout 返回 `{resolved, reward, per_test}` JSON。
+
 ## 修改范围
 
 - `uenv-worker/src/swe/runtime_contract.rs`
