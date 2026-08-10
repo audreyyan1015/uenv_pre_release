@@ -233,7 +233,7 @@ uenv env plugin test "$HOME/uenv-envs/warehouse"
 sudo uenv env plugin install-local "$HOME/uenv-envs/warehouse"
 ```
 
-`install-local` 将 process plugin 安装到当前 UEnv Worker。需要向多台 UEnv Worker 发布固定版本时，使用 [UEnv Hub 使用指南](./UEnv%20Hub使用指南.md) 中的发布、同步和激活流程。
+`install-local` 将 process plugin 安装到当前 UEnv Worker。需要向多台 UEnv Worker 发布固定版本时，使用 [UEnv Hub 使用指南](./UEnv%20Hub使用指南.md) 中的发布、预同步和按需激活流程。
 
 ## 7. 执行 SWE 评测
 

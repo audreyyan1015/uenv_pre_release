@@ -111,11 +111,32 @@ def _remove_spooled_completion(path: Path) -> None:
     _sync_directory(COMPLETION_SPOOL_DIR)
 
 
+def _archive_spooled_completion(path: Path, reason: str) -> Path:
+    archive_dir = COMPLETION_SPOOL_DIR / f"archived-{reason}"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    target = archive_dir / path.name
+    if target.exists():
+        target = archive_dir / f"{path.stem}-{int(time.time())}{path.suffix}"
+    os.replace(path, target)
+    _sync_directory(archive_dir)
+    _sync_directory(COMPLETION_SPOOL_DIR)
+    return target
+
+
 def _submit_spooled_completion(client: Any, path: Path) -> bool:
     record = json.loads(path.read_text(encoding="utf-8"))
     acked = client.complete_agent_job(**record)
     if acked:
         _remove_spooled_completion(path)
+        return True
+    code = str(getattr(client, "last_complete_code", "") or "").upper()
+    if code == "UNKNOWN_JOB":
+        archived = _archive_spooled_completion(path, "unknown-job")
+        print(
+            f"[agent-poll] archived unknown completion spool={path.name} -> {archived}",
+            flush=True,
+        )
+        return True
     return bool(acked)
 
 

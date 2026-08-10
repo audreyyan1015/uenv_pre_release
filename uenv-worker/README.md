@@ -9,7 +9,7 @@ Worker 是 UEnv **Layer 2 Worker Pool** 的执行节点：gRPC **Server** 接收
 - **Episode 执行**：`EpisodeExecutor` 管理 reset → N×step → close（M2+）
 - **模型回调**：`ModelClient` 直连推理服务（HTTP/gRPC）
 - **预热池**：`WarmupPool` 本地持有 Warm 实例；缺实例时自行 `spawn`；Episode 结束归还 Warm 复用（M6+）
-- **Hub 元数据**：`EnvResolver` 在 spawn 前拉取/合并 Hub manifest（M-5+）；制品仍用本地 `plugins/`
+- **Hub 元数据**：`EnvResolver` 在 spawn 前拉取/合并 Hub manifest（M-5+）；可执行制品来自本地 `plugins/`、Hub 激活的 `package_plugin_dir` 或 SWE 本地 EnvPackage 目录
 - **插件子进程**：`ProcessBackend` + `plugins/math/`（M4+）；**非**内嵌 Python 主路径
 - **Worker WAL**：断连重放（schema M1 冻结，持久化 M8）
 
@@ -50,7 +50,7 @@ uenv-worker health
 正式单轮验证环境：`plugins/qa/`（`env_type=qa`，复用 `uenv-math-plugin` 判分）；金标契约见 `plugins/qa/RUBRIC.md`。
 **`math` 已退役**：Worker `env.types` 勿再注册 `math`；误发会得到 Server `no worker supports env type`。插件二进制可留作回滚。
 
-默认 **`prewarm_on_startup: false`**：Worker 启动不预创建实例；首条 `DispatchEpisode` 时从池 acquire（池空则 spawn）。可选 Hub：
+默认 **`prewarm_on_startup: false`**：Worker 启动不预创建实例；首条 `DispatchEpisode` 时从池 acquire（池空则 spawn）。Hub 配置只用于元数据解析和已预同步包的版本登记，不是 Episode 调度热路径：
 
 ```bash
 UENV_HUB_ENDPOINT=http://127.0.0.1:8080

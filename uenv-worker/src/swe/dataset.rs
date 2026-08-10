@@ -9,6 +9,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::swe::repo_specs::{DEFAULT_SPEC, LogParser, RepoSpec, spec_for};
+use crate::swe::runtime_contract::BenchmarkRuntimeContract;
 use crate::swe::spec::{EvaluationSpec, InstanceSpec, TaskSpec};
 use crate::swe::variant::BenchmarkVariant;
 
@@ -67,6 +68,10 @@ pub struct SweInstance {
     /// Pro 变体：跑测试前依赖服务（如 NodeBB 需 `redis-server --daemonize yes`）。
     #[serde(default)]
     pub pre_test_cmd: Option<String>,
+    /// Optional per-instance runtime contract. If absent, Worker derives a default
+    /// contract from `benchmark_variant` (Verified/Lite/Pro/Smith).
+    #[serde(default, alias = "benchmark_runtime")]
+    pub runtime_contract: Option<BenchmarkRuntimeContract>,
 }
 
 impl SweInstance {
@@ -113,12 +118,36 @@ impl SweInstance {
     }
 
     /// 容器内工作区路径：Verified/Smith=`/testbed`；Pro（jefzda/sweap-images）=`/app`。
-    pub fn workspace_dir(&self) -> &'static str {
+    pub fn workspace_dir(&self) -> &str {
+        if let Some(ws) = self
+            .runtime_contract
+            .as_ref()
+            .and_then(|c| c.workspace_dir.as_deref())
+            .filter(|s| !s.trim().is_empty())
+        {
+            return ws;
+        }
         match self.variant() {
             BenchmarkVariant::Pro => "/app",
             BenchmarkVariant::Verified | BenchmarkVariant::Lite | BenchmarkVariant::Smith => {
                 "/testbed"
             }
+        }
+    }
+
+    /// Runtime lifecycle contract for this instance.
+    pub fn runtime_contract(&self) -> BenchmarkRuntimeContract {
+        self.runtime_contract
+            .clone()
+            .unwrap_or_else(|| BenchmarkRuntimeContract::for_variant(self.variant()))
+    }
+
+    /// Mutate only missing per-instance contracts. Used when an EnvPackage
+    /// declares a package-level `worker_overlay.swe.benchmark_runtime` default.
+    pub fn apply_default_runtime_contract(&mut self, contract: &BenchmarkRuntimeContract) {
+        if self.runtime_contract.is_none() {
+            self.runtime_contract =
+                Some(BenchmarkRuntimeContract::for_variant(self.variant()).merge_overlay(contract));
         }
     }
 
@@ -302,6 +331,12 @@ impl InstanceStore {
     /// 合并另一个目录（多变体加载）：后者覆盖同名 instance_id。
     pub fn merge_from(&mut self, other: InstanceStore) {
         self.instances.extend(other.instances);
+    }
+
+    pub fn apply_default_runtime_contract(&mut self, contract: &BenchmarkRuntimeContract) {
+        for inst in self.instances.values_mut() {
+            inst.apply_default_runtime_contract(contract);
+        }
     }
 
     pub fn ids(&self) -> Vec<String> {
@@ -490,6 +525,56 @@ mod tests {
         assert_eq!(
             inst.to_instance_spec().dataset.as_deref(),
             Some("SWE-bench/SWE-smith")
+        );
+        let contract = inst.runtime_contract();
+        assert_eq!(
+            contract.initial_state.patch_semantics,
+            crate::swe::runtime_contract::PatchSemantics::CleanToBuggy
+        );
+        assert_eq!(
+            contract.initial_state.provision_patch,
+            crate::swe::runtime_contract::PatchMode::ApplyDatasetPatch
+        );
+        assert_eq!(
+            contract.gold.patch_mode,
+            crate::swe::runtime_contract::PatchMode::ReverseDatasetPatch
+        );
+    }
+
+    #[test]
+    fn runtime_contract_can_be_declared_in_catalog() {
+        let raw = r#"{
+          "custom__env-1": {
+            "instance_id": "custom__env-1",
+            "repo": "custom/env",
+            "base_commit": "deadbeef",
+            "runtime_contract": {
+              "kind": "swe",
+              "workspace_dir": "/workspace",
+              "initial_state": {
+                "patch_semantics": "clean_to_buggy",
+                "provision_patch": "apply_dataset_patch",
+                "commit_after_provision": true
+              },
+              "gold": {"patch_mode": "reverse_dataset_patch"},
+              "reward": {
+                "adapter": "external_command",
+                "command_env": "UENV_CUSTOM_REWARD_CMD",
+                "authority": "custom_official"
+              }
+            }
+          }
+        }"#;
+        let store = InstanceStore::from_json(raw).unwrap();
+        let contract = store.get("custom__env-1").unwrap().runtime_contract();
+        assert_eq!(contract.workspace_dir.as_deref(), Some("/workspace"));
+        assert_eq!(
+            contract.gold.patch_mode,
+            crate::swe::runtime_contract::PatchMode::ReverseDatasetPatch
+        );
+        assert_eq!(
+            contract.reward.command_env.as_deref(),
+            Some("UENV_CUSTOM_REWARD_CMD")
         );
     }
 }

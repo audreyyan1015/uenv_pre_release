@@ -91,6 +91,8 @@ class AgentControlClient:
     def __init__(self, server_endpoint: str, timeout_sec: float = 10.0) -> None:
         self.endpoint = server_endpoint
         self.timeout_sec = timeout_sec
+        self.last_complete_code = ""
+        self.last_complete_message = ""
         self._grpc, self._pb2, pb2_grpc = _load_grpc_modules()
         self._channel = self._grpc.insecure_channel(server_endpoint)
         self._stub = pb2_grpc.AgentControlServiceStub(self._channel)
@@ -231,9 +233,13 @@ class AgentControlClient:
             req.rollout_trace.response_ids.extend(ids)
             req.rollout_trace.response_mask.extend(mask)
         resp = self._stub.CompleteAgentJob(req, timeout=self.timeout_sec)
+        self.last_complete_code = ""
+        self.last_complete_message = ""
         if not resp.ack:
             code = getattr(resp, "code", "") or ""
             message = getattr(resp, "message", "") or ""
+            self.last_complete_code = str(code)
+            self.last_complete_message = str(message)
             print(
                 f"[agent-client] CompleteAgentJob not acked job={job_id} "
                 f"agent_id={agent_id} code={code} message={message}",

@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useRunStream } from "@/hooks/use-run-stream";
+import { SystemHomeLink } from "@/components/system-home-link";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import type { ConnectionState, ViewMode } from "@/lib/store/chain-store";
 import type {
@@ -257,6 +258,11 @@ export function TrainingConsole({ initialRunId = null }: { initialRunId?: string
   const [bottomTab, setBottomTab] = useState<
     "logs" | "metrics" | "events" | "snapshots" | "search"
   >("events");
+  const [clientReady, setClientReady] = useState(false);
+
+  useEffect(() => {
+    setClientReady(true);
+  }, []);
 
   const workflowNodes = useMemo(() => {
     const nodes = chainState?.workflow.nodes ?? [];
@@ -316,14 +322,16 @@ export function TrainingConsole({ initialRunId = null }: { initialRunId?: string
     };
   }, [chainState]);
 
-  if (!chainState) {
+  if (!clientReady || !chainState) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background text-foreground">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         <div className="text-sm text-muted-foreground">
-          {runId
-            ? `正在初始化训练运行 ${runId}…`
-            : "未指定 training_run_id，请通过 URL ?run= 指定，或配置 VITE_DEFAULT_RUN_ID。"}
+          {!clientReady
+            ? "正在初始化技术观测台…"
+            : runId
+              ? `正在初始化训练运行 ${runId}…`
+              : "未指定 training_run_id，请通过 URL ?run= 指定，或配置 VITE_DEFAULT_RUN_ID。"}
         </div>
       </div>
     );
@@ -346,6 +354,7 @@ export function TrainingConsole({ initialRunId = null }: { initialRunId?: string
         }
         episodeStats={episodeStats}
         workerStats={workerStats}
+        clientReady={clientReady}
       />
       <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
         <ResizablePanel defaultSize={42} minSize={28}>
@@ -416,6 +425,7 @@ function TopBar({
   activeNode,
   episodeStats,
   workerStats,
+  clientReady,
 }: {
   chainState: ChainState;
   connection: ConnectionState;
@@ -429,6 +439,7 @@ function TopBar({
   activeNode: WorkflowNode | null;
   episodeStats: { total: number; done: number; failed: number; active: number };
   workerStats: { total: number; active: number };
+  clientReady: boolean;
 }) {
   // Some pressure drivers publish Episode lifecycle events without a separate
   // run_status transition. Do not label such an actively progressing run as
@@ -495,7 +506,11 @@ function TopBar({
           value={`${episodeStats.done + episodeStats.failed} / ${episodeStats.total}`}
         />
         <Summary label="Worker" value={`${workerStats.active} / ${workerStats.total} 活跃`} />
-        <Summary label="最近更新" value={formatClock(chainState.updated_at)} mono />
+        <Summary
+          label="最近更新"
+          value={clientReady ? formatClock(chainState.updated_at) : "同步中"}
+          mono
+        />
         <div
           className={cn(
             "ml-auto flex items-center gap-2 rounded-full border px-3 py-1 text-xs",
@@ -533,6 +548,8 @@ function TopBar({
 
       {/* Actions */}
       <div className="flex items-center gap-2 border-l border-border px-4 py-3">
+        <SystemHomeLink className="border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground hover:border-primary/40 hover:text-primary" />
+        <div className="mx-1 h-6 w-px bg-border" />
         <button
           disabled
           title="P0 只读观测：开始/终止训练留待 P1 接入 REST 控制"

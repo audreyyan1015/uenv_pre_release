@@ -170,7 +170,7 @@ uenv status
 --hub-token-file ./worker-reader.token
 ```
 
-这两个参数让 UEnv Worker 连接 UEnv Hub。随后将环境版本发布为 EnvPackage，在每台 UEnv Worker 上下载并激活同一版本，再重启 UEnv Worker 加载该版本。完整操作见 UEnv Hub 使用指南。
+这两个参数让 UEnv Worker 连接 UEnv Hub。随后将环境版本发布为 EnvPackage，并在每台 UEnv Worker 上按需预同步同一版本；process plugin 需要执行激活并重启 Worker，SWE 等运行时包通常通过本地 EnvPackage 目录配置加载。完整操作见 UEnv Hub 使用指南。
 
 ## 8. 多机验收
 
@@ -250,4 +250,4 @@ uenv version
 cat /opt/uenv/current/.bundle.sha256 2>/dev/null || true
 ```
 
-然后核对环境插件、配置和任务文件。需要统一管理环境版本时，使用 UEnv Hub 的发布、同步和激活流程。
+然后核对环境插件、配置和任务文件。需要统一管理环境版本时，使用 UEnv Hub 的发布、预同步和按需激活流程。
