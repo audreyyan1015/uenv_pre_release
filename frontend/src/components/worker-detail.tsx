@@ -18,6 +18,7 @@ import {
 
 import { useRunStream } from "@/hooks/use-run-stream";
 import { useWorkerFleetLive } from "@/hooks/use-worker-fleet-live";
+import { SystemHomeLink } from "@/components/system-home-link";
 import type { ConnectionState } from "@/lib/store/chain-store";
 import type { NodeStatus } from "@/lib/types/chain-state";
 import {
@@ -248,8 +249,25 @@ export function WorkerDetail({
   const poolReady = poolSummary.reduce((sum, item) => sum + (item.ready ?? 0), 0);
   const poolBusy = poolSummary.reduce((sum, item) => sum + (item.busy ?? 0), 0);
   const poolCapacity = poolSummary.reduce((sum, item) => sum + (item.capacity ?? 0), 0);
+  const swePackages = packageStates.filter(
+    (pkg) => pkg.env_type === "swe" && pkg.backend_kind === "swe_instance_pool",
+  );
+  const readySwePackages = swePackages.filter((pkg) => pkg.state === "ready");
+  const hasSweInstancePool =
+    readySwePackages.length > 0 ||
+    supportedEnvTypes.includes("swe") ||
+    backendKinds.includes("swe_instance_pool");
+  const processPoolBusy = poolSummary
+    .filter((item) => item.backend_kind !== "swe_instance_pool")
+    .reduce((sum, item) => sum + (item.busy ?? 0), 0);
+  const sweRuntimeBusy = hasSweInstancePool ? Math.max(0, load - processPoolBusy) : 0;
+  const sweRuntimeCapacity =
+    hasSweInstancePool && typeof capacity === "number" ? Math.max(0, capacity) : null;
   const envInstanceCount =
-    poolSlots.length || worker?.env_instances?.length || projection.envInstances.length;
+    poolSlots.length ||
+    worker?.env_instances?.length ||
+    projection.envInstances.length ||
+    readySwePackages.length;
   const visiblePoolSlots = showAllPoolSlots ? poolSlots : poolSlots.slice(0, 12);
   const hiddenPoolSlotCount = Math.max(0, poolSlots.length - visiblePoolSlots.length);
 
@@ -277,9 +295,12 @@ export function WorkerDetail({
                 </h1>
               </div>
             </div>
-            <div className="inline-flex w-fit items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 shadow-sm">
-              <span className={`h-2 w-2 rounded-full ${connectionInfo.dot}`} />
-              {liveMode ? connectionInfo.label : "演示数据"}
+            <div className="flex flex-wrap items-center gap-2">
+              <SystemHomeLink className="h-8 rounded-full border-slate-200 bg-white px-3 text-xs text-slate-600 shadow-sm hover:border-blue-200 hover:text-blue-700" />
+              <div className="inline-flex w-fit items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 shadow-sm">
+                <span className={`h-2 w-2 rounded-full ${connectionInfo.dot}`} />
+                {liveMode ? connectionInfo.label : "演示数据"}
+              </div>
             </div>
           </div>
 
@@ -402,6 +423,60 @@ export function WorkerDetail({
                       <p className="text-xs text-slate-500">capacity</p>
                       <p className="mt-1 text-lg font-semibold text-slate-800">{poolCapacity}</p>
                     </div>
+                  </div>
+                )}
+
+                {hasSweInstancePool && (
+                  <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-blue-900">SWE 环境池</p>
+                        <p className="mt-1 text-xs leading-5 text-blue-700">
+                          SWE 由 Runtime Gateway / SweInstancePool 管理，不会出现在 qa/code 的
+                          process-plugin 槽位里。
+                        </p>
+                      </div>
+                      <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-medium text-blue-700 ring-1 ring-blue-100">
+                        swe_instance_pool
+                      </span>
+                    </div>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                      <div className="rounded-xl bg-white px-3 py-3 ring-1 ring-blue-100">
+                        <p className="text-xs text-slate-500">ready package</p>
+                        <p className="mt-1 text-lg font-semibold text-emerald-600">
+                          {readySwePackages.length}
+                        </p>
+                      </div>
+                      <div className="rounded-xl bg-white px-3 py-3 ring-1 ring-blue-100">
+                        <p className="text-xs text-slate-500">agent-mode load</p>
+                        <p className="mt-1 text-lg font-semibold text-blue-600">{sweRuntimeBusy}</p>
+                      </div>
+                      <div className="rounded-xl bg-white px-3 py-3 ring-1 ring-blue-100">
+                        <p className="text-xs text-slate-500">worker capacity</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-800">
+                          {sweRuntimeCapacity ?? "未知"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {swePackages.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        {swePackages.map((pkg) => (
+                          <div
+                            key={`${pkg.package_id}-${pkg.version}-${pkg.bundle_digest}`}
+                            className="flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2 ring-1 ring-blue-100"
+                          >
+                            <span className="min-w-0 truncate font-mono text-xs text-slate-700">
+                              {pkg.package_id || "swe-package"}@{pkg.version || "latest"}
+                            </span>
+                            <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-100">
+                              {pkg.state || "unknown"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -688,7 +763,7 @@ export function WorkerDetail({
 
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                 <p className="text-xs font-medium text-slate-500">实例池汇总</p>
-                {poolSummary.length > 0 || poolSlots.length > 0 ? (
+                {poolSummary.length > 0 || poolSlots.length > 0 || hasSweInstancePool ? (
                   <div className="mt-3 grid gap-3 lg:grid-cols-2">
                     {poolSummary.map((item) => (
                       <div
@@ -710,6 +785,18 @@ export function WorkerDetail({
                         </p>
                       </div>
                     ))}
+                    {hasSweInstancePool && (
+                      <div className="rounded-xl bg-white p-3 ring-1 ring-blue-100">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-sm font-medium text-slate-800">swe</span>
+                          <span className="text-xs text-blue-600">swe_instance_pool</span>
+                        </div>
+                        <p className="mt-2 text-xs text-slate-600">
+                          ready packages {readySwePackages.length} · agent-mode load{" "}
+                          {sweRuntimeBusy} · worker capacity {sweRuntimeCapacity ?? "未知"}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <p className="mt-2 text-sm text-slate-400">未上报实例池快照</p>

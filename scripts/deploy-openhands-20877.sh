@@ -10,6 +10,8 @@ JUMP_HOST="${UENV_JUMP_HOST:-219.147.100.43}"
 JUMP_PORT="${UENV_JUMP_PORT:-7142}"
 REMOTE_UENV="${UENV_REMOTE_UENV:-/root/UENV}"
 ENABLE_POLL="${OPENHANDS_ENABLE_POLL:-0}"
+AGENT_REPLICAS="${OPENHANDS_AGENT_REPLICAS:-1}"
+ENABLE_AUTOSCALE="${OPENHANDS_ENABLE_AUTOSCALE:-0}"
 
 resolve_key() {
   if [[ -n "${UENV_SSH_KEY:-}" && -f "${UENV_SSH_KEY}" ]]; then echo "${UENV_SSH_KEY}"; return; fi
@@ -92,6 +94,8 @@ touch integrations/openhands/uenv_runtime/gen/__init__.py \
   integrations/openhands/uenv_runtime/gen/uenv/v1/__init__.py
 
 ENABLE_POLL="${ENABLE_POLL}"
+AGENT_REPLICAS="${AGENT_REPLICAS}"
+ENABLE_AUTOSCALE="${ENABLE_AUTOSCALE}"
 if [[ "\$ENABLE_POLL" == "1" ]]; then
   echo "== enable Server poll mode =="
   grep -q '^OPENHANDS_AGENT_POLL=' /root/.openhands-20877.env 2>/dev/null && \
@@ -111,6 +115,8 @@ if [[ "\$ENABLE_POLL" == "1" ]]; then
     echo 'OPENHANDS_MAX_OUTPUT_TOKENS=32768' >> /root/.openhands-20877.env
   grep -q '^OPENHANDS_AGENT_MAX_CONCURRENT=' /root/.openhands-20877.env || \
     echo 'OPENHANDS_AGENT_MAX_CONCURRENT=1' >> /root/.openhands-20877.env
+  grep -q '^OPENHANDS_AGENT_ID=' /root/.openhands-20877.env || \
+    echo 'OPENHANDS_AGENT_ID=openhands-20877-main' >> /root/.openhands-20877.env
   cp scripts/openhands/uenv-agent-poller.service /etc/systemd/system/uenv-agent-poller.service
   sed -i 's|^ExecStart=.*|ExecStart=/root/uenv-agent-venv/bin/python /root/UEnv/scripts/openhands/openhands_runner.py|' \
     /etc/systemd/system/uenv-agent-poller.service
@@ -119,6 +125,66 @@ if [[ "\$ENABLE_POLL" == "1" ]]; then
   systemctl disable openhands-runner.service 2>/dev/null || true
   systemctl enable uenv-agent-poller.service
   systemctl restart uenv-agent-poller.service
+
+  if [[ "\$AGENT_REPLICAS" =~ ^[0-9]+$ && "\$AGENT_REPLICAS" -gt 1 ]]; then
+    echo "== enable additional OpenHands agent pollers replicas=\$AGENT_REPLICAS =="
+    for idx in \$(seq 1 \$((AGENT_REPLICAS - 1))); do
+      slot=\$(printf '%02d' "\$idx")
+      api=\$((8888 + idx))
+      health=\$((8777 + idx))
+      runs_dir="/var/log/uenv/openhands-extra-\$slot"
+      mkdir -p "\$runs_dir"
+      cat > "/etc/systemd/system/uenv-agent-poller-extra-\$slot.service" <<EXTRA
+[Unit]
+Description=UEnv OpenHands Agent poller extra \$slot (208.77 -> Server AgentControlService)
+After=network-online.target uenv-gateway-tunnel.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'set -a; . /root/.openhands-20877.env; set +a; export OPENHANDS_AGENT_POLL=1 UENV_SERVER_ENDPOINT=8.130.75.157:8088 OPENHANDS_AGENT_POOL_ID=openhands-default OPENHANDS_AGENT_BRIDGE_ID=uenv-agent-openhands OPENHANDS_AGENT_BRIDGE_VERSION=1.0.0 OPENHANDS_AGENT_MAX_CONCURRENT=1 OPENHANDS_POLL_INTERVAL_SEC=1 OPENHANDS_HEARTBEAT_INTERVAL_SEC=5 UENV_AGENT_BRIDGE_DIR=/root/UEnv/integrations/openhands OPENHANDS_RUN_SCRIPT=/root/UEnv/scripts/run-openhands-pro-20877.sh UENV_GATEWAY_LOCAL=http://127.0.0.1:28097 UENV_GATEWAY_API_KEY=swe-pro-secret OPENHANDS_AGENT_ID=openhands-20877-extra-\$slot OPENHANDS_RUNS_DIR=\$runs_dir OPENHANDS_COMPLETION_SPOOL_DIR=\$runs_dir/completion-spool OPENHANDS_RUNNER_API_BIND=127.0.0.1:\$api OPENHANDS_RUNNER_HEALTH_BIND=127.0.0.1:\$health OPENHANDS_AGENT_LABELS=role=openhands,slot=extra-\$slot; exec /root/uenv-agent-venv/bin/python /root/UEnv/scripts/openhands/openhands_runner.py'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EXTRA
+      systemctl enable "uenv-agent-poller-extra-\$slot.service"
+      systemctl restart "uenv-agent-poller-extra-\$slot.service"
+    done
+  fi
+
+  if [[ "\$ENABLE_AUTOSCALE" == "1" ]]; then
+    echo "== enable OpenHands agent pool autoscaler =="
+    cat > /etc/systemd/system/uenv-agent-pool-supervisor.service <<'SUPERVISOR'
+[Unit]
+Description=UEnv OpenHands Agent Pool Supervisor
+After=network-online.target uenv-agent-poller.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=UENV_AGENT_SUPERVISOR_ADMIN_BASE_URL=http://8.130.75.157:8099
+Environment=OPENHANDS_AGENT_POOL_ID=openhands-default
+Environment=OPENHANDS_AGENT_AUTOSCALE_MIN=1
+Environment=OPENHANDS_AGENT_AUTOSCALE_MAX=4
+Environment=OPENHANDS_AGENT_AUTOSCALE_INTERVAL_SEC=10
+Environment=UENV_GATEWAY_LOCAL=http://127.0.0.1:28097
+Environment=UENV_GATEWAY_API_KEY=swe-pro-secret
+ExecStart=/root/uenv-agent-venv/bin/python /root/UEnv/scripts/openhands/agent_pool_supervisor.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SUPERVISOR
+    systemctl daemon-reload
+    systemctl enable uenv-agent-pool-supervisor.service
+    systemctl restart uenv-agent-pool-supervisor.service
+  else
+    systemctl stop uenv-agent-pool-supervisor.service 2>/dev/null || true
+    systemctl disable uenv-agent-pool-supervisor.service 2>/dev/null || true
+  fi
 else
   systemctl is-active openhands-runner.service >/dev/null 2>&1 && systemctl restart openhands-runner.service || true
 fi
@@ -129,8 +195,20 @@ curl -sf http://127.0.0.1:8777/health && echo " runner_ok" || echo " runner_not_
 curl -sf -H 'X-API-Key: swe-pro-secret' http://127.0.0.1:28097/health && echo " tunnel_gateway_ok" || echo " tunnel_gateway_fail"
 if [[ "\$ENABLE_POLL" == "1" ]]; then
   systemctl is-active uenv-agent-poller.service && echo " agent_poller_active" || echo " agent_poller_inactive"
+  if [[ "\$AGENT_REPLICAS" =~ ^[0-9]+$ && "\$AGENT_REPLICAS" -gt 1 ]]; then
+    for idx in \$(seq 1 \$((AGENT_REPLICAS - 1))); do
+      slot=\$(printf '%02d' "\$idx")
+      health=\$((8777 + idx))
+      systemctl is-active "uenv-agent-poller-extra-\$slot.service" && echo " agent_poller_extra_\${slot}_active" || echo " agent_poller_extra_\${slot}_inactive"
+      curl -sf "http://127.0.0.1:\${health}/health" && echo " agent_poller_extra_\${slot}_health_ok" || echo " agent_poller_extra_\${slot}_health_fail"
+    done
+  fi
+  if [[ "\$ENABLE_AUTOSCALE" == "1" ]]; then
+    systemctl is-active uenv-agent-pool-supervisor.service && echo " agent_pool_supervisor_active" || echo " agent_pool_supervisor_inactive"
+    journalctl -u uenv-agent-pool-supervisor -n 8 --no-pager 2>/dev/null | tail -5 || true
+  fi
   journalctl -u uenv-agent-poller -n 8 --no-pager 2>/dev/null | tail -5 || true
 fi
 REMOTE
 
-echo "208.77 sync done (OPENHANDS_ENABLE_POLL=${ENABLE_POLL})."
+echo "208.77 sync done (OPENHANDS_ENABLE_POLL=${ENABLE_POLL}, OPENHANDS_AGENT_REPLICAS=${AGENT_REPLICAS}, OPENHANDS_ENABLE_AUTOSCALE=${ENABLE_AUTOSCALE})."

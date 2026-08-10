@@ -174,10 +174,7 @@ function moduleHref(kind: "root" | "ops" | "server" | "hub") {
   // Hub console assets use absolute paths (/console/app.css, /api/v1/...).
   // Opening via the Vite /hub proxy breaks CSS/JS/API; always open the Hub origin.
   // Override locally with VITE_HUB_CONSOLE_URL=http://127.0.0.1:8088/
-  return (
-    import.meta.env.VITE_HUB_CONSOLE_URL?.trim() ||
-    "http://8.130.95.176:8088/"
-  );
+  return import.meta.env.VITE_HUB_CONSOLE_URL?.trim() || "http://8.130.95.176:8088/";
 }
 
 function workerHref(worker: WorkerView | undefined, runId: string | null) {
@@ -635,8 +632,18 @@ function buildDiagram({
       sum + (row.pool_summary ?? []).reduce((inner, item) => inner + (Number(item.busy) || 0), 0),
     0,
   );
-  const agentCount = agents?.agents?.filter((agent) => !agent.stale).length ?? 0;
-  const runningAgentJobs = agents?.running_jobs ?? 0;
+  const activeAgents = agents?.agents?.filter((agent) => !agent.stale) ?? [];
+  const activeAgentIds = new Set(activeAgents.map((agent) => agent.agent_id).filter(Boolean));
+  const agentCount = activeAgents.length;
+  const nonStaleAgentLoad = activeAgents.reduce(
+    (sum, agent) =>
+      sum + Math.max(Number(agent.current_load) || 0, Number(agent.reserved_load) || 0),
+    0,
+  );
+  const nonStaleInFlight = (agents?.in_flight_detail ?? []).filter((job) =>
+    activeAgentIds.has(job.agent_id ?? ""),
+  ).length;
+  const runningAgentJobs = Math.max(nonStaleAgentLoad, nonStaleInFlight);
   const pendingAgentJobs = agents?.pending_jobs ?? 0;
 
   const modules: DiagramModule[] = [
@@ -1018,7 +1025,7 @@ function buildDiagram({
       label: "AgentJob",
       kind: "data",
       active: activeAgent,
-      progress: activityProgress(activeAgent, Boolean(agents?.agent_count)),
+      progress: activityProgress(activeAgent, agentCount > 0),
     },
     {
       id: "server-trajectory",
@@ -1082,7 +1089,7 @@ function buildDiagram({
       label: "session",
       kind: "data",
       active: activeAgent,
-      progress: activityProgress(activeAgent, Boolean(agents?.agent_count)),
+      progress: activityProgress(activeAgent, agentCount > 0),
     },
     {
       id: "pool-plugin",
@@ -1138,7 +1145,7 @@ function buildDiagram({
       label: "HTTP",
       kind: "data",
       active: activeAgent,
-      progress: activityProgress(activeAgent, Boolean(agents?.agent_count)),
+      progress: activityProgress(activeAgent, agentCount > 0),
     },
     {
       id: "agent-model",
