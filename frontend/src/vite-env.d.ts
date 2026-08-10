@@ -9,7 +9,11 @@ interface ImportMetaEnv {
   readonly VITE_DEFAULT_RUN_ID?: string;
   /** Hub 只读 overview token。仅用于本地联调；生产环境应由服务端代理注入。 */
   readonly VITE_HUB_TOKEN?: string;
-  /** Hub 控制台外链；不配置时使用同源 /hub/console 代理。 */
+  /**
+   * Hub 控制台外链（须为 Hub 源站，如 http://127.0.0.1:8088/ 或
+   * http://8.130.95.176:8088/console）。勿使用 /hub/console 代理路径：
+   * console 的 CSS/JS/API 为绝对路径，经代理打开会丢样式。
+   */
   readonly VITE_HUB_CONSOLE_URL?: string;
 }
 

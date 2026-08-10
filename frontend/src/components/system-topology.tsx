@@ -171,7 +171,13 @@ function moduleHref(kind: "root" | "ops" | "server" | "hub") {
   if (kind === "root") return "/";
   if (kind === "ops") return "/ops";
   if (kind === "server") return "/server";
-  return import.meta.env.VITE_HUB_CONSOLE_URL?.trim() || "/hub/console";
+  // Hub console assets use absolute paths (/console/app.css, /api/v1/...).
+  // Opening via the Vite /hub proxy breaks CSS/JS/API; always open the Hub origin.
+  // Override locally with VITE_HUB_CONSOLE_URL=http://127.0.0.1:8088/
+  return (
+    import.meta.env.VITE_HUB_CONSOLE_URL?.trim() ||
+    "http://8.130.95.176:8088/"
+  );
 }
 
 function workerHref(worker: WorkerView | undefined, runId: string | null) {
