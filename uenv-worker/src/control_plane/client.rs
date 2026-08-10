@@ -457,6 +457,16 @@ impl SchedulerControlPlaneClient {
             .await?
             .into_inner();
         if !response.ack {
+            if response.duplicate {
+                // duplicate=true 表示 server 已确定终态（已完成、已取消、lease 被取代等），
+                // 继续重试不会改变结果，直接当作已送达处理，避免 WAL 无限重放。
+                tracing::warn!(
+                    code = %response.code,
+                    message = %response.message,
+                    "report_result_terminal_outcome_dropped"
+                );
+                return Ok(());
+            }
             tracing::warn!(
                 code = %response.code,
                 message = %response.message,

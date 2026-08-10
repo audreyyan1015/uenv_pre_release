@@ -1,0 +1,2 @@
+{"id":"gsm8k-train-1","env_type":"qa","dataset":"gsm8k","question":"A shop has 9 notebooks and sells 3. How many notebooks remain? End with `#### number`.","target":"6","max_steps":1}
+{"id":"gsm8k-train-2","env_type":"qa","dataset":"gsm8k","question":"There are 4 bags with 5 apples in each bag. How many apples are there? End with `#### number`.","target":"20","max_steps":1}

@@ -18,7 +18,7 @@ import importlib
 import sys
 from typing import Any, Optional
 
-from .agent_job import AgentJob
+from .agent_job import AgentJob, decode_generation_config
 
 
 class AgentControlUnavailable(RuntimeError):
@@ -273,6 +273,11 @@ def _job_from_proto(job: Any) -> AgentJob:
     from .agent_job import normalize_benchmark_variant, resolve_workspace_dir
 
     variant = normalize_benchmark_variant(job.benchmark_variant or "pro")
+    try:
+        has_model_config = job.HasField("model_endpoint_config")
+    except (AttributeError, ValueError):
+        has_model_config = bool(getattr(job, "model_endpoint_config", None))
+    model_config = job.model_endpoint_config if has_model_config else None
     return AgentJob(
         job_id=job.job_id,
         run_id=job.run_id,
@@ -286,7 +291,13 @@ def _job_from_proto(job: Any) -> AgentJob:
         agent_bridge_id=job.agent_bridge_id,
         agent_bridge_version=job.agent_bridge_version,
         driver_entrypoint=job.driver_entrypoint,
-        model_endpoint=job.model_endpoint_config.url if job.HasField("model_endpoint_config") else "",
+        model_endpoint_type=(model_config.endpoint_type if model_config else ""),
+        model_endpoint=(model_config.url if model_config else ""),
+        model_name=(model_config.model_name if model_config else ""),
+        generation_config=decode_generation_config(
+            model_config.generation_config_json if model_config else b""
+        ),
+        model_max_retries=int(model_config.max_retries) if model_config else 0,
         max_iterations=int(job.max_iterations) or 30,
         workspace_dir=resolve_workspace_dir(variant, job.workspace_dir or ""),
         episode_id=job.episode_id,

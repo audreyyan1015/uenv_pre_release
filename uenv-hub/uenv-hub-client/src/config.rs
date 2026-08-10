@@ -57,7 +57,27 @@ impl ClientConfig {
         }
         let toml = toml::to_string_pretty(self)
             .map_err(|e| ClientError::Serde(e.to_string()))?;
-        std::fs::write(path, toml)?;
+        let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        {
+            use std::io::Write;
+            file.write_all(toml.as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, &path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }

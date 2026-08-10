@@ -13,6 +13,8 @@ UENV="${UENV_REPO:-/root/UEnv}"
 GATEWAY="${UENV_GATEWAY:-}"
 API_KEY="${UENV_GATEWAY_API_KEY:-swe-pro-secret}"
 LLM_JSON="${OPENHANDS_LLM_CONFIG:-$UENV/config/openhands-llm-20877.json}"
+# 手动评测默认尽力采集但不因 trace 缺失而失败；训练 poller 会显式设为 required。
+ROLLOUT_TRACE="${UENV_ROLLOUT_TRACE:-best-effort}"
 
 # Server 编排：从 AgentJob 读取 variant，避免 .env 默认 pro / smoke fixture 抢占 Smith。
 if [[ -n "${UENV_AGENT_JOB_FILE:-}" && -f "${UENV_AGENT_JOB_FILE}" ]]; then
@@ -45,7 +47,7 @@ if [[ "$VARIANT" == "smith" || "$VARIANT" == "swe-smith" || "$VARIANT" == "swesm
     DEFAULT_INSTANCES=""
   else
     DEFAULT_INSTANCES="$UENV/fixtures/swe/smith_catalog.json"
-    [[ -f "$DEFAULT_INSTANCES" ]] || DEFAULT_INSTANCES="$UENV/config/swe/smith-smoke.json"
+    [[ -f "$DEFAULT_INSTANCES" ]] || DEFAULT_INSTANCES="$UENV/config/swe/smith-sample-catalog.json"
   fi
 else
   DEFAULT_INSTANCE="instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c"
@@ -107,6 +109,7 @@ DRIVER_ARGS=(
   --instance "$INSTANCE"
   --benchmark-variant "$VARIANT"
   --mode "$MODE"
+  --rollout-trace "$ROLLOUT_TRACE"
   --max-iterations "${MAX_ITERATIONS:-30}"
   --output-dir "$OUT"
 )

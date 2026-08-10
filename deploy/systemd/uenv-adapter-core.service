@@ -1,0 +1,21 @@
+[Unit]
+Description=UEnv Adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uenv
+Group=uenv
+WorkingDirectory=/var/lib/uenv/server
+EnvironmentFile=/etc/uenv/server.env
+EnvironmentFile=-/etc/uenv/secrets/swe.env
+ExecStartPre=/opt/uenv/current/bin/uenv-adapter-core --validate-config
+ExecStart=/opt/uenv/current/bin/uenv-adapter-core
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=60
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

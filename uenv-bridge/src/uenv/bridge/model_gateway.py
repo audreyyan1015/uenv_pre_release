@@ -217,10 +217,13 @@ class ModelGateway:
         )
 
     def _gateway_health_url(self) -> str:
-        base = self.public_url.rstrip("/")
-        if base.endswith("/v1"):
-            base = base[: -len("/v1")]
-        return f"{base}/uenv/gateway/health"
+        # 复用检查应探测本机绑定地址，而不是 public_url：public_url 可能指向
+        # NAT/隧道另一侧的地址，从本网关所在主机回访可能不通或超时。
+        host = self.config.bind_host
+        if host in {"", "0.0.0.0", "::"}:
+            host = "127.0.0.1"
+        port = self._server.server_port if self._server is not None else self.config.port
+        return f"http://{host}:{port}/uenv/gateway/health"
 
     def _is_gateway_health_path(self, path: str) -> bool:
         route = urllib.parse.urlsplit(path).path

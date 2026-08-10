@@ -230,5 +230,11 @@ pub fn package_summary(row: &EnvPackageRow) -> dto::PackageSummary {
         latest_version: row.latest_version.clone(),
         created_at: row.created_at,
         updated_at: row.updated_at,
+        // Derived from the latest manifest by the repository, which is the only
+        // layer that can read it; a bare row conversion cannot classify.
+        kind: dto::PackageKind::default(),
+        env_type: None,
+        dataset: None,
+        instance_count: None,
     }
 }

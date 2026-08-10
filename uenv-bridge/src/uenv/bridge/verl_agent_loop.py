@@ -161,7 +161,7 @@ class UEnvAgentLoopConfig:
     binary: str | None = None
     fake_reward: float = 1.0
     fake_response_text: str = ""
-    default_env_type: str = "qa"
+    default_env_type: str = ""
     default_model_endpoint: str = "https://openrouter.ai/api/v1"
     default_model_name: str = "qwen/qwen-2.5-7b-instruct"
     default_max_steps: int = 10
@@ -219,7 +219,7 @@ class UEnvAgentLoop(AgentLoopBase):
         binary: str | None = None,
         fake_reward: float | None = None,
         fake_response_text: str | None = None,
-        default_env_type: str = "qa",
+        default_env_type: str = "",
         default_model_endpoint: str = "https://openrouter.ai/api/v1",
         default_model_name: str = "qwen/qwen-2.5-7b-instruct",
         default_max_steps: int = 10,
@@ -366,6 +366,7 @@ class UEnvAgentLoop(AgentLoopBase):
         response_ids = response_ids[:max_response_length] if max_response_length else response_ids
         if not response_ids:
             response_ids = [self._pad_token_id()]
+        response_logprobs = self._response_logprobs_from_result(result, len(response_ids))
 
         response_mask = self._response_mask_from_result(result, len(response_ids))
         response_mask = response_mask[: len(response_ids)]
@@ -382,6 +383,7 @@ class UEnvAgentLoop(AgentLoopBase):
             prompt_ids=prompt_ids,
             response_ids=response_ids,
             response_mask=response_mask,
+            response_logprobs=response_logprobs,
             reward_score=float(result.summary.total_reward),
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=agent_metrics,
@@ -569,6 +571,7 @@ class UEnvAgentLoop(AgentLoopBase):
         response_ids = response_ids[:max_response_length] if max_response_length else response_ids
         if not response_ids:
             response_ids = [self._pad_token_id()]
+        response_logprobs = self._response_logprobs_from_result(result, len(response_ids))
         response_mask = self._response_mask_from_result(result, len(response_ids))
         response_mask = response_mask[: len(response_ids)]
         if len(response_mask) < len(response_ids):
@@ -578,6 +581,7 @@ class UEnvAgentLoop(AgentLoopBase):
             prompt_ids=prompt_ids,
             response_ids=response_ids,
             response_mask=response_mask,
+            response_logprobs=response_logprobs,
             reward_score=float(result.summary.total_reward),
             num_turns=max(result.trajectory.total_steps + 1, 2),
             metrics=AgentLoopMetrics(generate_sequences=0.0, tool_calls=0.0, compute_score=0.0, num_preempted=-1),
@@ -1121,26 +1125,57 @@ class UEnvAgentLoop(AgentLoopBase):
             "dataset": dataset,
             "raw_prompt": prompt_as_text,
         }
+        # Custom process plugins can receive their configuration from a VeRL
+        # sample without adding another hard-coded mapping here.  `extra_info`
+        # takes precedence through `_value_from_extra_info`, while a top-level
+        # `env_config` remains accepted for callers that construct samples
+        # directly.
+        explicit_env_config = self._python_value(
+            self._value_from_extra_info(sample_kwargs, "env_config", None)
+        )
+        if explicit_env_config is not None:
+            if not isinstance(explicit_env_config, dict):
+                raise ValueError("UEnv sample env_config must be a mapping")
+            env_config.update(self._jsonable(explicit_env_config))
         if env_type != "swe":
             return env_config
 
         def value(key: str, default: Any = "") -> Any:
-            return self._value_from_extra_info(sample_kwargs, key, default)
+            return self._value_from_extra_info(
+                sample_kwargs,
+                key,
+                env_config.get(key, default),
+            )
+
+        instance_id = str(value("instance_id", "") or "").strip()
+        benchmark_variant = str(value("benchmark_variant", "") or "").strip().lower()
+        if not instance_id:
+            raise ValueError("SWE sample requires explicit instance_id")
+        if not benchmark_variant:
+            raise ValueError("SWE sample requires explicit benchmark_variant")
+        env_package_id = str(value("env_package_id", "") or "").strip()
+        env_package_version = str(value("env_package_version", "") or "").strip()
+        if bool(env_package_id) != bool(env_package_version):
+            raise ValueError(
+                "SWE sample must provide both env_package_id and "
+                "env_package_version, or leave both empty for a local catalog"
+            )
+        workspace_default = "/app" if benchmark_variant == "pro" else "/testbed"
 
         env_config.update(
             {
-                "instance_id": value("instance_id"),
-                "benchmark_variant": value("benchmark_variant", "pro"),
+                "instance_id": instance_id,
+                "benchmark_variant": benchmark_variant,
                 "command_mode": value("command_mode", "full_shell"),
-                "env_package_id": value("env_package_id", "swe-bench-pro"),
-                "env_package_version": value("env_package_version", "0.3.4"),
+                "env_package_id": env_package_id,
+                "env_package_version": env_package_version,
                 "execution_mode": value("execution_mode", "agent"),
                 "mode": value("agent_mode", value("mode", "llm")),
                 "agent_bridge_id": value("agent_bridge_id", "uenv-agent-openhands"),
                 "agent_bridge_version": value("agent_bridge_version", "1.0.0"),
                 "agent_pool_id": value("agent_pool_id", "openhands-default"),
                 "driver_entrypoint": value("driver_entrypoint", "run_swebenchpro_official.py"),
-                "workspace_dir": value("workspace_dir", "/app"),
+                "workspace_dir": value("workspace_dir", workspace_default),
                 "llm_config_path": value(
                     "llm_config_path",
                     "/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json",
@@ -1165,6 +1200,13 @@ class UEnvAgentLoop(AgentLoopBase):
         env_type: str,
         reward_model: Any,
     ) -> dict[str, Any]:
+        explicit_reward_config = self._python_value(
+            self._value_from_extra_info(sample_kwargs, "reward_config", None)
+        )
+        if explicit_reward_config is not None:
+            if not isinstance(explicit_reward_config, dict):
+                raise ValueError("UEnv sample reward_config must be a mapping")
+            return self._jsonable(explicit_reward_config)
         if env_type == "swe":
             return {
                 "type": "swe_resolved",
@@ -1176,6 +1218,18 @@ class UEnvAgentLoop(AgentLoopBase):
         }
 
     def _env_type(self, sample_kwargs: dict[str, Any]) -> str:
+        # Explicit routing is the stable extension point.  It deliberately
+        # runs before the built-in compatibility heuristics so a new plugin
+        # never needs to edit this function merely to become routable.
+        explicit = self._python_value(
+            self._value_from_extra_info(sample_kwargs, "env_type", None)
+        )
+        if explicit is not None:
+            env_type = str(explicit).strip()
+            if not env_type:
+                raise ValueError("UEnv sample env_type must not be empty")
+            return env_type
+
         candidates = [
             sample_kwargs.get("task_name"),
             sample_kwargs.get("ability"),
@@ -1202,6 +1256,11 @@ class UEnvAgentLoop(AgentLoopBase):
         if "agent" in lowered:
             return "agent"
         env_type = self.config_for_uenv.default_env_type
+        if not str(env_type).strip():
+            raise ValueError(
+                "UEnv sample is missing extra_info.env_type and did not match a "
+                "legacy built-in route; declare env_type explicitly"
+            )
         logger.warning(
             "_env_type fallback to default_env_type=%s; unmatched sample kwargs: task_name=%r ability=%r data_source=%r",
             env_type,
@@ -1397,6 +1456,13 @@ class UEnvAgentLoop(AgentLoopBase):
             return []
 
         values: list[Any] = []
+        server_handles = getattr(manager, "_server_id_to_handle", None)
+        if server_handles:
+            try:
+                values.extend(server_handles.keys())
+            except (AttributeError, TypeError):
+                pass
+
         for attr in ("server_addresses", "addresses"):
             value = getattr(manager, attr, None)
             if value:
@@ -1424,6 +1490,22 @@ class UEnvAgentLoop(AgentLoopBase):
                 pass
 
         return values
+
+    def _response_logprobs_from_result(
+        self,
+        result: EpisodeResult,
+        response_length: int,
+    ) -> list[float] | None:
+        if not result.rollout_log_probs:
+            return None
+        source_response_length = len(self._response_ids_from_result(result))
+        if len(result.rollout_log_probs) != source_response_length:
+            raise RuntimeError(
+                "UEnv rollout token trace is inconsistent: "
+                f"response_ids={source_response_length} rollout_log_probs={len(result.rollout_log_probs)} "
+                f"request_id={result.request_id}"
+            )
+        return [float(value) for value in result.rollout_log_probs[:response_length]]
 
     async def _await_ray_value(self, value: Any) -> list[Any]:
         if inspect.isawaitable(value):

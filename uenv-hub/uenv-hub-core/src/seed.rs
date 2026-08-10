@@ -108,7 +108,7 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
         store,
         EnvIdentity {
             env_type: "swe",
-            description: "SweEnv — 仓库级缺陷修复任务环境 (SWE-bench Verified / Pro，容器内 FullShell)",
+            description: "SweEnv — 仓库级缺陷修复任务环境 (SWE-bench Verified / Pro / Smith，容器内 FullShell)",
             tags: &["swe", "code", "agent", "multi-turn", "container"],
             lifecycle: dto::EnvLifecycle::Canonical,
             superseded_by: None,
@@ -131,6 +131,59 @@ pub async fn seed_envs(store: &SqliteStore) -> Result<()> {
     )
     .await?;
     ensure_env_version(store, "agent", simple_manifest("agent", "0.1.0")).await?;
+
+    retire_benchmarks_registered_as_environments(store).await?;
+    Ok(())
+}
+
+/// Benchmarks that were published as if they were capability classes.
+///
+/// Each entry is already an enumerated `dataset` value of the environment it maps
+/// to — `pubmedqa`/`scitab`/`olymmath` under `qa`, `dscodebench` under `code`,
+/// `swebenchpro` under `swe`'s `swe-bench-pro`. Holding both spellings made the
+/// registry claim two different things about one benchmark, and the console had no
+/// way to show the hierarchy because the data did not encode one.
+const BENCHMARKS_MISFILED_AS_ENVS: &[(&str, &str)] = &[
+    ("swebenchpro", "swe"),
+    ("dscodebench", "code"),
+    ("olymmath", "qa"),
+    ("scitab", "qa"),
+    ("pubmedqa", "qa"),
+];
+
+/// Label misfiled benchmark environments as deprecated aliases of their real
+/// capability class.
+///
+/// This only touches rows that already exist: a fresh Hub should not gain five
+/// deprecated entries for names it never published. Retirement uses the same
+/// lifecycle labels as the `math` → `qa` rename, so the old `env_type` keeps
+/// resolving with a 200 plus a `Deprecation` header, and no Worker prewarm breaks.
+async fn retire_benchmarks_registered_as_environments(store: &SqliteStore) -> Result<()> {
+    for (env_type, successor) in BENCHMARKS_MISFILED_AS_ENVS {
+        let Some(existing) = store.find_env_row(env_type).await? else {
+            continue;
+        };
+        if existing.lifecycle() == dto::EnvLifecycle::Deprecated
+            && existing.superseded_by.as_deref() == Some(*successor)
+        {
+            continue;
+        }
+        store
+            .update_env(
+                env_type,
+                crate::models::EnvPatch {
+                    lifecycle: Some(dto::EnvLifecycle::Deprecated),
+                    superseded_by: Some((*successor).to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        tracing::info!(
+            env_type,
+            successor,
+            "retired benchmark that was registered as an environment"
+        );
+    }
     Ok(())
 }
 
@@ -369,7 +422,9 @@ async fn seed_episode_stacks(store: &SqliteStore) -> Result<()> {
     };
     ensure_stack(store, "swe-bench-verified-openhands", swe_stack).await?;
 
-    let smith_stack = dto::PublishStackRequest {
+    // 1.0.0 钉住 smoke 包；1.1.0 钉住 repo-complete 包（Hub 托管镜像 tar）。
+    // ensure_stack 按版本跳过已存在行，两者可并存，latest 取最高 semver。
+    let smith_stack_smoke = dto::PublishStackRequest {
         version: "1.0.0".into(),
         publisher: Some("org-uenv-hub".into()),
         description: Some(
@@ -377,7 +432,7 @@ async fn seed_episode_stacks(store: &SqliteStore) -> Result<()> {
                 .into(),
         ),
         changelog: Some(
-            "初版：swe@0.1.0 + swe-bench-smith@0.1.0 + uenv-agent-openhands@1.0.0"
+            "初版：swe@0.1.0 + swe-bench-smith@0.1.0（smoke）+ uenv-agent-openhands@1.0.0"
                 .into(),
         ),
         execution_mode: dto::ExecutionMode::Agent,
@@ -404,7 +459,16 @@ async fn seed_episode_stacks(store: &SqliteStore) -> Result<()> {
             "trajectory_v2_2".into(),
         ],
     };
-    ensure_stack(store, "swe-bench-smith-openhands", smith_stack).await?;
+    ensure_stack(store, "swe-bench-smith-openhands", smith_stack_smoke.clone()).await?;
+
+    let mut smith_stack_full = smith_stack_smoke;
+    smith_stack_full.version = "1.1.0".into();
+    smith_stack_full.changelog = Some(
+        "钉住 swe-bench-smith@0.2.0（10 仓库全量实例 + Hub 托管 image_tar，消费侧零外拉）"
+            .into(),
+    );
+    smith_stack_full.env_packages = vec!["swe-bench-smith@0.2.0".into()];
+    ensure_stack(store, "swe-bench-smith-openhands", smith_stack_full).await?;
 
     let qa_stack = dto::PublishStackRequest {
         version: "1.0.0".into(),

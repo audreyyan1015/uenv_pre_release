@@ -1,0 +1,18 @@
+[Unit]
+Description=UEnv environment registry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uenv
+Group=uenv
+WorkingDirectory=/var/lib/uenv/hub
+EnvironmentFile=-/etc/uenv/secrets/hub.env
+ExecStart=/opt/uenv/current/bin/uenv-hub-server --config /etc/uenv/hub.toml
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

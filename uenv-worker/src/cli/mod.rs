@@ -22,8 +22,10 @@ pub enum Commands {
     Serve,
     /// 输出 protocol_version、crate 版本
     Version,
-    /// 本地探活（M2 实现 gRPC HealthCheck）
+    /// 请求 Worker 的 HTTP 健康端点；失败时返回非零退出码
     Health,
+    /// 加载并校验配置，不启动 Worker
+    ValidateConfig,
     /// 从 Hub 实例镜像拉起容器并运行单个 SWE-bench 实例（plan §8 验收）
     SweRun(SweRunArgs),
     /// gRPC 客户端：向运行中的 Worker 发 DispatchEpisode(env_type=swe)，演示 Server→Worker 派发
@@ -33,7 +35,7 @@ pub enum Commands {
 #[derive(clap::Args)]
 pub struct SweDispatchArgs {
     /// 目标 Worker gRPC endpoint（host:port）
-    #[arg(long, default_value = "127.0.0.1:50052")]
+    #[arg(long, default_value = "127.0.0.1:50054")]
     pub endpoint: String,
     /// 目标 instance_id
     #[arg(long)]

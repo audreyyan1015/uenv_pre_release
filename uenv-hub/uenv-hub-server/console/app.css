@@ -510,6 +510,54 @@ select option {
   background: var(--border);
 }
 
+/* 基准页：契约层级说明 */
+.model-card {
+  background: color-mix(in oklab, var(--primary) 6%, var(--card));
+  border: 1px solid color-mix(in oklab, var(--primary) 22%, var(--border));
+  border-radius: var(--radius-lg);
+  padding: 14px 16px 12px;
+  margin: 0 0 16px;
+}
+
+.model-card h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.model-steps {
+  margin: 0 0 8px;
+  padding-left: 1.25em;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--foreground);
+}
+
+.model-steps li + li {
+  margin-top: 4px;
+}
+
+.model-steps code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--muted);
+}
+
+.model-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+
+.contract-blurb {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
 /* --------------------------------------------------------- stat tiles */
 
 .stat {

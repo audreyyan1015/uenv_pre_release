@@ -123,21 +123,7 @@ impl ModelClient {
         } = resolve_llm_target(&self.llm, model_endpoint);
         let gen_cfg = model_endpoint_generation_config(model_endpoint)?;
         let llm_ready = LlmConfig::llm_call_ready(&endpoint_base, &self.llm);
-        let question = payload_json
-            .get("question")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                payload_json
-                    .pointer("/episode_config/initial_observation/prompt_text")
-                    .and_then(Value::as_str)
-            })
-            .or_else(|| {
-                payload_json
-                    .pointer("/env_config/raw_prompt")
-                    .and_then(Value::as_str)
-            })
-            .map(str::trim)
-            .filter(|q| !q.is_empty());
+        let question = payload_question(&payload_json);
 
         // W-2: rule_reward short-circuit only for headless/grpcurl tests without LLM.
         if !llm_ready && question.is_none() {
@@ -164,19 +150,15 @@ impl ModelClient {
         if !llm_ready {
             if LlmConfig::endpoint_requires_api_key(&endpoint_base) {
                 return Err(ModelInferError::Other(
-                    "model client: UENV_LLM_API_KEY is required for HTTPS LLM endpoint (config/uenv-worker-llm.env)"
+                    "model client: UENV_LLM_API_KEY is required for this HTTPS endpoint; run `sudo uenv evaluate configure-model` on this Worker (/etc/uenv/secrets/worker-llm.env)"
                         .to_string(),
                 ));
             }
             return Err(ModelInferError::Other(
-                "model client: default LLM is not configured (set UENV_LLM_ENDPOINT in config/uenv-worker-llm.env)"
+                "model client: default LLM is not configured; run `sudo uenv evaluate configure-model` on this Worker (/etc/uenv/secrets/worker-llm.env)"
                     .to_string(),
             ));
         }
-        let question = question.ok_or_else(|| {
-            ModelInferError::Other("model client: payload missing question".to_string())
-        })?;
-
         let temperature = gen_cfg
             .get("temperature")
             .and_then(Value::as_f64)
@@ -187,25 +169,12 @@ impl ModelClient {
             .or_else(|| gen_cfg.get("max_tokens").and_then(Value::as_i64))
             .unwrap_or(self.llm.max_tokens);
 
-        let mut messages = vec![json!({"role": "user", "content": question})];
-        if step_index > 1 {
-            if let Some(previous_action) = previous_action.filter(|value| !value.is_empty()) {
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": String::from_utf8_lossy(previous_action),
-                }));
-            }
-            if !current_observation.is_empty() {
-                messages.push(json!({
-                    "role": "user",
-                    "content": format!(
-                        "The evaluator returned this feedback for the previous candidate:\n{}\n\
-                         Revise the implementation and return the complete Python code.",
-                        String::from_utf8_lossy(current_observation)
-                    ),
-                }));
-            }
-        }
+        let messages = build_model_messages(
+            &payload_json,
+            step_index,
+            current_observation,
+            previous_action,
+        )?;
 
         let mut request_body = json!({
             "model": model_name,
@@ -320,6 +289,90 @@ impl ModelClient {
     }
 }
 
+fn payload_question(payload_json: &Value) -> Option<&str> {
+    [
+        "/question",
+        "/env_config/question",
+        "/metadata/extra_info/question",
+        "/episode_config/initial_observation/prompt_text",
+        "/env_config/raw_prompt",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        payload_json
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn non_empty_text(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn build_model_messages(
+    payload_json: &Value,
+    step_index: u32,
+    current_observation: &[u8],
+    previous_action: Option<&[u8]>,
+) -> Result<Vec<Value>, ModelInferError> {
+    let question = payload_question(payload_json);
+    let observation = non_empty_text(current_observation);
+
+    if step_index <= 1 {
+        let content = match (question, observation.as_deref()) {
+            // Built-in QA and Code environments return the question as their reset
+            // observation. Avoid sending the same text twice in that common case.
+            (Some(question), Some(observation)) if observation != question => format!(
+                "{question}\n\nThe environment returned this observation after reset:\n{observation}"
+            ),
+            (Some(question), _) => question.to_string(),
+            // A generic process plugin may derive its initial state from a seed or
+            // external simulator and have no static question in the Episode payload.
+            (None, Some(observation)) => observation.to_string(),
+            (None, None) => {
+                return Err(ModelInferError::Other(
+                    "model client: payload missing question and environment reset returned no observation"
+                        .to_string(),
+                ));
+            }
+        };
+        return Ok(vec![json!({"role": "user", "content": content})]);
+    }
+
+    let mut messages = Vec::new();
+    if let Some(question) = question {
+        messages.push(json!({"role": "user", "content": question}));
+    } else {
+        // Keep the conversation valid even when a fully dynamic environment uses
+        // observations, rather than a static question, as its task interface.
+        messages.push(json!({
+            "role": "user",
+            "content": "Continue interacting with the environment.",
+        }));
+    }
+    if let Some(previous_action) = previous_action.filter(|value| !value.is_empty()) {
+        messages.push(json!({
+            "role": "assistant",
+            "content": String::from_utf8_lossy(previous_action),
+        }));
+    }
+    if let Some(observation) = observation {
+        messages.push(json!({
+            "role": "user",
+            "content": format!(
+                "The environment returned this observation after the previous action:\n\
+                 {observation}\n\
+                 Choose the next action according to the original task."
+            ),
+        }));
+    }
+    Ok(messages)
+}
+
 fn response_headers(resp: &reqwest::Response) -> HashMap<String, String> {
     resp.headers()
         .iter()
@@ -398,7 +451,7 @@ fn model_endpoint_generation_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{LlmTarget, ModelClient, resolve_llm_target};
+    use super::{build_model_messages, resolve_llm_target, LlmTarget, ModelClient};
     use crate::llm::LlmConfig;
     use crate::proto::v1::ModelEndpoint;
     use serde_json::{Value, json};
@@ -520,6 +573,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn qa_first_step_deduplicates_question_reset_observation() {
+        let payload = json!({
+            "env_config": {
+                "question": "What is 2 + 2?",
+                "dataset": "gsm8k"
+            }
+        });
+
+        let messages = build_model_messages(&payload, 1, b"What is 2 + 2?", None)
+            .expect("build QA messages");
+
+        assert_eq!(messages, vec![json!({
+            "role": "user",
+            "content": "What is 2 + 2?"
+        })]);
+    }
+
+    #[test]
+    fn custom_first_step_includes_dynamic_reset_observation_and_question() {
+        let payload = json!({
+            "question": "Move the robot to the loading bay without collisions.",
+            "env_config": {"map": "warehouse-a"}
+        });
+        let reset_observation =
+            br#"{"position":[2,3],"available_actions":["north","wait"]}"#;
+
+        let messages = build_model_messages(&payload, 1, reset_observation, None)
+            .expect("build custom environment messages");
+        let content = messages[0]["content"].as_str().expect("message content");
+
+        assert!(content.contains("Move the robot to the loading bay"));
+        assert!(content.contains("environment returned this observation after reset"));
+        assert!(content.contains(r#""position":[2,3]"#));
+        assert!(content.contains("available_actions"));
+    }
+
+    #[test]
+    fn custom_first_step_can_use_reset_observation_without_static_question() {
+        let payload = json!({"env_config": {"map": "warehouse-b"}});
+
+        let messages = build_model_messages(
+            &payload,
+            1,
+            b"You are at (0, 0). Available actions: east, wait.",
+            None,
+        )
+        .expect("build observation-only messages");
+
+        assert_eq!(messages[0]["content"], "You are at (0, 0). Available actions: east, wait.");
+    }
+
+    #[test]
+    fn custom_later_step_uses_environment_neutral_observation_prompt() {
+        let payload = json!({"question": "Keep the warehouse robot safe."});
+        let messages = build_model_messages(
+            &payload,
+            2,
+            br#"{"position":[2,4],"collision":false}"#,
+            Some(br#"{"move":"north"}"#),
+        )
+        .expect("build later-step messages");
+
+        assert_eq!(messages[0]["content"], "Keep the warehouse robot safe.");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert!(messages[1]["content"].as_str().unwrap().contains("north"));
+        let feedback = messages[2]["content"].as_str().expect("observation prompt");
+        assert!(feedback.contains("environment returned this observation"));
+        assert!(feedback.contains("collision"));
+        assert!(!feedback.to_ascii_lowercase().contains("python"));
+        assert!(!feedback.to_ascii_lowercase().contains("code"));
+        assert!(!feedback.to_ascii_lowercase().contains("evaluator"));
+    }
+
     #[tokio::test]
     async fn ignores_response_text_payload_shortcut() {
         let client = ModelClient::new();
@@ -605,7 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn includes_previous_action_and_evaluator_feedback_after_first_step() {
+    async fn code_step_keeps_task_action_and_environment_feedback() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let captured = Arc::new(Mutex::new(String::new()));
@@ -643,9 +770,11 @@ mod tests {
 
         let request = captured.lock().expect("lock").clone();
         assert!(request.contains("\"role\":\"assistant\""));
+        assert!(request.contains("Implement add. Task ID: gate3-real-1"));
         assert!(request.contains("return a - b"));
-        assert!(request.contains("evaluator returned this feedback"));
+        assert!(request.contains("environment returned this observation"));
         assert!(request.contains("assertion failed"));
+        assert!(!request.contains("complete Python code"));
     }
 
     #[tokio::test]

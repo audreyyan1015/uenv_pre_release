@@ -1,4 +1,12 @@
+import os as _os
+
+# gen/ 下的 pb2 由旧版 protoc 生成，与 protobuf>=5 默认的 upb 运行时不兼容
+# （import 时报 Descriptors cannot be created directly）。在导入任何子模块之前
+# 默认退回纯 Python 解析；已显式设置该变量的环境（如 VeRL 训练容器）不受影响。
+_os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
 from .clients import (
+
     EpisodeClient,
     RustCoreClientConfig,
     RustCoreEpisodeClient,

@@ -49,6 +49,18 @@ fn metrics_handle() -> PrometheusHandle {
 /// Build the application state: connect DB, run migrations, seed data, install
 /// metrics, and bootstrap an admin token if configured.
 pub async fn build_state(config: Config) -> Result<AppState, Box<dyn std::error::Error>> {
+    // Resolve and validate secret files before opening/mutating the Hub store.
+    let bootstrap_secret = config.auth.bootstrap_secret()?;
+    // Remote publishers may ask the Hub to import large files by path. Keep
+    // that capability inside one explicitly configured staging directory.
+    std::fs::create_dir_all(&config.packages.import_dir)?;
+    if !std::fs::metadata(&config.packages.import_dir)?.is_dir() {
+        return Err(format!(
+            "packages.import_dir is not a directory: {}",
+            config.packages.import_dir
+        )
+        .into());
+    }
     let store = SqliteStore::new(
         connect(&DbConfig {
             url: config.database.url.clone(),
@@ -75,7 +87,7 @@ pub async fn build_state(config: Config) -> Result<AppState, Box<dyn std::error:
     }
 
     // Bootstrap: if requested and no tokens exist, create the admin token.
-    if let Some(secret) = &config.auth.bootstrap_admin_token {
+    if let Some(secret) = bootstrap_secret {
         if store.token_count().await? == 0 {
             store
                 .create_token_with_secret(
@@ -86,10 +98,10 @@ pub async fn build_state(config: Config) -> Result<AppState, Box<dyn std::error:
                         namespaces: vec!["*".into()],
                         expires_at: None,
                     },
-                    secret,
+                    &secret,
                 )
                 .await?;
-            tracing::info!("bootstrapped admin token from config");
+            tracing::info!("bootstrapped admin token from configured secret source");
         }
     }
 

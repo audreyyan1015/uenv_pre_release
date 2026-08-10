@@ -10,7 +10,11 @@ import type {
 /** 全新 run 的空 ChainState，用于 store 初始化与 fixture/连接前占位。 */
 export function emptyChainState(runId: string): ChainState {
   const now = Date.now();
-  const stages: Array<{ id: string; stage: WorkflowGraph["nodes"][number]["stage"]; label: string }> = [
+  const stages: Array<{
+    id: string;
+    stage: WorkflowGraph["nodes"][number]["stage"];
+    label: string;
+  }> = [
     { id: "submit", stage: "SUBMIT", label: "接入提交" },
     { id: "dispatch", stage: "DISPATCH", label: "调度下发" },
     { id: "execute", stage: "EXECUTE", label: "环境执行" },
@@ -139,7 +143,12 @@ export function applyStateDelta(state: ChainState, delta: StateDelta): ChainStat
   }
 
   let key = delta.entity_key || "run";
-  if (key !== "run" && key !== "workflow" && key !== "tree" && looksLikeRunLevelPatch(delta.patch)) {
+  if (
+    key !== "run" &&
+    key !== "workflow" &&
+    key !== "tree" &&
+    looksLikeRunLevelPatch(delta.patch)
+  ) {
     key = "run";
   }
   let next: ChainState;

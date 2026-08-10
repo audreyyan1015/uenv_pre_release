@@ -53,6 +53,15 @@ uenv env init mymath --template math    # scaffold an OpenEnv-style project
 cd mymath && uenv env validate          # local manifest + schema validation
 uenv env publish --manifest manifest.toml
 uenv env yank mymath --version 0.1.0 --reason "broken"
+
+# Process-plugin package: registry identity/version + digest-verified artifacts.
+python3 -m pip download -r ../plugins/myenv/requirements.txt -d ../plugins/myenv/wheelhouse
+uenv env publish-plugin --plugin-dir ../plugins/myenv --version 0.1.0
+uenv env sync myenv --version 0.1.0 --activate
+
+# Do not put production bearer tokens in shell history.
+uenv hub login --endpoint http://hub.internal:8080 --token-file ./reader.token
+uenv hub token create --name worker-01 --role reader --namespace default --out ./worker-01.token
 ```
 
 ## Configuration
@@ -65,7 +74,7 @@ nesting). Example: [`config/hub.example.toml`](config/hub.example.toml).
 | `UENV_HUB_SERVER__HOST` / `__PORT` | bind address |
 | `UENV_HUB_DATABASE__URL` | `sqlite://...` path |
 | `UENV_HUB_AUTH__REQUIRE_TOKEN` | enforce API tokens (default true) |
-| `UENV_HUB_AUTH__BOOTSTRAP_ADMIN_TOKEN` | create admin token on first boot |
+| `UENV_HUB_AUTH__BOOTSTRAP_ADMIN_TOKEN_FILE` | mode-0600 file used to create the first admin token |
 | `UENV_HUB_RATE_LIMIT__*`, `UENV_HUB_CORS__*` | limits / CORS |
 
 ## Documentation

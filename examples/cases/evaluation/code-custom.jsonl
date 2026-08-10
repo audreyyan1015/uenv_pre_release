@@ -1,0 +1,1 @@
+{"id":"custom-code-1","env_type":"code","dataset":"dscodebench","question":"Return only Python code defining add(a, b).","target":"custom-code-1","env_config":{"task_id":"custom-code-1","library":"python","ground_truth_code":"def add(a, b):\n    return a + b\n","entry_point":"add","test_code":"assert add(2, 3) == 5","num_tests":1,"timeout_secs":30},"max_steps":1}

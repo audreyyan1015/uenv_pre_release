@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::metrics::MetricsExporter;
@@ -24,12 +24,36 @@ use crate::swe::variant::BenchmarkVariant;
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
+/// Capacity reservation held while a container is being provisioned outside
+/// the session-map lock.  Without this reservation concurrent requests could
+/// all observe the same free slot and exceed the configured pool capacity.
+struct PendingSlot<'a> {
+    counter: &'a AtomicUsize,
+    active: bool,
+}
+
+impl PendingSlot<'_> {
+    fn release(&mut self) {
+        if self.active {
+            self.counter.fetch_sub(1, Ordering::SeqCst);
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for PendingSlot<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// SWE 会话池。`Arc<SweSession>` 使长耗时操作（pytest）在锁外执行，不阻塞其他 session。
 pub struct SweInstancePool {
     store: Arc<InstanceStore>,
     runtime: ContainerRuntime,
     capacity: usize,
     sessions: Mutex<HashMap<String, Arc<SweSession>>>,
+    pending: AtomicUsize,
     seq: AtomicU64,
     metrics: Option<MetricsExporter>,
     /// seccomp profile 目录（M2-4）：`Some` 时所有 session provision 注入 `--security-opt seccomp`。
@@ -50,6 +74,7 @@ impl SweInstancePool {
             runtime,
             capacity: capacity.max(1),
             sessions: Mutex::new(HashMap::new()),
+            pending: AtomicUsize::new(0),
             seq: AtomicU64::new(1),
             metrics: None,
             seccomp_dir: None,
@@ -126,20 +151,9 @@ impl SweInstancePool {
     pub fn create_session(
         &self,
         instance_id: &str,
-        _variant: BenchmarkVariant,
+        variant: BenchmarkVariant,
         policy: CommandPolicyConfig,
     ) -> Result<(String, ResetObservation), DynErr> {
-        {
-            let guard = self.sessions.lock().expect("pool lock");
-            if guard.len() >= self.capacity {
-                return Err(format!(
-                    "swe instance pool at capacity ({}/{})",
-                    guard.len(),
-                    self.capacity
-                )
-                .into());
-            }
-        }
         let instance = self
             .store
             .get(instance_id)
@@ -150,6 +164,33 @@ impl SweInstancePool {
                 )
             })?
             .clone();
+        let catalog_variant = instance.variant();
+        if catalog_variant != variant {
+            return Err(format!(
+                "swe instance `{instance_id}` variant mismatch: requested={}, catalog={}",
+                variant.as_str(),
+                catalog_variant.as_str()
+            )
+            .into());
+        }
+
+        let mut reservation = {
+            let guard = self.sessions.lock().expect("pool lock");
+            let pending = self.pending.load(Ordering::SeqCst);
+            if guard.len() + pending >= self.capacity {
+                return Err(format!(
+                    "swe instance pool at capacity ({}/{})",
+                    guard.len() + pending,
+                    self.capacity
+                )
+                .into());
+            }
+            self.pending.fetch_add(1, Ordering::SeqCst);
+            PendingSlot {
+                counter: &self.pending,
+                active: true,
+            }
+        };
 
         // M4：解析 Hub 预制镜像 tar（若 EnvPackage 已同步），直接交给 provision。
         // provision 内部 `ensure_image_with_tar` 会优先 `docker load` 该 tar，无 tar 且
@@ -181,6 +222,7 @@ impl SweInstancePool {
         let count = {
             let mut guard = self.sessions.lock().expect("pool lock");
             guard.insert(session_id.clone(), Arc::new(session));
+            reservation.release();
             guard.len()
         };
         self.publish_size(count);
@@ -405,9 +447,14 @@ impl SweInstancePool {
         n: usize,
         policy: CommandPolicyConfig,
     ) -> Result<Vec<String>, DynErr> {
+        let variant = self
+            .store
+            .get(instance_id)
+            .ok_or_else(|| format!("swe instance_id `{instance_id}` not in catalog (size={})", self.store.len()))?
+            .variant();
         let mut ids = Vec::new();
         for _ in 0..n {
-            match self.create_session(instance_id, BenchmarkVariant::default(), policy.clone()) {
+            match self.create_session(instance_id, variant, policy.clone()) {
                 Ok((sid, _obs)) => ids.push(sid),
                 Err(e) if e.to_string().contains("at capacity") => break,
                 Err(e) => return Err(e),

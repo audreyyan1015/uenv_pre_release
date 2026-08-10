@@ -1,14 +1,14 @@
 //! `uenv` CLI — env/hub subcommands backed by the UEnvHub client SDK
 //! (design tasks S8 + S13).
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use uenv_hub_client::client::UEnvHubClient;
 use uenv_hub_client::config::ClientConfig;
 use uenv_hub_client::manifest_file::ManifestFile;
-use uenv_hub_client::{scaffold, HttpClient};
-use uenv_hub_types::{Example, SearchQuery, Severity};
+use uenv_hub_client::{scaffold, ClientError, HttpClient};
+use uenv_hub_types::{ErrorCode, Example, SearchQuery, Severity};
 
 #[derive(Parser)]
 #[command(name = "uenv", version, about = "UEnv CLI — interact with UEnvHub")]
@@ -208,6 +208,25 @@ enum EnvCommand {
         #[arg(long, default_value = "manifest.toml")]
         manifest: String,
     },
+    /// Publish a Worker process plugin as a versioned EnvPackage.
+    ///
+    /// The directory must contain `manifest.yaml` and a relative executable
+    /// entry implementing the Proto/UDS plugin contract. All files are stored
+    /// as digest-addressed inline artifacts; large images belong in a separate
+    /// image package.
+    PublishPlugin {
+        #[arg(long)]
+        plugin_dir: PathBuf,
+        #[arg(long, default_value = "0.1.0")]
+        version: String,
+        /// Package id; defaults to the manifest's env_type.
+        #[arg(long)]
+        package: Option<String>,
+        #[arg(long, default_value = "0.1.0")]
+        worker_min: String,
+        #[arg(long)]
+        publisher: Option<String>,
+    },
     /// Yank a published version.
     Yank {
         env: String,
@@ -248,12 +267,23 @@ enum EnvCommand {
         /// that will score the result.
         #[arg(long, default_value = "worker")]
         consumer: String,
+        /// Atomically activate a process-plugin package for the Worker. The
+        /// package must contain `plugin/manifest.yaml` and its declared entry.
+        #[arg(long)]
+        activate: bool,
+        /// Root scanned by Worker `env.package_plugin_dir`.
+        #[arg(long, default_value = "/var/lib/uenv/plugins")]
+        plugin_dir: PathBuf,
+        /// Python used to create an offline venv when the plugin package carries
+        /// requirements.txt and wheelhouse/*.whl.
+        #[arg(long, default_value = "python3")]
+        python: String,
     },
     /// Publish image tarball(s) already staged on the Hub host as a package
     /// version, so Workers `docker load` them from the Hub (no third-party pull).
     ///
-    /// Each `--tar PATH` is a `docker save …` archive resolvable on the **Hub
-    /// host**; its basename becomes the artifact name and lands at
+    /// Each `--tar PATH` is a `docker save …` archive already staged below the
+    /// Hub server's configured `packages.import_dir`; its basename becomes the artifact name and lands at
     /// `images/<basename>` in the synced package.
     PublishImage {
         /// Package id to publish under, e.g. `swe-bench-verified-images`.
@@ -505,8 +535,12 @@ struct PageArgs {
 enum HubCommand {
     /// Save an API token (and optionally the endpoint).
     Login {
-        #[arg(long)]
-        token: String,
+        /// Inline token (convenient for CI env expansion; visible in argv).
+        #[arg(long, required_unless_present = "token_file", conflicts_with = "token_file")]
+        token: Option<String>,
+        /// Read the token from a mode-0600 file so it does not enter shell history.
+        #[arg(long, required_unless_present = "token", conflicts_with = "token")]
+        token_file: Option<PathBuf>,
         #[arg(long)]
         endpoint: Option<String>,
     },
@@ -519,11 +553,57 @@ enum HubCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Create or revoke Hub API tokens (Admin token required).
+    Token {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
     /// Manage CLI configuration.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliRole {
+    Admin,
+    Publisher,
+    Reader,
+}
+
+impl From<CliRole> for uenv_hub_types::Role {
+    fn from(value: CliRole) -> Self {
+        match value {
+            CliRole::Admin => Self::Admin,
+            CliRole::Publisher => Self::Publisher,
+            CliRole::Reader => Self::Reader,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum TokenCommand {
+    /// Create a token. The secret is printed exactly once.
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_enum)]
+        role: CliRole,
+        #[arg(long)]
+        owner: Option<String>,
+        /// Allowed namespace (repeatable); defaults to `*`.
+        #[arg(long = "namespace")]
+        namespaces: Vec<String>,
+        /// Optional Unix timestamp after which the token expires.
+        #[arg(long)]
+        expires_at: Option<i64>,
+        /// Write only the plaintext token to a new mode-0600 file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Revoke a token by the id shown when it was created.
+    Revoke { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -541,6 +621,46 @@ fn make_client(endpoint_override: Option<String>) -> (HttpClient, ClientConfig) 
     }
     let client = HttpClient::new(cfg.endpoint.clone(), cfg.token.clone());
     (client, cfg)
+}
+
+fn read_private_token_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("cannot inspect token file {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("token file is not a regular file: {}", path.display()).into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "token file {} must have mode 0600 or stricter",
+                path.display()
+            )
+            .into());
+        }
+    }
+    let token = std::fs::read_to_string(path)?;
+    if token.trim().is_empty() {
+        return Err(format!("token file is empty: {}", path.display()).into());
+    }
+    Ok(token.trim().to_string())
+}
+
+fn create_private_token_output(
+    path: &Path,
+) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
 }
 
 #[tokio::main]
@@ -751,6 +871,23 @@ async fn run_env(
         EnvCommand::Publish { manifest } => {
             publish_manifest(&client, &manifest).await?;
         }
+        EnvCommand::PublishPlugin {
+            plugin_dir,
+            version,
+            package,
+            worker_min,
+            publisher,
+        } => {
+            run_publish_plugin(
+                &client,
+                &plugin_dir,
+                &version,
+                package.as_deref(),
+                &worker_min,
+                publisher,
+            )
+            .await?;
+        }
         EnvCommand::Yank {
             env,
             version,
@@ -768,6 +905,9 @@ async fn run_env(
             docker_load,
             engine,
             consumer,
+            activate,
+            plugin_dir,
+            python,
         } => {
             run_env_sync(
                 &client,
@@ -779,6 +919,9 @@ async fn run_env(
                 docker_load,
                 &engine,
                 &consumer,
+                activate,
+                &plugin_dir,
+                &python,
             )
             .await?;
         }
@@ -2112,7 +2255,12 @@ async fn run_publish_image(
             features: vec![],
             consumers: consumers.to_vec(),
         },
-        worker_overlay: serde_json::json!({ "swe": { "image_pull_policy": "local_only" } }),
+        worker_overlay: serde_json::json!({
+            "container_images": {
+                "format": "docker-archive",
+                "load_required": true
+            }
+        }),
         agent_defaults: serde_json::Value::Null,
         contracts: uenv_hub_types::PackageContracts::default(),
         interface: uenv_hub_types::InterfaceSchema::default(),
@@ -2131,23 +2279,669 @@ async fn run_publish_image(
     Ok(())
 }
 
-/// Compare two dotted-numeric versions; returns true when `a` < `b`.
-/// Tolerant: non-numeric / missing components are treated as 0.
-fn version_lt(a: &str, b: &str) -> bool {
-    fn parts(v: &str) -> Vec<u64> {
-        v.trim()
-            .split(['.', '-', '+'])
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ProcessPluginManifest {
+    env_type: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    supported_backends: Option<Vec<String>>,
+    ipc: String,
+    entry: String,
+}
+
+fn safe_relative_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    use std::path::Component;
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(format!("path must be non-empty and relative: {}", path.display()).into());
     }
-    let (pa, pb) = (parts(a), parts(b));
-    for i in 0..pa.len().max(pb.len()) {
-        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
-        if x != y {
-            return x < y;
+    let mut clean = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::Normal(value) => clean.push(value),
+            Component::CurDir => {}
+            _ => return Err(format!("path may not escape its package: {}", path.display()).into()),
         }
     }
-    false
+    if clean.as_os_str().is_empty() {
+        return Err("relative path resolves to an empty path".into());
+    }
+    Ok(clean)
+}
+
+/// Accept a value only when it is one ordinary filesystem component on every
+/// platform we support. Package locators are received from both the CLI and the
+/// remote Hub, so neither side is allowed to influence local path traversal.
+fn validate_safe_component(
+    label: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::path::Component;
+
+    let mut chars = value.chars();
+    let starts_safely = chars.next().is_some_and(|character| character.is_ascii_alphanumeric());
+    let rest_is_safe = chars.all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '+' | '-')
+    });
+    if !starts_safely
+        || !rest_is_safe
+        || matches!(value, "." | "..")
+        || value.contains("..")
+        || value.contains('/')
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!("{label} is not a safe path component: {value:?}").into());
+    }
+    let mut components = Path::new(value).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(format!("{label} is not a safe path component: {value:?}").into());
+    }
+    Ok(())
+}
+
+fn validate_sync_request(
+    package: &str,
+    version: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_safe_component("package id", package)?;
+    if version != "latest" {
+        validate_safe_component("requested package version", version)?;
+        uenv_hub_core::domain::version::parse(version)
+            .map_err(|error| format!("requested package version is not valid SemVer: {error}"))?;
+    }
+    Ok(())
+}
+
+fn validate_sync_response(
+    requested_package: &str,
+    requested_version: &str,
+    manifest_package: &str,
+    manifest_version: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_safe_component("Hub manifest package id", manifest_package)?;
+    validate_safe_component("Hub manifest package version", manifest_version)?;
+    if manifest_package != requested_package {
+        return Err(format!(
+            "Hub returned package id {manifest_package:?} for request {requested_package:?}"
+        )
+        .into());
+    }
+    let resolved = uenv_hub_core::domain::version::parse(manifest_version)
+        .map_err(|error| format!("Hub returned a non-SemVer package version: {error}"))?;
+    if requested_version != "latest" {
+        let requested = uenv_hub_core::domain::version::parse(requested_version)
+            .map_err(|error| format!("requested package version is not valid SemVer: {error}"))?;
+        if resolved != requested {
+            return Err(format!(
+                "Hub resolved pinned version {requested_version:?} as {manifest_version:?}"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_process_plugin_env_type(env_type: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut chars = env_type.chars();
+    let starts_safely = chars
+        .next()
+        .is_some_and(|value| value.is_ascii_lowercase() || value.is_ascii_digit());
+    let rest_is_safe = chars.all(|value| {
+        value.is_ascii_lowercase()
+            || value.is_ascii_digit()
+            || matches!(value, '-' | '_' | '.')
+    });
+    if !starts_safely
+        || !rest_is_safe
+        || env_type.len() > 128
+        || env_type.contains("..")
+    {
+        return Err(format!(
+            "invalid plugin env_type {env_type:?}; use 1-128 lowercase letters, digits, '-', '_', or '.', beginning with a letter or digit"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn collect_plugin_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(
+            name.as_ref(),
+            ".venv" | ".git" | "__pycache__" | ".pytest_cache" | ".mypy_cache"
+        ) || name.ends_with(".pyc")
+        {
+            continue;
+        }
+        let ty = entry.file_type()?;
+        if ty.is_symlink() {
+            return Err(format!(
+                "plugin packages may not contain symlinks: {}",
+                entry.path().display()
+            )
+            .into());
+        }
+        if ty.is_dir() {
+            collect_plugin_files(root, &entry.path(), out)?;
+        } else if ty.is_file() {
+            out.push(entry.path().strip_prefix(root)?.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn python_wheelhouse_is_complete(plugin_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !plugin_dir.join("requirements.txt").is_file() {
+        return Ok(());
+    }
+    let wheelhouse = plugin_dir.join("wheelhouse");
+    let has_wheel = std::fs::read_dir(&wheelhouse)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry.file_type().map(|ty| ty.is_file()).unwrap_or(false)
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("whl"))
+        });
+    if !has_wheel {
+        return Err(format!(
+            "{} declares requirements.txt but has no wheelhouse/*.whl; prepare target-compatible offline dependencies with `python3 -m pip download -r requirements.txt -d wheelhouse`",
+            plugin_dir.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn plugin_artifact_kind(
+    plugin_dir: &Path,
+    rel: &Path,
+    entry_rel: &Path,
+) -> Result<&'static str, Box<dyn std::error::Error>> {
+    if rel == Path::new("manifest.yaml") {
+        return Ok("plugin_manifest");
+    }
+    if rel == entry_rel {
+        return Ok("plugin_entry");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(plugin_dir.join(rel))?
+            .permissions()
+            .mode()
+            & 0o111
+            != 0
+        {
+            return Ok("plugin_executable");
+        }
+    }
+    Ok("plugin_asset")
+}
+
+fn read_process_plugin_manifest(
+    plugin_dir: &Path,
+) -> Result<ProcessPluginManifest, Box<dyn std::error::Error>> {
+    let manifest_path = plugin_dir.join("manifest.yaml");
+    let raw = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
+    let manifest: ProcessPluginManifest = serde_yaml::from_str(&raw)
+        .map_err(|e| format!("parsing {}: {e}", manifest_path.display()))?;
+    validate_process_plugin_env_type(&manifest.env_type)?;
+    if manifest.ipc != "proto-uds" {
+        return Err(format!(
+            "plugin {} uses ipc={}; Hub process packages require proto-uds",
+            manifest.env_type, manifest.ipc
+        )
+        .into());
+    }
+    if !manifest
+        .supported_backends
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|backend| backend == "process")
+    {
+        return Err(format!(
+            "plugin {} must declare supported_backends: [process]",
+            manifest.env_type
+        )
+        .into());
+    }
+    let entry = safe_relative_path(Path::new(&manifest.entry))?;
+    if !plugin_dir.join(&entry).is_file() {
+        return Err(format!(
+            "plugin entry does not exist: {}",
+            plugin_dir.join(entry).display()
+        )
+        .into());
+    }
+    Ok(manifest)
+}
+
+fn is_api_error(error: &ClientError, code: ErrorCode) -> bool {
+    matches!(error, ClientError::Api { code: actual, .. } if *actual == code)
+}
+
+async fn ensure_process_plugin_registry_version(
+    client: &HttpClient,
+    plugin: &ProcessPluginManifest,
+    version: &str,
+    worker_min: &str,
+    publisher: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match client.get_env(&plugin.env_type).await {
+        Ok(_) => {}
+        Err(error) if is_api_error(&error, ErrorCode::NotFound) => {
+            client
+                .create_env(&uenv_hub_types::CreateEnvRequest {
+                    env_type: plugin.env_type.clone(),
+                    namespace: Some("default".to_string()),
+                    description: Some(format!("UEnv process plugin for {}", plugin.env_type)),
+                    author: publisher.map(str::to_string),
+                    homepage: None,
+                    repository: None,
+                    license: None,
+                    tags: vec!["process-plugin".to_string()],
+                    lifecycle: uenv_hub_types::EnvLifecycle::Active,
+                    superseded_by: None,
+                    compat_aliases: vec![],
+                })
+                .await?;
+            println!("created Hub environment identity {}", plugin.env_type);
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    match client.get_version(&plugin.env_type, version).await {
+        Ok(existing) => {
+            if existing.entrypoint.as_deref() != Some(plugin.entry.as_str())
+                || !existing.supported_backends.iter().any(|value| value == "process")
+                || existing.min_uenv_version.as_deref() != Some(worker_min)
+            {
+                return Err(format!(
+                    "Hub already has {}@{} with a different entrypoint/backend/minimum version; versions are immutable",
+                    plugin.env_type, version
+                )
+                .into());
+            }
+            println!("registry version already exists: {}@{}", plugin.env_type, version);
+        }
+        Err(error) if is_api_error(&error, ErrorCode::NotFound) => {
+            let request = uenv_hub_types::PublishVersionRequest {
+                version: version.to_string(),
+                changelog: Some("published with a process-plugin EnvPackage".to_string()),
+                image: None,
+                base_image: None,
+                health_check_path: None,
+                entrypoint: Some(plugin.entry.clone()),
+                supported_backends: vec!["process".to_string()],
+                config_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": true
+                })),
+                default_config: Some(serde_json::json!({})),
+                resources: uenv_hub_types::ResourceSpec::default(),
+                interface: uenv_hub_types::InterfaceSchema::default(),
+                examples: vec![],
+                dependencies: None,
+                min_uenv_version: Some(worker_min.to_string()),
+                rubric: None,
+            };
+            client
+                .publish_version(&plugin.env_type, &request)
+                .await?;
+            println!("published Hub registry version {}@{}", plugin.env_type, version);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Publish a complete, small process-plugin directory as a generic EnvPackage.
+async fn run_publish_plugin(
+    client: &HttpClient,
+    plugin_dir: &Path,
+    version: &str,
+    package_override: Option<&str>,
+    worker_min: &str,
+    publisher: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::Engine as _;
+
+    let plugin = read_process_plugin_manifest(plugin_dir)?;
+    python_wheelhouse_is_complete(plugin_dir)?;
+    if let Some(declared) = plugin.version.as_deref() {
+        if declared != version {
+            return Err(format!(
+                "plugin manifest version {declared} does not match package version {version}"
+            )
+            .into());
+        }
+    }
+    let package = package_override
+        .map(str::to_string)
+        .unwrap_or_else(|| plugin.env_type.clone());
+    validate_safe_component("process-plugin package id", &package)?;
+    validate_safe_component("process-plugin package version", version)?;
+    uenv_hub_core::domain::version::parse(version)
+        .map_err(|error| format!("process-plugin version is not valid SemVer: {error}"))?;
+    uenv_hub_core::domain::version::parse(worker_min)
+        .map_err(|error| format!("minimum Worker version is not valid SemVer: {error}"))?;
+
+    let entry_rel = safe_relative_path(Path::new(&plugin.entry))?;
+    let mut files = Vec::new();
+    collect_plugin_files(plugin_dir, plugin_dir, &mut files)?;
+    if files.is_empty() {
+        return Err(format!("plugin directory is empty: {}", plugin_dir.display()).into());
+    }
+
+    let mut artifacts = Vec::with_capacity(files.len());
+    let mut local_artifacts = Vec::with_capacity(files.len());
+    let mut total_bytes = 0u64;
+    for (index, rel) in files.iter().enumerate() {
+        let bytes = std::fs::read(plugin_dir.join(rel))?;
+        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+        if total_bytes > 40 * 1024 * 1024 {
+            return Err(
+                "process-plugin package exceeds the 40 MiB inline limit; keep images/large data in separate EnvPackages"
+                    .into(),
+            );
+        }
+        let kind = plugin_artifact_kind(plugin_dir, rel, &entry_rel)?;
+        let target_rel_path = Path::new("plugin").join(rel);
+        let target_rel_path = target_rel_path.to_string_lossy().replace('\\', "/");
+        let media_type = if rel.extension().and_then(|v| v.to_str()) == Some("yaml") {
+            Some("application/yaml".to_string())
+        } else {
+            Some("application/octet-stream".to_string())
+        };
+        let name = format!("plugin-{index:04}");
+        let digest = uenv_hub_core::package::sha256_hex(&bytes);
+        local_artifacts.push((
+            name.clone(),
+            kind.to_string(),
+            target_rel_path.clone(),
+            digest,
+        ));
+        artifacts.push(uenv_hub_types::InlineArtifact {
+            name,
+            kind: kind.to_string(),
+            sync_mode: "inline".to_string(),
+            media_type,
+            target_rel_path: Some(target_rel_path),
+            content: None,
+            content_b64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        });
+    }
+
+    match client.get_package_manifest(&package, version).await {
+        Ok(existing) => {
+            let existing_env = existing
+                .worker_overlay
+                .pointer("/process_plugin/env_type")
+                .and_then(|value| value.as_str());
+            let existing_root = existing
+                .worker_overlay
+                .pointer("/process_plugin/root")
+                .and_then(|value| value.as_str());
+            let existing_ipc = existing
+                .worker_overlay
+                .pointer("/process_plugin/ipc")
+                .and_then(|value| value.as_str());
+            let existing_entry = existing
+                .worker_overlay
+                .pointer("/process_plugin/entry")
+                .and_then(|value| value.as_str());
+            let mut remote_artifacts = existing
+                .artifacts
+                .iter()
+                .map(|artifact| {
+                    (
+                        artifact.name.clone(),
+                        artifact.kind.clone(),
+                        artifact.target_rel_path.clone(),
+                        artifact.digest.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            local_artifacts.sort();
+            remote_artifacts.sort();
+            if existing_env != Some(plugin.env_type.as_str())
+                || existing_root != Some("plugin")
+                || existing_ipc != Some("proto-uds")
+                || existing_entry != Some(plugin.entry.as_str())
+                || existing.platform.uenv_worker_min != worker_min
+                || !existing
+                    .platform
+                    .features
+                    .iter()
+                    .any(|feature| feature == "process_plugin_v1")
+                || !existing
+                    .platform
+                    .allows_consumer(uenv_hub_types::CONSUMER_WORKER)
+                || local_artifacts != remote_artifacts
+            {
+                return Err(format!(
+                    "Hub already has immutable package {package}@{version} with different plugin bytes; increment the version instead of overwriting it"
+                )
+                .into());
+            }
+            println!("process-plugin package already exists with identical bytes: {package}@{version}");
+            ensure_process_plugin_registry_version(
+                client,
+                &plugin,
+                version,
+                worker_min,
+                publisher.as_deref(),
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(error) if is_api_error(&error, ErrorCode::NotFound) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    // Only mutate the classic environment registry after every local file and
+    // any immutable package collision have been validated. A bad/oversized
+    // source directory must not leave a metadata-only version behind.
+    ensure_process_plugin_registry_version(
+        client,
+        &plugin,
+        version,
+        worker_min,
+        publisher.as_deref(),
+    )
+    .await?;
+
+    let req = uenv_hub_types::PublishPackageRequest {
+        version: version.to_string(),
+        publisher,
+        description: Some(format!("UEnv process plugin for {}", plugin.env_type)),
+        changelog: None,
+        platform: uenv_hub_types::PackagePlatform {
+            uenv_worker_min: worker_min.to_string(),
+            uenv_server_min: None,
+            features: vec!["process_plugin_v1".to_string()],
+            consumers: vec![uenv_hub_types::CONSUMER_WORKER.to_string()],
+        },
+        worker_overlay: serde_json::json!({
+            "process_plugin": {
+                "env_type": plugin.env_type.clone(),
+                "root": "plugin",
+                "ipc": "proto-uds",
+                "entry": plugin.entry.clone(),
+            }
+        }),
+        agent_defaults: serde_json::Value::Null,
+        contracts: uenv_hub_types::PackageContracts::default(),
+        interface: uenv_hub_types::InterfaceSchema::default(),
+        artifacts,
+        file_artifacts: vec![],
+    };
+    let resp = client.publish_package(&package, &req).await?;
+    println!(
+        "published process plugin {} as {}@{} -> {}",
+        plugin.env_type, resp.package_id, resp.version, resp.manifest_url
+    );
+    println!(
+        "next: uenv env sync {} --version {} --activate",
+        resp.package_id, resp.version
+    );
+    Ok(())
+}
+
+/// Compare Worker/package versions with the same SemVer rules the Hub uses.
+/// In particular, `1.0.0-rc.1` is older than `1.0.0`; treating suffixes as zero
+/// would incorrectly activate a stable-only package on a prerelease Worker.
+fn version_lt(a: &str, b: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let a = uenv_hub_core::domain::version::parse(a)
+        .map_err(|error| format!("invalid Worker version: {error}"))?;
+    let b = uenv_hub_core::domain::version::parse(b)
+        .map_err(|error| format!("invalid package minimum Worker version: {error}"))?;
+    Ok(a < b)
+}
+
+fn package_target_path(
+    root: &Path,
+    target_rel_path: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let relative = safe_relative_path(Path::new(target_rel_path))?;
+    if relative == Path::new("manifest.json") || relative == Path::new(".synced") {
+        return Err(format!("artifact target is reserved: {target_rel_path}").into());
+    }
+    Ok(root.join(relative))
+}
+
+fn synced_marker_matches(
+    dest: &Path,
+    package: &str,
+    version: &str,
+    bundle_digest: &str,
+) -> bool {
+    let Ok(raw) = std::fs::read_to_string(dest.join(".synced")) else {
+        return false;
+    };
+    let Ok(marker) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    dest.join("manifest.json").is_file()
+        && marker.get("package_id").and_then(|v| v.as_str()) == Some(package)
+        && marker.get("version").and_then(|v| v.as_str()) == Some(version)
+        && marker.get("bundle_digest").and_then(|v| v.as_str()) == Some(bundle_digest)
+}
+
+fn synced_package_files_match(
+    dest: &Path,
+    manifest: &uenv_hub_types::EnvPackageManifest,
+) -> bool {
+    manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.sync_mode == "inline")
+        .all(|artifact| {
+            let Ok(path) = package_target_path(dest, &artifact.target_rel_path) else {
+                return false;
+            };
+            uenv_hub_core::package::sha256_hex_file(&path)
+                .map(|digest| digest == artifact.digest)
+                .unwrap_or(false)
+        })
+}
+
+/// A package is commonly synced by root and consumed by the systemd `uenv`
+/// user.  Do not rely on the invoking shell's umask: make immutable package
+/// contents readable/traversable while preserving which regular files are
+/// executables.  Symlinks are deliberately not followed.
+fn make_package_tree_worker_readable(
+    root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn visit(path: &Path) -> std::io::Result<()> {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() {
+                return Ok(());
+            }
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(path)? {
+                    visit(&entry?.path())?;
+                }
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+            } else if metadata.is_file() {
+                let mode = if metadata.permissions().mode() & 0o111 != 0 {
+                    0o755
+                } else {
+                    0o644
+                };
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+            }
+            Ok(())
+        }
+
+        visit(root)?;
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+    Ok(())
+}
+
+fn make_synced_artifact_executable(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn create_sync_staging_dir(
+    parent: &Path,
+    version: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    use std::io::ErrorKind;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let time_part = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    for _ in 0..128 {
+        let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{version}.sync-{}-{time_part:x}-{sequence:x}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(format!(
+        "could not reserve a unique sync staging directory below {}",
+        parent.display()
+    )
+    .into())
 }
 
 /// Shared package sync implementation (EnvPackage + AgentBridgePackage).
@@ -2162,13 +2956,23 @@ async fn run_package_sync(
     docker_load: bool,
     engine: &str,
     consumer: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // Validate user-controlled locators before they enter either an HTTP path or
+    // a local filesystem path. Validate the Hub response separately before any
+    // join/remove operation below; a remote registry is not a path authority.
+    validate_sync_request(package, version)?;
     let manifest = client.get_package_manifest(package, version).await?;
     let resolved = manifest.version.clone();
+    validate_sync_response(
+        package,
+        version,
+        &manifest.package_id,
+        &resolved,
+    )?;
 
     let min = manifest.platform.uenv_worker_min.trim();
     if let Some(wv) = &worker_version {
-        if !min.is_empty() && version_lt(wv, min) {
+        if !min.is_empty() && version_lt(wv, min)? {
             return Err(format!(
                 "worker version {wv} is below package requirement uenv_worker_min={min}"
             )
@@ -2210,51 +3014,95 @@ async fn run_package_sync(
 
     if dry_run {
         println!("(dry-run: nothing downloaded)");
-        return Ok(());
+        return Ok(dest);
     }
 
-    std::fs::create_dir_all(&dest)?;
-    let mut image_tars: Vec<PathBuf> = Vec::new();
-    for a in &manifest.artifacts {
-        if a.sync_mode != "inline" {
-            println!("  skip {} (sync_mode={}, fetched out-of-band)", a.name, a.sync_mode);
-            continue;
+    if dest.exists() {
+        if synced_marker_matches(&dest, package, &resolved, &bundle)
+            && synced_package_files_match(&dest, &manifest)
+        {
+            println!("already synced and verified: {}", dest.display());
+            return Ok(dest);
         }
-        let out = dest.join(&a.target_rel_path);
-        // Stream every artifact to disk (hash-verified on the fly) so multi-GB
-        // image tarballs never buffer in RAM.
-        let written = client
-            .download_artifact_to_file(package, &resolved, &a.name, &out, &a.digest)
-            .await?;
-        println!("  wrote {} ({written} bytes)", out.display());
-        if a.kind == "image_tar" {
-            image_tars.push(out);
-        }
+        return Err(format!(
+            "refusing to overwrite existing package directory without a matching .synced marker: {}",
+            dest.display()
+        )
+        .into());
     }
 
-    if docker_load && !image_tars.is_empty() {
-        for tar in &image_tars {
-            println!("  docker load -i {}", tar.display());
-            run_engine(engine, &["load", "-i", &tar.to_string_lossy()])?;
-        }
-        println!("  loaded {} image tarball(s) via {engine}", image_tars.len());
-    } else if !image_tars.is_empty() {
-        println!(
-            "  {} image tarball(s) synced; run with --docker-load or `{engine} load -i <file>` to import",
-            image_tars.len()
-        );
-    }
+    let parent = dest.parent().ok_or("package destination has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    // Reserve a fresh directory atomically. Never delete a predictable path an
+    // attacker (or a crashed older process) may have created in advance.
+    let staging = create_sync_staging_dir(parent, &resolved)?;
 
-    std::fs::write(dest.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
-    let marker = serde_json::json!({
-        "package_id": package,
-        "version": resolved,
-        "bundle_digest": bundle,
-        "synced_at": chrono_now_secs(),
-    });
-    std::fs::write(dest.join(".synced"), serde_json::to_vec_pretty(&marker)?)?;
+    let sync_result: Result<(), Box<dyn std::error::Error>> = async {
+        let mut image_tars: Vec<PathBuf> = Vec::new();
+        let mut skipped = Vec::new();
+        for a in &manifest.artifacts {
+            if a.sync_mode != "inline" {
+                println!("  skip {} (sync_mode={}, fetched out-of-band)", a.name, a.sync_mode);
+                skipped.push(a.name.clone());
+                continue;
+            }
+            let out = package_target_path(&staging, &a.target_rel_path)?;
+            // Stream every artifact to disk (hash-verified on the fly) so
+            // multi-GB image tarballs never buffer in RAM.
+            let written = client
+                .download_artifact_to_file(package, &resolved, &a.name, &out, &a.digest)
+                .await?;
+            if matches!(a.kind.as_str(), "plugin_entry" | "plugin_executable") {
+                make_synced_artifact_executable(&out)?;
+            }
+            println!("  wrote {} ({written} bytes)", out.display());
+            if a.kind == "image_tar" {
+                image_tars.push(out);
+            }
+        }
+
+        if docker_load && !image_tars.is_empty() {
+            for tar in &image_tars {
+                println!("  {engine} load -i {}", tar.display());
+                run_engine(engine, &["load", "-i", &tar.to_string_lossy()])?;
+            }
+            println!("  loaded {} image tarball(s) via {engine}", image_tars.len());
+        } else if !image_tars.is_empty() {
+            println!(
+                "  {} image tarball(s) synced; run with --docker-load or `{engine} load -i <file>` to import",
+                image_tars.len()
+            );
+        }
+
+        std::fs::write(
+            staging.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        let marker = serde_json::json!({
+            "package_id": package,
+            "version": resolved.clone(),
+            "bundle_digest": bundle.clone(),
+            "synced_at": chrono_now_secs(),
+            "skipped_artifacts": skipped,
+        });
+        std::fs::write(
+            staging.join(".synced"),
+            serde_json::to_vec_pretty(&marker)?,
+        )?;
+        make_package_tree_worker_readable(&staging)?;
+        Ok(())
+    }
+    .await;
+    if let Err(err) = sync_result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
+    if let Err(error) = std::fs::rename(&staging, &dest) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error.into());
+    }
     println!("synced {package}@{resolved} -> {}", dest.display());
-    Ok(())
+    Ok(dest)
 }
 
 async fn run_agent_bridge(
@@ -2293,7 +3141,7 @@ async fn run_agent_bridge(
             dry_run,
             consumer,
         } => {
-            run_package_sync(
+            let dest = run_package_sync(
                 &client,
                 &package,
                 &version,
@@ -2305,16 +3153,310 @@ async fn run_agent_bridge(
                 consumer.as_deref(),
             )
             .await?;
-            let dest = target_dir.join(&package).join(
-                client
-                    .get_package_manifest(&package, &version)
-                    .await?
-                    .version,
-            );
             println!("next: export UENV_AGENT_BRIDGE_DIR={}", dest.display());
             Ok(())
         }
     }
+}
+
+#[cfg(unix)]
+struct ActivationLock {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for ActivationLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn acquire_activation_lock(
+    plugin_root: &Path,
+    env_type: &str,
+) -> Result<ActivationLock, Box<dyn std::error::Error>> {
+    fn ensure_plain_directory(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+            Ok(_) => Err(format!(
+                "activation metadata path must be a real directory, not a file or symlink: {}",
+                path.display()
+            )
+            .into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(path)?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    let state_dir = plugin_root.join(".active");
+    ensure_plain_directory(&state_dir)?;
+    let lock_parent = state_dir.join(".locks");
+    ensure_plain_directory(&lock_parent)?;
+    let path = lock_parent.join(env_type);
+    std::fs::create_dir(&path).map_err(|error| {
+        format!(
+            "cannot lock activation for env_type={env_type}: {error}; if no activation is running, remove stale lock {}",
+            path.display()
+        )
+    })?;
+    Ok(ActivationLock { path })
+}
+
+/// Validate a synced generic process-plugin package and atomically switch the
+/// `<plugin_root>/<env_type>` link. Running Workers intentionally do not reload
+/// code in place; a service restart is required after this explicit operation.
+fn activate_process_plugin(
+    package_dir: &Path,
+    plugin_root: &Path,
+    python: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (package_dir, plugin_root, python);
+        return Err("process-plugin activation currently requires Unix symlinks".into());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let manifest_raw = std::fs::read_to_string(package_dir.join("manifest.json"))?;
+        let package: uenv_hub_types::EnvPackageManifest = serde_json::from_str(&manifest_raw)?;
+        let marker_raw = std::fs::read_to_string(package_dir.join(".synced"))?;
+        let marker: serde_json::Value = serde_json::from_str(&marker_raw)?;
+        let expected_bundle = uenv_hub_core::package::bundle_digest(&package.artifacts);
+        if marker.get("package_id").and_then(|v| v.as_str())
+            != Some(package.package_id.as_str())
+            || marker.get("version").and_then(|v| v.as_str())
+                != Some(package.version.as_str())
+            || marker.get("bundle_digest").and_then(|v| v.as_str())
+                != Some(expected_bundle.as_str())
+            || !synced_package_files_match(package_dir, &package)
+        {
+            return Err("package marker or artifact digest verification failed".into());
+        }
+        if marker
+            .get("skipped_artifacts")
+            .and_then(|v| v.as_array())
+            .is_some_and(|items| !items.is_empty())
+        {
+            return Err("cannot activate a package with out-of-band/skipped artifacts".into());
+        }
+        let declared_env = package
+            .worker_overlay
+            .pointer("/process_plugin/env_type")
+            .and_then(|v| v.as_str())
+            .ok_or("package does not declare worker_overlay.process_plugin.env_type")?
+            .to_string();
+        let plugin_dir = package_dir.join("plugin");
+        let plugin = read_process_plugin_manifest(&plugin_dir)?;
+        if plugin.env_type != declared_env {
+            return Err(format!(
+                "package declares env_type={declared_env}, plugin manifest declares {}",
+                plugin.env_type
+            )
+            .into());
+        }
+        if let Some(version) = plugin.version.as_deref() {
+            if version != package.version {
+                return Err(format!(
+                    "plugin manifest version {version} does not match package version {}",
+                    package.version
+                )
+                .into());
+            }
+        }
+        prepare_python_plugin_runtime(&plugin_dir, python)?;
+        let entry = plugin_dir.join(safe_relative_path(Path::new(&plugin.entry))?);
+        let mut permissions = std::fs::metadata(&entry)?.permissions();
+        permissions.set_mode(permissions.mode() | 0o755);
+        std::fs::set_permissions(&entry, permissions)?;
+
+        std::fs::create_dir_all(plugin_root)?;
+        let active = plugin_root.join(&plugin.env_type);
+        if let Ok(meta) = std::fs::symlink_metadata(&active) {
+            if !meta.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing to replace non-symlink activated plugin path: {}",
+                    active.display()
+                )
+                .into());
+            }
+        }
+        // Serialize link + state changes for one env_type. A failed process may
+        // leave this empty directory behind; the error identifies the exact,
+        // narrowly scoped path an operator can inspect and remove.
+        let _activation_lock = acquire_activation_lock(plugin_root, &plugin.env_type)?;
+        let target = std::fs::canonicalize(&plugin_dir)?;
+        let previous_target = std::fs::read_link(&active).ok();
+        let pending = plugin_root.join(format!(
+            ".{}.activate-{}",
+            plugin.env_type,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pending);
+        symlink(&target, &pending)?;
+
+        // Prepare the state file before changing the active symlink. The final
+        // two renames are on the same filesystem. If the state rename fails,
+        // restore the previous active link so the command cannot report failure
+        // after silently changing the runtime selection.
+        let state_dir = plugin_root.join(".active");
+        let state_path = state_dir.join(format!("{}.json", plugin.env_type));
+        let state_tmp = state_dir.join(format!(
+            ".{}.json.tmp-{}",
+            plugin.env_type,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&state_tmp);
+        let state = serde_json::json!({
+            "env_type": plugin.env_type.clone(),
+            "package_id": package.package_id.clone(),
+            "version": package.version.clone(),
+            "bundle_digest": marker.get("bundle_digest").and_then(|v| v.as_str()).unwrap_or(""),
+            "plugin_dir": target,
+            "activated_at": chrono_now_secs(),
+        });
+        std::fs::write(&state_tmp, serde_json::to_vec_pretty(&state)?)?;
+
+        if let Err(err) = std::fs::rename(&pending, &active) {
+            let _ = std::fs::remove_file(&pending);
+            let _ = std::fs::remove_file(&state_tmp);
+            return Err(err.into());
+        }
+        if let Err(state_error) = std::fs::rename(&state_tmp, state_path) {
+            let _ = std::fs::remove_file(&state_tmp);
+            let rollback_result = if let Some(previous_target) = previous_target {
+                let rollback = plugin_root.join(format!(
+                    ".{}.rollback-{}",
+                    plugin.env_type,
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_file(&rollback);
+                symlink(previous_target, &rollback)
+                    .and_then(|_| std::fs::rename(&rollback, &active))
+            } else {
+                std::fs::remove_file(&active)
+            };
+            if let Err(rollback_error) = rollback_result {
+                return Err(format!(
+                    "activation state update failed ({state_error}) and active-link rollback failed ({rollback_error}); inspect {}",
+                    active.display()
+                )
+                .into());
+            }
+            return Err(format!(
+                "activation state update failed ({state_error}); restored the previous active plugin"
+            )
+            .into());
+        }
+        Ok(declared_env)
+    }
+}
+
+fn prepare_python_plugin_runtime(
+    plugin_dir: &Path,
+    python: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let requirements = plugin_dir.join("requirements.txt");
+    if !requirements.is_file() {
+        return Ok(());
+    }
+    python_wheelhouse_is_complete(plugin_dir)?;
+    let venv = plugin_dir.join(".venv");
+    let venv_python_path = |root: &Path| {
+        if cfg!(windows) {
+            root.join("Scripts/python.exe")
+        } else {
+            root.join("bin/python")
+        }
+    };
+    if venv.exists() {
+        let existing_python = venv_python_path(&venv);
+        if !existing_python.is_file() {
+            return Err(format!(
+                "existing plugin venv is incomplete: {}; stop users of this package and remove it before retrying",
+                venv.display()
+            )
+            .into());
+        }
+        let status = Command::new(&existing_python)
+            .args(["-m", "pip", "check"])
+            .status()?;
+        if status.success() {
+            make_package_tree_worker_readable(&venv)?;
+            return Ok(());
+        }
+        return Err(format!(
+            "existing plugin venv failed `pip check`: {}; it was left untouched because running episodes may still use it",
+            venv.display()
+        )
+        .into());
+    }
+
+    let pending = plugin_dir.join(format!(".venv.install-{}", std::process::id()));
+    if pending.exists() {
+        std::fs::remove_dir_all(&pending)?;
+    }
+    let status = match Command::new(python)
+        .args(["-m", "venv"])
+        .arg(&pending)
+        .status()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&pending);
+            return Err(format!("failed to create plugin venv with {python}: {error}").into());
+        }
+    };
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&pending);
+        return Err(format!("{python} -m venv failed for {}", plugin_dir.display()).into());
+    }
+    let venv_python = venv_python_path(&pending);
+    let status = match Command::new(&venv_python)
+        .args(["-m", "pip", "install", "--no-index", "--find-links"])
+        .arg(plugin_dir.join("wheelhouse"))
+        .arg("-r")
+        .arg(&requirements)
+        .status()
+    {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&pending);
+            return Err(format!("failed to install offline plugin dependencies: {error}").into());
+        }
+    };
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&pending);
+        return Err(format!(
+            "offline dependency install failed for {}; verify wheelhouse matches this Worker platform",
+            plugin_dir.display()
+        )
+        .into());
+    }
+    make_package_tree_worker_readable(&pending)?;
+    if let Err(error) = std::fs::rename(&pending, &venv) {
+        // A concurrent activation may have won the race. Reuse it only if it is
+        // complete; otherwise preserve both paths for operator inspection.
+        let winner = venv_python_path(&venv);
+        let winner_ok = winner.is_file()
+            && Command::new(&winner)
+                .args(["-m", "pip", "check"])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+        if winner_ok {
+            let _ = std::fs::remove_dir_all(&pending);
+        } else {
+            return Err(format!("failed to activate plugin venv: {error}").into());
+        }
+    }
+    Ok(())
 }
 
 /// `uenv env sync` — pull a package to `<target_dir>/envs/<pkg>/<ver>/`,
@@ -2330,8 +3472,11 @@ async fn run_env_sync(
     docker_load: bool,
     engine: &str,
     consumer: &str,
+    activate: bool,
+    plugin_dir: &Path,
+    python: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_package_sync(
+    let dest = run_package_sync(
         client,
         package,
         version,
@@ -2343,12 +3488,36 @@ async fn run_env_sync(
         Some(consumer),
     )
     .await?;
+    if dry_run {
+        if activate {
+            println!("(dry-run: activation was not changed)");
+        }
+        return Ok(());
+    }
     let manifest = client.get_package_manifest(package, version).await?;
-    let dest = target_dir
-        .join("envs")
-        .join(package)
-        .join(manifest.version);
-    println!("next: point the worker at it via UENV_SWE_ENV_PACKAGE={}", dest.display());
+    if activate {
+        let env_type = activate_process_plugin(&dest, plugin_dir, python)?;
+        println!(
+            "activated env_type={env_type} from {} in {}",
+            dest.display(),
+            plugin_dir.display()
+        );
+        println!("next: restart uenv-worker so it reloads the activated version");
+    } else if manifest
+        .worker_overlay
+        .get("process_plugin")
+        .is_some()
+    {
+        println!(
+            "next: re-run with --activate --plugin-dir {} to enable this process plugin",
+            plugin_dir.display()
+        );
+    } else if manifest.worker_overlay.get("swe").is_some() {
+        // Backward-compatible hint for the existing SWE package consumer.
+        println!("next: point the worker at it via UENV_SWE_ENV_PACKAGE={}", dest.display());
+    } else {
+        println!("package synced; consult its manifest.json for consumer configuration");
+    }
     Ok(())
 }
 
@@ -2510,12 +3679,24 @@ async fn run_hub(
     endpoint: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        HubCommand::Login { token, endpoint: ep } => {
+        HubCommand::Login {
+            token,
+            token_file,
+            endpoint: ep,
+        } => {
             let mut cfg = ClientConfig::load();
             if let Some(ep) = ep.or(endpoint) {
                 cfg.endpoint = ep;
             }
-            cfg.token = Some(token);
+            let token = match (token, token_file) {
+                (Some(token), None) => token,
+                (None, Some(path)) => read_private_token_file(&path)?,
+                _ => return Err("provide exactly one of --token or --token-file".into()),
+            };
+            if token.trim().is_empty() {
+                return Err("Hub token is empty".into());
+            }
+            cfg.token = Some(token.trim().to_string());
             cfg.save()?;
             println!("saved credentials for {}", cfg.endpoint);
         }
@@ -2549,6 +3730,74 @@ async fn run_hub(
             }
             if dry_run {
                 println!("(dry-run: nothing written locally)");
+            }
+        }
+        HubCommand::Token { command } => {
+            let (client, _cfg) = make_client(endpoint);
+            match command {
+                TokenCommand::Create {
+                    name,
+                    role,
+                    owner,
+                    mut namespaces,
+                    expires_at,
+                    out,
+                } => {
+                    if namespaces.is_empty() {
+                        namespaces.push("*".to_string());
+                    }
+                    // Reserve the destination before creating a one-time secret;
+                    // otherwise a path error would discard the only copy.
+                    let mut output = match out.as_deref() {
+                        Some(path) => Some(create_private_token_output(path)?),
+                        None => None,
+                    };
+                    let response = match client
+                        .create_token(&uenv_hub_types::CreateTokenRequest {
+                            name,
+                            owner,
+                            role: role.into(),
+                            namespaces,
+                            expires_at,
+                        })
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => {
+                            if let Some(path) = out.as_deref() {
+                                drop(output.take());
+                                let _ = std::fs::remove_file(path);
+                            }
+                            return Err(error.into());
+                        }
+                    };
+                    println!("token id:   {}", response.id);
+                    println!("token name: {}", response.name);
+                    println!("token role: {:?}", response.role);
+                    if let (Some(path), Some(mut file)) = (out.as_deref(), output) {
+                        use std::io::Write;
+                        if let Err(error) = file
+                            .write_all(format!("{}\n", response.token).as_bytes())
+                            .and_then(|_| file.sync_all())
+                        {
+                            drop(file);
+                            let _ = std::fs::remove_file(path);
+                            return Err(format!(
+                                "token was created but could not be saved to {}: {error}; revoke id {} and retry",
+                                path.display(), response.id
+                            )
+                            .into());
+                        }
+                        println!("token file: {} (plaintext not printed)", path.display());
+                    } else {
+                        println!("token:      {}", response.token);
+                        println!("save this secret now; Hub will not show it again");
+                    }
+                }
+                TokenCommand::Revoke { id } => {
+                    client.revoke_token(id).await?;
+                    println!("revoked token id {id}");
+                }
             }
         }
         HubCommand::Config { command } => match command {
@@ -2963,5 +4212,320 @@ entrypoint = "/bin/bash"
         let today = today_utc();
         assert_eq!(today.len(), 10);
         assert!(today.starts_with("20"));
+    }
+
+    #[test]
+    fn package_targets_cannot_escape_or_replace_sync_metadata() {
+        let root = Path::new("/tmp/package-root");
+        assert_eq!(
+            package_target_path(root, "plugin/bin/run").unwrap(),
+            root.join("plugin/bin/run")
+        );
+        assert!(package_target_path(root, "../../etc/passwd").is_err());
+        assert!(package_target_path(root, "/etc/passwd").is_err());
+        assert!(package_target_path(root, ".synced").is_err());
+        assert!(package_target_path(root, "manifest.json").is_err());
+    }
+
+    #[test]
+    fn sync_locators_are_validated_before_local_path_use() {
+        assert!(validate_sync_request("demo-plugin", "1.2.3").is_ok());
+        assert!(validate_sync_request("demo-plugin", "latest").is_ok());
+        for package in [
+            "",
+            ".",
+            "..",
+            "../victim",
+            "a/b",
+            "a\\b",
+            "bad\nname",
+            "query?x",
+            "fragment#x",
+            "escape%2fpath",
+        ] {
+            assert!(
+                validate_sync_request(package, "1.2.3").is_err(),
+                "unsafe package was accepted: {package:?}"
+            );
+        }
+        for version in ["../1.2.3", "1/2/3", "not-semver"] {
+            assert!(
+                validate_sync_request("demo", version).is_err(),
+                "unsafe version was accepted: {version:?}"
+            );
+        }
+
+        assert!(validate_sync_response("demo", "latest", "demo", "2.0.0-rc.1").is_ok());
+        assert!(validate_sync_response("demo", "1.2.3", "demo", "1.2.3").is_ok());
+        assert!(validate_sync_response("demo", "latest", "../victim", "1.2.3").is_err());
+        assert!(validate_sync_response("demo", "latest", "other", "1.2.3").is_err());
+        assert!(validate_sync_response("demo", "latest", "demo", "../../../victim").is_err());
+        assert!(validate_sync_response("demo", "1.2.3", "demo", "1.2.4").is_err());
+        assert!(version_lt("1.2.3-rc.1", "1.2.3").unwrap());
+        assert!(!version_lt("1.2.3", "1.2.3-rc.1").unwrap());
+        assert!(version_lt("not-a-version", "1.2.3").is_err());
+    }
+
+    #[test]
+    fn plugin_env_type_cannot_collide_with_activation_metadata() {
+        assert!(validate_process_plugin_env_type("demo.env-1").is_ok());
+        for env_type in [".active", "_hidden", "../demo", "demo/other", "UPPER", "a..b"] {
+            assert!(
+                validate_process_plugin_env_type(env_type).is_err(),
+                "unsafe env_type was accepted: {env_type:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_lock_serializes_state_and_link_updates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("plugins");
+        std::fs::create_dir_all(&root).unwrap();
+        let first = acquire_activation_lock(&root, "demo").unwrap();
+        assert!(acquire_activation_lock(&root, "demo").is_err());
+        drop(first);
+        assert!(acquire_activation_lock(&root, "demo").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_metadata_directory_may_not_be_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("plugins");
+        let redirected = tmp.path().join("redirected");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&redirected).unwrap();
+        symlink(&redirected, root.join(".active")).unwrap();
+        assert!(acquire_activation_lock(&root, "demo").is_err());
+        assert!(std::fs::read_dir(&redirected).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn synced_package_permissions_are_readable_by_the_worker_user() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let package = tmp.path().join("package");
+        let bin = package.join("plugin/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let manifest = package.join("plugin/manifest.yaml");
+        let entry = bin.join("run");
+        std::fs::write(&manifest, "env_type: demo\n").unwrap();
+        std::fs::write(&entry, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&package, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        make_package_tree_worker_readable(&package).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&package).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::metadata(&manifest).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_packaging_ignores_local_venvs_and_requires_offline_wheels() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manifest.yaml"), "env_type: demo\n").unwrap();
+        std::fs::write(tmp.path().join("requirements.txt"), "grpcio\n").unwrap();
+        std::fs::write(tmp.path().join("run.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(tmp.path().join("helper"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            tmp.path().join("helper"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join(".venv/bin")).unwrap();
+        symlink("/usr/bin/python3", tmp.path().join(".venv/bin/python")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("__pycache__")).unwrap();
+        std::fs::write(tmp.path().join("__pycache__/x.pyc"), b"cache").unwrap();
+
+        let mut files = Vec::new();
+        collect_plugin_files(tmp.path(), tmp.path(), &mut files).unwrap();
+        assert!(files.contains(&PathBuf::from("manifest.yaml")));
+        assert!(files.contains(&PathBuf::from("requirements.txt")));
+        assert!(files.iter().all(|path| !path.starts_with(".venv")));
+        assert!(files.iter().all(|path| !path.starts_with("__pycache__")));
+        assert_eq!(
+            plugin_artifact_kind(tmp.path(), Path::new("run.sh"), Path::new("run.sh")).unwrap(),
+            "plugin_entry"
+        );
+        assert_eq!(
+            plugin_artifact_kind(tmp.path(), Path::new("helper"), Path::new("run.sh")).unwrap(),
+            "plugin_executable"
+        );
+        assert!(python_wheelhouse_is_complete(tmp.path()).is_err());
+
+        std::fs::create_dir_all(tmp.path().join("wheelhouse")).unwrap();
+        std::fs::write(tmp.path().join("wheelhouse/grpcio.whl"), b"wheel").unwrap();
+        assert!(python_wheelhouse_is_complete(tmp.path()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_token_file_must_not_be_group_or_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("reader.token");
+        std::fs::write(&path, "secret\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_private_token_file(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_private_token_file(&path).unwrap(), "secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_output_is_new_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested/reader.token");
+        let file = create_private_token_output(&path).unwrap();
+        drop(file);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(create_private_token_output(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_plugin_activation_is_explicit_atomic_and_rollbackable() {
+        fn stage_package(root: &Path, version: &str) -> PathBuf {
+            let package = root.join("envs/demo").join(version);
+            std::fs::create_dir_all(package.join("plugin")).unwrap();
+            std::fs::write(
+                package.join("plugin/manifest.yaml"),
+                format!(
+                    "env_type: demo\nversion: '{version}'\nsupported_backends: [process]\nipc: proto-uds\nentry: ./run.sh\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(package.join("plugin/run.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::write(
+                package.join("manifest.json"),
+                format!(
+                    r#"{{
+                      "package_id":"demo","version":"{version}","published_at":1,
+                      "platform":{{"uenv_worker_min":"0.1.0","features":[],"consumers":["worker"]}},
+                      "artifacts":[],
+                      "worker_overlay":{{"process_plugin":{{"env_type":"demo","root":"plugin","ipc":"proto-uds","entry":"./run.sh"}}}},
+                      "agent_defaults":null,"contracts":{{}},"interface":{{}}
+                    }}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                package.join(".synced"),
+                format!(
+                    r#"{{"package_id":"demo","version":"{version}","bundle_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","skipped_artifacts":[]}}"#
+                ),
+            )
+            .unwrap();
+            package
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let v1 = stage_package(tmp.path(), "1.0.0");
+        let v2 = stage_package(tmp.path(), "2.0.0");
+
+        assert_eq!(
+            activate_process_plugin(&v1, &plugins, "python3").unwrap(),
+            "demo"
+        );
+        assert_eq!(
+            std::fs::canonicalize(plugins.join("demo")).unwrap(),
+            std::fs::canonicalize(v1.join("plugin")).unwrap()
+        );
+
+        assert_eq!(
+            activate_process_plugin(&v2, &plugins, "python3").unwrap(),
+            "demo"
+        );
+        assert_eq!(
+            std::fs::canonicalize(plugins.join("demo")).unwrap(),
+            std::fs::canonicalize(v2.join("plugin")).unwrap()
+        );
+
+        // Re-activating the old immutable version is the rollback operation.
+        activate_process_plugin(&v1, &plugins, "python3").unwrap();
+        assert_eq!(
+            std::fs::canonicalize(plugins.join("demo")).unwrap(),
+            std::fs::canonicalize(v1.join("plugin")).unwrap()
+        );
+        assert!(plugins.join(".active/demo.json").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restores_old_link_when_state_commit_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+
+        fn stage(root: &Path, version: &str) -> PathBuf {
+            let package = root.join(version);
+            std::fs::create_dir_all(package.join("plugin")).unwrap();
+            std::fs::write(
+                package.join("plugin/manifest.yaml"),
+                format!(
+                    "env_type: demo\nversion: '{version}'\nsupported_backends: [process]\nipc: proto-uds\nentry: ./run.sh\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(package.join("plugin/run.sh"), "#!/bin/sh\n").unwrap();
+            std::fs::write(
+                package.join("manifest.json"),
+                format!(
+                    r#"{{"package_id":"demo","version":"{version}","published_at":1,"platform":{{"uenv_worker_min":"0.1.0","features":[],"consumers":["worker"]}},"artifacts":[],"worker_overlay":{{"process_plugin":{{"env_type":"demo"}}}},"agent_defaults":null,"contracts":{{}},"interface":{{}}}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                package.join(".synced"),
+                format!(
+                    r#"{{"package_id":"demo","version":"{version}","bundle_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","skipped_artifacts":[]}}"#
+                ),
+            )
+            .unwrap();
+            package
+        }
+
+        let v1 = stage(tmp.path(), "1.0.0");
+        let v2 = stage(tmp.path(), "2.0.0");
+        activate_process_plugin(&v1, &plugins, "python3").unwrap();
+        let old_target = std::fs::canonicalize(plugins.join("demo")).unwrap();
+
+        // A directory at the final state-file path makes the metadata rename
+        // fail after the active-link switch, exercising the rollback path.
+        std::fs::remove_file(plugins.join(".active/demo.json")).unwrap();
+        std::fs::create_dir(plugins.join(".active/demo.json")).unwrap();
+        assert!(activate_process_plugin(&v2, &plugins, "python3").is_err());
+        assert_eq!(
+            std::fs::canonicalize(plugins.join("demo")).unwrap(),
+            old_target
+        );
     }
 }

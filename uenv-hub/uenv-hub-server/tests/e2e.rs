@@ -38,6 +38,7 @@ async fn spawn_server_with_seed_examples(
         auth: AuthConfig {
             require_token: false,
             bootstrap_admin_token: None,
+            bootstrap_admin_token_file: None,
         },
         rate_limit: RateLimitConfig {
             enabled: false,
@@ -49,6 +50,7 @@ async fn spawn_server_with_seed_examples(
         },
         packages: PackagesConfig {
             artifact_dir: tmp.path().join("artifacts").display().to_string(),
+            import_dir: tmp.path().join("import").display().to_string(),
             catalog_seed_dir,
             // Other tests don't need example packages; the package test publishes its own.
             seed_examples,

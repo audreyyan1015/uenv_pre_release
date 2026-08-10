@@ -26,10 +26,7 @@ import {
   formatHeartbeatLabel,
   projectWorkerDetail,
 } from "@/lib/worker-tree";
-import {
-  classifyWorkerStatus,
-  type WorkerOperationalStatus,
-} from "@/lib/worker-status";
+import { classifyWorkerStatus, type WorkerOperationalStatus } from "@/lib/worker-status";
 
 const STATE_POLL_INTERVAL_MS = 3_000;
 const CLOCK_REFRESH_INTERVAL_MS = 2_000;
@@ -203,7 +200,7 @@ export function WorkerDetail({
   const worker = projection.worker;
   const supportedEnvTypes = live?.supportedEnvTypes?.length
     ? live.supportedEnvTypes
-    : worker?.supported_env_types ?? [];
+    : (worker?.supported_env_types ?? []);
   const platformFeatures = live?.platformFeatures ?? worker?.platform_features ?? [];
   const backendKinds = live?.backendKinds ?? worker?.backend_kinds ?? [];
   const trajectorySchemas = live?.trajectorySchemas ?? worker?.trajectory_schemas ?? [];
@@ -216,9 +213,9 @@ export function WorkerDetail({
     (live?.found !== false &&
       Boolean(
         live &&
-          (live.load !== undefined ||
-            (live.liveEpisodes?.length ?? 0) > 0 ||
-            live.heartbeatAgeSecs != null),
+        (live.load !== undefined ||
+          (live.liveEpisodes?.length ?? 0) > 0 ||
+          live.heartbeatAgeSecs != null),
       ));
   const showDetail = Boolean(worker) || hasLiveFleet;
 
@@ -240,11 +237,9 @@ export function WorkerDetail({
   const load = live?.load ?? worker?.current_load ?? projection.liveActiveCount;
   const capacity = live?.capacity ?? worker?.capacity;
   const reason = worker?.status_reason?.trim().toUpperCase() ?? "";
-  const backSearch = effectiveRunId ? { run: effectiveRunId } : {};
-  const freshness = formatFreshnessLabel(
-    live?.fetchedAt ?? projection.stateUpdatedAt,
-    now,
-  );
+  // /server 的 validateSearch 要求 run: string | null，不能传缺省字段。
+  const backSearch = { run: effectiveRunId ?? null };
+  const freshness = formatFreshnessLabel(live?.fetchedAt ?? projection.stateUpdatedAt, now);
   const heartbeatLabel = formatHeartbeatLabel(
     worker?.last_heartbeat_ts,
     now,
@@ -413,14 +408,16 @@ export function WorkerDetail({
                 {poolSlots.length > 0 ? (
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
                     {visiblePoolSlots.map((slot) => {
-                      const slotMeta =
-                        poolSlotStatusMeta[slot.status] ?? {
-                          label: slot.status || "unknown",
-                          dot: "bg-slate-400",
-                          tone: "bg-slate-50 text-slate-600 ring-slate-200",
-                        };
+                      const slotMeta = poolSlotStatusMeta[slot.status] ?? {
+                        label: slot.status || "unknown",
+                        dot: "bg-slate-400",
+                        tone: "bg-slate-50 text-slate-600 ring-slate-200",
+                      };
                       return (
-                        <div key={slot.slot_id} className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                        <div
+                          key={slot.slot_id}
+                          className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4"
+                        >
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <p className="truncate font-mono text-sm font-semibold text-slate-800">
@@ -430,7 +427,9 @@ export function WorkerDetail({
                                 {slot.env_type || "env"} · {slot.backend_kind || "backend"}
                               </p>
                             </div>
-                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ${slotMeta.tone}`}>
+                            <span
+                              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ${slotMeta.tone}`}
+                            >
                               <span className={`h-2 w-2 rounded-full ${slotMeta.dot}`} />
                               {slotMeta.label}
                             </span>
@@ -538,7 +537,9 @@ export function WorkerDetail({
                   <Activity className="h-4 w-4" />
                   当前执行
                 </div>
-                <h2 className="mt-1 text-xl font-semibold tracking-tight">Worker 上的实时 Episode</h2>
+                <h2 className="mt-1 text-xl font-semibold tracking-tight">
+                  Worker 上的实时 Episode
+                </h2>
                 <p className="mt-2 text-sm text-slate-500">
                   来自 Server 舰队名册，反映该节点此刻正在跑的任务（不限本训练运行历史）。
                 </p>
@@ -626,9 +627,7 @@ export function WorkerDetail({
 
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
                   <p className="text-xs font-medium text-slate-500">环境实例数</p>
-                  <p className="mt-2 text-sm font-semibold text-slate-800">
-                    {envInstanceCount}
-                  </p>
+                  <p className="mt-2 text-sm font-semibold text-slate-800">{envInstanceCount}</p>
                 </div>
               </div>
 
@@ -638,7 +637,10 @@ export function WorkerDetail({
                   <div className="mt-2 flex flex-wrap gap-2">
                     {[...platformFeatures, ...backendKinds].length > 0 ? (
                       [...platformFeatures, ...backendKinds].map((item) => (
-                        <span key={item} className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+                        <span
+                          key={item}
+                          className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200"
+                        >
                           {item}
                         </span>
                       ))
@@ -652,7 +654,10 @@ export function WorkerDetail({
                   <div className="mt-2 flex flex-wrap gap-2">
                     {[...trajectorySchemas, ...toolSchemas].length > 0 ? (
                       [...trajectorySchemas, ...toolSchemas].map((item) => (
-                        <span key={item} className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200">
+                        <span
+                          key={item}
+                          className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-200"
+                        >
                           {item}
                         </span>
                       ))
@@ -666,8 +671,12 @@ export function WorkerDetail({
                   <div className="mt-2 space-y-1">
                     {packageStates.length > 0 ? (
                       packageStates.slice(0, 4).map((pkg) => (
-                        <p key={`${pkg.env_type}-${pkg.package_id}-${pkg.version}`} className="truncate text-xs text-slate-600">
-                          {pkg.env_type || "env"} · {pkg.package_id || "manifest"}@{pkg.version || "latest"} · {pkg.state}
+                        <p
+                          key={`${pkg.env_type}-${pkg.package_id}-${pkg.version}`}
+                          className="truncate text-xs text-slate-600"
+                        >
+                          {pkg.env_type || "env"} · {pkg.package_id || "manifest"}@
+                          {pkg.version || "latest"} · {pkg.state}
                         </p>
                       ))
                     ) : (
@@ -682,15 +691,22 @@ export function WorkerDetail({
                 {poolSummary.length > 0 || poolSlots.length > 0 ? (
                   <div className="mt-3 grid gap-3 lg:grid-cols-2">
                     {poolSummary.map((item) => (
-                      <div key={`${item.env_type}-${item.variant}-${item.package_id}`} className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
+                      <div
+                        key={`${item.env_type}-${item.variant}-${item.package_id}`}
+                        className="rounded-xl bg-white p-3 ring-1 ring-slate-200"
+                      >
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-sm font-medium text-slate-800">
-                            {item.env_type}{item.variant ? `/${item.variant}` : ""}
+                            {item.env_type}
+                            {item.variant ? `/${item.variant}` : ""}
                           </span>
-                          <span className="text-xs text-slate-500">{item.backend_kind || "backend"}</span>
+                          <span className="text-xs text-slate-500">
+                            {item.backend_kind || "backend"}
+                          </span>
                         </div>
                         <p className="mt-2 text-xs text-slate-600">
-                          ready {item.ready} · busy {item.busy} · warming {item.warming} · capacity {item.capacity}
+                          ready {item.ready} · busy {item.busy} · warming {item.warming} · capacity{" "}
+                          {item.capacity}
                         </p>
                       </div>
                     ))}

@@ -16,7 +16,7 @@ type PrimarySection = "train" | "benchmark" | "observe";
 type LaunchMode = "params" | "script";
 type DemoRunState = "idle" | "running" | "stopping" | "stopped" | "completed";
 
-type FieldConfig<T extends Record<string, string>> = {
+type FieldConfig<T extends object> = {
   key: keyof T;
   label: string;
   type?: "text" | "number" | "select";
@@ -159,7 +159,7 @@ function dataHref(text: string) {
   return `data:text/x-shellscript;charset=utf-8,${encodeURIComponent(text)}`;
 }
 
-function updateValue<T extends Record<string, string>>(
+function updateValue<T extends object>(
   setter: React.Dispatch<React.SetStateAction<T>>,
   key: keyof T,
   value: string,
@@ -171,7 +171,7 @@ function demoEvent(message: string) {
   return `${new Date().toLocaleTimeString("zh-CN", { hour12: false })}  ${message}`;
 }
 
-function Field<T extends Record<string, string>>({
+function Field<T extends object>({
   field,
   value,
   onChange,

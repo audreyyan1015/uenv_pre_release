@@ -1,0 +1,46 @@
+server:
+  endpoint: "@SERVER_ENDPOINT@"
+
+worker:
+  id: "auto"
+  listen: "0.0.0.0:50054"
+  advertise_endpoint: "@ADVERTISE_ENDPOINT@"
+  max_concurrent: 4
+
+scheduler:
+  mode: "remote"
+
+env:
+  types: ["qa", "math", "code"]
+  backend: "process"
+  plugin_dir: "/opt/uenv/current/plugins"
+  # `uenv env sync --activate` places versioned plugin links here.
+  package_plugin_dir: "/var/lib/uenv/plugins"
+
+pool:
+  warmup_size: 2
+  prewarm_on_startup: false
+  max_idle_time: 300
+  cool_timeout: 60
+  max_episode_count: 1000
+
+logging:
+  level: "INFO"
+  file: "/var/log/uenv/worker.log"
+
+wal:
+  dir: "/var/lib/uenv/worker/wal"
+
+observability:
+  metrics_listen: "0.0.0.0:19090"
+  health_listen: "0.0.0.0:19090"
+
+hub:
+  enabled: @HUB_ENABLED@
+  endpoint: "@HUB_ENDPOINT@"
+  # Keep bearer tokens out of this YAML. The installer copies a supplied
+  # Reader token to this uenv-owned 0600 file.
+  token_file: "@HUB_TOKEN_FILE@"
+
+llm:
+  env_file: "/etc/uenv/secrets/worker-llm.env"

@@ -111,18 +111,17 @@ export function useRunStream(
   useEffect(() => {
     const chainStore = store;
     const cancelledRef = { cancelled: false };
-    let stopFixture: (() => void) | null = null;
     let currentAbort: AbortController | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconcileTimer: ReturnType<typeof setInterval> | null = null;
     let failures = 0;
 
     if (config.useFixture) {
-      stopFixture = startFixturePlayback(chainStore, effectiveRunId, cancelledRef);
+      const stopFixture = startFixturePlayback(chainStore, effectiveRunId, cancelledRef);
       chainStore.setError(null);
       return () => {
         cancelledRef.cancelled = true;
-        stopFixture?.();
+        stopFixture();
         chainStore.setConnection("disconnected");
       };
     }
@@ -238,7 +237,7 @@ export function useRunStream(
       currentAbort?.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (reconcileTimer) clearInterval(reconcileTimer);
-      stopFixture?.();
+      // fixture 分支已提前 return；此路径 stopFixture 恒为 null。
       chainStore.setConnection("disconnected");
     };
   }, [

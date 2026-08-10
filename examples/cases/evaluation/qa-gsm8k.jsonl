@@ -1,0 +1,2 @@
+{"id":"gsm8k-1","env_type":"qa","dataset":"gsm8k","question":"A box contains 3 red balls and 5 blue balls. How many balls are in the box? End with `#### number`.","target":"8","max_steps":1}
+{"id":"gsm8k-2","env_type":"qa","dataset":"gsm8k","question":"Li has 12 books and gives away 4. How many books remain? End with `#### number`.","target":"8","max_steps":1}

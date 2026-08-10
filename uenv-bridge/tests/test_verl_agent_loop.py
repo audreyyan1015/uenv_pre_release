@@ -189,6 +189,11 @@ class FakeServerManager:
         self.server_addresses = addresses
 
 
+class FakeVerl071ServerManager:
+    def __init__(self, addresses):
+        self._server_id_to_handle = {address: object() for address in addresses}
+
+
 class FakeRemoteMethod:
     def __init__(self, value):
         self.value = value
@@ -462,6 +467,31 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
         self.assertEqual(override_payload["metadata"]["extra_info"]["effective_max_steps"], 12)
 
+    def test_swe_request_requires_explicit_case_identity(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+        with self.assertRaisesRegex(ValueError, "explicit instance_id"):
+            loop.build_episode_request(
+                sampling_params={},
+                prompt_ids=[10],
+                raw_prompt="Fix it",
+                sample_kwargs={"extra_info": {"env_type": "swe"}},
+            )
+        with self.assertRaisesRegex(ValueError, "explicit benchmark_variant"):
+            loop.build_episode_request(
+                sampling_params={},
+                prompt_ids=[10],
+                raw_prompt="Fix it",
+                sample_kwargs={
+                    "extra_info": {
+                        "env_type": "swe",
+                        "instance_id": "repo__issue-1",
+                    }
+                },
+            )
+
     def test_run_returns_agent_loop_output_from_episode_result(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
         loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=client)
@@ -493,6 +523,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                     raw_prompt=[{"role": "user", "content": "fix issue"}],
                     data_source="swebenchpro",
                     reward_model={},
+                    extra_info={"instance_id": "repo__issue-1", "benchmark_variant": "pro"},
                 )
             )
 
@@ -506,6 +537,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                 raw_prompt=[{"role": "user", "content": "fix issue"}],
                 data_source="swebenchpro",
                 reward_model={},
+                extra_info={"instance_id": "repo__issue-1", "benchmark_variant": "pro"},
             )
         )
 
@@ -612,9 +644,9 @@ class UEnvAgentLoopTest(unittest.TestCase):
             loop.run_batch(
                 [{}, {}, {}],
                 [
-                    {"raw_prompt": "a", "data_source": "swesmith"},
-                    {"raw_prompt": "b", "data_source": "swesmith"},
-                    {"raw_prompt": "c", "data_source": "swesmith"},
+                    {"raw_prompt": "a", "data_source": "swesmith", "extra_info": {"instance_id": "repo__smith-1", "benchmark_variant": "smith"}},
+                    {"raw_prompt": "b", "data_source": "swesmith", "extra_info": {"instance_id": "repo__smith-2", "benchmark_variant": "smith"}},
+                    {"raw_prompt": "c", "data_source": "swesmith", "extra_info": {"instance_id": "repo__smith-3", "benchmark_variant": "smith"}},
                 ],
                 batch_id="batch-failed",
             )
@@ -634,7 +666,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
             sampling_params={},
             prompt_ids=[10],
             raw_prompt="2+2?",
-            sample_kwargs={"extra_info": {"batch_id": "batch-sync", "sample_index": 0}},
+            sample_kwargs={"extra_info": {"env_type": "qa", "batch_id": "batch-sync", "sample_index": 0}},
         )
 
         metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
@@ -654,7 +686,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
             sampling_params={},
             prompt_ids=[10],
             raw_prompt="2+2?",
-            sample_kwargs={"extra_info": {"batch_id": "batch-one-step", "sample_index": 0, "global_steps": 3}},
+            sample_kwargs={"extra_info": {"env_type": "qa", "batch_id": "batch-one-step", "sample_index": 0, "global_steps": 3}},
         )
 
         metadata = json.loads(request.payload.decode("utf-8"))["metadata"]
@@ -681,6 +713,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
             raw_prompt="2+2?",
             sample_kwargs={
                 "extra_info": {
+                    "env_type": "qa",
                     "batch_id": "batch-one-step",
                     "sample_index": 0,
                     "parallel_mode": "one_step_off_policy",
@@ -739,7 +772,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
             loop.run(
                 sampling_params={},
                 raw_prompt="2+2?",
-                sample_kwargs={"extra_info": {"batch_id": "batch-fully-async", "sample_index": 0, "global_step": 10}},
+                extra_info={"env_type": "qa", "batch_id": "batch-fully-async", "sample_index": 0, "global_step": 10},
             )
         )
 
@@ -867,7 +900,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                     raw_prompt=[{"role": "user", "content": "fix issue"}],
                     data_source="gsm8k",
                     reward_model={},
-                    extra_info={"batch_id": "batch-empty", "sample_index": 1},
+                    extra_info={"instance_id": "repo__issue-1", "benchmark_variant": "pro", "batch_id": "batch-empty", "sample_index": 1},
                 )
             )
 
@@ -903,7 +936,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                     raw_prompt=[{"role": "user", "content": "fix issue"}],
                     data_source="swe-bench-pro",
                     reward_model={},
-                    extra_info={"batch_id": "batch-empty", "sample_index": 1},
+                    extra_info={"instance_id": "repo__issue-1", "benchmark_variant": "pro", "batch_id": "batch-empty", "sample_index": 1},
                 )
             )
 
@@ -928,7 +961,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                 raw_prompt=[{"role": "user", "content": "fix issue"}],
                 data_source="swe-bench-pro",
                 reward_model={},
-                extra_info={"batch_id": "batch-empty", "sample_index": 1},
+                extra_info={"instance_id": "repo__issue-1", "benchmark_variant": "pro", "batch_id": "batch-empty", "sample_index": 1},
             )
         )
 
@@ -1018,6 +1051,83 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(client.last_request.model_endpoint, "http://10.0.2.100:38285/v1")
         self.assertEqual(payload["model_endpoint"]["url"], "http://10.0.2.100:38285/v1")
 
+    def test_run_discovers_verl_071_server_manager_endpoint(self) -> None:
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=client,
+            server_manager=FakeVerl071ServerManager(["10.0.3.100:38286"]),
+            default_model_endpoint="https://openrouter.ai/api/v1",
+        )
+
+        asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        payload = json.loads(client.last_request.payload.decode("utf-8"))
+        self.assertEqual(client.last_request.model_endpoint, "http://10.0.3.100:38286/v1")
+        self.assertEqual(payload["model_endpoint"]["url"], "http://10.0.3.100:38286/v1")
+
+    def test_run_returns_rollout_log_probs_for_verl(self) -> None:
+        result = self._result_with_token_ids()
+        result.rollout_log_probs = [-0.25, -0.75]
+        loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result))
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.response_ids, [101, 102])
+        self.assertEqual(output.response_logprobs, [-0.25, -0.75])
+
+    def test_run_truncates_response_ids_and_rollout_log_probs_together(self) -> None:
+        result = self._result_with_token_ids()
+        result.rollout_log_probs = [-0.25, -0.75]
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(result),
+            trainer_config=AttrDict(actor_rollout_ref=AttrDict(rollout=AttrDict(response_length=1))),
+        )
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.response_ids, [101])
+        self.assertEqual(output.response_logprobs, [-0.25])
+
+    def test_run_rejects_misaligned_rollout_log_probs(self) -> None:
+        for rollout_log_probs in ([-0.25], [-0.25, -0.75, -1.0]):
+            with self.subTest(rollout_log_probs=rollout_log_probs):
+                result = self._result_with_token_ids()
+                result.rollout_log_probs = rollout_log_probs
+                loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result))
+
+                with self.assertRaisesRegex(RuntimeError, "rollout token trace is inconsistent"):
+                    asyncio.run(
+                        loop.run(
+                            {},
+                            raw_prompt=[{"role": "user", "content": "2+2?"}],
+                            data_source="gsm8k",
+                            reward_model={"ground_truth": "4"},
+                        )
+                    )
+
     def test_run_uses_model_gateway_for_multiple_verl_runtime_endpoints(self) -> None:
         client = RecordingEpisodeClient(self._result_with_token_ids())
         loop = UEnvAgentLoop(
@@ -1093,7 +1203,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
             sampling_params={},
             prompt_ids=[10],
             raw_prompt="question",
-            sample_kwargs={"extra_info": {"batch_id": "batch-a"}},
+            sample_kwargs={"extra_info": {"env_type": "qa", "batch_id": "batch-a"}},
         )
 
         result = client.submit_episode(request)
@@ -1112,7 +1222,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                 sampling_params={},
                 prompt_ids=[10],
                 raw_prompt=f"question-{index}",
-                sample_kwargs={"extra_info": {"batch_id": "batch-core", "sample_index": index}},
+                sample_kwargs={"extra_info": {"env_type": "qa", "batch_id": "batch-core", "sample_index": index}},
             )
             for index in range(3)
         ]
@@ -1143,7 +1253,13 @@ class UEnvAgentLoopTest(unittest.TestCase):
             sampling_params={},
             prompt_ids=[10],
             raw_prompt="question",
-            sample_kwargs={"extra_info": {"batch_id": "batch-schedule", "sample_index": 0}},
+            sample_kwargs={
+                "extra_info": {
+                    "env_type": "qa",
+                    "batch_id": "batch-schedule",
+                    "sample_index": 0,
+                }
+            },
         )
 
         list(client.submit_episode_stream([request]))
@@ -1238,7 +1354,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                 sampling_params={},
                 prompt_ids=[10],
                 raw_prompt=f"question-{index}",
-                sample_kwargs={"extra_info": {"batch_id": "batch-stream", "sample_index": index}},
+                sample_kwargs={"extra_info": {"env_type": "qa", "batch_id": "batch-stream", "sample_index": index}},
             )
             for index in range(3)
         ]
@@ -1260,7 +1376,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
             sampling_params={},
             prompt_ids=[10],
             raw_prompt="question",
-            sample_kwargs={"extra_info": {"batch_id": "retry-unary"}},
+            sample_kwargs={"extra_info": {"env_type": "qa", "batch_id": "retry-unary"}},
         )
 
         result = client.submit_episode(request)
@@ -1285,7 +1401,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
                 sampling_params={},
                 prompt_ids=[10],
                 raw_prompt=f"question-{index}",
-                sample_kwargs={"extra_info": {"batch_id": "retry-stream", "sample_index": index}},
+                sample_kwargs={"extra_info": {"env_type": "qa", "batch_id": "retry-stream", "sample_index": index}},
             )
             for index in range(3)
         ]
@@ -1313,6 +1429,61 @@ class UEnvAgentLoopTest(unittest.TestCase):
         ):
             with self.subTest(data_source=data_source):
                 self.assertEqual(loop._env_type({"data_source": data_source}), "qa")
+
+    def test_explicit_env_type_routes_custom_plugin_without_hardcoded_mapping(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10, 11],
+            raw_prompt=[{"role": "user", "content": "Choose a safe action"}],
+            sample_kwargs={
+                "env_type": "ignored-top-level",
+                "data_source": "organization/private-benchmark",
+                "extra_info": {
+                    "env_type": "robotics-sim",
+                    "batch_id": "batch-custom",
+                    "env_config": {
+                        "arena": "warehouse-a",
+                        "difficulty": 3,
+                        "nested": {"preserve": True},
+                    },
+                    "reward_config": {
+                        "type": "plugin",
+                        "weights": {"safety": 2.0, "speed": 0.5},
+                    },
+                },
+            },
+        )
+
+        payload = json.loads(request.payload.decode("utf-8"))
+        self.assertEqual(request.env_type, "robotics-sim")
+        self.assertEqual(payload["env_config"]["arena"], "warehouse-a")
+        self.assertEqual(payload["env_config"]["difficulty"], 3)
+        self.assertEqual(payload["env_config"]["nested"], {"preserve": True})
+        self.assertEqual(
+            payload["reward_config"],
+            {"type": "plugin", "weights": {"safety": 2.0, "speed": 0.5}},
+        )
+
+    def test_explicit_env_type_rejects_empty_value(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+        with self.assertRaisesRegex(ValueError, "env_type must not be empty"):
+            loop._env_type({"extra_info": {"env_type": "  "}})
+
+    def test_unknown_task_never_falls_back_to_qa(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+        )
+        with self.assertRaisesRegex(ValueError, "declare env_type explicitly"):
+            loop._env_type({"data_source": "organization/private-benchmark"})
 
     def test_build_episode_request_writes_explicit_dataset_for_pubmedqa(self) -> None:
         loop = UEnvAgentLoop(

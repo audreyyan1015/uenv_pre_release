@@ -395,6 +395,11 @@ fn sample_to_worker_payload(sample: &SampleEnvelope, env_cfg: &Value, metadata: 
         "request_id": sample.request_id,
         "question": question,
         "dataset": dataset,
+        // Keep the complete structured environment configuration. Worker
+        // exposes this object unchanged in `_uenv.payload.env_config` and
+        // flattens missing keys into the legacy sidecar view. The explicit
+        // nesting avoids collisions with protocol-owned top-level fields.
+        "env_config": env_cfg,
         "metadata": metadata,
     });
     if let Some(obj) = worker_payload.as_object_mut() {
@@ -814,7 +819,7 @@ mod tests {
             batch_id: "batch-1".to_string(),
             sample_index,
             framework: "verl".to_string(),
-            env_type: "math".to_string(),
+            env_type: "qa".to_string(),
             parallel_mode: String::new(),
             env_config_json: json_bytes(&env_cfg),
             episode_config_json: json_bytes(&episode_cfg),
@@ -972,7 +977,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_batch_maps_verl_math_payload_to_worker_contract() {
+    async fn execute_batch_maps_verl_qa_payload_to_worker_contract() {
         let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
         let core = AdapterCore::new(RecordingEpisodeService {
             requests: Arc::clone(&recorded),
@@ -1008,6 +1013,8 @@ mod tests {
 
         assert_eq!(worker_payload["question"], "How many clips?");
         assert_eq!(worker_payload["dataset"], "openai/gsm8k");
+        assert_eq!(worker_payload["env_config"]["data_source"], "openai/gsm8k");
+        assert_eq!(worker_payload["env_config"]["raw_prompt"], "user: ignored");
         let model_endpoint_config = episode_requests[0]
             .model_endpoint_config
             .as_ref()
@@ -1026,6 +1033,71 @@ mod tests {
         assert_eq!(worker_payload["generation_config"]["max_new_tokens"], 8);
         assert_eq!(worker_reward["type"], "rule_reward");
         assert_eq!(worker_reward["target"], "72");
+    }
+
+    #[test]
+    fn worker_payload_preserves_complete_custom_env_config() {
+        let env_cfg = json!({
+            "question": "Choose an action",
+            "dataset": "robotics-v1",
+            "arena": {
+                "name": "warehouse-a",
+                "obstacles": [
+                    {"x": 1, "y": 2},
+                    {"x": 3, "y": 4}
+                ]
+            },
+            "allowed_actions": ["move-left", "move-right"],
+            "domain_options": {
+                "safety": {"enabled": true, "thresholds": [0.1, 0.5, 0.9]}
+            }
+        });
+        let sample = SampleEnvelope {
+            request_id: "custom-1".to_string(),
+            env_type: "robotics-sim".to_string(),
+            ..Default::default()
+        };
+
+        let worker_payload = sample_to_worker_payload(&sample, &env_cfg, &Value::Null);
+
+        assert_eq!(worker_payload["question"], "Choose an action");
+        assert_eq!(worker_payload["dataset"], "robotics-v1");
+        assert_eq!(worker_payload["env_config"], env_cfg);
+        assert_eq!(worker_payload["env_config"]["arena"]["obstacles"][1]["y"], 4);
+        assert_eq!(
+            worker_payload["env_config"]["domain_options"]["safety"]["thresholds"],
+            json!([0.1, 0.5, 0.9])
+        );
+    }
+
+    #[test]
+    fn worker_payload_keeps_code_legacy_fields_and_full_env_config() {
+        let env_cfg = json!({
+            "question": "Implement add(a, b)",
+            "dataset": "dscodebench",
+            "task_id": "code-17",
+            "test_code": "assert add(2, 3) == 5",
+            "entry_point": "add",
+            "timeout_secs": 30,
+            "sandbox_options": {
+                "network": false,
+                "mounts": ["fixtures", "output"]
+            }
+        });
+        let sample = SampleEnvelope {
+            request_id: "code-1".to_string(),
+            env_type: "code".to_string(),
+            ..Default::default()
+        };
+
+        let worker_payload = sample_to_worker_payload(&sample, &env_cfg, &Value::Null);
+
+        assert_eq!(worker_payload["question"], "Implement add(a, b)");
+        assert_eq!(worker_payload["task_id"], "code-17");
+        assert_eq!(worker_payload["test_code"], "assert add(2, 3) == 5");
+        assert_eq!(worker_payload["entry_point"], "add");
+        assert_eq!(worker_payload["timeout_secs"], 30);
+        assert_eq!(worker_payload["env_config"], env_cfg);
     }
 
     #[tokio::test]

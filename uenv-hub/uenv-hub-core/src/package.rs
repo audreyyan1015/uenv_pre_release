@@ -36,7 +36,10 @@ pub fn stage_file_streaming(src: &Path, dst: &Path) -> Result<(String, u64)> {
         std::fs::create_dir_all(parent)
             .map_err(|e| HubError::Internal(format!("create artifact dir {}: {e}", parent.display())))?;
     }
-    let mut output = std::fs::File::create(dst)
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
         .map_err(|e| HubError::Internal(format!("create artifact {}: {e}", dst.display())))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; STREAM_CHUNK];
@@ -118,6 +121,140 @@ fn artifact_bytes(a: &dto::InlineArtifact) -> Result<Vec<u8>> {
     }
 }
 
+fn normalized_target_rel_path(path: &str) -> Result<PathBuf> {
+    use std::path::Component;
+    let path = Path::new(path);
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(HubError::InvalidManifest(format!(
+            "artifact target_rel_path must be non-empty and relative: {}",
+            path.display()
+        )));
+    }
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => clean.push(value),
+            Component::CurDir => {}
+            _ => {
+                return Err(HubError::InvalidManifest(format!(
+                    "artifact target_rel_path may not escape its package: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if clean.as_os_str().is_empty() {
+        return Err(HubError::InvalidManifest(format!(
+            "artifact target_rel_path resolves to an empty path: {}",
+            path.display()
+        )));
+    }
+    if clean == Path::new("manifest.json") || clean == Path::new(".synced") {
+        return Err(HubError::InvalidManifest(format!(
+            "artifact target_rel_path is reserved: {}",
+            path.display()
+        )));
+    }
+    Ok(clean)
+}
+
+fn validate_target_rel_path(path: &str) -> Result<()> {
+    normalized_target_rel_path(path).map(|_| ())
+}
+
+fn validate_artifact_identity(name: &str, kind: &str, sync_mode: &str) -> Result<()> {
+    if name.trim().is_empty()
+        || name == "."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.chars().any(|ch| matches!(ch, '?' | '#' | '%'))
+        || name.chars().any(char::is_control)
+    {
+        return Err(HubError::InvalidManifest(format!(
+            "artifact name '{name}' must be non-empty and must not be a path, contain '..', URL delimiters, or control characters"
+        )));
+    }
+    if kind.trim().is_empty() || kind.chars().any(char::is_control) {
+        return Err(HubError::InvalidManifest(format!(
+            "artifact '{name}' kind must be non-empty and contain no control characters"
+        )));
+    }
+    if sync_mode.trim().is_empty() || sync_mode.chars().any(char::is_control) {
+        return Err(HubError::InvalidManifest(format!(
+            "artifact '{name}' sync_mode must be non-empty and contain no control characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate everything derivable from a publish request before creating the
+/// version directory. A malformed request must not leave artifact bytes that
+/// make a corrected retry of the same immutable version impossible.
+fn validate_publish_artifacts(req: &dto::PublishPackageRequest) -> Result<()> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut targets: Vec<(PathBuf, &str)> = Vec::new();
+
+    for artifact in &req.artifacts {
+        validate_artifact_identity(&artifact.name, &artifact.kind, &artifact.sync_mode)?;
+        if !names.insert(artifact.name.as_str()) {
+            return Err(HubError::InvalidManifest(format!(
+                "duplicate artifact name '{}'",
+                artifact.name
+            )));
+        }
+        // Decode now, before any artifact is written. This catches mutually
+        // exclusive/missing content and malformed base64 without poisoning the
+        // final version directory.
+        artifact_bytes(artifact)?;
+        let target = artifact
+            .target_rel_path
+            .clone()
+            .unwrap_or_else(|| artifact.name.clone());
+        targets.push((normalized_target_rel_path(&target)?, artifact.name.as_str()));
+    }
+
+    for artifact in &req.file_artifacts {
+        validate_artifact_identity(&artifact.name, &artifact.kind, &artifact.sync_mode)?;
+        if !names.insert(artifact.name.as_str()) {
+            return Err(HubError::InvalidManifest(format!(
+                "duplicate artifact name '{}'",
+                artifact.name
+            )));
+        }
+        let source = Path::new(&artifact.local_path);
+        if !source.is_file() {
+            return Err(HubError::InvalidManifest(format!(
+                "file artifact '{}' source is not a regular file: {}",
+                artifact.name,
+                source.display()
+            )));
+        }
+        let target = default_target_rel_path(
+            &artifact.name,
+            &artifact.kind,
+            artifact.target_rel_path.as_deref(),
+        );
+        targets.push((normalized_target_rel_path(&target)?, artifact.name.as_str()));
+    }
+
+    for (index, (left_path, left_name)) in targets.iter().enumerate() {
+        for (right_path, right_name) in targets.iter().skip(index + 1) {
+            if right_path == left_path
+                || right_path.starts_with(left_path)
+                || left_path.starts_with(right_path)
+            {
+                return Err(HubError::InvalidManifest(format!(
+                    "artifact targets conflict: '{left_name}' -> {} and '{right_name}' -> {}",
+                    left_path.display(),
+                    right_path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Persist inline artifacts to `<root>/<package_id>/<version>/<name>`, compute
 /// digests, and return the (DB rows, manifest refs) pair.
 fn stage_artifacts(
@@ -133,21 +270,22 @@ fn stage_artifacts(
     let mut rows = Vec::with_capacity(artifacts.len());
     let mut refs = Vec::with_capacity(artifacts.len());
     for a in artifacts {
-        if a.name.contains('/') || a.name.contains("..") {
-            return Err(HubError::InvalidManifest(format!(
-                "artifact name '{}' must not contain '/' or '..'",
-                a.name
-            )));
-        }
+        validate_artifact_identity(&a.name, &a.kind, &a.sync_mode)?;
         let bytes = artifact_bytes(a)?;
         let digest = sha256_hex(&bytes);
         let size = bytes.len() as i64;
-        std::fs::write(dir.join(&a.name), &bytes)
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(&a.name))
+            .map_err(|e| HubError::Internal(format!("create artifact '{}': {e}", a.name)))?;
+        file.write_all(&bytes)
             .map_err(|e| HubError::Internal(format!("write artifact '{}': {e}", a.name)))?;
 
         let rel_path = format!("{package_id}/{version}/{}", a.name);
         let url = artifact_url(package_id, version, &a.name);
         let target_rel_path = a.target_rel_path.clone().unwrap_or_else(|| a.name.clone());
+        validate_target_rel_path(&target_rel_path)?;
 
         rows.push(NewPackageArtifact {
             name: a.name.clone(),
@@ -203,12 +341,7 @@ fn stage_file_artifacts(
     let mut rows = Vec::with_capacity(artifacts.len());
     let mut refs = Vec::with_capacity(artifacts.len());
     for a in artifacts {
-        if a.name.contains('/') || a.name.contains("..") {
-            return Err(HubError::InvalidManifest(format!(
-                "file artifact name '{}' must not contain '/' or '..'",
-                a.name
-            )));
-        }
+        validate_artifact_identity(&a.name, &a.kind, &a.sync_mode)?;
         let src = Path::new(&a.local_path);
         let (digest, size) = stage_file_streaming(src, &dir.join(&a.name))?;
 
@@ -216,6 +349,7 @@ fn stage_file_artifacts(
         let url = artifact_url(package_id, version, &a.name);
         let target_rel_path =
             default_target_rel_path(&a.name, &a.kind, a.target_rel_path.as_deref());
+        validate_target_rel_path(&target_rel_path)?;
         let media_type = a
             .media_type
             .clone()
@@ -268,6 +402,20 @@ pub async fn publish_inline_package(
         ));
     }
 
+    // Artifact bytes live outside SQLite. Refuse a known duplicate before any
+    // filesystem write, and use create-new staging below as the race-safe
+    // backstop so a concurrent duplicate cannot mutate an immutable version.
+    match store.get_package_manifest(package_id, &req.version).await {
+        Ok(_) => {
+            return Err(HubError::already_exists(
+                "package version",
+                format!("{package_id}@{}", req.version),
+            ));
+        }
+        Err(HubError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
+    }
+
     // Validate the OpenEnv-style interface schemas (reuses the same validator as
     // the classic env registry / `uenv env validate`, so publish and CLI agree).
     {
@@ -285,6 +433,10 @@ pub async fn publish_inline_package(
             )));
         }
     }
+
+    // All request-only artifact validation must happen before either staging
+    // function creates `<artifact_root>/<package>/<version>`.
+    validate_publish_artifacts(&req)?;
 
     let (mut rows, mut refs) =
         stage_artifacts(artifact_root, package_id, &req.version, &req.artifacts)?;
@@ -452,6 +604,115 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn package_artifact_target_must_stay_below_package_root() {
+        assert!(validate_target_rel_path("plugin/bin/run").is_ok());
+        assert!(validate_target_rel_path(".").is_err());
+        assert!(validate_target_rel_path("./").is_err());
+        assert!(validate_target_rel_path("../escape").is_err());
+        assert!(validate_target_rel_path("/etc/passwd").is_err());
+        assert!(validate_target_rel_path("manifest.json").is_err());
+        assert!(validate_target_rel_path("./manifest.json").is_err());
+        assert!(validate_target_rel_path(".synced").is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_artifact_request_leaves_no_version_dir_and_corrected_retry_succeeds() {
+        use crate::db::{connect, DbConfig};
+
+        let tmp = std::env::temp_dir().join(format!(
+            "uenv-pkg-preflight-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let store = SqliteStore::new(
+            connect(&DbConfig {
+                url: "sqlite::memory:".into(),
+                max_connections: 1,
+                create_if_missing: true,
+            })
+            .await
+            .unwrap(),
+        );
+        let artifact_root = tmp.join("artifacts");
+        let mut req = dto::PublishPackageRequest {
+            version: "1.2.3".into(),
+            publisher: None,
+            description: None,
+            changelog: None,
+            platform: dto::PackagePlatform {
+                uenv_worker_min: "0.1.0".into(),
+                uenv_server_min: None,
+                features: vec![],
+                consumers: vec![],
+            },
+            worker_overlay: serde_json::Value::Null,
+            agent_defaults: serde_json::Value::Null,
+            contracts: dto::PackageContracts::default(),
+            interface: dto::InterfaceSchema::default(),
+            artifacts: vec![
+                dto::InlineArtifact {
+                    name: "first".into(),
+                    kind: "plugin_asset".into(),
+                    sync_mode: "inline".into(),
+                    media_type: None,
+                    target_rel_path: Some("plugin/first".into()),
+                    content: Some("first bytes".into()),
+                    content_b64: None,
+                },
+                dto::InlineArtifact {
+                    name: "second".into(),
+                    kind: "plugin_asset".into(),
+                    sync_mode: "inline".into(),
+                    media_type: None,
+                    target_rel_path: Some("../escape".into()),
+                    content: Some("second bytes".into()),
+                    content_b64: None,
+                },
+            ],
+            file_artifacts: vec![],
+        };
+
+        req.artifacts[0].kind.clear();
+        assert!(publish_inline_package(&store, &artifact_root, "demo", req.clone(), None)
+            .await
+            .is_err());
+        assert!(!version_dir(&artifact_root, "demo", "1.2.3").exists());
+        req.artifacts[0].kind = "plugin_asset".into();
+
+        assert!(publish_inline_package(&store, &artifact_root, "demo", req.clone(), None)
+            .await
+            .is_err());
+        assert!(!version_dir(&artifact_root, "demo", "1.2.3").exists());
+
+        req.artifacts[1].target_rel_path = Some("plugin/second".into());
+        let source = tmp.join("source.bin");
+        std::fs::write(&source, b"file bytes").unwrap();
+        req.file_artifacts.push(dto::FileArtifact {
+            name: "first".into(),
+            kind: "plugin_asset".into(),
+            sync_mode: "inline".into(),
+            media_type: None,
+            target_rel_path: Some("plugin/from-file".into()),
+            local_path: source.to_string_lossy().into_owned(),
+        });
+        assert!(publish_inline_package(&store, &artifact_root, "demo", req.clone(), None)
+            .await
+            .is_err());
+        assert!(!version_dir(&artifact_root, "demo", "1.2.3").exists());
+
+        req.file_artifacts.clear();
+        let manifest = publish_inline_package(&store, &artifact_root, "demo", req, None)
+            .await
+            .expect("a corrected request for the same version remains publishable");
+        assert_eq!(manifest.artifacts.len(), 2);
+        assert!(version_dir(&artifact_root, "demo", "1.2.3").join("first").is_file());
+        assert!(version_dir(&artifact_root, "demo", "1.2.3").join("second").is_file());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[tokio::test]
     async fn publish_with_file_artifact_streams_and_records_digest() {
         use crate::db::{connect, DbConfig};
@@ -495,6 +756,7 @@ mod tests {
                 local_path: tar.to_string_lossy().into_owned(),
             }],
         };
+        let duplicate = req.clone();
         let manifest =
             publish_inline_package(&store, &tmp.join("artifacts"), "img-pkg", req, None)
                 .await
@@ -511,6 +773,20 @@ mod tests {
 
         // Bytes were streamed into the content-addressed store and verify clean.
         let rel = "img-pkg/0.1.0/django.tar";
+        verify_artifact_file(&tmp.join("artifacts"), rel, &a.digest).unwrap();
+
+        // Package versions are immutable outside SQLite too: a duplicate
+        // publish must not overwrite bytes before the DB rejects its version.
+        std::fs::write(&tar, b"different bytes").unwrap();
+        assert!(publish_inline_package(
+            &store,
+            &tmp.join("artifacts"),
+            "img-pkg",
+            duplicate,
+            None,
+        )
+        .await
+        .is_err());
         verify_artifact_file(&tmp.join("artifacts"), rel, &a.digest).unwrap();
 
         let _ = std::fs::remove_dir_all(&tmp);

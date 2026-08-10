@@ -26,7 +26,7 @@
 | 7142 DeepSeek vLLM 拉起 | ✅ `vllm-dsv3-awq` + gateway `:18888` ready |
 | 真实 LLM Agent 正式轨迹 | ✅ `…00045` variant=smith seal+server_verified（resolved=false） |
 | 7142 训练可读 smoke | ✅ `schema_ok=true`（chat_sft.jsonl） |
-| Hub 注册 | ✅ `swe-bench-smith@0.1.0` EnvPackage + `swe-bench-smith-openhands@1.0.0` Episode Stack |
+| Hub 注册 | ⏳ 按规划后续交接 |
 
 ---
 

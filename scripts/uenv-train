@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stable public entry for UEnv's VeRL integration. The implementation lives in
+# libexec so examples/ can remain a collection of editable input data only.
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED="$(readlink -f -- "$SELF" 2>/dev/null || true)"
+  [[ -n "$RESOLVED" ]] && SELF="$RESOLVED"
+fi
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+RELEASE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENTRY="${UENV_TRAIN_ENTRY:-$RELEASE_ROOT/libexec/uenv/training/train_verl.sh}"
+
+if [[ ! -f "$ENTRY" ]]; then
+  echo "错误：找不到 UEnv 训练实现：$ENTRY" >&2
+  exit 1
+fi
+
+exec bash "$ENTRY" "$@"

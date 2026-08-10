@@ -6,15 +6,16 @@ use uenv_worker::plugin::host::PluginHost;
 use uenv_worker::plugin::instance::PluginInstanceState;
 
 #[tokio::test]
-async fn m4_plugin_host_reset_step_close() {
+async fn m4_plugin_host_qa_reset_step_close() {
     let plugin_bin = std::env::var("CARGO_BIN_EXE_uenv-math-plugin")
         .expect("missing CARGO_BIN_EXE_uenv-math-plugin");
     unsafe {
+        std::env::set_var("UENV_QA_PLUGIN_BIN", &plugin_bin);
         std::env::set_var("UENV_MATH_PLUGIN_BIN", plugin_bin);
     }
 
     let host = PluginHost::load_from_dir("../plugins").expect("load host");
-    let instance = host.spawn("math").await.expect("spawn plugin");
+    let instance = host.spawn("qa").await.expect("spawn qa plugin");
     let obs = host
         .reset(&instance.instance_id, None, None)
         .await

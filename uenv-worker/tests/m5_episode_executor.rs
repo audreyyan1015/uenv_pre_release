@@ -12,10 +12,11 @@ use uenv_worker::pool::warmup_pool::{WarmupPool, WarmupPoolConfig};
 use uenv_worker::proto::v1::{EpisodeRequest, EpisodeResult, ModelEndpoint};
 
 #[tokio::test]
-async fn m5_single_round_math_matches_expected_reward_and_status() {
+async fn m5_single_round_qa_matches_expected_reward_and_status() {
     let plugin_bin = std::env::var("CARGO_BIN_EXE_uenv-math-plugin")
         .expect("missing CARGO_BIN_EXE_uenv-math-plugin");
     unsafe {
+        std::env::set_var("UENV_QA_PLUGIN_BIN", &plugin_bin);
         std::env::set_var("UENV_MATH_PLUGIN_BIN", plugin_bin);
     }
 
@@ -28,9 +29,10 @@ async fn m5_single_round_math_matches_expected_reward_and_status() {
 
     let req_bytes = fs::read(fixture_path).expect("read request fixture");
     let mut request = EpisodeRequest::decode(req_bytes.as_slice()).expect("decode request fixture");
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind mock llm");
+    // `qa` is the public environment identity. The same scoring binary still
+    // accepts `math` as a compatibility alias for existing deployments.
+    request.env_type = "qa".to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock llm");
     let addr = listener.local_addr().expect("mock llm addr");
     request.model_endpoint_config = Some(ModelEndpoint {
         endpoint_type: "http".to_string(),
@@ -72,7 +74,7 @@ async fn m5_single_round_math_matches_expected_reward_and_status() {
             max_episode_count: 1000,
         },
     );
-    pool.prewarm(&["math".to_string()])
+    pool.prewarm(&["qa".to_string()])
         .await
         .expect("prewarm pool");
     let executor = EpisodeExecutor::new(host, pool, uenv_worker::llm::LlmConfig::default());

@@ -21,6 +21,8 @@ require_token = true
 # If set AND no tokens exist yet, an admin token with this exact value is
 # created on first startup. Remove / rotate it after bootstrapping.
 # bootstrap_admin_token = "uenvh_change_me"
+# Recommended for production (mode 0600); mutually exclusive with the inline value:
+# bootstrap_admin_token_file = "/etc/uenv/secrets/hub-admin.token"
 
 [rate_limit]
 enabled = true
@@ -32,11 +34,14 @@ burst = 100
 allow_origins = ["*"]
 
 [packages]
-# EnvPackage artifact store: content-addressed small artifacts (catalog.json,
-# images.manifest.json, ...) are written and served from here. Image *bytes* are
-# referenced by digest (registry/tarball), never stored here.
+# EnvPackage artifact store: inline metadata and large files imported from the
+# controlled staging root are written and served from here, recorded by digest.
 artifact_dir = "data/artifacts"
+# Remote Publisher `file_artifacts` may only read files staged below this root.
+# Copy large tarballs here on the Hub host before `uenv env publish-image`.
+import_dir = "data/import"
 # Directory the startup seed reads `<variant>.json` catalogs from to publish the
 # example swe-bench-verified / swe-bench-pro packages (idempotent, tolerant).
 catalog_seed_dir = "config/swe"
-seed_examples = true
+# Optional sample packages are task-specific; keep a fresh Hub generic.
+seed_examples = false

@@ -18,8 +18,10 @@ use crate::proto::scheduler::v1::{
     WorkerInfo,
 };
 use crate::result_finalizer::{
-    ResultPersistenceContext, ResultTiming, complete_episode_result, persist_episode_result,
+    ResultPersistenceContext, ResultTiming, complete_episode_result, failed_result_from_request,
+    persist_episode_result,
 };
+use crate::proto::v1::ErrorCode;
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
 use crate::state::ServerState;
 
@@ -123,6 +125,74 @@ pub struct ControlPlaneServiceImpl {
     pub state: Arc<ServerState>,
 }
 
+impl ControlPlaneServiceImpl {
+    /// 新 worker 以同一 advertise endpoint 注册时，旧的同 endpoint 注册记录（通常是
+    /// id=auto 的 worker 重启后遗留的旧 id）不会再有心跳。若不及时处理，旧 id 名下的
+    /// dispatch lease 会一直挂在 pending_results 里：真正执行了任务的新 worker 上报结果
+    /// 会因 WORKER_MISMATCH 被拒，客户端无限等待。这里把旧记录标为 draining，并给旧
+    /// lease 注入 ERR_LEASE_SUPERSEDED 终态，让等待中的 episode 立刻以明确错误结束。
+    async fn supersede_same_endpoint_workers(&self, new_worker_id: &str, endpoint: &str) {
+        let stale_ids: Vec<String> = self
+            .state
+            .scheduler
+            .read()
+            .list_workers()
+            .into_iter()
+            .filter(|w| w.endpoint == endpoint && w.worker_id != new_worker_id)
+            .map(|w| w.worker_id)
+            .collect();
+        for stale_id in stale_ids {
+            warn!(
+                stale_worker_id = %stale_id,
+                new_worker_id = %new_worker_id,
+                endpoint = %endpoint,
+                "worker_endpoint_replaced_superseding_leases"
+            );
+            self.state.scheduler.write().unregister_worker(&stale_id);
+            let pending_keys: Vec<(String, u32, String)> = self
+                .state
+                .pending_results
+                .iter()
+                .filter(|entry| entry.value().worker_id == stale_id)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for pending_key in pending_keys {
+                let Some((_, pending)) = self.state.pending_results.remove(&pending_key)
+                else {
+                    continue;
+                };
+                let timing = ResultTiming {
+                    enqueue_at: pending.enqueue_at,
+                    dispatch_at: Some(pending.dispatch_at),
+                    dispatch_ts: Some(pending.dispatch_ts),
+                };
+                let mut result = failed_result_from_request(
+                    &pending.ctx.request,
+                    "failed",
+                    format!(
+                        "dispatch lease superseded: worker {stale_id} was replaced \
+                         by a new registration at the same endpoint"
+                    ),
+                    ErrorCode::ErrLeaseSuperseded,
+                    Some(timing),
+                );
+                result.metadata.insert(
+                    "terminal_kind".to_string(),
+                    "lease_superseded".to_string(),
+                );
+                // episode 等待任务收到结果后会走统一 publish/persist；这里先写内存
+                // outcome，让旧 lease 的迟到上报在持久化提交前也能得到稳定的终态答复。
+                self.state.remember_result_outcome(
+                    pending_key,
+                    "ERR_LEASE_SUPERSEDED",
+                    "dispatch lease superseded by a new registration at the same endpoint",
+                );
+                let _ = pending.tx.send(result);
+            }
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl ControlPlaneService for ControlPlaneServiceImpl {
     /// 注册 worker。
@@ -216,6 +286,8 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 &self.state,
                 crate::obs::worker_registered(&worker_id, self.state.epoch()),
             );
+            self.supersede_same_endpoint_workers(&worker_id, &req.endpoint)
+                .await;
         }
 
         Ok(Response::new(RegisterWorkerResponse {
@@ -609,7 +681,9 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                 "report_result_pending_absent_rejected"
             );
             remember(false, &code, &message);
-            return Ok(response(false, false, &code, &message));
+            // 这些 code 全部是确定终态（已完成、已取消、lease 被取代或未知），
+            // 继续重试不会改变结果，标记 duplicate=true 让 worker 丢弃 WAL 记录。
+            return Ok(response(false, true, &code, &message));
         };
 
         let timing = ResultTiming {
@@ -815,8 +889,76 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!second_key.ack);
-        assert!(!second_key.duplicate);
+        // ALREADY_COMPLETED 是确定终态，duplicate=true 让 worker 丢弃记录而不是无限重试。
+        assert!(second_key.duplicate);
         assert_eq!(second_key.code, "ALREADY_COMPLETED");
+    }
+
+    #[tokio::test]
+    async fn same_endpoint_reregistration_supersedes_stale_leases() {
+        let state = crate::create_default_state();
+        let svc = ControlPlaneServiceImpl {
+            state: Arc::clone(&state),
+        };
+
+        // 旧 worker（w1）注册，并持有一个等待结果的 dispatch lease。
+        let mut old_reg = register_req(4);
+        old_reg.endpoint = "10.0.0.21:50054".to_string();
+        old_reg.load = 1;
+        let accepted = svc
+            .register_worker(Request::new(old_reg))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(accepted.accepted);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.pending_results.insert(
+            ("ep1".to_string(), 1, "lease-1".to_string()),
+            pending_result(tx),
+        );
+
+        // 同一 endpoint 的新 worker（重启后 id=auto 换新 id）注册。
+        let mut new_reg = register_req(4);
+        new_reg.worker_id = "w2".to_string();
+        new_reg.endpoint = "10.0.0.21:50054".to_string();
+        let accepted = svc
+            .register_worker(Request::new(new_reg))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(accepted.accepted);
+
+        // 旧 lease 立即收到 ERR_LEASE_SUPERSEDED 终态，而不是无限挂起。
+        let result = rx.await.expect("superseded result delivered");
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.error_code,
+            Some(ErrorCode::ErrLeaseSuperseded as i32)
+        );
+        assert!(state.pending_results.is_empty());
+
+        // 旧 worker 记录被标为 draining。
+        let snapshot = svc
+            .state
+            .scheduler
+            .read()
+            .list_workers()
+            .into_iter()
+            .find(|w| w.worker_id == "w1")
+            .expect("old worker still tracked");
+        assert!(snapshot.draining);
+
+        // 新 worker 为旧 lease 的迟到上报得到稳定终态答复（可丢弃，不再无限重试）。
+        let mut late = report_req("key-late");
+        late.worker_id = "w2".to_string();
+        let response = svc
+            .report_result(Request::new(late))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.ack);
+        assert!(response.duplicate);
+        assert_eq!(response.code, "ERR_LEASE_SUPERSEDED");
     }
 
     #[tokio::test]

@@ -65,7 +65,9 @@ export UENV_SWE_INSTANCES="${UENV_SWE_INSTANCES:-/root/UEnv/config/swe/pro.json}
 export UENV_SWE_RUNTIME=docker
 # 本机已预拉 / docker load 的镜像走 local；缺图时再由运维拉，不在重启脚本里强制公网 pull
 export UENV_SWE_IMAGE_PULL_POLICY="${UENV_SWE_IMAGE_PULL_POLICY:-local_only}"
-if [[ -x /tmp/uenv-swesmith-official-check/venv/bin/python && -d /tmp/uenv-swesmith-official-check/SWE-smith ]]; then
+if [[ -x /tmp/uenv-swesmith-official-check/venv/bin/python &&
+      -d /tmp/uenv-swesmith-official-check/SWE-smith &&
+      -f /root/UEnv/scripts/eval_swesmith_official_reward.py ]]; then
   export UENV_SWESMITH_REPO="${UENV_SWESMITH_REPO:-/tmp/uenv-swesmith-official-check/SWE-smith}"
   export UENV_SWE_SMITH_EVAL_CMD="${UENV_SWE_SMITH_EVAL_CMD:-/tmp/uenv-swesmith-official-check/venv/bin/python /root/UEnv/scripts/eval_swesmith_official_reward.py}"
 fi

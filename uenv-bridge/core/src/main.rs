@@ -28,6 +28,20 @@ const DEFAULT_GRPC_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config_path =
+        std::env::var("UENV_CONFIG_PATH").unwrap_or_else(|_| "config/server.yaml".to_string());
+    if std::env::args().any(|arg| arg == "--validate-config" || arg == "validate-config") {
+        let config = uenv_server::ServerConfig::load(&config_path)?;
+        println!(
+            "server config is valid (admin={}:{})",
+            config.admin_http_bind, config.admin_http_port
+        );
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--version" || arg == "version") {
+        println!("uenv-adapter-core {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let addr: SocketAddr = std::env::var("UENV_ADDR")
         .unwrap_or_else(|_| "[::]:50051".to_string())
         .parse()?;
@@ -71,8 +85,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let config_path =
-        std::env::var("UENV_CONFIG_PATH").unwrap_or_else(|_| "config/server.yaml".to_string());
     let config = if std::env::var("UENV_SERVER_CONFIG_STRICT")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)

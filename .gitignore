@@ -20,18 +20,22 @@ secrets/*
 !secrets/README.md
 # scripts 默认忽略，显式保留运维交付脚本；_ 前缀为联调临时脚本，不入库
 /scripts/*
+!/scripts/uenv-train
 /scripts/_*
 /scripts/integrations/
 !/scripts/connect-remote.sh
 !/scripts/gen-worker-proto.sh
 !/scripts/proto-gen.sh
 !/scripts/gen-gsm8k-fixture.sh
+!/scripts/build-release.sh
 !/scripts/gen-math-fixture.sh
 !/scripts/export_swe_instances.py
 !/scripts/export_swe_pro_instances.py
 !/scripts/deploy-pro-python-openhands-7143.sh
 !/scripts/pull-pro-image-7143.sh
 !/scripts/hub-stage-image-package.sh
+!/scripts/publish_swesmith_hub_package.py
+!/scripts/build_swesmith_envpackage.py
 !/scripts/deploy-openhands-20877.sh
 !/scripts/run-openhands-pro-20877.sh
 !/scripts/restart-worker-gateway-28097-7143.sh
@@ -101,7 +105,15 @@ server-state/
 /uenv-bridge/data/benchmarks/swebenchpro/test.jsonl
 /uenv-bridge/data/benchmarks/swebenchpro/swe_bench_pro_full.csv
 
-# Playwright CLI 本地页面快照（非仓库产物）
+# runtime data (production service state)
+/obs-data/
+/server-state/
+/trajectory-data/
+/logs/
+uenv-bridge/build/
+*.egg-info/
+
+# Playwright CLI local page snapshots
 .playwright-cli/
 
 # 本地联调截图/导出产物（非仓库产物）

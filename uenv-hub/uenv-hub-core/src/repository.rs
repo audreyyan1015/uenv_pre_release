@@ -1067,12 +1067,64 @@ impl SqliteStore {
         .bind(offset as i64)
         .fetch_all(&self.pool)
         .await?;
+        let mut items: Vec<dto::PackageSummary> =
+            rows.iter().map(convert::package_summary).collect();
+        for (item, row) in items.iter_mut().zip(rows.iter()) {
+            self.annotate_package_kind(item, row).await?;
+        }
         Ok(dto::Page {
-            items: rows.iter().map(convert::package_summary).collect(),
+            items,
             page,
             per_page,
             total: total.0 as u64,
         })
+    }
+
+    /// Fill in the derived role fields of a package summary from its latest
+    /// manifest.
+    ///
+    /// A package whose latest version is missing or yanked keeps the default
+    /// `other` kind rather than borrowing the classification of an older version:
+    /// the summary describes what the registry currently serves.
+    async fn annotate_package_kind(
+        &self,
+        item: &mut dto::PackageSummary,
+        row: &EnvPackageRow,
+    ) -> Result<()> {
+        let Some(latest) = row.latest_version.clone() else {
+            return Ok(());
+        };
+        let version = sqlx::query_as::<_, PackageVersionRow>(
+            "SELECT * FROM env_package_versions \
+             WHERE package_db_id = ? AND version = ? AND is_yanked = 0",
+        )
+        .bind(row.id)
+        .bind(&latest)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(version) = version else {
+            return Ok(());
+        };
+        let manifest: dto::EnvPackageManifest = serde_json::from_str(&version.manifest_json)?;
+        item.kind = dto::PackageKind::classify(&manifest);
+        if matches!(
+            item.kind,
+            dto::PackageKind::Benchmark | dto::PackageKind::Fixture
+        ) {
+            item.env_type = dto::PackageKind::benchmark_env_type(&manifest);
+            item.dataset = dto::PackageKind::benchmark_dataset(&manifest);
+            item.instance_count = manifest
+                .worker_overlay
+                .get("instance_count")
+                .or_else(|| {
+                    manifest
+                        .worker_overlay
+                        .get("swe")
+                        .and_then(|s| s.get("instance_count"))
+                })
+                .and_then(serde_json::Value::as_i64);
+        }
+        Ok(())
     }
 
     /// The Agent-bridge catalog: the latest non-yanked version of every package
@@ -1706,7 +1758,33 @@ impl SqliteStore {
             templates: scalar("SELECT COUNT(*) FROM env_templates").await?,
             active_tokens: scalar("SELECT COUNT(*) FROM api_tokens WHERE is_revoked = 0").await?,
             audit_entries: scalar("SELECT COUNT(*) FROM audit_log").await?,
+            packages_by_kind: self.count_packages_by_kind().await?,
+            active_envs: scalar(
+                "SELECT COUNT(*) FROM envs WHERE is_deleted = 0 AND lifecycle != 'deprecated'",
+            )
+            .await?,
         })
+    }
+
+    /// Tally packages by the role their latest manifest implies.
+    ///
+    /// `kind` is derived, not stored, so this parses each package's latest
+    /// manifest. The registry holds packages in the tens, and the overview is not
+    /// a hot path, so a correct count is worth more here than a cached one that
+    /// can disagree with the list endpoint.
+    async fn count_packages_by_kind(&self) -> Result<std::collections::BTreeMap<String, i64>> {
+        let rows = sqlx::query_as::<_, EnvPackageRow>(
+            "SELECT * FROM env_packages WHERE is_deleted = 0",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = std::collections::BTreeMap::new();
+        for row in &rows {
+            let mut summary = convert::package_summary(row);
+            self.annotate_package_kind(&mut summary, row).await?;
+            *out.entry(summary.kind.as_str().to_string()).or_insert(0) += 1;
+        }
+        Ok(out)
     }
 }
 

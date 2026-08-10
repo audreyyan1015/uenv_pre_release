@@ -132,9 +132,7 @@ function buildEnvInstancesFromTree(
       label: nodeLabel(envNode),
       status: envNode.status,
       meta: envNode.meta,
-      episodes: treeEpisodes.sort((left, right) =>
-        right.episodeId.localeCompare(left.episodeId),
-      ),
+      episodes: treeEpisodes.sort((left, right) => right.episodeId.localeCompare(left.episodeId)),
     };
   });
 }
@@ -233,12 +231,14 @@ export function projectWorkerDetail(
     live?.liveEpisodes?.map((item) => item.episodeId) ??
     (Array.isArray(worker?.active_episodes) ? worker.active_episodes : []);
 
-  const activeEpisodes = buildLiveEpisodes(rosterIds, episodesById, liveMeta).sort((left, right) => {
-    const leftElapsed = left.elapsedSecs ?? -1;
-    const rightElapsed = right.elapsedSecs ?? -1;
-    if (leftElapsed !== rightElapsed) return rightElapsed - leftElapsed;
-    return right.lastSourceTs - left.lastSourceTs;
-  });
+  const activeEpisodes = buildLiveEpisodes(rosterIds, episodesById, liveMeta).sort(
+    (left, right) => {
+      const leftElapsed = left.elapsedSecs ?? -1;
+      const rightElapsed = right.elapsedSecs ?? -1;
+      if (leftElapsed !== rightElapsed) return rightElapsed - leftElapsed;
+      return right.lastSourceTs - left.lastSourceTs;
+    },
+  );
 
   const completedEpisodeCount = runEpisodes.filter(
     (episode) => episode.status === "DONE" || episode.status === "CLOSED",

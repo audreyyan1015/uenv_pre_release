@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenHands benchmark runner HTTP API (208.77 :8888, health :8777).
+"""OpenHands benchmark runner and UEnv AgentJob poller.
 
 两种触发模式并存：
   - HTTP 旁路（原有）：POST /v1/runs 手动/调试触发。
@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-API_BIND = os.environ.get("OPENHANDS_RUNNER_API_BIND", "0.0.0.0:8888")
-HEALTH_BIND = os.environ.get("OPENHANDS_RUNNER_HEALTH_BIND", "0.0.0.0:8777")
+API_BIND = os.environ.get("OPENHANDS_RUNNER_API_BIND", "127.0.0.1:8888")
+HEALTH_BIND = os.environ.get("OPENHANDS_RUNNER_HEALTH_BIND", "127.0.0.1:8777")
 RUN_SCRIPT = os.environ.get(
-    "OPENHANDS_RUN_SCRIPT", "/root/UEnv/scripts/run-openhands-pro-20877.sh"
+    "OPENHANDS_RUN_SCRIPT", "/opt/uenv/agent/run-agent-job.sh"
 )
-RUNS_DIR = Path(os.environ.get("OPENHANDS_RUNS_DIR", "/var/log/uenv/openhands-runs"))
+RUNS_DIR = Path(os.environ.get("OPENHANDS_RUNS_DIR", "/var/lib/uenv/agent/runs"))
 COMPLETION_SPOOL_DIR = Path(
     os.environ.get("OPENHANDS_COMPLETION_SPOOL_DIR", str(RUNS_DIR / "completion-spool"))
 )
@@ -42,9 +42,19 @@ AGENT_MAX_CONCURRENT = int(os.environ.get("OPENHANDS_AGENT_MAX_CONCURRENT", "1")
 POLL_INTERVAL_SEC = float(os.environ.get("OPENHANDS_POLL_INTERVAL_SEC", "3"))
 HEARTBEAT_INTERVAL_SEC = float(os.environ.get("OPENHANDS_HEARTBEAT_INTERVAL_SEC", "10"))
 # uenv_runtime 包所在目录（agent_client / agent_job），默认 monorepo 路径。
-BRIDGE_DIR = os.environ.get("UENV_AGENT_BRIDGE_DIR", "/root/UEnv/integrations/openhands")
+BRIDGE_DIR = os.environ.get(
+    "UENV_AGENT_BRIDGE_DIR", "/opt/uenv/current/share/swe/openhands"
+)
 # 路由标签，格式 "k1=v1,k2=v2"（如 "region=bj,gpu=a100"），供 Server 多池标签亲和用。
 AGENT_LABELS = os.environ.get("OPENHANDS_AGENT_LABELS", "")
+
+
+def _require_agent_job_rollout_trace(env: dict[str, str]) -> None:
+    """AgentJob poll results feed training, so a real token trace is mandatory."""
+
+    env["UENV_ROLLOUT_TRACE"] = "required"
+    # Keep the completion-side validation as a second line of defence.
+    env["UENV_REQUIRE_SWE_RESPONSE_TRACE"] = "1"
 
 
 def _parse_labels(raw: str) -> dict[str, str]:
@@ -64,6 +74,11 @@ _stop = threading.Event()
 _active_jobs = 0  # 当前在跑的 AgentJob 数（心跳上报用）
 _active_lock = threading.Lock()
 _registration_lock = threading.Lock()
+_agent_state: dict[str, Any] = {
+    "agent_id": AGENT_ID,
+    "registered": False,
+    "last_error": "poller is starting" if AGENT_POLL_ENABLED else "",
+}
 
 
 def _sync_directory(path: Path) -> None:
@@ -225,8 +240,29 @@ class HealthHandler(BaseHTTPRequestHandler):
         print(f"[runner-health] {self.address_string()} {fmt % args}", flush=True)
 
     def do_GET(self) -> None:  # noqa: N802
-        body = b'{"status":"ok","service":"openhands-runner"}\n'
-        self.send_response(200)
+        if self.path != "/health":
+            self.send_error(404)
+            return
+        with _registration_lock:
+            registered = bool(_agent_state.get("registered"))
+            agent_id = str(_agent_state.get("agent_id") or "")
+            last_error = str(_agent_state.get("last_error") or "")
+        ready = not AGENT_POLL_ENABLED or registered
+        document = {
+            "status": "ok" if ready else "starting",
+            "service": "openhands-runner",
+            "poll_enabled": AGENT_POLL_ENABLED,
+            "registered": registered,
+            "agent_id": agent_id,
+            "agent_pool_id": AGENT_POOL_ID,
+            "server_endpoint": SERVER_ENDPOINT,
+        }
+        if last_error and not ready:
+            document["last_error"] = last_error
+        body = (json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n").encode(
+            "utf-8"
+        )
+        self.send_response(200 if ready else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -475,10 +511,11 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
             )
             job_dict["gateway_url"] = local_gw
         if not job_dict.get("gateway_api_key"):
-            job_dict["gateway_api_key"] = os.environ.get("UENV_GATEWAY_API_KEY", "swe-pro-secret")
+            job_dict["gateway_api_key"] = os.environ.get("UENV_GATEWAY_API_KEY", "")
         job_file.write_text(json.dumps(job_dict, indent=2) + "\n", encoding="utf-8")
 
         env = os.environ.copy()
+        _require_agent_job_rollout_trace(env)
         env["UENV_AGENT_JOB_FILE"] = str(job_file)
         env["MAX_ITERATIONS"] = str(job.max_iterations or 30)
         env["OPENHANDS_OUT_DIR"] = str(out_dir)  # 让脚本把输出写到可预测目录
@@ -515,7 +552,7 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
             (out_dir / "runner_stderr.log").write_text(proc.stderr[-16000:], encoding="utf-8")
             if proc.returncode == 0:
                 status, reward, trajectory_id, rollout_fields = _read_reward(out_dir)
-                require_trace = os.environ.get(
+                require_trace = env.get(
                     "UENV_REQUIRE_SWE_RESPONSE_TRACE", "1"
                 ).strip().lower() not in {"0", "false", "no", "off"}
                 if (
@@ -527,8 +564,7 @@ def _run_agent_job(client: Any, job: Any, agent_id: str) -> None:
                     status = "failed"
                     err = (
                         "llm mode completed without rollout_trace.response_ids; "
-                        "refusing pad-fallback training sample "
-                        "(set UENV_REQUIRE_SWE_RESPONSE_TRACE=0 to bypass)"
+                        "refusing pad-fallback training sample"
                     )
             else:
                 status = "failed"
@@ -599,6 +635,7 @@ def _mark_agent_unregistered(agent_state: dict[str, Any], reason: str) -> None:
     with _registration_lock:
         was_registered = bool(agent_state.get("registered"))
         agent_state["registered"] = False
+        agent_state["last_error"] = reason
     if was_registered:
         print(f"[agent-poll] registration invalidated: {reason}", flush=True)
 
@@ -620,11 +657,14 @@ def _register_agent_once(
             labels=labels,
         )
     except Exception as exc:  # noqa: BLE001
+        with _registration_lock:
+            agent_state["last_error"] = f"register_failed: {exc}"
         print(f"[agent-poll] RegisterAgent failed, retrying: {exc}", flush=True)
         return False
     with _registration_lock:
         agent_state["agent_id"] = agent_id
         agent_state["registered"] = True
+        agent_state["last_error"] = ""
     print(
         f"[agent-poll] registered agent_id={agent_id} pool={AGENT_POOL_ID} "
         f"max_concurrent={AGENT_MAX_CONCURRENT}",
@@ -660,6 +700,7 @@ def _heartbeat_loop(client: Any, agent_state: dict[str, Any], registration_lost_
 def _poll_loop() -> None:
     global _active_jobs
     if not SERVER_ENDPOINT:
+        _mark_agent_unregistered(_agent_state, "UENV_SERVER_ENDPOINT is unset")
         print("[agent-poll] UENV_SERVER_ENDPOINT unset; poll mode disabled", flush=True)
         return
     try:
@@ -668,12 +709,13 @@ def _poll_loop() -> None:
         # ?? catch????? poll ?????? HTTP ???
         client = AgentControlClient(SERVER_ENDPOINT)
     except Exception as exc:  # noqa: BLE001
+        _mark_agent_unregistered(_agent_state, f"agent_client_init_failed: {exc}")
         print(f"[agent-poll] cannot init agent client (poll mode off): {exc}", flush=True)
         return
 
     bridges = [{"package_id": AGENT_BRIDGE_ID, "version": AGENT_BRIDGE_VERSION, "bundle_digest": ""}]
     labels = _parse_labels(AGENT_LABELS)
-    agent_state: dict[str, Any] = {"agent_id": AGENT_ID, "registered": False}
+    agent_state = _agent_state
 
     # ?????????? Server ?????? heartbeat/poll ???? registered
     # ????????? RegisterAgent??? Server ?????????????
