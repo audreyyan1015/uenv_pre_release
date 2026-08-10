@@ -16,6 +16,7 @@ import {
   Code2,
   Cpu,
   Database,
+  ExternalLink,
   GitBranch,
   Hand,
   Layers3,
@@ -167,10 +168,11 @@ function mergeWorkers(state: ChainState | null, fleet: FleetStatusPayload | null
   return Array.from(byId.values());
 }
 
-function moduleHref(kind: "root" | "ops" | "server" | "hub") {
+function moduleHref(kind: "root" | "ops" | "server" | "agents" | "hub") {
   if (kind === "root") return "/";
   if (kind === "ops") return "/ops";
   if (kind === "server") return "/server";
+  if (kind === "agents") return "/server/agents";
   // Hub console assets use absolute paths (/console/app.css, /api/v1/...).
   // Opening via the Vite /hub proxy breaks CSS/JS/API; always open the Hub origin.
   // Override locally with VITE_HUB_CONSOLE_URL=http://127.0.0.1:8088/
@@ -185,6 +187,28 @@ function workerHref(worker: WorkerView | undefined, runId: string | null) {
     status: classifyWorkerStatus(worker),
   });
   return `/server/worker?${new URLSearchParams(search).toString()}`;
+}
+
+function QuickNavLink({
+  href,
+  label,
+  external,
+}: {
+  href: string;
+  label: string;
+  external?: boolean;
+}) {
+  return (
+    <a
+      href={href}
+      target={external ? "_blank" : undefined}
+      rel={external ? "noreferrer" : undefined}
+      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 shadow-sm transition hover:border-blue-300 hover:text-blue-700"
+    >
+      {label}
+      {external && <ExternalLink className="h-3.5 w-3.5" />}
+    </a>
+  );
 }
 
 function flowColor(kind: FlowKind) {
@@ -632,7 +656,13 @@ function buildDiagram({
       sum + (row.pool_summary ?? []).reduce((inner, item) => inner + (Number(item.busy) || 0), 0),
     0,
   );
-  const activeAgents = agents?.agents?.filter((agent) => !agent.stale) ?? [];
+  const openhandsPool = (agents?.pools ?? []).find(
+    (pool) => pool.agent_pool_id === "openhands-default",
+  );
+  const activeAgents =
+    agents?.agents?.filter(
+      (agent) => agent.agent_pool_id === "openhands-default" && !agent.stale,
+    ) ?? [];
   const activeAgentIds = new Set(activeAgents.map((agent) => agent.agent_id).filter(Boolean));
   const agentCount = activeAgents.length;
   const nonStaleAgentLoad = activeAgents.reduce(
@@ -644,7 +674,7 @@ function buildDiagram({
     activeAgentIds.has(job.agent_id ?? ""),
   ).length;
   const runningAgentJobs = Math.max(nonStaleAgentLoad, nonStaleInFlight);
-  const pendingAgentJobs = agents?.pending_jobs ?? 0;
+  const pendingAgentJobs = openhandsPool?.pending_jobs ?? agents?.pending_jobs ?? 0;
 
   const modules: DiagramModule[] = [
     {
@@ -763,7 +793,7 @@ function buildDiagram({
       icon: BrainCircuit,
       tone: "purple",
       status: runningAgentJobs > 0 ? "running" : pendingAgentJobs > 0 ? "pending" : "idle",
-      href: moduleHref("ops"),
+      href: moduleHref("agents"),
       active: runningAgentJobs > 0 || pendingAgentJobs > 0,
       metric: `${pendingAgentJobs} / ${runningAgentJobs}`,
     },
@@ -933,7 +963,7 @@ function buildDiagram({
       icon: Hand,
       tone: "purple",
       status: agentCount > 0 ? "online" : "waiting",
-      href: moduleHref("ops"),
+      href: moduleHref("agents"),
       active: runningAgentJobs > 0,
       metric: `${agentCount} agents`,
     },
@@ -1196,7 +1226,7 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
     reconcileIntervalMs: STATE_POLL_INTERVAL_MS,
   });
   const liveMode = !usingFixture && !usingMockFallback;
-  const telemetry = useSystemTelemetry(liveMode);
+  const telemetry = useSystemTelemetry(true);
   const clientReady = now > 0;
   const nowLabel = clientReady ? formatTime(now) : "同步中";
 
@@ -1286,6 +1316,13 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
             {[error, telemetry.error, telemetry.hub.error].filter(Boolean).join(" · ")}
           </div>
         )}
+        <nav className="mt-3 flex flex-wrap items-center gap-2" aria-label="系统快捷入口">
+          <QuickNavLink href={moduleHref("root")} label="主控制台" />
+          <QuickNavLink href={moduleHref("server")} label="Episode 进度" />
+          <QuickNavLink href={moduleHref("ops")} label="技术观测台" />
+          <QuickNavLink href={moduleHref("agents")} label="Agent 池状态" />
+          <QuickNavLink href={moduleHref("hub")} label="Hub 控制台" external />
+        </nav>
       </header>
 
       <section className="p-4 sm:p-6">
