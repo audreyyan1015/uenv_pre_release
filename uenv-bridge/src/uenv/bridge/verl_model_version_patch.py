@@ -38,27 +38,21 @@ async def _run_server_with_model_version(self: Any, args: Any, parent_run_server
 
 
 def _patch_vllm_http_server_class(vllm_async_server: Any) -> Any:
-    """Use a bridge-owned actor class so Ray serializes the patched behavior.
-
-    Ray may import top-level actor classes by module path in the worker process,
-    which can drop monkey patches made only in the driver. Replacing the module
-    global with a local subclass makes the middleware override part of the actor
-    class that Ray serializes.
-    """
+    """Patch VeRL's vLLM server class without replacing the Ray actor class."""
 
     current_cls = vllm_async_server.vLLMHttpServer
-    if getattr(current_cls, "_uenv_model_version_actor_class", False):
+    if getattr(current_cls, "_uenv_model_version_run_server_patch_applied", False):
         return current_cls
 
     parent_run_server = current_cls.run_server
 
-    class UEnvModelVersionVLLMHttpServer(current_cls):
-        async def run_server(self, args):
-            return await _run_server_with_model_version(self, args, parent_run_server)
+    @wraps(parent_run_server)
+    async def run_server(self, args):
+        return await _run_server_with_model_version(self, args, parent_run_server)
 
-    UEnvModelVersionVLLMHttpServer._uenv_model_version_actor_class = True
-    vllm_async_server.vLLMHttpServer = UEnvModelVersionVLLMHttpServer
-    return UEnvModelVersionVLLMHttpServer
+    current_cls.run_server = run_server
+    current_cls._uenv_model_version_run_server_patch_applied = True
+    return current_cls
 
 
 def _patch_vllm_server_actor_env(vllm_async_server: Any) -> None:

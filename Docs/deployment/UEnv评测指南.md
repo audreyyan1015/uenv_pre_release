@@ -124,6 +124,8 @@ QA JSONL 每行包含一条问题和标准答案：
 
 JSONL 中的 `env_type`、`dataset` 和 `max_steps` 需要与命令行参数一致。使用其他 QA 数据集时，替换 `--dataset`、`--input` 和 `--output`。多轮任务同时调整 `--max-steps`。
 
+快速检查链路时，可在 `run-task` 命令末尾增加 `--limit N`，只执行输入 JSONL 的前 N 行。
+
 ## 4. 执行 Code 评测
 
 Code 评测的执行主机和输出方式与 QA 评测相同。以下命令读取 UEnv 安装包中的 Code 样例：
@@ -422,7 +424,7 @@ sudo uenv evaluate run-swe \
 
 完整流程包含四步。以 SWE-bench Pro 为例：
 
-1. 从 [SWE-bench Pro 官方页面](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro) 获取 JSON 或 JSONL 数据。
+1. 从 [SWE-bench Pro 官方页面](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro) 获取 JSON、JSONL 或 Parquet 数据。
 2. 在存放数据文件、且已安装 `uenv` 命令的主机生成 SWE catalog：
 
    ```bash
@@ -465,7 +467,7 @@ sudo uenv evaluate run-swe \
    --input /path/to/pro-input.jsonl
    ```
 
-每台 UEnv Worker 可以配置一个主 SWE catalog 和一个额外 SWE catalog。需要使用多个自定义 SWE catalog 时，先按 `instance_id` 将它们合并为一个 JSON 文件。
+对于已经发布为 UEnv EnvPackage 或已同步到 UEnv Hub 的 SWE 数据集，优先通过 EnvPackage/Hub 同步 catalog 和镜像清单。上面的 `UENV_SWE_EXTRA_CATALOG` 适合临时挂载一个额外 catalog。需要使用多个临时 catalog 时，先按 `instance_id` 将它们合并为一个 JSON 文件。
 
 ## 8. 读取评测结果
 
