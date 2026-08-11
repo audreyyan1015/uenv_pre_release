@@ -108,7 +108,8 @@ pub fn run_instance(
     session.evaluate()
 }
 
-/// 构造 pytest 测试命令（纯函数）。FAIL_TO_PASS + PASS_TO_PASS 节点 id 单引号转义。
+/// 构造 pytest 测试命令（纯函数）。短列表直接作为参数，长列表由调用方写文件后用
+/// `xargs` 分批传入，避免把所有 node id 塞进 docker exec 的单个 argv。
 pub fn build_test_command(fail_to_pass: &[String], pass_to_pass: &[String]) -> String {
     let ids = fail_to_pass
         .iter()
@@ -119,7 +120,16 @@ pub fn build_test_command(fail_to_pass: &[String], pass_to_pass: &[String]) -> S
     // 不用 `--no-header`（pytest<6.0 不支持，会整体报错使全部用例失败）。
     // `-rA -v`：verbose 逐行输出 `<nodeid> PASSED`，pytest 3.x–8.x 格式稳定，
     // 比仅 `-rA` 摘要（旧版本不打印 PASSED 行）更可靠。
-    format!("{CONDA_ACTIVATE}; cd {TESTBED} && python -m pytest -rA -v -p no:cacheprovider {ids}")
+    if ids.len() <= crate::swe::repo_specs::MAX_INLINE_NODE_IDS_BYTES {
+        format!(
+            "{CONDA_ACTIVATE}; cd {TESTBED} && python -m pytest -rA -v -p no:cacheprovider {ids}"
+        )
+    } else {
+        format!(
+            "{CONDA_ACTIVATE}; cd {TESTBED} && xargs -r -0 -n 100 python -m pytest -rA -v -p no:cacheprovider < {}",
+            crate::swe::repo_specs::PYTEST_NODE_IDS_FILE
+        )
+    }
 }
 
 const PYTEST_STATUSES: [&str; 6] = ["PASSED", "FAILED", "ERROR", "SKIPPED", "XFAIL", "XPASS"];

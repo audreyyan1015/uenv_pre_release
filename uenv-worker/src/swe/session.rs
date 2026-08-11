@@ -511,6 +511,32 @@ impl SweSession {
         }
 
         // M1-2 / M1-4：按 repo@version 规格（或实例显式 test_cmd）构造 runner。
+        // pytest node id 很多时不要把列表放进 docker exec argv；先写入容器文件，
+        // 再由 xargs 在容器内分批启动 pytest。
+        if self.instance.test_cmd.is_none()
+            && self.instance.variant() != crate::swe::variant::BenchmarkVariant::Pro
+            && self
+                .instance
+                .fail_to_pass
+                .iter()
+                .chain(self.instance.pass_to_pass.iter())
+                .map(|id| id.len() + 1)
+                .sum::<usize>()
+                > crate::swe::repo_specs::MAX_INLINE_NODE_IDS_BYTES
+        {
+            let node_ids = self
+                .instance
+                .fail_to_pass
+                .iter()
+                .chain(self.instance.pass_to_pass.iter())
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join("\0");
+            self.write_file(
+                crate::swe::repo_specs::PYTEST_NODE_IDS_FILE,
+                &format!("{node_ids}\0"),
+            )?;
+        }
         let test_cmd = self.instance.resolved_test_command(TESTBED);
         let test_run = self.exec_raw(&test_cmd)?;
         let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
