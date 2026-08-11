@@ -296,7 +296,9 @@ mod tests {
     fn long_node_lists_use_container_file_and_xargs() {
         let ids = vec!["pkg/test.py::test_long_name".repeat(2000)];
         let cmd = DEFAULT_SPEC.build_test_command("source activate", "/testbed", &ids, &[]);
-        assert!(cmd.contains("xargs -r -0 -n 100 timeout --kill-after=30s 600s"));
+        assert!(cmd.contains(format!(
+            "xargs -r -0 -n 100 timeout --kill-after=30s {TEST_BATCH_TIMEOUT_SECS}s"
+        )));
         assert!(cmd.contains(PYTEST_NODE_IDS_FILE));
         assert!(!cmd.contains("test_long_name"));
     }
