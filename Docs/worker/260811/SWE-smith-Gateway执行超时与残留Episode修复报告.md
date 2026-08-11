@@ -98,3 +98,68 @@ Worker 当前 `28097`、`28777`、`28888` 均监听，health 返回正常，Serv
 Rust 的 `spawn_blocking` 超时会停止等待并执行 session cleanup，但无法强制取消已经
 进入阻塞系统调用的线程。因此 `SweSession::exec` 自身也必须使用外部 `timeout`；本次
 修复已同时覆盖该层。后续如需更强的任务取消语义，应将每次评测放入独立可杀进程组。
+
+## 7. 增量更新：终止状态与联调复核（2026-08-11）
+
+针对上一节指出的 `spawn_blocking` 无法强制取消阻塞线程风险，Worker 的
+`SweSession` 增加了显式终止状态：
+
+```text
+terminated: AtomicBool
+```
+
+`terminate()` 现在先设置终止标记，再执行：
+
+```text
+docker rm -f <container>
+```
+
+`evaluate()` 在评测开始、依赖安装、test patch、pre-test、pytest 返回和 reward
+组装等关键阶段调用 `ensure_active()`。超时清理后，即使原阻塞任务稍后从 Docker CLI
+返回，也不能继续将已终止 session 作为有效结果完成。
+
+### 7.1 目标机重新构建与重启
+
+7143 已重新执行：
+
+```text
+cargo build -p uenv-worker --release
+```
+
+release build 成功。新 Worker 进程为 `3785839`，实际环境变量保持为：
+
+```text
+UENV_WORKER_GATEWAY_EXEC_TIMEOUT_SECS=180
+UENV_WORKER_GATEWAY_SUBMIT_TIMEOUT_SECS=1800
+UENV_WORKER_EXEC_TIMEOUT_SECS=1200
+UENV_WORKER_EPISODE_TIMEOUT_SECS=1800
+UENV_WORKER_DISPATCH_HEARTBEAT_SECS=15
+```
+
+### 7.2 联调结果
+
+```text
+28777 health -> ok
+28097 Runtime Gateway -> ok
+28888 -> listening
+```
+
+Server `/status` 复核：
+
+```json
+{
+  "ready": true,
+  "accepting": true,
+  "active_episodes": 0,
+  "pending_results": 0,
+  "worker_count": 1,
+  "load": 0
+}
+```
+
+Worker 已重新注册并持续 heartbeat，主机上未发现残留的 `pytest`、`xargs` 或
+`timeout ... pytest` 进程。
+
+本次增量更新未启动完整 pydicom 长测；已完成目标机 release build、Worker 重启、
+Gateway/health/gRPC 联调、Server 状态复核和残留进程检查。完整超时耗时回归仍应在
+隔离 session 中执行，避免占用生产评测槽位。
