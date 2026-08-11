@@ -42,7 +42,7 @@ pub enum TestRunner {
 /// session writes the ids to this path before running the command.
 pub const PYTEST_NODE_IDS_FILE: &str = "/tmp/uenv-pytest-nodeids";
 pub const MAX_INLINE_NODE_IDS_BYTES: usize = 32 * 1024;
-pub const TEST_BATCH_TIMEOUT_SECS: u32 = 600;
+pub const TEST_BATCH_TIMEOUT_SECS: u32 = 900;
 
 /// 单个 `repo@version`（或 repo 全版本）的执行规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

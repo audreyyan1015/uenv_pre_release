@@ -24,7 +24,7 @@ use crate::wal::WalWriter;
 
 const DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS: u64 = 30;
 /// 覆盖 OlymMATH thinking 长输出（数分钟级）并留回传余量；可用 env / EpisodeRequest.timeout_seconds 覆盖。
-const DEFAULT_EPISODE_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_EPISODE_TIMEOUT_SECS: u64 = 1800;
 const DEFAULT_DISPATCH_HEARTBEAT_SECS: u64 = 15;
 
 fn env_u64(key: &str, default: u64) -> u64 {

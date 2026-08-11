@@ -430,6 +430,13 @@ impl SweInstancePool {
         Ok(removed)
     }
 
+    /// Kill the container before dropping the session Arc (used by timeout cleanup).
+    pub fn terminate(&self, session_id: &str) -> Result<bool, DynErr> {
+        let session = self.get(session_id)?;
+        session.terminate();
+        self.destroy(session_id)
+    }
+
     /// 回收复用（M0-2）：经 `ResettableInstance` 语义把 session 沙箱重置回 base_commit，
     /// **保留容器**供下一 episode 复用（避免重复 provision 的冷启动）。不改变池计数。
     pub fn recycle(&self, session_id: &str) -> Result<(), DynErr> {
@@ -450,7 +457,12 @@ impl SweInstancePool {
         let variant = self
             .store
             .get(instance_id)
-            .ok_or_else(|| format!("swe instance_id `{instance_id}` not in catalog (size={})", self.store.len()))?
+            .ok_or_else(|| {
+                format!(
+                    "swe instance_id `{instance_id}` not in catalog (size={})",
+                    self.store.len()
+                )
+            })?
             .variant();
         let mut ids = Vec::new();
         for _ in 0..n {

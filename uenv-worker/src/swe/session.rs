@@ -19,19 +19,35 @@ use crate::swe::contract_eval::try_external_contract_grade;
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for_spec;
 use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
-use crate::swe::image_cache::{ImageCacheFactory, ImagePullPolicy, resolve_provision_image};
+use crate::swe::image_cache::{resolve_provision_image, ImageCacheFactory, ImagePullPolicy};
 use crate::swe::pro_eval::try_external_pro_grade_from_env;
 use crate::swe::resettable::PodmanResettableInstance;
 use crate::swe::runtime_contract::{PatchMode, RewardAdapterKind};
 use crate::swe::smith_eval::try_external_smith_grade_from_env;
-use crate::swe::spec::{ResetObservation, Workspace, build_reset_observation};
+use crate::swe::spec::{build_reset_observation, ResetObservation, Workspace};
 use crate::swe::trajectory::{
-    StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore, now_ms,
+    now_ms, StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore,
 };
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
 const TESTBED: &str = "/testbed";
+
+fn worker_exec_timeout_secs() -> u64 {
+    std::env::var("UENV_WORKER_EXEC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1200)
+}
+
+fn gateway_exec_timeout_secs() -> u64 {
+    std::env::var("UENV_WORKER_GATEWAY_EXEC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(180)
+}
 
 /// 容器内一次命令执行结果。
 #[derive(Debug, Clone)]
@@ -194,6 +210,13 @@ impl SweSession {
         &self.container
     }
 
+    /// Immediately terminate the sandbox and its process tree.
+    pub fn terminate(&self) {
+        let _ = Command::new(self.runtime.cli())
+            .args(["rm", "-f", &self.container])
+            .output();
+    }
+
     /// v2.2：注入一次评测作业 ID（gateway 在 create_session 时从 X-UEnv-Run-Id 设置）。
     pub fn set_run_id(&self, run_id: impl Into<String>) {
         if let Ok(mut g) = self.run_id.lock() {
@@ -235,7 +258,7 @@ impl SweSession {
             );
             return Ok(result);
         }
-        let result = self.exec_raw(command)?;
+        let result = self.exec_raw_with_timeout(command, gateway_exec_timeout_secs())?;
         self.push_step(
             StepAction::Exec {
                 command: command.to_string(),
@@ -254,11 +277,14 @@ impl SweSession {
 
     /// 不过策略的内部执行（reset / apply_patch / evaluate 内部用）。
     fn exec_raw(&self, command: &str) -> Result<ExecResult, DynErr> {
-        let timeout_secs = std::env::var("UENV_WORKER_EXEC_TIMEOUT_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(900);
+        self.exec_raw_with_timeout(command, worker_exec_timeout_secs())
+    }
+
+    fn exec_raw_with_timeout(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<ExecResult, DynErr> {
         let timeout_arg = format!("{timeout_secs}s");
         let out = Command::new("timeout")
             .args([
@@ -793,9 +819,7 @@ impl Drop for SweSession {
         if self.keep {
             return;
         }
-        let _ = Command::new(self.runtime.cli())
-            .args(["rm", "-f", &self.container])
-            .output();
+        self.terminate();
     }
 }
 
