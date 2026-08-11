@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 VARIANTS = ("verified", "lite", "pro", "smith")
 VERIFIED_PREFIX = "swebench/sweb.eval."
+SMITH_PREFIX = "swebench/swesmith."
 
 
 def _list(value: Any) -> list[str]:
@@ -147,8 +148,8 @@ def _normalize(row: dict[str, Any], variant: str) -> dict[str, Any]:
         raise ValueError(f"{instance_id} 的 {variant} 镜像必须位于 {VERIFIED_PREFIX} 命名空间")
     if variant == "pro" and image.startswith(VERIFIED_PREFIX):
         raise ValueError(f"{instance_id} 的 Pro 镜像不能使用 Verified 命名空间")
-    if variant == "smith" and (image.startswith(VERIFIED_PREFIX) or "swesmith" not in image.lower()):
-        raise ValueError(f"{instance_id} 的 Smith 镜像必须使用 swesmith 命名空间")
+    if variant == "smith" and not image.startswith(SMITH_PREFIX):
+        raise ValueError(f"{instance_id} 的 Smith 镜像必须使用 {SMITH_PREFIX} 命名空间")
 
     normalized: dict[str, Any] = {
         "instance_id": instance_id,
