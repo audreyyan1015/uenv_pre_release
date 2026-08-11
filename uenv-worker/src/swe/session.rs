@@ -254,8 +254,23 @@ impl SweSession {
 
     /// 不过策略的内部执行（reset / apply_patch / evaluate 内部用）。
     fn exec_raw(&self, command: &str) -> Result<ExecResult, DynErr> {
-        let out = Command::new(self.runtime.cli())
-            .args(["exec", &self.container, "bash", "-lc", command])
+        let timeout_secs = std::env::var("UENV_WORKER_EXEC_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(900);
+        let timeout_arg = format!("{timeout_secs}s");
+        let out = Command::new("timeout")
+            .args([
+                "--kill-after=30s",
+                &timeout_arg,
+                self.runtime.cli(),
+                "exec",
+                &self.container,
+                "bash",
+                "-lc",
+                command,
+            ])
             .output()
             .map_err(|e| format!("{} exec spawn failed: {e}", self.runtime.cli()))?;
         let (stdout_bytes, t1) = self.policy.truncate_output(&out.stdout);

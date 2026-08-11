@@ -17,11 +17,11 @@ use crate::proto::scheduler::v1::{
     RegisterWorkerRequest, RegisterWorkerResponse, ReportResultRequest, ReportResultResponse,
     WorkerInfo,
 };
+use crate::proto::v1::ErrorCode;
 use crate::result_finalizer::{
     ResultPersistenceContext, ResultTiming, complete_episode_result, failed_result_from_request,
     persist_episode_result,
 };
-use crate::proto::v1::ErrorCode;
 use crate::scheduler::traits::{Scheduler, WorkerInfo as SchedulerWorkerInfo};
 use crate::state::ServerState;
 
@@ -157,8 +157,7 @@ impl ControlPlaneServiceImpl {
                 .map(|entry| entry.key().clone())
                 .collect();
             for pending_key in pending_keys {
-                let Some((_, pending)) = self.state.pending_results.remove(&pending_key)
-                else {
+                let Some((_, pending)) = self.state.pending_results.remove(&pending_key) else {
                     continue;
                 };
                 let timing = ResultTiming {
@@ -176,10 +175,9 @@ impl ControlPlaneServiceImpl {
                     ErrorCode::ErrLeaseSuperseded,
                     Some(timing),
                 );
-                result.metadata.insert(
-                    "terminal_kind".to_string(),
-                    "lease_superseded".to_string(),
-                );
+                result
+                    .metadata
+                    .insert("terminal_kind".to_string(), "lease_superseded".to_string());
                 // episode 等待任务收到结果后会走统一 publish/persist；这里先写内存
                 // outcome，让旧 lease 的迟到上报在持久化提交前也能得到稳定的终态答复。
                 self.state.remember_result_outcome(
@@ -337,6 +335,13 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                             heartbeat.load.max(0) as u32,
                             heartbeat.max_load.max(0) as u32,
                         );
+                        let registered = capacity_change.is_some();
+                        if !registered {
+                            warn!(
+                                worker_id = %heartbeat.worker_id,
+                                "heartbeat_from_unregistered_worker"
+                            );
+                        }
                         state.scheduler.write().update_worker_runtime_state(
                             &heartbeat.worker_id,
                             heartbeat.supported_env_types.clone(),
@@ -380,7 +385,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                         );
 
                         let resp = HeartbeatResponse {
-                            ok: true,
+                            ok: registered,
                             drain: None,
                             server_epoch: state.epoch(),
                             next_heartbeat_interval_ms: state.heartbeat_interval_ms as i32,

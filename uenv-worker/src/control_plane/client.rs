@@ -278,6 +278,12 @@ impl SchedulerControlPlaneClient {
                 .await?
                 .into_inner();
 
+            if !response.accepted {
+                return Err(
+                    format!("server rejected worker registration: {}", response.message).into(),
+                );
+            }
+
             let mut identity = self.identity.write().await;
             if !response.worker_id.is_empty() {
                 identity.worker_id = response.worker_id;
@@ -376,7 +382,7 @@ impl SchedulerControlPlaneClient {
             (Vec::new(), Vec::new())
         };
         tx.send(HeartbeatRequest {
-            worker_id: identity.worker_id,
+            worker_id: identity.worker_id.clone(),
             load: self.metrics.active_episode_count() as i32,
             max_load: self.max_concurrent as i32,
             timestamp_ms: SystemTime::now()
@@ -411,6 +417,17 @@ impl SchedulerControlPlaneClient {
                     server_epoch = new_epoch,
                     msg = "heartbeat"
                 );
+            }
+            if !resp.ok {
+                tracing::warn!(
+                    trace_id = "control_plane",
+                    episode_id = "-",
+                    worker_id = %identity.worker_id,
+                    msg = "heartbeat_rejected_reregistering"
+                );
+                self.connected.store(false, Ordering::Relaxed);
+                self.register().await?;
+                return Ok(Some(500));
             }
             // epoch 发生变化说明 server 重启了，需要重新注册。
             // prev_epoch == 0 是初始状态（尚未完成第一次注册），不算 server 重启。

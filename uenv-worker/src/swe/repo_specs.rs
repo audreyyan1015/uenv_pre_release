@@ -42,6 +42,7 @@ pub enum TestRunner {
 /// session writes the ids to this path before running the command.
 pub const PYTEST_NODE_IDS_FILE: &str = "/tmp/uenv-pytest-nodeids";
 pub const MAX_INLINE_NODE_IDS_BYTES: usize = 32 * 1024;
+pub const TEST_BATCH_TIMEOUT_SECS: u32 = 600;
 
 /// 单个 `repo@version`（或 repo 全版本）的执行规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +89,9 @@ impl RepoSpec {
             .sum::<usize>();
         let inline_or = |inline: String, prefix: &str| {
             if node_ids_bytes > MAX_INLINE_NODE_IDS_BYTES {
-                format!("xargs -r -0 -n 100 {prefix} < {PYTEST_NODE_IDS_FILE}")
+                format!(
+                    "xargs -r -0 -n 100 timeout --kill-after=30s {TEST_BATCH_TIMEOUT_SECS}s {prefix} < {PYTEST_NODE_IDS_FILE}"
+                )
             } else {
                 inline
             }
@@ -293,7 +296,7 @@ mod tests {
     fn long_node_lists_use_container_file_and_xargs() {
         let ids = vec!["pkg/test.py::test_long_name".repeat(2000)];
         let cmd = DEFAULT_SPEC.build_test_command("source activate", "/testbed", &ids, &[]);
-        assert!(cmd.contains("xargs -r -0 -n 100"));
+        assert!(cmd.contains("xargs -r -0 -n 100 timeout --kill-after=30s 600s"));
         assert!(cmd.contains(PYTEST_NODE_IDS_FILE));
         assert!(!cmd.contains("test_long_name"));
     }

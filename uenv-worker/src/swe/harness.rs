@@ -126,7 +126,8 @@ pub fn build_test_command(fail_to_pass: &[String], pass_to_pass: &[String]) -> S
         )
     } else {
         format!(
-            "{CONDA_ACTIVATE}; cd {TESTBED} && xargs -r -0 -n 100 python -m pytest -rA -v -p no:cacheprovider < {}",
+            "{CONDA_ACTIVATE}; cd {TESTBED} && xargs -r -0 -n 100 timeout --kill-after=30s {}s python -m pytest -rA -v -p no:cacheprovider < {}",
+            crate::swe::repo_specs::TEST_BATCH_TIMEOUT_SECS,
             crate::swe::repo_specs::PYTEST_NODE_IDS_FILE
         )
     }
