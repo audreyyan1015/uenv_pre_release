@@ -277,7 +277,38 @@ def _patch_verl_text_only_processor() -> None:
     tokenizer_module._uenv_text_only_processor_patch_applied = True
 
 
+def _patch_transformers_qwen35_moe_config() -> None:
+    """Let local Transformers load Qwen3.5/Qwen3.6 MoE configs as Qwen3 MoE.
+
+    The local Qwen3.6-35B-A3B checkpoint declares ``model_type`` as
+    ``qwen3_5_moe``. Transformers 4.57 has the compatible Qwen3 MoE config and
+    model classes, but not that exact registry key. Registering a thin config
+    subclass keeps VeRL on the Transformers 4.x stack it expects.
+    """
+
+    import sys
+
+    configuration_auto = sys.modules.get("transformers.models.auto.configuration_auto")
+    if configuration_auto is None:
+        raise AttributeError("transformers.models.auto.configuration_auto is not fully initialized")
+    AutoConfig = configuration_auto.AutoConfig
+    from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+
+    class Qwen3_5MoeConfig(Qwen3MoeConfig):
+        model_type = "qwen3_5_moe"
+
+    try:
+        AutoConfig.register("qwen3_5_moe", Qwen3_5MoeConfig)
+    except ValueError as exc:
+        if "already used" not in str(exc) and "already registered" not in str(exc):
+            raise
+
+
 if os.environ.get("UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR") in {"1", "true", "True", "enabled"}:
+    _run_when_module_imported(
+        "transformers.models.auto.configuration_auto",
+        _patch_transformers_qwen35_moe_config,
+    )
     _run_when_module_imported("verl.utils", _patch_verl_text_only_processor)
 
 
