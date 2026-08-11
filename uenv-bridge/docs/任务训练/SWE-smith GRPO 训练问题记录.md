@@ -72,11 +72,11 @@ details = "CLIENT: Received message larger than max (4594969 vs. 4194304)"
 
 因此，`UENV_AGENT_LOOP_BATCH_SIZE=4` 只能减少每次聚合返回的 episode 条数，不能解决单条 episode trace 过大的问题。只要一个 chunk 内存在多个大 trace，仍会触发 4 MiB 限制。
 
-## 2. Reward 与官方判分未对齐
+## 2. Reward 信号失效
 
 ### 2.1 Worker 官方 Harness 对照发现 UEnv reward 不可信
 
-Worker 侧在 `Docs/worker/260807/SWE-smith官方Harness判分对照校验.md` 中对同一 SWE-smith instance 做了官方 harness 与 UEnv Worker 内部 grader 的对照。结论是：官方 harness 可作为最终 reward 的权威标准，但当前 UEnv Worker 内部 `swesmith` grader 与当前镜像 / catalog 组合不等价，不能作为 SWE-smith 最终训练 reward 的权威来源。
+Worker 侧对同一 SWE-smith instance 做了官方 harness 与 UEnv Worker 内部 grader 的对照。结论是：官方 harness 可作为最终 reward 的权威标准，但当前 UEnv Worker 内部 `swesmith` grader 与当前镜像 / catalog 组合不等价，不能作为 SWE-smith 最终训练 reward 的权威来源。
 
 对照样本：
 
@@ -111,3 +111,87 @@ uenv image_cache_key = jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd525
 当前 UEnv 的 all-pass 规则方向上接近官方 resolved 语义，即要求 FAIL_TO_PASS 全通过且 PASS_TO_PASS 不退化。但实际运行环境未与官方 harness 对齐，导致 gold patch 的 PASS_TO_PASS 有 142 项失败，进而被判为未解决。
 
 因此，之前 SWE-smith GRPO 训练中出现的 reward 全 0 不能只解释为模型没有修复能力；其中至少包含 reward 环境本身不可信的问题。在官方 harness 对齐前，当前 SWE-smith GRPO reward 不应作为有效训练信号。
+
+### 2.2 Worker 未注入 SWE-smith bug baseline 导致 agent 进入 clean 状态
+
+Adapter 侧记录了另一类会导致 reward 全 0 / `resolved=false` 的问题：Worker 创建 SWE-smith session 后，没有把数据集中的 bug-inducing patch 注入到 `/testbed`，导致 OpenHands agent 进入的是已经修好的 clean 状态。
+
+#### 错误证据
+
+问题 run：
+
+```text
+run_id = verl_swesmith_grpo_train_20260808_185234
+instance_id = oauthlib__oauthlib.1fd52536.combine_file__oni9ccvi
+trajectory_id = trj-worker-7143-pro-1786188520094-00031
+```
+
+该样本 prompt 描述的 bug 是 Metadata Endpoint 返回：
+
+```text
+Content-Type: application/xml
+Status: 500
+```
+
+但 trajectory 中 agent 在 `/testbed` 运行 reproduction 时实际看到：
+
+```text
+Content-Type: application/json
+Access-Control-Allow-Origin: *
+Status: 200
+tests/oauth2/rfc6749/endpoints/test_metadata.py: 7 passed
+```
+
+这说明 agent 看到的 workspace 已经是 clean/fixed 状态，prompt 中的 bug 无法复现。对应 rollout 最终没有产生有效修复：
+
+```text
+git_diff_bytes = 0
+git_diff_nonempty = 0
+resolved = false
+tests_passed = 531 / 673
+```
+
+本地原始 SWE-smith parquet 中同一实例的 `patch` 方向为 clean -> buggy：
+
+```diff
+-            'Content-Type': 'application/json',
+-            'Access-Control-Allow-Origin': '*',
++            'Content-Type': 'application/xml',
++            'Access-Control-Allow-Origin': 'localhost',
+
+-        return headers, json.dumps(self.claims), 200
++        return headers, json.dumps(self.claims), 500
+```
+
+因此，交互式 agent 训练时，Worker 需要先把 workspace 准备为 buggy baseline，再让模型产生 buggy -> fixed 的修复 diff。
+
+#### Worker 修复
+
+Worker 侧反馈该问题已经修复，修复记录保存在：
+
+```text
+Docs/adapter/20260809-SWE-smith-GRPO初始环境与Reward核验说明.md
+Docs/debug_log/20260809-SWE-smith问题修复统一汇总.md
+```
+
+当前修复方向：
+
+- `SweSession::provision()` 后对 SWE-smith 正向应用数据集 `patch`，把 `/testbed` 置为 buggy 状态。
+- 随后执行 `git add -A && git commit -m 'uenv smith bug baseline'`，把 bug 状态提交为 baseline。
+- 后续 agent 产生的 `git diff` 表示从 buggy baseline 到 fixed 状态的 model patch。
+- native gold 路径对 SWE-smith 使用 `apply_patch_reverse()`，用于从 buggy baseline 还原到 fixed 状态。
+
+Worker 侧 smoke 已验证修复后出现真实非零 reward：
+
+```text
+run_id = codex_swesmith_grpo_retry_20260809_1414
+reward = 1.0
+resolved = true
+git_diff_bytes = 7928
+used_pad_fallback = false
+rollout_log_probs_len = 6305
+```
+
+#### 后续核验点
+
+如果后续启用 SWE session recycle，需要确认 `reset_to_base()` 后也会重新注入 SWE-smith bug baseline。否则复用 session 可能再次回到 clean 状态，导致同类 reward 信号失效问题复现。
