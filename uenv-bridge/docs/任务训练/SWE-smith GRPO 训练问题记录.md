@@ -1,7 +1,7 @@
 # SWE-smith GRPO 训练问题记录
 
 > 记录日期：2026-08-08
-> 说明：本文用于汇总 SWE-smith GRPO 训练过程中遇到的主要问题。当前按“训练正确性”和“训练效率”两类组织，每个问题从问题说明、证据和解决方案三方面记录。
+> 说明：本文用于汇总 SWE-smith GRPO 训练过程中遇到的主要问题。当前按“训练正确性”“训练效率”和“训练稳定性”三类组织，每个问题从问题说明、证据和解决方案三方面记录。
 
 ## 1. 训练正确性问题
 
@@ -200,3 +200,77 @@ timing_s/step ~= 1004.99
 Adapter 侧保留 `UENV_EXPECTED_WORKER_PARALLELISM`、`max_episode_concurrency`、`target_worker_slots`、`max_parallel_per_worker` 等字段，用于表达训练侧期望、记录实验配置和辅助 Server/Worker 调度，但实际并行上限由 Worker 根据资源情况决定。
 
 后续更完整的方案应由 Worker 侧根据机器资源动态调整并发，例如根据 CPU、内存、可用容器、OpenHands agent 池、Runtime Gateway session 和当前负载自动决定可接收 episode 数。多机资源可用后，再扩展为多 Worker 横向并行。
+
+## 3. 训练稳定性问题
+
+训练稳定性问题指单条 episode 或单个基础设施环节出现异常后，训练框架能否把该样本转为可控失败，并继续完成当前 GRPO step。SWE-smith 这类 agentic 任务链路长，涉及模型推理、工具调用、容器执行、测试判分和 token trace 回填，因此需要对局部失败有更强的容错能力。
+
+### 3.1 长测试列表导致 Worker 命令过长
+
+#### 3.1.1 问题说明
+
+部分 SWE-smith 样本包含大量测试项。如果 Worker 把所有测试项直接拼到单条 `docker exec` 命令中，命令参数可能超过操作系统限制，导致 episode 在测试启动阶段失败。
+
+#### 3.1.2 证据
+
+关联 run：
+
+```text
+verl_swesmith_grpo_train_20260811_120115
+```
+
+第一轮 rollout batch 共 8 条 episode：
+
+```text
+agent-loop-requests.jsonl = 8
+agent-loop-results.jsonl = 8
+completed = 4
+failed = 4
+```
+
+失败的 4 条都集中在同一个样本：
+
+```text
+instance_id = pyparsing__pyparsing.533adf47.combine_file__dsi7jva0
+fail_to_pass_count = 476
+pass_to_pass_count = 1315
+```
+
+Worker 返回的直接错误是：
+
+```text
+uenv_runtime.client.GatewayError:
+gateway HTTP 500: docker exec spawn failed: Argument list too long (os error 7)
+```
+
+失败结果进入 Adapter 后被转为 zero-reward fallback：
+
+```text
+status = failed
+used_pad_fallback = true
+response_ids = []
+verl_response_ids = [248044]
+verl_response_mask = [0]
+rollout_log_probs_len = 0
+```
+
+随后 VeRL 在合并 `response_logprobs` 时中断：
+
+```text
+TypeError: expected Tensor as element 4 in argument 0, but got NoneType
+```
+
+对应位置：
+
+```text
+/workspace/verl/verl/experimental/agent_loop/agent_loop.py
+optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
+```
+
+#### 3.1.3 解决方案
+
+Worker 侧需要改造长测试列表的执行方式，避免把大量 pytest node id 直接拼入单条 `docker exec` 参数。可采用测试列表文件、分批执行或官方 harness 支持的列表输入方式。
+
+Adapter 侧需要补齐失败 episode 的 schema 容错。当 `failed_episode_policy=zero_reward` 且训练配置要求 `calculate_log_probs=True` 时，失败样本也应返回与占位 token 对齐的 dummy `response_logprobs`，确保 VeRL 后处理拿到的每条样本字段类型一致。
+
+这类问题处理完成后，单条 episode 的 Worker 执行失败会稳定转为 `reward=0.0` 的训练样本，当前 GRPO step 可以继续完成。
