@@ -103,7 +103,9 @@ uenv_instance_pool_size{{status=\"idle\"}} {}\n\
 uenv_instance_pool_size{{status=\"cooling\"}} {}\n\
 uenv_instance_pool_size{{status=\"evicting\"}} {}\n\
 uenv_instance_pool_size{{status=\"destroyed\"}} {}\n\
-uenv_swe_instance_pool_size {}\n",
+uenv_swe_instance_pool_size {}\n\
+uenv_swe_active_session_count {}\n\
+uenv_worker_runtime_load {}\n",
             self.episode_total.load(Ordering::Relaxed),
             self.episode_duration_ms_sum.load(Ordering::Relaxed),
             self.env_step_duration_ms_sum.load(Ordering::Relaxed),
@@ -122,6 +124,9 @@ uenv_swe_instance_pool_size {}\n",
             self.pool_size_evicting.load(Ordering::Relaxed),
             self.pool_size_destroyed.load(Ordering::Relaxed),
             self.swe_pool_size.load(Ordering::Relaxed),
+            self.swe_pool_size.load(Ordering::Relaxed),
+            self.active_episode_count.load(Ordering::Relaxed)
+                + self.swe_pool_size.load(Ordering::Relaxed),
         )
     }
 

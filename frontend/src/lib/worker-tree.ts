@@ -192,13 +192,23 @@ export function projectWorkerDetail(
   live?: WorkerLiveOverlay | null,
 ): WorkerDetailProjection {
   if (!state) {
+    const liveEpisodes = live?.liveEpisodes ?? [];
+    const liveActiveCount = liveEpisodes.length || (typeof live?.load === "number" ? live.load : 0);
     return {
       worker: null,
       envInstances: [],
-      activeEpisodes: [],
+      activeEpisodes: liveEpisodes.map((episode) => ({
+        episodeId: episode.episodeId,
+        label: `Episode ${episode.episodeId}`,
+        status: "ACTIVE",
+        attemptId: episode.attemptId,
+        lastSourceTs: 0,
+        fromLiveRoster: true,
+        elapsedSecs: episode.elapsedSecs,
+      })),
       runEpisodeCount: 0,
       completedEpisodeCount: 0,
-      liveActiveCount: 0,
+      liveActiveCount,
       stateUpdatedAt: 0,
       liveOverlayAt: live?.fetchedAt,
     };

@@ -232,6 +232,40 @@ class RolloutTraceModeTests(unittest.TestCase):
         self.assertEqual(child_env["UENV_ROLLOUT_TRACE"], "required")
         self.assertEqual(child_env["UENV_REQUIRE_SWE_RESPONSE_TRACE"], "1")
 
+    def test_unknown_job_completion_spool_is_archived(self):
+        runner = _load_runner_module()
+
+        class Client:
+            last_complete_code = ""
+            last_complete_message = ""
+
+            def complete_agent_job(self, **_kwargs):
+                self.last_complete_code = "UNKNOWN_JOB"
+                self.last_complete_message = "job no longer exists"
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner.COMPLETION_SPOOL_DIR = Path(tmp) / "spool"
+            path = runner._spool_completion(
+                {
+                    "job_id": "missing-job",
+                    "run_id": "run-1",
+                    "status": "completed",
+                    "reward": 0.0,
+                    "trajectory_id": "",
+                    "error_message": "",
+                    "agent_id": "agent-1",
+                    "metadata": {},
+                }
+            )
+
+            replay_done = runner._submit_spooled_completion(Client(), path)
+
+            self.assertTrue(replay_done)
+            self.assertFalse(path.exists())
+            archived = runner.COMPLETION_SPOOL_DIR / "archived-unknown-job" / path.name
+            self.assertTrue(archived.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

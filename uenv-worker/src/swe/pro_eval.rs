@@ -39,7 +39,23 @@ pub fn try_external_pro_grade(
     fail_to_pass: &[String],
     pass_to_pass: &[String],
 ) -> Result<Option<GradeResult>, DynErr> {
-    let cmd_line = match std::env::var("UENV_SWE_PRO_EVAL_CMD") {
+    try_external_pro_grade_from_env(
+        "UENV_SWE_PRO_EVAL_CMD",
+        instance_id,
+        test_output,
+        fail_to_pass,
+        pass_to_pass,
+    )
+}
+
+pub fn try_external_pro_grade_from_env(
+    command_env: &str,
+    instance_id: &str,
+    test_output: &str,
+    fail_to_pass: &[String],
+    pass_to_pass: &[String],
+) -> Result<Option<GradeResult>, DynErr> {
+    let cmd_line = match std::env::var(command_env) {
         Ok(v) if !v.trim().is_empty() => v,
         _ => return Ok(None),
     };
@@ -48,7 +64,7 @@ pub fn try_external_pro_grade(
         .env("UENV_SWE_INSTANCE_ID", instance_id)
         .env("UENV_SWE_TEST_OUTPUT", test_output)
         .output()
-        .map_err(|e| format!("UENV_SWE_PRO_EVAL_CMD spawn failed: {e}"))?;
+        .map_err(|e| format!("{command_env} spawn failed: {e}"))?;
 
     Ok(Some(grade_from_command_output(
         &String::from_utf8_lossy(&output.stdout),

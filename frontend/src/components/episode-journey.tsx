@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { useRunStream } from "@/hooks/use-run-stream";
+import { SystemHomeLink } from "@/components/system-home-link";
 import { WorkerStatusOverview } from "@/components/worker-status-overview";
 import type { ConnectionState } from "@/lib/store/chain-store";
 import type { NodeStatus, WorkflowStage } from "@/lib/types/chain-state";
@@ -457,9 +458,12 @@ export function EpisodeJourney({ initialRunId = null }: { initialRunId?: string 
                 <h1 className="text-xl font-semibold tracking-tight">Episode 进度</h1>
               </div>
             </div>
-            <div className="inline-flex w-fit items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 shadow-sm">
-              <span className={`h-2 w-2 rounded-full ${connectionInfo.dot}`} />
-              {liveMode ? connectionInfo.label : "演示数据"}
+            <div className="flex flex-wrap items-center gap-2">
+              <SystemHomeLink className="h-8 rounded-full border-slate-200 bg-white px-3 text-xs text-slate-600 shadow-sm hover:border-blue-200 hover:text-blue-700" />
+              <div className="inline-flex w-fit items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-500 shadow-sm">
+                <span className={`h-2 w-2 rounded-full ${connectionInfo.dot}`} />
+                {liveMode ? connectionInfo.label : "演示数据"}
+              </div>
             </div>
           </div>
 

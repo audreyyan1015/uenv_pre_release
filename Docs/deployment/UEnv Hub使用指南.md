@@ -1,6 +1,6 @@
 # UEnv Hub 使用指南
 
-UEnv Hub 用于保存环境版本，并把指定版本安装到一台或多台 UEnv Worker。团队需要共享自定义环境、统一多台 UEnv Worker 的环境版本或回滚旧版本时，可以部署 UEnv Hub。
+UEnv Hub 用于保存环境版本和 EnvPackage，并支持把指定版本预同步到一台或多台 UEnv Worker。团队需要共享自定义环境、统一多台 UEnv Worker 的环境版本、离线预置环境包或回滚旧版本时，可以部署 UEnv Hub。
 
 一条任务样本在 UEnv 中执行一次，称为一个 Episode。Adapter 负责分配 Episode，UEnv Worker 负责执行环境，UEnv Hub 负责登记、保存和分发环境版本。Adapter 由 `uenv-adapter-core.service` 运行，其内部使用 UEnv Server（`uenv-server`）模块完成 UEnv Worker 注册、Episode 调度和状态管理。
 
@@ -9,7 +9,7 @@ UEnv Hub 用于保存环境版本，并把指定版本安装到一台或多台 U
 | 当前需求 | 是否需要 UEnv Hub |
 |---|---|
 | 一台 UEnv Worker 使用 UEnv 安装包内置环境 | 可以直接使用当前安装，无需增加 UEnv Hub |
-| 多台 UEnv Worker 安装同一个自定义环境版本 | 使用 UEnv Hub |
+| 多台 UEnv Worker 预同步同一个自定义环境版本 | 使用 UEnv Hub |
 | 记录环境版本、校验文件内容或回滚旧版本 | 使用 UEnv Hub |
 | 离线 UEnv Worker 需要从内网下载 EnvPackage | 使用内网 UEnv Hub |
 
@@ -18,20 +18,20 @@ UEnv Hub 用于保存环境版本，并把指定版本安装到一台或多台 U
 | 名词 | 含义 |
 |---|---|
 | UEnv Hub | 保存环境名称、版本、接口说明和 EnvPackage 的服务 |
-| EnvPackage（环境包） | 一个确定版本的环境文件集合，供 UEnv Worker 下载和安装 |
+| EnvPackage（环境包） | 一个确定版本的环境文件集合，供 UEnv Worker 预同步、激活或按运行时配置加载 |
 | process plugin（进程插件） | 在 UEnv Worker 上以独立进程运行的环境插件 |
 | 内容摘要（digest） | 用于核对文件内容是否一致的校验值 |
 | 容器镜像仓库（OCI Registry） | 保存容器镜像的服务，例如 Docker Hub 或团队的私有镜像仓库 |
 | UEnv Hub 访问令牌（Token） | UEnv Hub 用于识别访问者及其权限的文件 |
 
-发布并使用一个 process plugin 包含以下步骤：
+发布并预置一个 process plugin EnvPackage 包含以下步骤：
 
 1. 开发者创建并测试 process plugin。
 2. 发布者把该版本作为 EnvPackage 发布到 UEnv Hub。
-3. 管理员在目标 UEnv Worker 上下载并激活该 EnvPackage。
+3. 管理员在目标 UEnv Worker 上预同步并激活该 EnvPackage。
 4. 管理员重启 UEnv Worker，使其加载新版本。
 
-第 5 节介绍发布，第 6 节介绍下载和激活。
+第 5 节介绍发布，第 6 节介绍预同步和激活。这个流程属于任务前的运维准备：Episode 运行时仍由 Adapter/Server 选择 Worker 并下发任务；Hub 不参与每次 Episode 的调度和结果返回。
 
 ## 2. 选择 UEnv Hub 的部署方式
 
@@ -263,9 +263,9 @@ uenv env plugin publish "$HOME/uenv-envs/my-environment"
 
 该命令直接上传的文件总量上限为 40 MiB。模型权重、大型官方数据集和容器镜像分别保存在模型存储、数据存储和容器镜像仓库中。
 
-## 6. 在 UEnv Worker 上下载并激活 EnvPackage
+## 6. 在 UEnv Worker 上预同步并激活 EnvPackage
 
-第 5 节把 EnvPackage 保存到 UEnv Hub。接下来在每台目标 UEnv Worker 上分别安装它。
+第 5 节把 EnvPackage 保存到 UEnv Hub。接下来在每台目标 UEnv Worker 上分别预同步它。这一步适合离线 Worker、多 Worker 固定版本和灰度/回滚准备；不是每条 Episode 的默认执行步骤。
 
 process plugin 包含 Python 依赖时，先安装 `python3-venv`：
 
@@ -290,7 +290,7 @@ UEnv Hub 与 UEnv Worker 同机、并使用默认本机配置时，跳过以上�
 | 选项 | 是否修改 UEnv Worker | 作用 |
 |---|---|---|
 | `--dry-run` | 否 | 显示将下载的文件，并检查版本兼容性 |
-| `--activate` | 是 | 下载、校验、安装并设为当前使用版本 |
+| `--activate` | 是 | 下载、校验，并把 process plugin 设为当前激活版本 |
 
 `--dry-run` 是可选检查：
 
@@ -303,7 +303,7 @@ sudo uenv env sync my-environment \
   --dry-run
 ```
 
-实际安装使用 `--activate`：
+process plugin 需要作为本机可执行环境加载时，使用 `--activate`：
 
 ```bash
 sudo uenv env sync my-environment \
@@ -318,9 +318,9 @@ sudo systemctl restart uenv-worker.service
 uenv environments
 ```
 
-`--activate` 会下载 EnvPackage、核对内容摘要、安装 Python 依赖，并设置当前版本。所有步骤成功后，UEnv Worker 才切换到新版本。重启服务后，UEnv Worker 开始使用该版本。
+`--activate` 会下载 EnvPackage、核对内容摘要、安装 Python 依赖，并把该 process plugin 版本设置为当前激活版本。所有步骤成功后，UEnv Worker 才切换到新版本。重启服务后，UEnv Worker 启动时加载该版本，并在注册信息中上报已同步的 EnvPackage。
 
-多台 UEnv Worker 需要逐台执行以上安装、激活和重启操作。更新期间，可以在任务样本的 `env_config` 中加入以下两个字段，指定 EnvPackage：
+多台 UEnv Worker 需要逐台执行以上预同步、激活和重启操作。更新期间，可以在任务样本的 `env_config` 中加入以下两个字段，指定 EnvPackage：
 
 ```json
 {
@@ -329,7 +329,9 @@ uenv environments
 }
 ```
 
-Adapter 会把该任务样本交给已经加载此 EnvPackage 版本的 UEnv Worker。
+Adapter/Server 会把该任务样本交给已经上报此 EnvPackage 版本的 UEnv Worker。Worker 收到 Server 下发的 Episode 后，再从本机实例池获取或按需拉起环境实例；如果实例已存在则复用，如果缺实例则按需创建。
+
+SWE 这类运行时包不使用 `--activate` 激活 process plugin。同步后将 Worker 配置中的 `swe.env_package_dir`、`swe.env_package_dirs` 或环境变量 `UENV_SWE_ENV_PACKAGE` 指向本地 EnvPackage 目录。Worker 启动后从该目录读取 catalog、overlay 和镜像索引；Episode 到达时再由 SWE 实例池按需 provision 对应实例。
 
 查看 UEnv Hub 中的版本：
 
@@ -433,8 +435,8 @@ sudo journalctl -u uenv-hub.service -n 200 --no-pager
 |---|---|
 | `401 Unauthorized` | UEnv Hub 访问令牌、令牌角色和 UEnv Worker 的 `token_file` |
 | UEnv Hub 健康，但 UEnv Worker 无法连接 | UEnv Hub 监听地址、防火墙和 UEnv Worker 配置的 URL |
-| UEnv Hub 已保存版本，但 UEnv Worker 找不到环境 | `sync --activate` 结果、process plugin 目录和 UEnv Worker 重启状态 |
+| UEnv Hub 已保存版本，但 UEnv Worker 找不到环境 | process plugin 检查 `sync --activate` 结果、插件目录和 UEnv Worker 重启状态；SWE 检查本地 EnvPackage 目录配置 |
 | Python 虚拟环境创建失败 | `python3-venv`、Python 离线依赖目录、Python 版本和 CPU 架构 |
 | 回滚后行为未改变 | `/var/lib/uenv/plugins/<env_type>` 当前版本和 UEnv Worker 重启状态 |
 
-`uenv hub sync` 只查看 UEnv Hub 注册信息的变化。下载和激活 EnvPackage 使用 `uenv env sync <package> ...`。
+`uenv hub sync` 只查看 UEnv Hub 注册信息的变化。预同步 EnvPackage 使用 `uenv env sync <package> ...`；process plugin 需要加载为可执行环境时再加 `--activate`。

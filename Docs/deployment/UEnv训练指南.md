@@ -389,14 +389,14 @@ SWE 训练使用 VeRL 训练镜像和 SWE 实例镜像：
 
 模型权重保存在 VeRL GPU 主机，SWE catalog 保存 SWE 实例信息，SWE 实例镜像保存对应的仓库环境。
 
-SWE 训练中的 OpenHands Agent 使用工具调用操作任务环境。Qwen 系列模型可以在命令末尾增加：
+SWE 训练中的 OpenHands Agent 使用工具调用操作任务环境。工具调用 parser 需要与模型输出格式和 VeRL 镜像中的 vLLM 版本匹配。以 Qwen3 Coder / Qwen3.6 Coder 类模型为例，可以在命令末尾增加：
 
 ```text
 --set +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true
---set +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=hermes
+--set +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=qwen3_coder
 ```
 
-`hermes` 是 Qwen 工具调用格式的解析器。使用其他模型时，按该模型的工具调用格式设置解析器。
+使用 Hermes 格式模型时，可将 `tool_call_parser` 改为 `hermes`。使用其他模型时，按该模型的工具调用格式和当前 vLLM 支持的 parser 设置。
 
 ## 7. 配置更多 VeRL 参数
 
@@ -432,6 +432,40 @@ cp /opt/uenv/current/examples/cases/training/verl-grpo-overrides.conf \
 ```text
 <work-dir>/.uenv-verl/output/effective-hydra-overrides.txt
 ```
+
+### 7.3 关键默认值
+
+训练入口会生成一组 UEnv 基线 VeRL 配置。常用默认值如下：
+
+| VeRL/Hydra 配置 | 默认值 | 调整方式 |
+|---|---:|---|
+| `data.max_prompt_length` | `1024` | `--set data.max_prompt_length=...` |
+| `data.max_response_length` | `4096` | `--set data.max_response_length=...` |
+| `actor_rollout_ref.rollout.gpu_memory_utilization` | `0.6` | `--set actor_rollout_ref.rollout.gpu_memory_utilization=...` |
+| `actor_rollout_ref.rollout.tensor_model_parallel_size` | `1` | `--set actor_rollout_ref.rollout.tensor_model_parallel_size=...` |
+| `actor_rollout_ref.rollout.agent.num_workers` | `1` | `--set actor_rollout_ref.rollout.agent.num_workers=...` |
+| `actor_rollout_ref.rollout.calculate_log_probs` | `True` | `--set actor_rollout_ref.rollout.calculate_log_probs=...` |
+| `trainer.logger` | `['console']` | `--set trainer.logger=...` |
+
+SWE/OpenHands 训练依赖 response token trace，默认启用 `calculate_log_probs=True`。SWE 等需要长输出的任务通常需要按模型上下文窗口和显存情况调大 `data.max_response_length`。
+
+训练入口还会把下列调度提示环境变量透传给 UEnv Bridge 和 Adapter，空值表示不发送该约束：
+
+| 环境变量 | 含义 |
+|---|---|
+| `UENV_EXPECTED_WORKER_PARALLELISM` | 期望的 Worker 并行能力，用于日志和调度预检口径 |
+| `UENV_MAX_EPISODE_CONCURRENCY` | 单个训练进程期望同时运行的最大 Episode 数 |
+| `UENV_MAX_IN_FLIGHT_BATCHES` | 允许同时在途的 rollout batch 数 |
+| `UENV_TARGET_WORKER_SLOTS` | 期望占用的 Worker slot 数 |
+| `UENV_POOL_WARMUP_TARGET` | 期望预热的环境/会话数量 |
+| `UENV_MAX_PARALLEL_PER_WORKER` | 单个 Worker 内期望的最大并行 Episode 数 |
+| `UENV_AGENT_JOB_MAX_CONCURRENCY` | OpenHands Agent job 侧期望的最大并发数 |
+| `UENV_RUNTIME_GATEWAY_SESSION_LIMIT` | SWE Runtime Gateway 侧期望的会话上限 |
+| `UENV_REQUIRE_WARM_SLOT` | 是否要求调度到已预热 slot，取值为 `true` 或 `false` |
+
+这些数值型变量需要设为非负整数。`UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES` 控制训练容器与 Adapter 之间的 gRPC 消息大小上限，默认值为 `16777216`（16 MiB）。
+
+### 7.4 配置映射
 
 VeRL v0.7.1 的上游配置位于：
 

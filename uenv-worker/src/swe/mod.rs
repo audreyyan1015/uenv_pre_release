@@ -17,6 +17,7 @@
 pub mod artifact;
 pub mod artifact_store;
 pub mod command_policy;
+pub mod contract_eval;
 pub mod dataset;
 pub mod env_package;
 pub mod grader;
@@ -27,6 +28,7 @@ pub mod instance_pool;
 pub mod pro_eval;
 pub mod repo_specs;
 pub mod resettable;
+pub mod runtime_contract;
 pub mod session;
 pub mod smith_eval;
 pub mod spec;
@@ -50,6 +52,11 @@ pub use instance_pool::SweInstancePool;
 pub use repo_specs::{LogParser, RepoSpec, TestRunner, spec_for};
 pub use resettable::{
     PodmanResettableInstance, ResettableInstance, ResettableSession, SnapshotResettableInstance,
+};
+pub use runtime_contract::{
+    BenchmarkRuntimeContract, GoldContract, InitialStateContract, ModelPatchBase,
+    ModelPatchCollect, ModelPatchContract, PatchMode, PatchSemantics, RewardAdapterKind,
+    RewardContract,
 };
 pub use session::{ExecResult, SubmitOutcome, SweSession};
 pub use spec::{
