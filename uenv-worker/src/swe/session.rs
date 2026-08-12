@@ -10,6 +10,7 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -19,19 +20,35 @@ use crate::swe::contract_eval::try_external_contract_grade;
 use crate::swe::dataset::SweInstance;
 use crate::swe::grader::grader_for_spec;
 use crate::swe::harness::{ContainerRuntime, EpisodeOutcome};
-use crate::swe::image_cache::{ImageCacheFactory, ImagePullPolicy, resolve_provision_image};
+use crate::swe::image_cache::{resolve_provision_image, ImageCacheFactory, ImagePullPolicy};
 use crate::swe::pro_eval::try_external_pro_grade_from_env;
 use crate::swe::resettable::PodmanResettableInstance;
 use crate::swe::runtime_contract::{PatchMode, RewardAdapterKind};
 use crate::swe::smith_eval::try_external_smith_grade_from_env;
-use crate::swe::spec::{ResetObservation, Workspace, build_reset_observation};
+use crate::swe::spec::{build_reset_observation, ResetObservation, Workspace};
 use crate::swe::trajectory::{
-    StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore, now_ms,
+    now_ms, StepAction, StepObservation, StepTrace, TrajectoryBundle, TrajectoryStore,
 };
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
 const TESTBED: &str = "/testbed";
+
+fn worker_exec_timeout_secs() -> u64 {
+    std::env::var("UENV_WORKER_EXEC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1200)
+}
+
+fn gateway_exec_timeout_secs() -> u64 {
+    std::env::var("UENV_WORKER_GATEWAY_EXEC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(180)
+}
 
 /// 容器内一次命令执行结果。
 #[derive(Debug, Clone)]
@@ -66,6 +83,7 @@ pub struct SweSession {
     run_id: Mutex<String>,
     /// Platform episode id when session pre-created via for-episode (SubmitEpisode path).
     platform_episode_id: Mutex<Option<String>>,
+    terminated: AtomicBool,
 }
 
 impl SweSession {
@@ -151,6 +169,7 @@ impl SweSession {
             gateway_base_url: gateway_base_url.to_string(),
             run_id: Mutex::new(String::new()),
             platform_episode_id: Mutex::new(None),
+            terminated: AtomicBool::new(false),
         };
 
         // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified/Smith 在 /testbed）。
@@ -194,6 +213,14 @@ impl SweSession {
         &self.container
     }
 
+    /// Immediately terminate the sandbox and its process tree.
+    pub fn terminate(&self) {
+        self.terminated.store(true, Ordering::SeqCst);
+        let _ = Command::new(self.runtime.cli())
+            .args(["rm", "-f", &self.container])
+            .output();
+    }
+
     /// v2.2：注入一次评测作业 ID（gateway 在 create_session 时从 X-UEnv-Run-Id 设置）。
     pub fn set_run_id(&self, run_id: impl Into<String>) {
         if let Ok(mut g) = self.run_id.lock() {
@@ -235,7 +262,7 @@ impl SweSession {
             );
             return Ok(result);
         }
-        let result = self.exec_raw(command)?;
+        let result = self.exec_raw_with_timeout(command, gateway_exec_timeout_secs())?;
         self.push_step(
             StepAction::Exec {
                 command: command.to_string(),
@@ -254,8 +281,26 @@ impl SweSession {
 
     /// 不过策略的内部执行（reset / apply_patch / evaluate 内部用）。
     fn exec_raw(&self, command: &str) -> Result<ExecResult, DynErr> {
-        let out = Command::new(self.runtime.cli())
-            .args(["exec", &self.container, "bash", "-lc", command])
+        self.exec_raw_with_timeout(command, worker_exec_timeout_secs())
+    }
+
+    fn exec_raw_with_timeout(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<ExecResult, DynErr> {
+        let timeout_arg = format!("{timeout_secs}s");
+        let out = Command::new("timeout")
+            .args([
+                "--kill-after=30s",
+                &timeout_arg,
+                self.runtime.cli(),
+                "exec",
+                &self.container,
+                "bash",
+                "-lc",
+                command,
+            ])
             .output()
             .map_err(|e| format!("{} exec spawn failed: {e}", self.runtime.cli()))?;
         let (stdout_bytes, t1) = self.policy.truncate_output(&out.stdout);
@@ -476,6 +521,7 @@ impl SweSession {
     /// 调用前 Agent（或 gold patch）已完成源码改动；test_patch 在此处应用，使外部
     /// Agent 不接触/篡改测试文件（对齐官方 harness：model patch → test patch → run）。
     pub fn evaluate(&self) -> Result<EpisodeOutcome, DynErr> {
+        self.ensure_active()?;
         let start = Instant::now();
         let ws = self.instance.workspace_dir();
         let model_diff = self
@@ -486,6 +532,7 @@ impl SweSession {
         // 顺序对齐官方 harness：源码 patch → install → test patch → run。安装失败仅告警
         // （不掩盖后续测试失败的真实根因）。
         if let Some(cmd) = self.install_command() {
+            self.ensure_active()?;
             let r = self.exec_raw(&cmd)?;
             if r.exit_code != 0 {
                 tracing::warn!(
@@ -498,6 +545,7 @@ impl SweSession {
         }
         // 评测前应用 test_patch（Pro 的 setup 已在 provision 完成，避免 wipe agent patch）。
         self.apply_patch(&self.instance.test_patch, "test")?;
+        self.ensure_active()?;
         if let Some(pre) = self.instance.resolved_pre_test_command() {
             let r = self.exec_raw(&pre)?;
             if r.exit_code != 0 {
@@ -509,10 +557,38 @@ impl SweSession {
                 );
             }
         }
+        self.ensure_active()?;
 
         // M1-2 / M1-4：按 repo@version 规格（或实例显式 test_cmd）构造 runner。
+        // pytest node id 很多时不要把列表放进 docker exec argv；先写入容器文件，
+        // 再由 xargs 在容器内分批启动 pytest。
+        if self.instance.test_cmd.is_none()
+            && self.instance.variant() != crate::swe::variant::BenchmarkVariant::Pro
+            && self
+                .instance
+                .fail_to_pass
+                .iter()
+                .chain(self.instance.pass_to_pass.iter())
+                .map(|id| id.len() + 1)
+                .sum::<usize>()
+                > crate::swe::repo_specs::MAX_INLINE_NODE_IDS_BYTES
+        {
+            let node_ids = self
+                .instance
+                .fail_to_pass
+                .iter()
+                .chain(self.instance.pass_to_pass.iter())
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join("\0");
+            self.write_file(
+                crate::swe::repo_specs::PYTEST_NODE_IDS_FILE,
+                &format!("{node_ids}\0"),
+            )?;
+        }
         let test_cmd = self.instance.resolved_test_command(TESTBED);
         let test_run = self.exec_raw(&test_cmd)?;
+        self.ensure_active()?;
         let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
 
         // M6-4 / runtime contract：外部 reward adapter 可成为权威评分，Rust pytest
@@ -604,6 +680,7 @@ impl SweSession {
             }
         };
 
+        self.ensure_active()?;
         let test_results = TestResults {
             passed: graded.resolved,
             raw_output: truncate(&combined, self.policy.max_output_bytes),
@@ -621,6 +698,13 @@ impl SweSession {
             artifact,
             duration_ms: start.elapsed().as_millis() as u64,
         })
+    }
+
+    fn ensure_active(&self) -> Result<(), DynErr> {
+        if self.terminated.load(Ordering::SeqCst) {
+            return Err("SWE session terminated".into());
+        }
+        Ok(())
     }
 
     /// Pro：`before_repo_set_cmd` 在 provision/recycle 时执行（checkout 测试文件基线）。
@@ -752,9 +836,7 @@ impl Drop for SweSession {
         if self.keep {
             return;
         }
-        let _ = Command::new(self.runtime.cli())
-            .args(["rm", "-f", &self.container])
-            .output();
+        self.terminate();
     }
 }
 
