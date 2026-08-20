@@ -1,8 +1,10 @@
-//! Gateway 逐步轨迹落盘与查询（plan §1.7 + 260625 冻结方案 v2.2）。
+//! Gateway 逐步轨迹落盘与查询（plan §1.7 + 260625 冻结方案 v2.2 / v2.3）。
 //!
 //! 本地存储仍为真值的"过渡态"（trajectory_upload.enabled=false）：
 //! `index/by-id/{id}.json` + `bodies/{id}.json`。
 //! v2.2 在此基础上加"上传旁路"：bundle 增 run_id 等字段，由 trajectory_upload 上传 Server。
+//! v2.3：非 SWE 通用 episode 也经本模块 seal（`StepAction::Generic`），
+//! artifact 根目录新增 `UENV_TRAJECTORY_ARTIFACT_DIR`（未设置回退 `UENV_SWE_ARTIFACT_DIR`）。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +28,13 @@ pub enum StepAction {
     Read { path: String },
     Write { path: String, content: String },
     ProvisionReset { issue_text: String },
+    /// v2.3：非 SWE 通用 episode 的 obs/action 步骤。动作是不透明字节：
+    /// UTF-8 可读按文本存储（encoding 省略），否则 hex 编码且 `action_encoding="hex"`。
+    Generic {
+        action: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        action_encoding: String,
+    },
 }
 
 /// 单步 observation。
@@ -43,6 +52,17 @@ pub struct StepObservation {
     pub read_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_ok: Option<bool>,
+    /// v2.3：通用 episode 的原始观测（不透明字节；UTF-8 文本或 hex，见 `raw_encoding`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raw_encoding: String,
+    /// v2.3：通用 episode 的单步 reward / 终止标记（SWE 步骤不填）。
+    /// 单步截断标记复用上方既有 `truncated` 字段（通用 episode 语义为 episode 截断）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated: Option<bool>,
 }
 
 /// 单步轨迹。
@@ -122,6 +142,35 @@ pub fn ref_from_bundle(bundle: &TrajectoryBundle, resolved: bool, reward: f64) -
     }
 }
 
+/// v2.3：轨迹 artifact 根目录解析。`UENV_TRAJECTORY_ARTIFACT_DIR` 优先，
+/// 未设置时回退 `UENV_SWE_ARTIFACT_DIR`（保持 SWE 既有部署零改动）。
+pub fn artifact_dir_from_env() -> Option<PathBuf> {
+    for key in ["UENV_TRAJECTORY_ARTIFACT_DIR", "UENV_SWE_ARTIFACT_DIR"] {
+        if let Some(dir) = std::env::var(key)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    None
+}
+
+/// v2.3：通用 episode 的 run_id 解析优先级：
+/// `metadata["run_id"]` → `metadata["training_run_id"]` → `metadata["batch_id"]` → `run-{episode_id}`。
+pub fn resolve_run_id(
+    metadata: &std::collections::HashMap<String, String>,
+    episode_id: &str,
+) -> String {
+    for key in ["run_id", "training_run_id", "batch_id"] {
+        if let Some(v) = metadata.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            return v.to_string();
+        }
+    }
+    format!("run-{episode_id}")
+}
+
 /// Worker 本地轨迹存储。
 #[derive(Debug, Clone)]
 pub struct TrajectoryStore {
@@ -136,11 +185,7 @@ impl TrajectoryStore {
     }
 
     pub fn from_env() -> Option<Self> {
-        std::env::var("UENV_SWE_ARTIFACT_DIR")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(Self::new)
+        artifact_dir_from_env().map(Self::new)
     }
 
     pub fn index_dir(&self) -> PathBuf {
@@ -350,5 +395,76 @@ mod tests {
             value["rollout_trace"]["response_mask"],
             serde_json::json!([1, 0])
         );
+    }
+
+    #[test]
+    fn generic_step_serializes_and_roundtrips() {
+        let step = StepTrace {
+            step_index: 3,
+            action: StepAction::Generic {
+                action: "{\"cmd\":\"look\"}".into(),
+                action_encoding: String::new(),
+            },
+            observation: StepObservation {
+                raw: Some("obs-text".into()),
+                reward: Some(0.5),
+                terminated: Some(false),
+                ..Default::default()
+            },
+            timestamp_ms: 0,
+            duration_ms: 7,
+            rollout_trace: None,
+        };
+        let value = serde_json::to_value(&step).expect("serialize");
+        assert_eq!(value["action"]["kind"], serde_json::json!("generic"));
+        assert_eq!(value["action"]["action"], serde_json::json!("{\"cmd\":\"look\"}"));
+        // 空 encoding / 未填字段不输出，避免噪声。
+        assert!(value["action"].get("action_encoding").is_none());
+        assert_eq!(value["observation"]["raw"], serde_json::json!("obs-text"));
+        assert_eq!(value["observation"]["reward"], serde_json::json!(0.5));
+        assert!(value["observation"].get("stdout").is_none());
+
+        let back: StepTrace = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, step);
+    }
+
+    #[test]
+    fn generic_step_hex_encoding_roundtrips() {
+        let step = StepTrace {
+            step_index: 0,
+            action: StepAction::Generic {
+                action: "00ff".into(),
+                action_encoding: "hex".into(),
+            },
+            observation: StepObservation {
+                raw: Some("ff".into()),
+                raw_encoding: "hex".into(),
+                ..Default::default()
+            },
+            timestamp_ms: 0,
+            duration_ms: 1,
+            rollout_trace: None,
+        };
+        let json = serde_json::to_string(&step).expect("serialize");
+        let back: StepTrace = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, step);
+    }
+
+    #[test]
+    fn resolve_run_id_priority() {
+        let mut md = std::collections::HashMap::new();
+        // 全空 → fallback run-{episode_id}
+        assert_eq!(resolve_run_id(&md, "ep-1"), "run-ep-1");
+        // batch_id 兜底
+        md.insert("batch_id".to_string(), "batch-9".to_string());
+        assert_eq!(resolve_run_id(&md, "ep-1"), "batch-9");
+        // training_run_id 优先于 batch_id
+        md.insert("training_run_id".to_string(), "train-7".to_string());
+        assert_eq!(resolve_run_id(&md, "ep-1"), "train-7");
+        // run_id 最高优先；空白值被跳过
+        md.insert("run_id".to_string(), "  ".to_string());
+        assert_eq!(resolve_run_id(&md, "ep-1"), "train-7");
+        md.insert("run_id".to_string(), "run-3".to_string());
+        assert_eq!(resolve_run_id(&md, "ep-1"), "run-3");
     }
 }

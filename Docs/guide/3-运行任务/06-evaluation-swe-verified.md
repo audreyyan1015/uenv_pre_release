@@ -70,7 +70,7 @@ sudo -u uenv docker info >/dev/null
 
 - 已存在 `/etc/uenv/swe.env` 且与本次参数不同时，`prepare-swe` 会中止并提示 `--force-swe-config`；先备份并确认差异，再带该参数重跑。
 - `control-plane` 形式的 `prepare-swe` 只配置密钥，不安装 Worker 组件；但安装器在 `control-plane` profile 下会停用同机的 `uenv-worker.service`，如果该主机同时运行 UEnv Worker，准备完成后用 `sudo systemctl enable --now uenv-worker.service` 恢复。
-- `--trajectory-endpoint` 指向 UEnv Server 的轨迹接口；多机使用时需按[轨迹采集指南](./12-trajectory.md#按需启用集中存储)把 Server 侧 `8077` 改为受控内网地址并配置 token。
+- `--trajectory-endpoint` 指向 UEnv Server 的轨迹接口；多机使用时需按[轨迹采集指南](./12-trajectory.md#多机部署)把 Server 侧 `8077` 改为受控内网地址并分发 token。
 
 ## 前置检查
 

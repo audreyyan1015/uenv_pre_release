@@ -98,6 +98,11 @@ impl SweInstancePool {
             .or_else(|| pkg.image_tar_for_ref(image))
     }
 
+    /// v2.3：共享上传器给通用 episode executor（clone 廉价，避免重复启动 drainer 线程）。
+    pub fn trajectory_uploader(&self) -> Option<TrajectoryUploader> {
+        self.uploader.clone()
+    }
+
     /// Gateway 轨迹元数据（worker_id + 对外 base URL）。
     pub fn with_trajectory_meta(mut self, worker_id: String, gateway_base_url: String) -> Self {
         self.worker_id = worker_id;

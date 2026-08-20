@@ -210,4 +210,4 @@ test -x "$HOME/uenv-training-client/bin/uenv-train"
 4. 指标、checkpoint、模型版本、数据版本、环境版本与命令可追溯。
 5. 需要审计时，训练结果能通过 `trajectory_id` 关联环境动作。
 
-接着阅读[轨迹采集指南](./12-trajectory.md)，先查看本轮已有结果，再决定是否启用集中存储。框架内部 hook、字段映射和配置见[VeRL 接入](../4-接入强化学习框架/04-verl.md)；案例见[训练案例](./02-cases.md#强化学习训练)。
+接着阅读[轨迹采集指南](./12-trajectory.md)，训练轨迹已自动进入集中存储，用 `uenv trajectory list --run-id` 即可查询。框架内部 hook、字段映射和配置见[VeRL 接入](../4-接入强化学习框架/04-verl.md)；案例见[训练案例](./02-cases.md#强化学习训练)。

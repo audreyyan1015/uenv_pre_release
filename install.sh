@@ -19,6 +19,10 @@ SWE_GATEWAY_BIND="127.0.0.1:28999"
 SWE_GATEWAY_PUBLIC=""
 SWE_IMAGE_PULL_POLICY="local_only"
 SWE_TRAJECTORY_ENDPOINT=""
+# 全任务类型轨迹 endpoint：默认可由 --swe-trajectory-endpoint 派生（见下方解析），
+# 均未提供时回退 http://127.0.0.1:8077。
+TRAJECTORY_ENDPOINT=""
+TRAJECTORY_SERVER="0.0.0.0:8077"
 SWE_SHARED_KEY_FILE=""
 HAS_SERVER=0
 HAS_WORKER=0
@@ -46,6 +50,8 @@ usage() {
     '  --swe-image-policy POLICY  local_only or allow_public (default: local_only)' \
     '  --swe-trajectory-endpoint URL  UEnv Server trajectory service used by a Worker' \
     '  --swe-shared-key-file FILE  protected file containing the shared Gateway key' \
+    '  --trajectory-endpoint URL  trajectory store address used by Workers (default: http://127.0.0.1:8077)' \
+    '  --trajectory-server HOST:PORT  trajectory HTTP listen address on the Server (default: 0.0.0.0:8077)' \
     '  --no-start             install without starting systemd units' \
     '  --force-config         replace existing component configs' \
     '  --force-swe-config     replace only the generated SWE runtime config' \
@@ -78,6 +84,8 @@ while (($#)); do
     --swe-image-policy) SWE_IMAGE_PULL_POLICY="${2:-}"; shift 2 ;;
     --swe-trajectory-endpoint) SWE_TRAJECTORY_ENDPOINT="${2:-}"; shift 2 ;;
     --swe-shared-key-file) SWE_SHARED_KEY_FILE="${2:-}"; shift 2 ;;
+    --trajectory-endpoint) TRAJECTORY_ENDPOINT="${2:-}"; shift 2 ;;
+    --trajectory-server) TRAJECTORY_SERVER="${2:-}"; shift 2 ;;
     --no-start) NO_START=1; shift ;;
     --force-config) FORCE_CONFIG=1; shift ;;
     --force-swe-config) FORCE_SWE_CONFIG=1; shift ;;
@@ -98,6 +106,13 @@ esac
 case "$PROFILE" in
   single-node|worker|full) HAS_WORKER=1 ;;
 esac
+
+# 未显式传 --trajectory-endpoint 时沿用 --swe-trajectory-endpoint（libexec prepare-swe 路径），
+# 均未提供时回退本机默认。
+TRAJECTORY_ENDPOINT="${TRAJECTORY_ENDPOINT:-${SWE_TRAJECTORY_ENDPOINT:-http://127.0.0.1:8077}}"
+[[ "$TRAJECTORY_SERVER" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "--trajectory-server 格式非法"
+[[ "$TRAJECTORY_ENDPOINT" =~ ^https?://[^[:space:]]+$ ]] \
+  || fail "--trajectory-endpoint 必须是 http(s) URL"
 
 if [[ -n "$HUB_TOKEN_FILE" ]]; then
   [[ -f "$HUB_TOKEN_FILE" ]] || fail "找不到 Hub token 文件：$HUB_TOKEN_FILE"
@@ -334,7 +349,10 @@ if [[ "$PROFILE" == "single-node" || "$PROFILE" == "control-plane" || "$PROFILE"
   if [[ "$PROFILE" == "single-node" || "$PROFILE" == "full" ]]; then
     SERVER_BIND="127.0.0.1:50051"
   fi
+  # server.env 模板已含 UENV_TRAJECTORY_ENABLED=1 与 DATA_DIR；仅按参数替换监听地址。
+  # install_config 保证已有 /etc/uenv/server.env 不被覆盖（--force-config 除外）。
   sed -e "s|^UENV_ADDR=.*|UENV_ADDR=$SERVER_BIND|" \
+    -e "s|^UENV_TRAJECTORY_HTTP_LISTEN=.*|UENV_TRAJECTORY_HTTP_LISTEN=$TRAJECTORY_SERVER|" \
     "$RELEASE_DIR/config/server.env" > "$TMP_DIR/server.env"
   install_config "$RELEASE_DIR/config/server.yaml" /etc/uenv/server.yaml
   install_config "$TMP_DIR/server.env" /etc/uenv/server.env
@@ -395,7 +413,13 @@ if [[ "$PROFILE" == "single-node" || "$PROFILE" == "worker" || "$PROFILE" == "fu
     ((${#provided[@]})) \
       && warn_if_config_kept_with_flags "$TMP_DIR/worker.yaml" /etc/uenv/worker.yaml "${provided[@]}"
   }
-  install_config "$RELEASE_DIR/config/worker.env" /etc/uenv/worker.env
+  # 轨迹集中存储对全部任务类型生效（不只 SWE）：endpoint 与 artifact 根目录写进 worker.env。
+  cat "$RELEASE_DIR/config/worker.env" > "$TMP_DIR/worker.env"
+  cat >> "$TMP_DIR/worker.env" <<EOF
+UENV_TRAJECTORY_ENDPOINT=$TRAJECTORY_ENDPOINT
+UENV_TRAJECTORY_ARTIFACT_DIR=/var/lib/uenv/worker/swe-artifacts
+EOF
+  install_config "$TMP_DIR/worker.env" /etc/uenv/worker.env
   if [[ ! -e /etc/uenv/secrets/worker-llm.env ]]; then
     install -o root -g uenv -m 0640 /dev/null /etc/uenv/secrets/worker-llm.env
   fi
@@ -474,6 +498,26 @@ UENV_SWE_GATEWAY_API_KEY=$SWE_GATEWAY_KEY
 EOF
   install -o root -g uenv -m 0640 "$TMP_DIR/swe-secret.env" /etc/uenv/secrets/swe.env
   unset SWE_GATEWAY_KEY SWE_SHARED_KEY RUNTIME_GATEWAY_KEY SERVER_GATEWAY_KEY INSTALLED_SWE_KEY
+fi
+
+# 轨迹上传共享 token：Server 与 Worker 的 systemd 单元都加载 /etc/uenv/secrets/swe.env，
+# 单机场景写一次即可闭环；多机场景需把同一 token 手工分发到各节点。
+# 轨迹集中存储覆盖全部任务类型，因此不依赖 --enable-swe，凡安装了 Server 或 Worker 都生成。
+if [[ "$PROFILE" == "single-node" || "$PROFILE" == "control-plane" || "$PROFILE" == "worker" || "$PROFILE" == "full" ]]; then
+  if [[ ! -e /etc/uenv/secrets/swe.env ]]; then
+    install -o root -g uenv -m 0640 /dev/null /etc/uenv/secrets/swe.env
+  fi
+  TRAJECTORY_TOKEN_CURRENT="$(awk -F= '$1 == "UENV_TRAJECTORY_TOKEN" {print substr($0, length($1) + 2); exit}' /etc/uenv/secrets/swe.env)"
+  if [[ -z "$TRAJECTORY_TOKEN_CURRENT" ]]; then
+    TRAJECTORY_TOKEN_NEW="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null || openssl rand -base64 32 2>/dev/null || true)"
+    [[ -n "$TRAJECTORY_TOKEN_NEW" ]] || fail "无法生成 UENV_TRAJECTORY_TOKEN；请手工写入 /etc/uenv/secrets/swe.env"
+    printf 'UENV_TRAJECTORY_TOKEN=%s\n' "$TRAJECTORY_TOKEN_NEW" >> /etc/uenv/secrets/swe.env
+    chown root:uenv /etc/uenv/secrets/swe.env
+    chmod 0640 /etc/uenv/secrets/swe.env
+    info "已生成 UENV_TRAJECTORY_TOKEN 并追加到 /etc/uenv/secrets/swe.env"
+  else
+    info "复用 /etc/uenv/secrets/swe.env 中已有的 UENV_TRAJECTORY_TOKEN"
+  fi
 fi
 
 if [[ "$PROFILE" == "hub" || "$PROFILE" == "full" ]]; then

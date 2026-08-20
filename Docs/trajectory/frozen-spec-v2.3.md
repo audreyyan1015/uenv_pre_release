@@ -1,19 +1,26 @@
-# UEnv 轨迹保存规范（冻结 v2.2）
+# UEnv 轨迹保存规范（冻结 v2.3）
 
 > **状态**：冻结、实机在用  
-> **适用范围**：SWE Runtime Gateway 路径（含 OpenHands driver）、VeRL native DispatchEpisode 路径  
+> **适用范围**：SWE Runtime Gateway 路径（含 OpenHands driver）、VeRL native DispatchEpisode 路径、**非 SWE 通用 episode 路径（v2.3 新增）**  
 > **Canonical 存储**：Server `8.130.75.157:8077`（HTTP）+ SQLite 索引；Worker 本地为 seal + 上传 spool  
-> **代码真源**：`uenv-worker/src/swe/trajectory.rs`、`uenv-common/src/trajectory.rs`、`uenv-server/src/trajectory.rs`
+> **代码真源**：`uenv-worker/src/swe/trajectory.rs`、`uenv-common/src/trajectory.rs`、`uenv-server/src/trajectory.rs`、`uenv-worker/src/episode/executor.rs`
+>
+> v2.3 相对 v2.2 的增量：**所有任务类型的轨迹都进集中存储**——非 SWE 通用 episode（math/code 等
+> plugin step 循环）在 episode 终态（completed / failed / timeout 全部）seal 成同一个
+> `TrajectoryBundle` 并复用同一上传旁路；`StepAction` 新增 `generic` kind；artifact 根目录新增
+> `UENV_TRAJECTORY_ARTIFACT_DIR`（回退 `UENV_SWE_ARTIFACT_DIR`）；run_id 增加 metadata 传播约定。
+> SWE 既有行为（seal、upload、ref 字段、spool 语义）不变。
 
 ---
 
 ## 1. 设计目标
 
-1. **逐步可追溯**：Gateway 每次 exec/read/write 与 provision reset 形成 `steps[]`。
+1. **逐步可追溯**：Gateway 每次 exec/read/write 与 provision reset 形成 `steps[]`；通用 episode 每次 obs/action/reward 形成 `generic` 步骤。
 2. **评测可关联**：`instance_id`、`reward`、`resolved`、`artifact.test_results` 与 SWE 评测对齐。
 3. **作业可聚合**：`run_id`（一次 OpenHands/评测作业）、`batch_id` / `correlation_id`（VeRL 训练批次）。
 4. **上传不阻断 reward**：seal 后异步 POST Server；失败写 spool，submit 仍返回 reward。
 5. **Server 统一查询**：LIST/GET 只暴露 `upload_status=acked` 且 `body_present=1` 的轨迹。
+6. **全任务类型覆盖（v2.3）**：非 SWE episode 同样 seal + 上传；**失败与超时终态也 seal 部分轨迹**，不丢训练数据。
 
 ---
 
@@ -22,7 +29,7 @@
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │  Worker（ephemeral）                                           │
-│  ${UENV_SWE_ARTIFACT_DIR}/                                    │
+│  ${UENV_TRAJECTORY_ARTIFACT_DIR:-UENV_SWE_ARTIFACT_DIR}/      │
 │    bodies/{trajectory_id}.json     ← TrajectoryBundle 正文   │
 │    index/by-id/{trajectory_id}.json ← TrajectoryRef 轻量索引 │
 │    spool/pending|failed/{id}.json  ← 上传重试 marker          │
@@ -40,10 +47,13 @@
 
 | 变量 | 侧 | 含义 |
 |------|-----|------|
-| `UENV_SWE_ARTIFACT_DIR` | Worker | 本地 `bodies/`、`index/`、`spool/` 根目录 |
-| `UENV_TRAJECTORY_ENDPOINT` | Worker | Server 轨迹 HTTP 根，如 `http://8.130.75.157:8077` |
+| `UENV_TRAJECTORY_ARTIFACT_DIR` | Worker | **v2.3 新增**：本地 `bodies/`、`index/`、`spool/` 根目录；未设置时回退 `UENV_SWE_ARTIFACT_DIR` |
+| `UENV_SWE_ARTIFACT_DIR` | Worker | artifact 根目录（v2.2 起；现为回退项，既有部署零改动） |
+| `UENV_TRAJECTORY_ENDPOINT` | Worker | Server 轨迹 HTTP 根，如 `http://8.130.75.157:8077`；未配置时仅本地 seal 不上传 |
 | `UENV_TRAJECTORY_TOKEN` | Worker / Server | 请求头 `X-Trajectory-Token` |
 | `trajectory.data_dir` | Server | SQLite + bodies 根（YAML 或部署配置） |
+
+`TrajectoryStore` 与 `TrajectoryUploader` 用同一解析函数取根目录，保证 spool 与 bodies 始终同根。
 
 ---
 
@@ -59,7 +69,13 @@
 ### 3.2 `run_id`
 
 - **含义**：一次完整评测作业 ID（OpenHands driver 启动时生成，或 native 路径用 `correlation_id`）。
-- **注入**：HTTP 头 `X-UEnv-Run-Id` → Gateway session → 写入 bundle。
+- **注入（SWE / Gateway）**：HTTP 头 `X-UEnv-Run-Id` → Gateway session → 写入 bundle。
+- **注入（非 SWE 通用 episode，v2.3）**：adapter-core 把 sample context 的 `training_run_id` /
+  `batch_id` / `run_id` 写入 `EpisodeRequest.metadata`（proto 字段 21），Server dispatch 原样透传；
+  Worker seal 时按以下优先级解析：  
+  `metadata["run_id"]` → `metadata["training_run_id"]` → `metadata["batch_id"]` → `run-{episode_id}`（兜底）。
+- **run-task 评测路径**：`uenv-bridge` Python `evaluate.py` → adapter-core `ExecuteBatch`；
+  `batch_id` 为 envelope 必填字段且必入 metadata，故该路径至少落到 `batch_id` 一级，无需额外补键。
 - **Server 入库**：**必填**（POST 校验）；LIST 可按 `run_id` 过滤。
 
 ---
@@ -77,25 +93,25 @@
 | `batch_id` | string \| null | | VeRL batch；OpenHands 常为 null |
 | `correlation_id` | string \| null | | 训练 run / 可视化关联 ID |
 | `episode_id` | string \| null | | Server 分配的 platform episode；Gateway 路径常为 null |
-| `session_id` | string | ✓ | Gateway SWE session |
-| `instance_id` | string | ✓ | SWE-bench 实例 ID |
-| `benchmark_variant` | string | ✓ | 如 `pro`、`verified` |
+| `session_id` | string | ✓ | Gateway SWE session；**通用 episode（v2.3）填 warmup 环境实例句柄** |
+| `instance_id` | string | ✓ | SWE-bench 实例 ID；通用 episode 同 session_id |
+| `benchmark_variant` | string | ✓ | 如 `pro`、`verified`；**通用 episode 填 `env_type`**（如 `math`、`code`） |
 | `worker_id` | string | ✓ | 注册 Worker ID |
-| `gateway_base_url` | string | ✓ | 产生轨迹的 Gateway 基址（溯源） |
+| `gateway_base_url` | string | ✓ | 产生轨迹的 Gateway 基址（溯源）；**通用 episode 无 gateway，留空** |
 | `steps` | array | ✓ | 逐步轨迹，见 §4.2 |
 | `artifact` | object | ✓ | Episode 产物，见 §4.3 |
-| `reward` | number | ✓（seal 后） | 评测得分 0.0–1.0 |
-| `resolved` | boolean | ✓（seal 后） | 是否通过 SWE 评测 |
+| `reward` | number | ✓（seal 后） | 评测得分 0.0–1.0；通用 episode 为累计 reward |
+| `resolved` | boolean | ✓（seal 后） | 是否通过 SWE 评测；**通用 episode = 环境自然终止（terminated）** |
 | `sealed_at_ms` | integer | ✓ | 封存 UTC 毫秒时间戳 |
 
 ### 4.2 `steps[]` — `StepTrace`
 
 | 字段 | 类型 | 含义 |
 |------|------|------|
-| `step_index` | uint | 从 0 递增 |
+| `step_index` | uint | 从 0 递增（通用 episode 取 proto step_index，从 1 起） |
 | `action` | object | 见下表（`kind` 区分类型） |
 | `observation` | object | 执行结果 |
-| `timestamp_ms` | uint | 步开始时间 |
+| `timestamp_ms` | uint | 步开始时间（通用 episode 的 proto StepRecord 无时间戳，填 0） |
 | `duration_ms` | uint | 步耗时 |
 
 **`action`（`kind` 为 snake_case tag）**
@@ -106,6 +122,7 @@
 | `read` | `path` | 读文件路径 |
 | `write` | `path`, `content` | 写文件 |
 | `provision_reset` | `issue_text` | 容器 provision 后 issue 摘要 |
+| `generic`（v2.3） | `action`, `action_encoding` | 非 SWE 通用 episode 的动作（不透明字节）：UTF-8 可读按文本存储（encoding 省略），否则 hex 编码且 `action_encoding="hex"` |
 
 **`observation`**
 
@@ -114,11 +131,15 @@
 | `stdout` | string | 标准输出 |
 | `stderr` | string | 标准错误 |
 | `exit_code` | int \| omit | 命令退出码 |
-| `truncated` | bool | 输出是否截断 |
+| `truncated` | bool | SWE：输出是否截断；**v2.3 通用 episode 复用该字段表示单步 episode 截断标记** |
 | `read_content` | string \| omit | read 动作内容 |
 | `write_ok` | bool \| omit | write 是否成功 |
+| `raw` | string \| omit | **v2.3**：通用 episode 的原始观测（UTF-8 文本或 hex） |
+| `raw_encoding` | string \| omit | **v2.3**：`"hex"` 或省略（=文本） |
+| `reward` | number \| omit | **v2.3**：通用 episode 的单步 reward |
+| `terminated` | bool \| omit | **v2.3**：通用 episode 的单步终止标记 |
 
-新增 action kind 需同步修改 `uenv-worker/src/swe/trajectory.rs` 中 `StepAction` 枚举及 Gateway 记录逻辑。
+新增 action kind 需同步修改 `uenv-worker/src/swe/trajectory.rs` 中 `StepAction` 枚举及对应记录逻辑。
 
 ### 4.3 `artifact` — `EpisodeArtifact`
 
@@ -131,7 +152,7 @@
 | `stdout_log` | string[] | 聚合 stdout |
 | `stderr_log` | string[] | 聚合 stderr |
 | `test_results` | object \| omit | 见下 |
-| `reward` | number \| omit | 产物内 reward（可与顶层重复） |
+| `reward` | number \| omit | 产物内 reward（可与顶层重复）；通用 episode 填累计 reward |
 | `artifact_uri` | string \| omit | 外部存储 URI（预留） |
 
 **`test_results`**
@@ -187,7 +208,9 @@ Server 从 bundle **解析** `TrajectoryHeader`（见 `uenv-common/src/trajector
 
 ---
 
-## 6. 生命周期（Gateway / OpenHands 路径）
+## 6. 生命周期
+
+### 6.1 Gateway / OpenHands 路径（SWE）
 
 ```text
 create_session（绑定 run_id）
@@ -200,6 +223,34 @@ create_session（绑定 run_id）
 
 **OpenHands / Server 编排路径**：driver 经 Gateway submit；`CompleteAgentJob` 回填 `trajectory_id` 字符串；**不写** Server `episode_results` 表（无 platform `episode_id`）。
 
+### 6.2 非 SWE 通用 episode 路径（v2.3）
+
+```text
+DispatchEpisode（env_type != "swe"）
+  → acquire（登记 inflight 部分轨迹）
+  → reset / step 循环（逐步累积 proto StepRecord 到 inflight）
+  → 终态（全部 seal，失败/超时同等待遇）：
+       completed            → seal（resolved = terminated）+ enqueue + 回填 EpisodeResult.trajectory_id
+       failed（reset/step/model/reward/release 错误、async 校验失败）
+                            → seal 已收集的部分轨迹；async failed result 同样回填 trajectory_id
+       timeout（tokio 超时丢弃执行 future）
+                            → worker_service 从 executor inflight 表取部分轨迹 seal + enqueue
+       cancel               → 丢弃 inflight（server 已取消，不留存）
+```
+
+要点：
+
+- inflight 部分轨迹保存在 `EpisodeExecutor` 的共享表中（key = `{episode_id}:{attempt_id}`），
+  timeout 时执行 future 已被丢弃，只有该表能取到已收集 steps。
+- 通用 seal 复用 SWE 同一个 `TrajectoryStore` / `TrajectoryUploader`（同一 drainer 线程、同一 spool）。
+- `UENV_TRAJECTORY_ENDPOINT` 未配置时仅本地 seal：`EpisodeResult.trajectory_id` 照填，
+  `trajectory_storage_url` 留空。
+- SWE native DispatchEpisode 路径仍复用 pool submit 的 seal 结果，**不重复 seal**。
+- Worker 回填的 `trajectory_id` / `trajectory_storage_url` 经 `ReportResult` 上报；Server
+  `result_finalizer::persist_episode_result` 对所有 env_type 无差别写入 `episode_results` 表。
+  注意：同步失败（gRPC 错误返回）与 timeout 终态没有 Worker 上报的 EpisodeResult，轨迹指针不进
+  `episode_results`，但 bundle 已进集中存储，可按 `episode_id` / `run_id` 关联。
+
 ---
 
 ## 7. HTTP API（Server `:8077`）
@@ -207,9 +258,9 @@ create_session（绑定 run_id）
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/control/v1/trajectories` | 上传 bundle（可 gzip） |
-| GET | `/control/v1/trajectories/{id}` | 取正文 JSON |
-| GET | `/control/v1/trajectories` | LIST（Query: run_id, instance_id, …） |
-| GET | `/control/v1/trajectories/health` | 健康检查 |
+| GET  | `/control/v1/trajectories/{id}` | 取正文 JSON |
+| GET  | `/control/v1/trajectories` | LIST（Query: run_id, instance_id, …） |
+| GET  | `/control/v1/trajectories/health` | 健康检查 |
 
 POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 成功 → `upload_status=acked`。
 
@@ -219,7 +270,7 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 
 ### 8.1 当前是否需要改代码
 
-**不需要。** v2.2 已冻结并在实机使用；§8.2 所列能力由现有实现提供。**不必**为「预留扩展」提前改 Worker / Server 代码。
+**不需要。** v2.3 已冻结并在实机使用；§8.2 所列能力由现有实现提供。**不必**为「预留扩展」提前改 Worker / Server 代码。
 
 §8.3、§8.6 描述的是 **将来真要增加轨迹内容时** 的设计与改码范围，属于后续演进指南，非当前必做项。
 
@@ -231,7 +282,7 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 | Server POST → **整段 JSON 原样落盘** | **否** | `insert()` 按 HTTP body 字节写 `bodies/{id}.json` |
 | Server 索引 → 解析 `TrajectoryHeader` 已知列 | **否** | LIST/过滤仅用 §5 索引字段 |
 | GET body → 返回完整 JSON 文件 | **否** | 含上传时带入、但未进索引的顶层字段 |
-| 不扩展新字段、维持 v2.2 契约 | **否** | 保持现状即可 |
+| 不扩展新字段、维持 v2.3 契约 | **否** | 保持现状即可 |
 
 ### 8.3 后续扩展：何时需要改代码
 
@@ -239,7 +290,7 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 |----------|--------------|--------|
 | 在 `artifact` / `observation` 增加**可选**字段（检索仍靠现有索引列） | **要** | `artifact.rs` / `trajectory.rs` 增加字段 + `#[serde(default)]`；同步更新 `Docs/trajectory/` |
 | 增加正式 `extensions: { ... }` 容器 | **要** | `TrajectoryBundle` 增加字段；若需 LIST 按扩展内容过滤，另改 `TrajectoryHeader` + SQLite schema |
-| 新增 `action.kind`（新步类型） | **要** | `StepAction` 枚举 + Gateway 记步逻辑 |
+| 新增 `action.kind`（新步类型） | **要** | `StepAction` 枚举 + 对应记步逻辑 |
 | POST body 临时带顶层未知字段（**不经过** Worker `seal`） | **可不改 Worker** | 自定义上传客户端；索引/LIST 仍不可见这些字段 |
 | 经 Worker `seal` 持久化顶层自定义字段 | **要** | 必须在 `TrajectoryBundle`（或嵌套 struct）中声明，否则 `seal` 不会写出 |
 | 按新字段做 Server LIST / retention / 监控 | **要** | `TrajectoryHeader`、`trajectories` 表及 POST 校验 |
@@ -253,7 +304,7 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 | 在 bundle **顶层**增加额外 JSON 字段 | **部分支持** | Server **原样保存** body 字节；**不会**进入 SQLite 索引与 LIST 过滤 |
 | 在 `artifact` 内增加可选字段 | **推荐（后续）** | Rust 类型加 `#[serde(default)]`；旧读者忽略；**实施时需改代码** |
 | 在 `observation` 内增加可选字段 | **推荐（后续）** | 同上，需改 `StepObservation` |
-| 新增 `action.kind` | **需协议升级** | 扩展 `StepAction` 枚举 + Gateway 写步逻辑 |
+| 新增 `action.kind` | **需协议升级** | 扩展 `StepAction` 枚举 + 写步逻辑 |
 | 仅 Worker 本地 seal 路径写扩展字段 | **不支持（不改代码时）** | `TrajectoryStore::seal` 只序列化已声明字段 |
 | 自定义上传 POST body（绕过 Worker seal） | **支持存根** | Server 存完整 JSON；索引仍只认 `TrajectoryHeader` 已知列 |
 
@@ -292,7 +343,7 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 ### 8.7 版本演进
 
 - 当前 **无** bundle 内 `schema_version` 字段；版本由仓库文档 + Git 管理。
-- 若未来引入 `schema_version`，建议：`"schema_version": "2.2"` 顶层字段，Server POST 校验兼容范围。
+- 若未来引入 `schema_version`，建议：`"schema_version": "2.3"` 顶层字段，Server POST 校验兼容范围。
 
 ---
 
@@ -300,7 +351,9 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 
 VeRL native 路径在 gRPC `ReportResult` 中另有一套 `Trajectory` / `StepRecord`（bytes observation/action，见 `proto/uenv/v1/episode.proto`）。  
 SWE Gateway 路径 **不使用** proto Trajectory 落盘，而使用本文 **JSON TrajectoryBundle**。  
-native 路径在 report 前可将 pool 轨迹 seal 为 bundle 并 upload，再填 `EpisodeResult.trajectory_id`。
+native 路径在 report 前将轨迹 seal 为 bundle 并 upload，再填 `EpisodeResult.trajectory_id`：SWE 复用
+pool submit 的 seal 结果；**非 SWE 通用 episode（v2.3）由 executor 把 proto StepRecord 映射为
+`generic` StepTrace 后 seal**（失败/超时终态 seal 部分轨迹）。
 
 ---
 
@@ -314,7 +367,9 @@ native 路径在 report 前可将 pool 轨迹 seal 为 bundle 并 upload，再�
 | 本地 seal + list | `TrajectoryStore` |
 | 上传 spool | `uenv-worker/src/swe/trajectory_upload.rs` |
 | Server 入库 / GET | `uenv-server/src/trajectory.rs` |
-| Session seal 入口 | `uenv-worker/src/swe/session.rs` → `seal_trajectory` |
+| Session seal 入口（SWE） | `uenv-worker/src/swe/session.rs` → `seal_trajectory` |
+| 通用 episode seal（v2.3） | `uenv-worker/src/episode/executor.rs` → `seal_inflight` |
+| run_id metadata 传播 | `uenv-bridge/core/src/core.rs` → `sample_to_episode_request` |
 
 ---
 
@@ -325,6 +380,4 @@ native 路径在 report 前可将 pool 轨迹 seal 为 bundle 并 upload，再�
 | v2.2 | 2026-06-25 | 冻结：Server 聚合、run_id、spool 上传、SQLite 索引 |
 | v2.2-doc | 2026-07-05 | 从 `260625` 抽离为本目录可读规范；补充扩展性章节 |
 | v2.2-doc.1 | 2026-07-05 | §8 补充「当前不必改代码 / 后续扩展改码范围」要点 |
-
-> **后继版本**：v2.3 已发布（`frozen-spec-v2.3.md`）——非 SWE 通用 episode 全终态 seal + 上传、
-> `generic` action kind、`UENV_TRAJECTORY_ARTIFACT_DIR`、run_id metadata 传播约定。新部署以 v2.3 为准。
+| v2.3 | 2026-08-20 | 全任务类型轨迹进集中存储：`generic` action kind；非 SWE 通用 episode 在 completed/failed/timeout 全终态 seal + 上传；`UENV_TRAJECTORY_ARTIFACT_DIR`（回退 `UENV_SWE_ARTIFACT_DIR`）；run_id 的 metadata 传播约定与优先级 |

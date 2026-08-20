@@ -370,11 +370,14 @@ impl WorkerRuntime {
         // 关停清理句柄：warmup_pool 随后被移动进 service，需先克隆一份用于关停回收。
         let warmup_pool_for_shutdown = warmup_pool.clone();
         let plugin_host_for_shutdown = plugin_host.clone();
+        // v2.3：通用 episode 轨迹上传与 SWE pool 共享同一 uploader（本地 store 由 executor 按 env 解析）。
+        let trajectory_uploader = swe_pool.trajectory_uploader();
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
             EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone())
                 .with_swe_catalog(swe_store, swe_runtime)
-                .with_swe_pool(swe_pool),
+                .with_swe_pool(swe_pool)
+                .with_trajectory_uploader(trajectory_uploader),
             metrics.clone(),
             warmup_pool,
             capabilities,

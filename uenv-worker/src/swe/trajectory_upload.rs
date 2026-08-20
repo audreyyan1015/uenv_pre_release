@@ -34,7 +34,8 @@ pub struct UploadConfig {
     pub endpoint: String,
     /// 上传鉴权 token（`X-Trajectory-Token`）；为空表示不带 token。
     pub token: Option<String>,
-    /// `UENV_SWE_ARTIFACT_DIR`，bodies/ 与 spool/ 的根。
+    /// 轨迹 artifact 根目录（`UENV_TRAJECTORY_ARTIFACT_DIR`，回退 `UENV_SWE_ARTIFACT_DIR`），
+    /// bodies/ 与 spool/ 的根。
     pub artifact_dir: PathBuf,
 }
 
@@ -45,10 +46,9 @@ impl UploadConfig {
             .ok()
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty())?;
-        let artifact_dir = std::env::var("UENV_SWE_ARTIFACT_DIR")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())?;
+        // v2.3：与 TrajectoryStore 同一解析（UENV_TRAJECTORY_ARTIFACT_DIR 优先，
+        // 回退 UENV_SWE_ARTIFACT_DIR），保证 spool 与 bodies 同根。
+        let artifact_dir = crate::swe::trajectory::artifact_dir_from_env()?;
         let token = std::env::var("UENV_TRAJECTORY_TOKEN")
             .ok()
             .map(|s| s.trim().to_string())
@@ -56,7 +56,7 @@ impl UploadConfig {
         Some(Self {
             endpoint,
             token,
-            artifact_dir: PathBuf::from(artifact_dir),
+            artifact_dir,
         })
     }
 
@@ -98,11 +98,20 @@ impl TrajectoryUploader {
         let cfg = UploadConfig::from_env()?;
         let _ = std::fs::create_dir_all(cfg.pending_dir());
         let _ = std::fs::create_dir_all(cfg.failed_dir());
-        let client = reqwest::blocking::Client::builder()
-            .timeout(UPLOAD_TIMEOUT)
-            .build()
-            .map_err(|e| tracing::error!(error = %e, "trajectory_uploader_client_build_failed"))
-            .ok()?;
+        // reqwest::blocking 客户端构造时会临时创建并 drop 一个 tokio runtime；
+        // 在 async 上下文（如 WorkerRuntime::run）中直接 drop runtime 会 panic，
+        // 因此当已处于 tokio runtime 内时经 block_in_place 包一层。
+        let build_client = || {
+            reqwest::blocking::Client::builder()
+                .timeout(UPLOAD_TIMEOUT)
+                .build()
+                .map_err(|e| tracing::error!(error = %e, "trajectory_uploader_client_build_failed"))
+                .ok()
+        };
+        let client = match tokio::runtime::Handle::try_current() {
+            Ok(_) => tokio::task::block_in_place(build_client),
+            Err(_) => build_client(),
+        }?;
         let uploader = Self {
             cfg: Arc::new(cfg),
             client,

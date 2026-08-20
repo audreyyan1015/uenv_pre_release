@@ -57,7 +57,7 @@ SWE 任务通过变体（`--benchmark-variant`）和 catalog 选择实例：
 |---|---|---|
 | [自定义环境](./11-process-plugin.md) | process plugin 接口模板：创建、测试、安装与两个使用入口 | 评测 `uenv evaluate run-task`；训练 `uenv train run-task` |
 
-每个评测或训练案例产生结果后都会生成轨迹，统一按[轨迹采集指南](./12-trajectory.md)查看内联 steps、实例产物或集中存储。
+每个评测或训练案例产生结果后都会生成轨迹并自动进入集中存储，统一按[轨迹采集指南](./12-trajectory.md)用 `uenv trajectory` 查询。
 
 ## 文件来源与安装路径
 

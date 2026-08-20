@@ -1,0 +1,2 @@
+# Shell 脚本必须保持 LF，Windows 检出不得转为 CRLF（插件 run.sh 在 CRLF 下无法执行）。
+*.sh text eol=lf
