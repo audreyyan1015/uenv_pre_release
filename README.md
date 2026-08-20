@@ -15,27 +15,27 @@ UEnv 让评测程序和强化学习框架通过同一套接口运行环境任务
 
 ## 从文档开始
 
-正式用户手册从 [UEnv 文档](./Docs/guide/index.md) 开始。推荐按下面的顺序了解完整能力：
+正式用户手册从 [UEnv 使用手册](./Docs/guide/1-了解UEnv/01-index.md) 开始。推荐按下面的顺序了解完整能力：
 
-1. [架构与组件](./Docs/guide/concepts/architecture.md)
-2. [单机部署](./Docs/guide/deployment/single-node.md)
-3. [多机部署](./Docs/guide/deployment/multi-node.md)
-4. [评测指南](./Docs/guide/usage/evaluation.md)
-5. [强化学习训练指南](./Docs/guide/usage/post-training.md)
-6. [轨迹采集与查询](./Docs/guide/usage/trajectory.md)
-7. [案例库](./Docs/guide/cases/README.md)
-8. [运行与维护](./Docs/guide/deployment/operations.md)
+1. [架构与组件](./Docs/guide/1-了解UEnv/02-architecture.md)
+2. [单机部署](./Docs/guide/2-部署UEnv/01-single-node.md)
+3. [多机部署](./Docs/guide/2-部署UEnv/02-multi-node.md)
+4. [通用评测流程](./Docs/guide/3-运行任务/03-evaluation.md)
+5. [强化学习训练指南](./Docs/guide/3-运行任务/07-post-training.md)
+6. [获取轨迹](./Docs/guide/3-运行任务/12-trajectory.md)
+7. [案例库](./Docs/guide/3-运行任务/02-cases.md)
+8. [运行维护](./Docs/guide/5-运维UEnv/01-operations.md)
 
 单机部署用于理解和验证基础拓扑；多机部署继续说明独立 Server、Worker 注册和扩容。评测与强化学习训练是两项并列的核心能力，都在主路径中完整介绍。
 
 按需查阅：
 
-- [配置 UEnv Server](./Docs/guide/deployment/server.md)
-- [Worker 配置与注册](./Docs/guide/deployment/worker-registration.md)
-- [Hub 配置](./Docs/guide/deployment/hub.md)
-- [强化学习框架接入](./Docs/guide/integration/README.md)
-- [故障排查](./Docs/guide/reference/troubleshooting.md)
-- [术语与兼容名称](./Docs/guide/reference/glossary.md)
+- [配置 UEnv Server](./Docs/guide/2-部署UEnv/03-server.md)
+- [配置并注册 UEnv Worker](./Docs/guide/2-部署UEnv/04-worker-registration.md)
+- [部署和使用 UEnv Hub](./Docs/guide/2-部署UEnv/05-hub.md)
+- [自定义强化学习框架接入](./Docs/guide/4-接入强化学习框架/01-custom-framework.md)
+- [故障排查](./Docs/guide/5-运维UEnv/02-troubleshooting.md)
+- [术语表](./Docs/guide/6-查阅参考/01-glossary.md)
 
 部署阶段只检查服务健康、Worker 注册状态和双向网络，不额外提交业务任务。
 
@@ -71,7 +71,7 @@ curl -fsS http://127.0.0.1:19090/health
 uenv status
 ```
 
-当前安装包中的 UEnv Server 服务名是 `uenv-adapter-core.service`。这是需要在命令中使用的服务名；其他兼容名称见[术语与兼容名称](./Docs/guide/reference/glossary.md)。
+当前安装包中的 UEnv Server 服务名是 `uenv-adapter-core.service`。这是需要在命令中使用的服务名；其他兼容名称见[术语表](./Docs/guide/6-查阅参考/01-glossary.md)。
 
 预期结果是两个服务均为 `active`，两个健康接口成功，并且 `uenv status` 显示一台状态为 `ready` 的 Worker。
 

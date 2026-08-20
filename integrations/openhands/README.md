@@ -45,8 +45,8 @@ uenv train run-swe ...
 
 文档：
 
-- [SWE-bench Verified 评测案例](../../Docs/guide/cases/evaluation-swe-verified.md)
-- [轨迹采集与查询](../../Docs/guide/usage/trajectory.md)
+- [代码修复评测](../../Docs/guide/3-运行任务/06-evaluation-swe-verified.md)
+- [轨迹采集指南](../../Docs/guide/3-运行任务/12-trajectory.md)
 
 ## 开发驱动
 

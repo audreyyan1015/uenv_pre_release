@@ -11,7 +11,7 @@
 | 实例 | `oauthlib__oauthlib.1fd52536.combine_file__09vlzwgc` |
 | 更新步数 / rollout | 20 / 每样本 4 |
 
-catalog 行保存仓库、base commit、问题、测试和 `image_cache_key`；runner 将所选行转换为强化学习训练数据。发布包自带的 Smith catalog 是 5 条冒烟样例；catalog 的生成方式和字段说明见[代码修复评测](./06-evaluation-swe-verified.md#输入与-catalog)，训练入口当前只支持 `smith` variant。
+catalog 行保存仓库、base commit、问题、测试和 `image_cache_key`；runner 将所选行转换为强化学习训练数据。发布包自带的 Smith catalog 是 5 条最小验证样例；catalog 的生成方式和字段说明见[代码修复评测](./06-evaluation-swe-verified.md#输入与-catalog)，训练入口当前只支持 `smith` variant。
 
 ## 执行主机
 
@@ -96,7 +96,7 @@ echo 'software repair training artifacts present'
 
 训练日志还必须证明：转换数据只含所选 Smith 实例；每条 rollout 使用独立 session/container；可训练结果含等长 response IDs/mask、reward 和 trajectory ID；完成 20 次更新并保存产物。`resolved=false` 是有效业务结果，模型、Gateway 或容器失败必须单独记录。
 
-启用集中轨迹后，从实例产物的 `trajectory_ref.json` 取得实际 training run ID 和 trajectory ID，再按[轨迹采集指南](./12-trajectory.md)查询；不要假设本地 `RUN_ID` 与 bundle `run_id` 相同。
+启用集中轨迹后，从实例产物的 `trajectory_ref.json` 取得实际 training run ID 和 trajectory ID，再按[获取轨迹](./12-trajectory.md)中的说明查询；不要假设本地 `RUN_ID` 与 bundle `run_id` 相同。
 
 ## 替换实例与规模
 

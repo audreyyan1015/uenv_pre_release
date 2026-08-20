@@ -178,4 +178,4 @@ jq -c '{case_id,status,reward,answer:(.steps[-1].action // ""),error_message}' "
 - [代码生成评测](./05-evaluation-code.md)
 - [代码修复评测](./06-evaluation-swe-verified.md)
 
-实现自定义环境应使用发行包中的 process plugin 模板；只有接入新的强化学习框架时才阅读[自定义强化学习框架接入](../4-接入强化学习框架/03-custom-framework.md)。
+实现自定义环境应使用发行包中的 process plugin 模板；只有接入新的强化学习框架时才阅读[自定义强化学习框架接入](../4-接入强化学习框架/01-custom-framework.md)。

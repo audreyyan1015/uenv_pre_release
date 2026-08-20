@@ -93,10 +93,10 @@ uenv train run-swe ...
 
 完整文档：
 
-- [Bridge 通用契约](../Docs/guide/integration/contract.md)
-- [VeRL 接入指南](../Docs/guide/integration/verl.md)
-- [强化学习训练指南](../Docs/guide/usage/post-training.md)
-- [强化学习训练案例](../Docs/guide/cases/README.md#强化学习训练)
+- [自定义强化学习框架接入](../Docs/guide/4-接入强化学习框架/01-custom-framework.md)
+- [以 VeRL 为例接入 UEnv](../Docs/guide/4-接入强化学习框架/02-verl.md)
+- [强化学习训练指南](../Docs/guide/3-运行任务/07-post-training.md)
+- [强化学习训练案例](../Docs/guide/3-运行任务/02-cases.md#强化学习训练)
 
 ## 开发验证
 

@@ -4,9 +4,9 @@
 
 | 文件 | 数据性质 | 案例文档 |
 |---|---|---|
-| `qa-gsm8k.jsonl` | 两条自拟数学问答，使用 `qa/gsm8k` 判分路由 | [数学问答评测](../../../Docs/guide/cases/evaluation-gsm8k.md) |
-| `code-custom.jsonl` | 一个自包含 `add(a,b)` 函数测试 | [代码生成评测](../../../Docs/guide/cases/evaluation-code.md) |
-| `swe-verified.jsonl` | 两个 Verified catalog 实例 ID | [软件工程修复评测](../../../Docs/guide/cases/evaluation-swe-verified.md) |
+| `qa-gsm8k.jsonl` | 两条自拟数学问答，使用 `qa/gsm8k` 判分路由 | [数学问答评测](../../../Docs/guide/3-运行任务/04-evaluation-gsm8k.md) |
+| `code-custom.jsonl` | 一个自包含 `add(a,b)` 函数测试 | [代码生成评测](../../../Docs/guide/3-运行任务/05-evaluation-code.md) |
+| `swe-verified.jsonl` | 两个 Verified catalog 实例 ID | [代码修复评测](../../../Docs/guide/3-运行任务/06-evaluation-swe-verified.md) |
 
 ## 数据约定
 
@@ -20,4 +20,4 @@
 /opt/uenv/current/examples/cases/evaluation/
 ```
 
-完整前置、变量、命令、预期结果与验收位于 `Docs/guide/cases/`。
+完整前置、变量、命令、预期结果与验收位于 `Docs/guide/3-运行任务/`。

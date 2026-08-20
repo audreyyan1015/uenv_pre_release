@@ -1,6 +1,6 @@
 # uenv-hub — UEnv 环境版本服务
 
-本页面向维护 Hub 源码的开发者。首次部署 UEnv 时可以先跳过 Hub；需要集中管理和分发环境版本时，请阅读[Hub 配置](../Docs/guide/deployment/hub.md)。
+本页面向维护 Hub 源码的开发者。首次部署 UEnv 时可以先跳过 Hub；需要集中管理和分发环境版本时，请阅读[部署和使用 UEnv Hub](../Docs/guide/2-部署UEnv/05-hub.md)。
 
 UEnv Hub 是可选的环境版本服务。它保存环境元数据、版本、镜像引用、资源要求和接口定义，但不参与每个 Episode 的任务调度。可以把它理解为团队内部的环境制品目录。
 

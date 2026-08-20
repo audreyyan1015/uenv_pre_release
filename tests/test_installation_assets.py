@@ -321,30 +321,27 @@ class InstallationAssetsTest(unittest.TestCase):
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
         guide_root = ROOT / "Docs/guide"
         canonical_pages = (
-            "index.md",
-            "concepts/architecture.md",
-            "concepts/episode-lifecycle.md",
-            "deployment/single-node.md",
-            "deployment/multi-node.md",
-            "deployment/server.md",
-            "deployment/worker-registration.md",
-            "deployment/hub.md",
-            "deployment/operations.md",
-            "usage/README.md",
-            "usage/evaluation.md",
-            "usage/post-training.md",
-            "usage/trajectory.md",
-            "integration/README.md",
-            "integration/contract.md",
-            "integration/verl.md",
-            "integration/custom-framework.md",
-            "integration/support-matrix.md",
-            "cases/README.md",
-            "reference/glossary.md",
-            "reference/ports.md",
-            "reference/configuration.md",
-            "reference/protocols.md",
-            "reference/troubleshooting.md",
+            "1-了解UEnv/01-index.md",
+            "1-了解UEnv/02-architecture.md",
+            "1-了解UEnv/03-episode-lifecycle.md",
+            "2-部署UEnv/01-single-node.md",
+            "2-部署UEnv/02-multi-node.md",
+            "2-部署UEnv/03-server.md",
+            "2-部署UEnv/04-worker-registration.md",
+            "2-部署UEnv/05-hub.md",
+            "3-运行任务/01-usage.md",
+            "3-运行任务/02-cases.md",
+            "3-运行任务/03-evaluation.md",
+            "3-运行任务/07-post-training.md",
+            "3-运行任务/12-trajectory.md",
+            "4-接入强化学习框架/01-custom-framework.md",
+            "4-接入强化学习框架/02-verl.md",
+            "5-运维UEnv/01-operations.md",
+            "5-运维UEnv/02-troubleshooting.md",
+            "6-查阅参考/01-glossary.md",
+            "6-查阅参考/02-configuration.md",
+            "6-查阅参考/03-ports.md",
+            "6-查阅参考/04-protocols.md",
         )
         self.assertIn('cp -a "$ROOT/Docs/guide"', release)
         for old_name in (
@@ -365,22 +362,21 @@ class InstallationAssetsTest(unittest.TestCase):
             self.assertNotIn("5分钟", text)
             self.assertNotIn("五分钟", text)
 
-        for removed in (
-            "deployment/adapter.md",
-            "integration/openhands.md",
-            "cases/trajectory-swe-openhands.md",
-        ):
-            self.assertFalse((guide_root / removed).exists(), removed)
+        integration_root = guide_root / "4-接入强化学习框架"
+        self.assertEqual(
+            [path.name for path in sorted(integration_root.glob("*.md"))],
+            ["01-custom-framework.md", "02-verl.md"],
+        )
 
         beginner_pages = (
-            "index.md",
-            "concepts/architecture.md",
-            "concepts/episode-lifecycle.md",
-            "usage/README.md",
-            "usage/evaluation.md",
-            "usage/post-training.md",
-            "usage/trajectory.md",
-            "cases/README.md",
+            "1-了解UEnv/01-index.md",
+            "1-了解UEnv/02-architecture.md",
+            "1-了解UEnv/03-episode-lifecycle.md",
+            "3-运行任务/01-usage.md",
+            "3-运行任务/02-cases.md",
+            "3-运行任务/03-evaluation.md",
+            "3-运行任务/07-post-training.md",
+            "3-运行任务/12-trajectory.md",
         )
         for relative in beginner_pages:
             text = (guide_root / relative).read_text(encoding="utf-8")
@@ -388,38 +384,61 @@ class InstallationAssetsTest(unittest.TestCase):
             self.assertNotIn("Adapter Core", text, relative)
             self.assertNotIn("Control Plane", text, relative)
 
-        index = (guide_root / "index.md").read_text(encoding="utf-8")
+        index = (guide_root / "1-了解UEnv/01-index.md").read_text(encoding="utf-8")
         ordered_links = (
-            "deployment/single-node.md",
-            "deployment/multi-node.md",
-            "usage/evaluation.md",
-            "usage/post-training.md",
-            "usage/trajectory.md",
+            "../2-部署UEnv/01-single-node.md",
+            "../2-部署UEnv/02-multi-node.md",
+            "../3-运行任务/03-evaluation.md",
+            "../3-运行任务/07-post-training.md",
+            "../3-运行任务/12-trajectory.md",
         )
         positions = [index.index(link) for link in ordered_links]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("二选一", index)
 
         case_titles = {
-            "evaluation-gsm8k.md": "# 数学问答",
-            "evaluation-code.md": "# 代码生成",
-            "evaluation-swe-verified.md": "# 软件工程修复",
-            "training-gsm8k-verl.md": "# 数学问答",
-            "training-code-verl.md": "# 代码生成",
-            "training-process-plugin.md": "# 自定义环境",
-            "training-swe-smith-verl.md": "# 软件工程修复",
+            "04-evaluation-gsm8k.md": "# 数学问答",
+            "05-evaluation-code.md": "# 代码生成",
+            "06-evaluation-swe-verified.md": "# 代码修复",
+            "08-training-gsm8k-verl.md": "# 数学问答",
+            "09-training-code-verl.md": "# 代码生成",
+            "10-training-swe-smith-verl.md": "# 代码修复",
+            "11-process-plugin.md": "# 自定义环境",
         }
         for name, title in case_titles.items():
-            first_line = (guide_root / "cases" / name).read_text(
+            first_line = (guide_root / "3-运行任务" / name).read_text(
                 encoding="utf-8"
             ).splitlines()[0]
             self.assertEqual(first_line, title, name)
 
         integration_text = "\n".join(
             path.read_text(encoding="utf-8")
-            for path in sorted((guide_root / "integration").glob("*.md"))
+            for path in sorted(integration_root.glob("*.md"))
         )
         self.assertNotIn("OpenHands", integration_text)
+        self.assertNotIn("reward-only", integration_text.casefold())
+        self.assertNotIn("先看结论", integration_text)
+
+        trajectory_text = (
+            guide_root / "3-运行任务/12-trajectory.md"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(trajectory_text.splitlines()[0], "# 获取轨迹")
+        self.assertEqual(
+            [line for line in trajectory_text.splitlines() if line.startswith("## ")],
+            ["## 查询和下载", "## 轨迹格式"],
+        )
+        self.assertNotIn("只有一种方式", trajectory_text)
+        self.assertNotIn("默认行为：零配置", trajectory_text)
+        self.assertIn("uenv trajectory list --run-id <RUN_ID>", trajectory_text)
+        self.assertIn(
+            "uenv trajectory get <TRAJECTORY_ID> -o trajectory.json",
+            trajectory_text,
+        )
+        self.assertIn(
+            "uenv trajectory export --run-id <RUN_ID> -o trajectories/",
+            trajectory_text,
+        )
+        self.assertIn("`TrajectoryBundle` JSON", trajectory_text)
 
     def test_release_data_interfaces_are_loopback_by_default(self) -> None:
         server_env = (ROOT / "deploy/config/server.env.example").read_text(

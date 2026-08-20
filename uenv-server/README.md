@@ -1,6 +1,6 @@
 # uenv-server — UEnv Server 调度库
 
-本页只面向维护 UEnv Server 源码的开发者。部署和使用 UEnv 时，请从 [UEnv 文档](../Docs/guide/index.md) 开始。
+本页只面向维护 UEnv Server 源码的开发者。部署和使用 UEnv 时，请从 [UEnv 使用手册](../Docs/guide/1-了解UEnv/01-index.md) 开始。
 
 `uenv-server` 是 UEnv Server 使用的内部 Rust library crate，负责 Worker 注册、心跳、调度、状态持久化和结果管理。当前发布包把它链接进 `uenv-adapter-core` 可执行程序，因此不能单独启动本 crate。
 
@@ -35,7 +35,7 @@ UEnv Server 进程同时提供：
 
 Worker 注册时上报它的公开 endpoint。Server 通过该地址反向调用 Worker，因此多机环境必须同时允许 Worker → Server 和 Server → Worker。
 
-注册和重启语义见 [`Docs/guide/deployment/worker-registration.md`](../Docs/guide/deployment/worker-registration.md)。
+注册和重启语义见 [配置并注册 UEnv Worker](../Docs/guide/2-部署UEnv/04-worker-registration.md)。
 
 ## 作为 library 使用
 
@@ -67,7 +67,7 @@ deploy/systemd/uenv-adapter-core.service
 /var/lib/uenv/server/server-state.db
 ```
 
-Server gRPC 实际 bind 由 `UENV_ADDR` 控制，发布默认 `0.0.0.0:50051`。`server.yaml` 负责调度、Episode、Admin HTTP 与持久化设置。完整参考见 [`Docs/guide/reference/configuration.md`](../Docs/guide/reference/configuration.md)。
+Server gRPC 实际 bind 由 `UENV_ADDR` 控制，发布默认 `0.0.0.0:50051`。`server.yaml` 负责调度、Episode、Admin HTTP 与持久化设置。完整参考见 [UEnv Server 与 UEnv Worker 配置参考](../Docs/guide/6-查阅参考/02-configuration.md)。
 
 ## 默认接口
 
@@ -97,7 +97,7 @@ UENV_CONFIG_PATH="$PWD/config/server.yaml" \
 cargo run -p uenv-adapter-core
 ```
 
-生产安装使用发布包与 `uenv-adapter-core.service`，见 [`Docs/guide/deployment/server.md`](../Docs/guide/deployment/server.md)。
+生产安装使用发布包与 `uenv-adapter-core.service`，见 [配置 UEnv Server](../Docs/guide/2-部署UEnv/03-server.md)。
 
 ## 协议权威来源
 

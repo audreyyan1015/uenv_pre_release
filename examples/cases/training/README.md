@@ -4,12 +4,12 @@
 
 | 文件 | 数据性质 | 案例文档 |
 |---|---|---|
-| `qa-gsm8k.jsonl` | 两条自拟数学问答，使用 `qa/gsm8k` 路由 | [数学问答训练](../../../Docs/guide/cases/training-gsm8k-verl.md) |
-| `code-dscodebench.jsonl` | 一个自包含 `add(a,b)` 测试 | [代码生成训练](../../../Docs/guide/cases/training-code-verl.md) |
-| `process-plugin.jsonl` | `my-environment/my-dataset` 字段模板 | [自定义环境训练](../../../Docs/guide/cases/training-process-plugin.md) |
+| `qa-gsm8k.jsonl` | 两条自拟数学问答，使用 `qa/gsm8k` 路由 | [数学问答训练](../../../Docs/guide/3-运行任务/08-training-gsm8k-verl.md) |
+| `code-dscodebench.jsonl` | 一个自包含 `add(a,b)` 测试 | [代码生成训练](../../../Docs/guide/3-运行任务/09-training-code-verl.md) |
+| `process-plugin.jsonl` | `my-environment/my-dataset` 字段模板 | [自定义环境](../../../Docs/guide/3-运行任务/11-process-plugin.md) |
 | `verl-grpo-overrides.conf` | 当前发布 runner 的 Hydra 覆盖示例 | 所有训练案例均可引用 |
 
-软件工程训练从 `config/swe/smith-sample-catalog.json` 选择实例，见[软件工程修复训练](../../../Docs/guide/cases/training-swe-smith-verl.md)。
+软件工程训练从 `config/swe/smith-sample-catalog.json` 选择实例，见[代码修复训练](../../../Docs/guide/3-运行任务/10-training-swe-smith-verl.md)。
 
 ## 数据约定
 

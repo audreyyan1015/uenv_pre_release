@@ -6,7 +6,7 @@ UEnv Worker 是环境执行节点。它接收 UEnv Server 派发的 Episode，�
 评测程序 / 强化学习框架 → UEnv Bridge → UEnv Server → UEnv Worker
 ```
 
-本页主要面向 Worker 维护者。首次部署请先阅读 [Worker 配置与注册](../Docs/guide/deployment/worker-registration.md)。
+本页主要面向 Worker 维护者。首次部署请先阅读 [配置并注册 UEnv Worker](../Docs/guide/2-部署UEnv/04-worker-registration.md)。
 
 ## 运行时职责
 
@@ -83,7 +83,7 @@ observability:
   health_listen: "0.0.0.0:19090"
 ```
 
-配置优先级是 CLI 日志选项 > 环境变量 > YAML > 代码默认值。环境变量与完整字段表见 [`Docs/guide/reference/configuration.md`](../Docs/guide/reference/configuration.md)。
+配置优先级是 CLI 日志选项 > 环境变量 > YAML > 代码默认值。环境变量与完整字段表见 [UEnv Server 与 UEnv Worker 配置参考](../Docs/guide/6-查阅参考/02-configuration.md)。
 
 校验配置：
 
@@ -100,7 +100,7 @@ sudo -u uenv /opt/uenv/current/bin/uenv-worker \
 4. Worker 完成任务后把最终结果返回 Server。
 5. Server 重启或注册丢失时，Worker 自动重新注册。
 
-面向用户的配置步骤见 [`Docs/guide/deployment/worker-registration.md`](../Docs/guide/deployment/worker-registration.md)；协议字段和可靠性机制见 [`Docs/guide/reference/protocols.md`](../Docs/guide/reference/protocols.md)。
+面向用户的配置步骤见 [配置并注册 UEnv Worker](../Docs/guide/2-部署UEnv/04-worker-registration.md)；协议字段和可靠性机制见 [协议与调用方向](../Docs/guide/6-查阅参考/04-protocols.md)。
 
 ## 源码运行
 

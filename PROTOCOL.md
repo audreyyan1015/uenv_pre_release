@@ -12,7 +12,7 @@
 - `ControlPlaneService` 是 Server 对 Worker 提供的一组兼容 RPC 名称，不是另一个组件。
 - Hub 是可选的环境版本和 EnvPackage 服务，不在 Episode 热路径。
 
-用户侧的完整解释见 [协议参考](./Docs/guide/reference/protocols.md) 和 [组件与边界](./Docs/guide/concepts/architecture.md)。
+用户侧的完整解释见 [协议与调用方向](./Docs/guide/6-查阅参考/04-protocols.md) 和 [架构与组件](./Docs/guide/1-了解UEnv/02-architecture.md)。
 
 ## 权威协议文件
 
@@ -102,6 +102,6 @@ Server 每次启动生成新的 `server_epoch`。Worker 在心跳响应中发现
 
 更详细的字段、状态与运维含义见：
 
-- [Bridge 接入契约](./Docs/guide/integration/contract.md)
-- [Worker 接入与注册](./Docs/guide/deployment/worker-registration.md)
-- [Episode 生命周期](./Docs/guide/concepts/episode-lifecycle.md)
+- [自定义强化学习框架接入](./Docs/guide/4-接入强化学习框架/01-custom-framework.md)
+- [配置并注册 UEnv Worker](./Docs/guide/2-部署UEnv/04-worker-registration.md)
+- [一次 Episode 如何完成](./Docs/guide/1-了解UEnv/03-episode-lifecycle.md)

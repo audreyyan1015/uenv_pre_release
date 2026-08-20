@@ -70,7 +70,7 @@ sudo -u uenv docker info >/dev/null
 
 - 已存在 `/etc/uenv/swe.env` 且与本次参数不同时，`prepare-swe` 会中止并提示 `--force-swe-config`；先备份并确认差异，再带该参数重跑。
 - `control-plane` 形式的 `prepare-swe` 只配置密钥，不安装 Worker 组件；但安装器在 `control-plane` profile 下会停用同机的 `uenv-worker.service`，如果该主机同时运行 UEnv Worker，准备完成后用 `sudo systemctl enable --now uenv-worker.service` 恢复。
-- `--trajectory-endpoint` 指向 UEnv Server 的轨迹接口；多机使用时需按[轨迹采集指南](./12-trajectory.md#多机部署)把 Server 侧 `8077` 改为受控内网地址并分发 token。
+- `--trajectory-endpoint` 指向 UEnv Server 的轨迹接口；多机使用时需按[配置 UEnv Server](../2-部署UEnv/03-server.md)把 Server 侧 `8077` 改为受控内网地址并分发 token。
 
 ## 前置检查
 
@@ -113,7 +113,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 
 ## 输入与 catalog
 
-发布包自带的 catalog 是冒烟样例，不是完整数据集：`verified.json` 含 10 条实例，`smith-sample-catalog.json` 含 5 条。四个 variant（`verified`、`lite`、`pro`、`smith`）的完整 catalog 都可以用官方数据集导出生成，例如：
+发布包自带的 catalog 是最小验证样例，不是完整数据集：`verified.json` 含 10 条实例，`smith-sample-catalog.json` 含 5 条。四个 variant（`verified`、`lite`、`pro`、`smith`）的完整 catalog 都可以用官方数据集导出生成，例如：
 
 ```bash
 uenv evaluate build-swe-catalog \
@@ -198,7 +198,7 @@ while IFS= read -r artifact_dir; do
 done < <(sudo jq -r '.artifact_dir' "$OUTPUT")
 ```
 
-启用轨迹时，每个 completed 实例目录还应有 `trajectory_ref.json`；读取方式见[轨迹采集指南](./12-trajectory.md)。模型是否真正修复任务用 `resolved`、reward 和测试结果统计，不用 `status` 代替。
+启用轨迹时，每个 completed 实例目录还应有 `trajectory_ref.json`；读取方式见[获取轨迹](./12-trajectory.md)。模型是否真正修复任务用 `resolved`、reward 和测试结果统计，不用 `status` 代替。
 
 ## 替换参数
 

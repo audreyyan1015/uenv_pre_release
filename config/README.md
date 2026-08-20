@@ -1,6 +1,6 @@
 # UEnv 内部配置样例说明
 #
-# 面向普通用户的配置说明见 Docs/guide/reference/configuration.md。
+# 面向普通用户的配置说明见 Docs/guide/6-查阅参考/02-configuration.md。
 # 本目录还保留开发联调和历史部署样例，请勿直接用于生产环境。
 #
 # 本地开发

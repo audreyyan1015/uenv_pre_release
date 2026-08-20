@@ -1,6 +1,6 @@
 # 案例库
 
-案例库按使用阶段分为评测与强化学习训练。先依次理解[通用评测流程](./03-evaluation.md)、[强化学习训练指南](./07-post-training.md)和[轨迹采集指南](./12-trajectory.md)，再在具体阶段选择与任务类型匹配的案例。
+案例库按使用阶段分为评测与强化学习训练。先依次理解[通用评测流程](./03-evaluation.md)、[强化学习训练指南](./07-post-training.md)和[获取轨迹](./12-trajectory.md)，再在具体阶段选择与任务类型匹配的案例。
 
 案例中的 QA 与 Code JSONL 是仓库自拟的最小示例输入，仅用于展示字段和端到端执行；benchmark 得分以官方评测为准。SWE 案例从安装包固定 catalog 选择实际实例。自定义环境（process plugin）单独成节，不绑定评测或训练阶段；自定义环境案例是接口模板，完成 plugin 实现、测试与安装后才能执行。
 
@@ -25,7 +25,7 @@ SWE 任务通过变体（`--benchmark-variant`）和 catalog 选择实例：
 | `pro` | [SWE-bench Pro](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro) | 按需生成 catalog |
 | `smith` | [SWE-smith](https://huggingface.co/datasets/SWE-bench/SWE-smith) | 5 条训练样例 |
 
-发布包自带的 catalog 是冒烟样例；四个 variant 的完整 catalog 都可以用官方导出自行生成，命令见[代码修复](./06-evaluation-swe-verified.md#输入与-catalog)。训练入口 `run-swe` 只支持 `smith`（见[强化学习训练指南](./07-post-training.md#选择任务入口)）。
+发布包自带的 catalog 是最小验证样例；四个 variant 的完整 catalog 都可以用官方导出自行生成，命令见[代码修复](./06-evaluation-swe-verified.md#输入与-catalog)。训练入口 `run-swe` 只支持 `smith`（见[强化学习训练指南](./07-post-training.md#选择任务入口)）。
 
 表中没有的任务用 process plugin 自建环境，见[自定义环境](./11-process-plugin.md)。
 
@@ -57,7 +57,7 @@ SWE 任务通过变体（`--benchmark-variant`）和 catalog 选择实例：
 |---|---|---|
 | [自定义环境](./11-process-plugin.md) | process plugin 接口模板：创建、测试、安装与两个使用入口 | 评测 `uenv evaluate run-task`；训练 `uenv train run-task` |
 
-每个评测或训练案例产生结果后都会生成轨迹并自动进入集中存储，统一按[轨迹采集指南](./12-trajectory.md)用 `uenv trajectory` 查询。
+评测或训练完成后，可以按[获取轨迹](./12-trajectory.md)中的说明使用 `uenv trajectory` 查询 UEnv 保存的轨迹。
 
 ## 文件来源与安装路径
 
@@ -79,4 +79,3 @@ test -d "$UENV_RELEASE_ROOT/examples/cases"
 ```
 
 从源码运行时，普通 JSONL 位于仓库根目录下的 `examples/cases/`，SWE catalog 位于 `config/swe/`；在安装布局中两者分别对应 `examples/cases/` 与 `share/swe/`。具体 SWE 页面分别给出需要替换的变量。
-
