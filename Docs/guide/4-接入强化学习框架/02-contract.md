@@ -1,161 +1,213 @@
-# 强化学习接入契约
+# 接口与数据契约
 
-本文定义强化学习框架接入 UEnv 时必须保持的运行边界。框架接入代码可以使用不同语言，但不能改变 ID、批次、token、结果或失败语义。
+本文介绍强化学习框架与 UEnv 之间的公开网络协议（wire API）。无论 Bridge 用什么语言实现，都应以仓库中的 `proto/uenv/v1/adapter_core.proto` 为唯一真源。
 
-## 术语与运行边界
-
-| 术语 | 本文含义 |
-|---|---|
-| sample | 强化学习框架选中的一条训练输入 |
-| Episode | UEnv 中一次独立环境执行 |
-| rollout | 模型在 Episode 中产生 response/action 的过程 |
-| response token/mask | 用于框架计算 loss 的 token 与有效位置 |
-| staleness | 异步训练中 rollout 相对当前策略版本的陈旧程度 |
-
-接入代码在框架侧运行，把训练任务数据直接转换为 UEnv Server 接入的标准数据包，通过 `AdapterCoreService` gRPC API 提交。协议服务名是兼容标识；接入代码只与 UEnv Server 交互，UEnv Worker 的注册与选择全部由 UEnv Server 完成。
-
-UEnv Server 把 `SampleEnvelope` 转成 `EpisodeRequest`，调度 UEnv Worker，再把 `EpisodeResult` 转成 `SampleResult`。接入点应位于“训练 sample 已确定、环境 rollout 尚未执行”的位置：
+这个接口的核心关系很简单：
 
 ```text
-sample -> framework preprocessing -> 接入代码 -> UEnv Server/Worker rollout
-       -> 接入代码 restores tokens/reward -> loss/update/checkpoint
+一个 SampleEnvelope  --request_id-->  UEnv 中的一次 Episode
+一个 SampleResult    --request_id-->  这次 Episode 的执行结果
 ```
 
-如果框架已经在本地完成生成，再把纯文本交给环境判分，则属于后置 reward 模式：UEnv 只完成判分，token、mask 和 trajectory 的来源必须另行说明。
+`env_config_json`、`reward_config_json` 中的业务字段由具体环境定义，不是 `AdapterCoreService` 的固定字段。本文只解释公开外层协议和当前实现会实际读取的通用字段。
 
-## 协议入口与最小连通检查
+## `AdapterCoreService`
 
-类型化边界位于 `proto/uenv/v1/adapter_core.proto`：
+完整服务名为 `uenv.bridge.v1.AdapterCoreService`。
 
-- `HealthCheck`：连接与协议版本检查。
-- `ExecuteBatch`：一次请求/响应的有界批次。
-- `ExecuteBatchStream`：样本和结果双向流式传输。
+| RPC | 请求 | 响应 | 用途 |
+|---|---|---|---|
+| `HealthCheck` | `HealthCheckRequest` | `HealthCheckResponse` | 检查 gRPC 服务是否可达，并读取服务版本。 |
+| `ExecuteBatch` | `ExecuteBatchRequest` | `ExecuteBatchResponse` | 一次提交一个有界批次，等待批次中的所有 Episode 结束后返回。首次接入建议先使用这个 RPC。 |
+| `ExecuteBatchStream` | `stream SampleEnvelope` | `stream SampleResult` | 双向流式提交；每个 sample 独立执行，结果按完成顺序返回。 |
 
-Python 开发可以直接使用仓库固定生成的 stub。安装项目依赖后，从仓库根目录执行：
+`HealthCheckResponse` 只包含：
 
-```bash
-export PYTHONPATH="$PWD/uenv-bridge/src"
-export UENV_SERVER_ENDPOINT='127.0.0.1:50051'
-
-python3 - <<'PY'
-import os
-import grpc
-from uenv.bridge.gen import adapter_core_pb2 as pb
-from uenv.bridge.gen import adapter_core_pb2_grpc as rpc
-
-with grpc.insecure_channel(os.environ["UENV_SERVER_ENDPOINT"]) as channel:
-    reply = rpc.AdapterCoreServiceStub(channel).HealthCheck(
-        pb.HealthCheckRequest(), timeout=5
-    )
-    assert reply.ok, reply
-    print({"ok": reply.ok, "version": reply.version})
-PY
-```
-
-明文 gRPC 只用于受控内网；跨不可信网络时通过组织批准的 TLS 入口或隧道连接。健康检查通过只说明 RPC 可达；训练接入完成以四层验收为准。
-
-## 请求契约
-
-每条 `SampleEnvelope` 的关键字段：
-
-| 字段 | 约束 |
-|---|---|
-| `request_id` | 每个 sample/rollout 唯一；重试同一逻辑请求时保持不变 |
-| `batch_id` | 非空；同一框架批次一致 |
-| `sample_index` | sample 在框架批次中的稳定索引 |
-| `framework` | 非空框架标识，例如 `verl` |
-| `env_type` | 显式环境类型，不从文件名或默认值猜测 |
-| `parallel_mode` | 与框架实际执行模式一致 |
-| `env_config_json` | 环境初始化与任务数据；UTF-8 JSON object |
-| `episode_config_json` | max steps/turns、seed、初始 observation 等 |
-| `reward_config_json` | target、rubric 或 plugin 配置 |
-| `model_endpoint` | UEnv Worker 可达的 URL、模型名、生成参数和重试上限 |
-| `timeout_seconds` | Episode 业务超时，与 gRPC deadline 分开设置 |
-| `correlation_id` | 跨框架日志、UEnv Server 日志与轨迹使用的关联键 |
-| `sample_context_json` | 可追溯 metadata，不得放 API Key |
-| `env_package_id/version` | 需要固定环境包时显式填写 |
-
-`dataset` 放入 `env_config_json`，`max_steps` 放入 `episode_config_json`；不要让同一含义在多个 JSON 中冲突。一个批次内 `request_id` 不得重复，`batch_id` 与 `framework` 不得为空，所有 JSON bytes 解码后必须是对象。
-
-## 模型、token 与策略版本
-
-接入代码必须明确当前策略模型在哪里：
-
-- UEnv Worker 直接访问模型服务时，request 携带 UEnv Worker 可达 URL。
-- 模型位于 GPU 主机时，框架 runner 提供对 UEnv Worker 可达的 model gateway。
-- 密钥通过服务配置或受保护文件传入，不进入 sample payload、轨迹或普通日志。
-
-训练输出优先使用 UEnv Worker 返回的原始 `response_ids` 与 `response_mask`。仅有 `response_text` 时，用框架 tokenizer 重新编码只能作为显式兼容模式，并记录 tokenizer、chat template 与 token 来源；否则可能改变训练语义。
-
-异步训练还要携带并检查 `rollout_param_version`、`rollout_policy_version` 和 token 级 logprob。框架必须定义最大 staleness、过期结果处理及权重切换时对 in-flight rollout 的策略。
-
-## 结果契约
-
-接入代码至少处理以下 `SampleResult` 字段：
-
-| 字段 | 接入代码行为 |
-|---|---|
-| `request_id` | 映射输入；未知或重复 ID 是协议错误 |
-| `batch_id`、`sample_index` | 校验批次归属，恢复框架原顺序 |
-| `status`、`done` | 决定结果能否进入训练更新 |
-| `reward` | 回填 reward，不用默认 0 掩盖错误 |
-| `termination_reason` | 写入框架 extra fields 与日志 |
-| `trajectory_json` | 还原 step、token/mask、轨迹引用和调试信息 |
-| `error_code/message` | 进入失败策略与可观测性 |
-| rollout version/logprobs | 验证策略新鲜度和 token 对齐 |
-
-UEnv Server 可以乱序返回，接入代码必须按 `request_id` 重排，不能用响应数组位置或 `zip(samples, results)` 回填。
-
-状态语义：
-
-| 状态 | 默认训练行为 |
-|---|---|
-| `completed` | 仍需校验 token/mask/reward 后才能用于更新 |
-| `failed` / `timeout` | 不进入更新；按失败策略终止或显式屏蔽 |
-| `recorded` | 旧接入实现的兼容状态；只有完整 trace 已校验时才按 completed 处理，并记录兼容来源 |
-| 未知值 | 协议错误，禁止猜测 |
-
-新接入不能为了兼容未知状态而把 `done=true` 作为唯一成功依据。
-
-## 批次、流和背压
-
-- 有界批次使用 `ExecuteBatch`；高吞吐或逐条返回使用 `ExecuteBatchStream`。
-- 接入代码限制本地 in-flight 数；收到 `RESOURCE_EXHAUSTED` 时降低并发并有界退避。
-- 框架 batch、UEnv Server pending batch、UEnv Worker slot、Agent job 和 Runtime Gateway session 是不同层级的上限，最终并发取最小值。
-- 调度 hint 不能绕过 UEnv Worker 上报的硬容量。
-
-流式调用必须在取消或框架退出时关闭发送端与 channel，不能留下继续提交的后台任务。
-
-## 超时、取消、重试与幂等
-
-| 场景 | 必须行为 |
-|---|---|
-| Episode 超时 | 返回终态超时/失败，记录终止原因 |
-| gRPC deadline | 调用方停止等待；只在请求可幂等重放时重试 |
-| 框架取消 | 停止产生新请求并传播取消 |
-| 容量不足 | 有界退避或拆小批次，保持原 `request_id` |
-| 业务低分 | 不做传输级重试 |
-| 未知结果 ID | 立即报协议错误 |
-
-同一 `request_id` 的重复提交必须表示同一个逻辑 Episode。需要新的 rollout 时生成新 ID，并用 `batch_id` / `correlation_id` 建立关联。
-
-## 失败策略
-
-默认 fail fast：非可训练终态不进入参数更新。只有任务定义明确允许时，才可把失败转成 `zero_reward`；此时同时保留零长度或全 0 mask 的占位、原始状态与错误字段，以及明确的 `failed_episode_policy` 标记。
-
-模型不可达、UEnv Worker 崩溃、容器失败和协议错配不应成为模型能力低下的训练信号。
-
-## 可观测性与数据安全
-
-框架、接入代码、UEnv Server 和 UEnv Worker 都应记录 `run_id`、`batch_id`、`request_id`、`episode_id` 与 `trajectory_id`。不得记录 API Key；prompt、response、源码和轨迹使用同一数据分级与保留策略。
-
-## 四层验收
-
-| 层级 | 验证内容 | 通过标准 |
+| 字段 | 类型 | 含义 |
 |---|---|---|
-| 映射单测 | sample→envelope、result→framework output | 必填字段和 token/reward 映射一致 |
-| 协议测试 | ID、乱序/重复/缺失、timeout、backpressure | 错误稳定识别，没有按位置误配 |
-| 本地闭环 | 接入代码 → UEnv Server → UEnv Worker | 真实 Episode 有终态、reward 与 trajectory |
-| 框架端到端 | 真实强化学习作业 | 完成预定更新并写出可追溯 checkpoint |
+| `ok` | `bool` | 当前实现在 RPC 可达时返回 `true`。 |
+| `version` | `string` | 当前服务程序的 package 版本。 |
 
-验收使用目标训练流程本身，不另加一套与真实接入语义不同的简化任务。实现步骤见[自定义强化学习框架接入](./03-custom-framework.md)。
+> **注意：** `HealthCheck` 成功只说明 `AdapterCoreService` RPC 存活。它不检查是否有可用 Worker，也不检查指定环境或模型端点能否执行。
+
+## `ExecuteBatch` 的外层消息
+
+### `ExecuteBatchRequest`
+
+| 字段 | protobuf 类型 | 谁提供 | 必填性 / 默认 | 说明 |
+|---|---|---|---|---|
+| `request_id` | `string` | Bridge | 协议默认为空；当前服务不强制校验 | 这一次批量 RPC 的 ID，会原样回填到响应。为了排查问题，客户端应始终填写。 |
+| `batch_id` | `string` | Bridge | 协议默认为空；当前服务不强制校验 | 这一次 RPC 的批次 ID，会原样回填到响应。客户端应使它与各 sample 的 `batch_id` 一致。 |
+| `samples` | `repeated SampleEnvelope` | Bridge | 可为空，但空批次不执行任何 Episode | 本批次要执行的 rollout。 |
+
+### `ExecuteBatchResponse`
+
+| 字段 | protobuf 类型 | 来源 | 说明 |
+|---|---|---|---|
+| `request_id` | `string` | 请求外层 | 原样回填 `ExecuteBatchRequest.request_id`。 |
+| `batch_id` | `string` | 请求外层 | 原样回填 `ExecuteBatchRequest.batch_id`。 |
+| `results` | `repeated SampleResult` | UEnv | 每个已提交 sample 对应一个结果。客户端应按 `request_id` 关联，不要用 `zip(samples, results)` 作为唯一对齐方式。 |
+
+当前 `ExecuteBatch` 实现会检查 Episode 结果数量、未知 ID 和重复 ID。如果底层返回的结果无法与提交的 sample 一一对应，整个 RPC 失败，而不是生成一个伪造的默认结果。
+
+## `SampleEnvelope`：一次 rollout 的输入
+
+可以先用下面这四句话判断字段应放在哪里：
+
+- 环境如何初始化、本条任务的数据是什么 → `env_config_json`。
+- Episode 最多走几步、使用什么随机种子 → `episode_config_json`。
+- 如何判分、标准答案或 rubric 是什么 → `reward_config_json`。
+- UEnv Worker 如何访问当前策略模型 → `model_endpoint`。
+
+### 身份与路由
+
+| 字段 | protobuf 类型 | 谁提供 | 必填性 / 默认 | 说明 |
+|---|---|---|---|---|
+| `request_id` | `string` | Bridge | **服务端强制非空** | 这次 rollout 的唯一 ID，内部直接用作 `episode_id`，也由 `SampleResult` 回填。 |
+| `batch_id` | `string` | Bridge | **服务端强制非空** | 归属的框架批次，同时用作默认的关联/调度分组 ID。 |
+| `sample_index` | `uint32` | Bridge | protobuf 默认 `0`，当前服务不校验唯一性 | sample 在框架批次中的稳定索引，会由结果回填。 |
+| `framework` | `string` | Bridge | **服务端强制非空** | 产生 sample 的框架标识，例如 `verl`。 |
+| `env_type` | `string` | 任务/环境配置 | 协议默认为空；**完整执行实际必填** | UEnv 用它选择环境和 Worker。当前 Adapter Core 不会提前拒绝空值，因此 Bridge 必须先校验。 |
+| `parallel_mode` | `string` | Bridge | 空字符串按 `sync` 处理 | 只接受 `sync`、`one_step_off_policy` 或 `fully_async`；其他非空值会被拒绝。首次接入使用 `sync`。 |
+
+### 环境、Episode 与奖励配置
+
+| 字段 | protobuf 类型 | 谁提供 | 必填性 / 默认 | 当前通用层行为 |
+|---|---|---|---|---|
+| `env_config_json` | `bytes` | 环境适配代码 | 协议可空；实际必填字段由 `env_type` 决定 | UTF-8 JSON，整个值会作为环境配置传给 Worker。通用层还会读取 `question`/`raw_prompt`、`dataset`/`data_source` 和可选 `response_text`。 |
+| `episode_config_json` | `bytes` | Bridge | 协议可空 | 当前 Adapter Core **只读取** `max_steps` 和 `seed`，两者必须是 i32 范围内的 JSON 整数。缺少时分别向下游传 `0` 和“未设置”。 |
+| `reward_config_json` | `bytes` | 环境/奖励适配代码 | 协议可空；能否判分由目标环境决定 | `{"type":"rule_reward", ...}` 原样传递；如果存在 `rubric_config.ground_truth`，通用层会转成 `rule_reward` 的 `target`；其他值原样传递。 |
+
+> **JSON 需要由 Bridge 先校验：** 这三个字段在 protobuf 中都是 `bytes`。当前 Adapter Core 不会因空字节或非法 JSON 拒绝请求，而是把解析失败的值当作 JSON `null`。为避免配置静默丢失，Bridge 应在提交前确认它们是 UTF-8 JSON，并按目标环境的约定检查类型和必填键。
+
+### 模型端点
+
+`model_endpoint` 的 protobuf 类型是 `ModelEndpoint`。消息本身可以缺省；在完整 rollout 模式中，如果 Worker 需要调用当前策略模型，则必须提供 Worker 实际可访问的端点。
+
+| 字段 | protobuf 类型 | 谁提供 | 必填性 / 默认 | 说明 |
+|---|---|---|---|---|
+| `endpoint_type` | `string` | 模型服务适配代码 | 默认空字符串 | 端点类型。公开 wire 层不自动填入 `http`。 |
+| `url` | `string` | 模型服务/框架 | 默认空字符串；需要模型调用时必填 | 必须从 UEnv Worker 所在网络访问；远程 Worker 不能使用框架主机的 `127.0.0.1`。 |
+| `model_name` | `string` | 模型服务/框架 | 默认空字符串 | 传给模型服务的模型名称；是否必填取决于端点。 |
+| `generation_config_json` | `bytes` | 强化学习框架 | 默认空字节 | UTF-8 JSON 生成参数。当前 Adapter Core 不校验其 JSON 合法性。 |
+| `max_retries` | `int32` | Bridge | 默认 `0` | 表示模型端点层的重试上限；Adapter Core 只原样传给下游，是否执行由实际模型适配实现决定。 |
+
+### 超时、关联与环境包
+
+| 字段 | protobuf 类型 | 谁提供 | 必填性 / 默认 | 当前通用层行为 |
+|---|---|---|---|---|
+| `timeout_seconds` | `int32` | Bridge | `<= 0` 时使用 `300` | 单个 Episode 的业务超时，不是 gRPC deadline。 |
+| `correlation_id` | `string` | Bridge | 空字符串时使用 `sample.batch_id` | 用于跨框架、Server 和 Worker 追踪这次执行。 |
+| `sample_context_json` | `bytes` | Bridge | 默认空字节 | UTF-8 JSON 上下文。当前非 object 或解析失败的值会被忽略；不得放入 API Key 等密钥。 |
+| `env_package_id` | `string` | 环境配置 | 默认空字符串 | 留空时会回退读取 `env_config_json.env_package_id` 或 `package_id`。 |
+| `env_package_version` | `string` | 环境配置 | 默认空字符串 | 留空时会回退读取 `env_config_json.env_package_version` 或 `package_version`。 |
+
+如果显式的 `env_package_id` / `env_package_version` 与 `env_config_json` 中的回退值同时存在且不一致，当前实现会以非法请求拒绝，不会猜测应使用哪一个。
+
+## `SampleResult`：一次 rollout 的输出
+
+| 字段 | protobuf 类型 | 当前值的来源 / 默认 | Bridge 应如何使用 |
+|---|---|---|---|
+| `request_id` | `string` | 来自底层 `EpisodeResult.episode_id` | 用它找回原 `SampleEnvelope`；未知或重复 ID 是协议错误。 |
+| `batch_id` | `string` | 从原 `SampleEnvelope.batch_id` 恢复 | 校验结果属于预期批次。 |
+| `sample_index` | `uint32` | 从原 `SampleEnvelope.sample_index` 恢复 | 在按 ID 校验后，用于恢复框架顺序。 |
+| `status` | `string` | 原样传递底层 Episode 状态 | 只有明确识别为成功的状态才能进入训练更新；当前正常成功值为 `completed`。 |
+| `reward` | `double` | `EpisodeResult.summary.total_reward`；缺少 summary 时为 `0.0` | 回填框架 reward。状态失败时不要把默认 `0.0` 当作模型能力得分。 |
+| `done` | `bool` | 当前 Adapter Core 仅对 `completed` / `failed` / `timeout` 设为 `true` | 不要用它单独判断成功。例如底层可返回 `cancelled`，当前该值为 `false`。 |
+| `termination_reason` | `string` | `EpisodeResult.summary.terminate_reason`；缺少时为空 | 写入框架输出和日志，不要代替 `status`。 |
+| `trajectory_json` | `bytes` | 由 Episode trajectory 序列化；也可能是空字节 | 非空时按下文 schema 解析。 |
+| `error_code` | `string` | 底层枚举数值转成十进制字符串；缺少时为空 | 与 `status` / `error_message` 一起保留。不要假定它是符号名。 |
+| `error_message` | `string` | 底层错误信息；缺少时为空 | 用于失败诊断，不转换成 reward。 |
+| `rollout_param_version` | `int64` | 底层可选值；缺少时会变成 `0` | 异步训练用。当前 wire 层无法区分“缺少”和真实版本 `0`。 |
+| `rollout_policy_version` | `string` | 底层可选值；缺少时为空 | 异步训练用。 |
+| `rollout_log_probs` | `repeated float` | 底层 `EpisodeResult.rollout_log_probs` | 如果框架使用，必须自行验证与 response token 对齐；Adapter Core 当前不做长度校验。 |
+
+### `trajectory_json` 的完整结构
+
+`trajectory_json` 有三种形态：
+
+1. 底层有完整 trajectory 时，返回包含 steps 的 JSON object。
+2. 没有内联 trajectory，但有 `trajectory_id` 或 metadata 时，返回 `steps: []` 的 JSON object。
+3. 内联 trajectory、`trajectory_id` 和 metadata 都不存在时，返回空字节 `b""`。空字节不是 JSON，解析前必须先判空。
+
+非空时，当前所有已知字段由下面的 JSON Schema 描述。其中 `$schema` 是 schema 文档本身的声明，不是实际 `trajectory_json` 里的字段。客户端应忽略未来可能增加的字段。
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["steps", "total_reward", "total_steps"],
+  "properties": {
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "step_index",
+          "observation",
+          "action",
+          "reward",
+          "terminated",
+          "truncated",
+          "info",
+          "duration_ms",
+          "rollout_trace"
+        ],
+        "properties": {
+          "step_index": {"type": "integer"},
+          "observation": {"type": "string"},
+          "action": {"type": "string"},
+          "reward": {"type": "number"},
+          "terminated": {"type": "boolean"},
+          "truncated": {"type": "boolean"},
+          "info": {
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+          },
+          "duration_ms": {"type": "integer"},
+          "rollout_trace": {
+            "type": "object",
+            "properties": {
+              "response_ids": {
+                "type": "array",
+                "items": {"type": "integer"}
+              },
+              "response_mask": {
+                "type": "array",
+                "items": {"type": "integer"}
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "total_reward": {"type": "number"},
+    "total_steps": {"type": "integer"},
+    "trajectory_id": {"type": "string"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    }
+  },
+  "additionalProperties": true
+}
+```
+
+还需要注意：
+
+- `response_ids` 和 `response_mask` 不在 `SampleResult` 顶层，而在 `steps[*].rollout_trace` 中。
+- 某一步没有 rollout trace 时，当前序列化结果是空 object `{}`；有 trace 时会同时输出两个数组。Bridge 应检查两个数组等长。
+- `observation` 和 `action` 由底层 bytes 以 lossy UTF-8 转成字符串；它们不适合承载需要逐字节无损还原的二进制数据。
+- `total_reward` / `total_steps` 在有内联 trajectory 时来自 trajectory；只有外壳时分别来自 summary 和其默认值。
+
+## ID 与状态的最小规则
+
+1. 每次新 rollout 都生成新的非空 `request_id`。同一 `ExecuteBatch` 内的重复 ID 会被拒绝。
+2. 当前流式 RPC 会逐 sample 校验，不会在整条流上替客户端检测重复 `request_id`；Bridge 仍必须保证全局不冲突。
+3. `SampleEnvelope.batch_id` 必须非空。当前服务不会校验它是否等于 `ExecuteBatchRequest.batch_id`，Bridge 必须自己保持一致。
+4. 先按 `request_id` 建立结果索引，再校验 `batch_id` 和 `sample_index`。不识别的 ID、重复结果或缺失结果都应使本批次失败。
+5. 默认只把 `status == "completed"` 的结果交给训练更新，并且仍要校验 reward 和所需 trace。`failed`、`cancelled` 或未知状态都不能仅因 `done` 的值而被当作成功。
+
+超时与 gRPC deadline 的区别、重试与幂等、取消、背压、流式并发和异步策略版本属于运行时行为，见[生产运行语义](./06-runtime-semantics.md)。

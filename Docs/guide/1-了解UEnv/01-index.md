@@ -37,7 +37,7 @@ UEnv Hub（可选）→ 向 UEnv Worker 分发环境包
 
 | 需要完成的事情 | 文档 |
 |---|---|
-| 把强化学习框架接入 UEnv | [强化学习框架接入指南](../4-接入强化学习框架/01-integration.md) |
+| 把强化学习框架接入 UEnv | [接入强化学习框架](../4-接入强化学习框架/01-integration.md) |
 | 修改中心服务 | [配置 UEnv Server](../2-部署UEnv/03-server.md) |
 | 新增或重新注册 UEnv Worker | [配置并注册 UEnv Worker](../2-部署UEnv/04-worker-registration.md) |
 | 统一环境版本 | [部署和使用 UEnv Hub](../2-部署UEnv/05-hub.md) |
