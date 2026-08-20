@@ -2,7 +2,7 @@
 
 UEnv 向强化学习框架提供 Episode 级 rollout 接口。框架把一批训练样本和当前策略模型的服务地址交给 UEnv；UEnv 调用模型、与环境交互并计算奖励，然后返回每条样本的执行状态、reward 和 trajectory。数据加载、rollout 结果整理、loss 计算、参数更新和 checkpoint 仍由强化学习框架负责。
 
-接入代码只需要完成两次转换：在 rollout 开始前把框架 sample 转成 UEnv 请求，收到结果后再把 UEnv 结果转成框架所需的 rollout 输出。接入新框架时不需要修改 UEnv Server、UEnv Worker 或环境实现。
+与 UEnv 相关的接入代码只需要完成两次数据转换：在 rollout 开始前把框架 sample 转成 UEnv 请求，收到结果后再把 UEnv 结果转成框架所需的 rollout 输出。接入新框架时不需要修改 UEnv Server、UEnv Worker 或环境实现。
 
 ## 接入位置
 
@@ -14,7 +14,7 @@ UEnv 向强化学习框架提供 Episode 级 rollout 接口。框架把一批训
 
 ## UEnv 提供的接口
 
-框架通过 gRPC 调用 `uenv.bridge.v1.AdapterCoreService.ExecuteBatch`。一次调用提交一批 `SampleEnvelope`，并收到同批 `SampleResult`。公开协议的真源是 `proto/uenv/v1/adapter_core.proto`。
+框架通过 gRPC 调用 `uenv.bridge.v1.AdapterCoreService`。下文先按同步训练说明：使用 `ExecuteBatch` 提交一批 `SampleEnvelope`，整批完成后收到 `ExecuteBatchResponse`。异步框架通常使用 `ExecuteBatchStream`，调用方式见[如果框架采用异步训练](#如果框架采用异步训练)。公开协议的真源是 `proto/uenv/v1/adapter_core.proto`。
 
 构造一条请求时，接入代码需要提供以下信息：
 
@@ -37,7 +37,7 @@ UEnv 返回的 `SampleResult` 中，接入代码通常只需关心：
 
 ## 开发者需要实现什么
 
-框架适配层需要实现两个转换函数，并在两者之间调用 `ExecuteBatch`：
+框架适配层需要实现两个转换函数，并在两者之间调用同步或流式接口：
 
 ```python
 def to_uenv_request(framework_sample, rollout_context):
@@ -50,7 +50,7 @@ def to_framework_output(uenv_result, original_sample):
     ...
 ```
 
-适配层还需要保存 `request_id -> 原 sample / prompt_ids / 批次位置` 的对应关系。UEnv 不承诺结果数组与请求数组的顺序相同，因此不能用 `zip(requests, results)` 关联结果。
+适配层还需要保存 `request_id -> 原 sample / prompt_ids / 批次位置` 的对应关系。当前 `ExecuteBatch` 会按请求顺序返回结果，`ExecuteBatchStream` 则按完成顺序返回。为了让同一适配层同时适用于两种接口，并正确处理重试，建议始终使用 `request_id` 关联输入和输出。
 
 如果当前策略模型只存在于框架进程内，还需要在框架侧暴露一个 Worker 可访问的 OpenAI-compatible 模型服务。这个服务如何跟随参数更新，由框架适配层处理。
 
@@ -154,6 +154,41 @@ framework_outputs = [
     for item in prepared
 ]
 ```
+
+## 如果框架采用异步训练
+
+异步训练中，rollout 生产端持续产生结果，模型更新端（learner）同时消费已经完成的 rollout 并更新模型。UEnv 可以承担 rollout 执行，但不会替代强化学习框架的结果队列和训练调度。
+
+`ExecuteBatch` 会等待本批所有样本完成后再返回。异步框架可以改用双向流 `ExecuteBatchStream`，在同一连接上持续发送 `SampleEnvelope`，并在每条 rollout 完成时收到对应的 `SampleResult`。返回顺序可能与提交顺序不同，因此仍要使用 `request_id` 关联结果。
+
+`parallel_mode` 要与框架的调度方式一致：如果框架只允许 rollout 落后当前模型一个更新步，使用 `one_step_off_policy`；rollout 生产与模型更新持续解耦时，使用 `fully_async`。其他环境和 Episode 字段与同步请求相同。框架提供的模型服务还必须在每次生成响应中给出实际使用的策略版本和 token 级 logprob；UEnv 会将它们作为 `rollout_param_version`、`rollout_policy_version` 和 `rollout_log_probs` 返回。
+
+框架侧需要维护待执行 sample、在途 `request_id` 和 learner 输入队列；模型更新后，将新权重发布到 `model_endpoint` 对应的服务；收到结果时，根据 rollout 版本决定接受、修正还是丢弃过旧结果。下面的伪代码只展示 UEnv 接口在异步框架中的位置：
+
+```python
+pending = {}
+
+def request_stream():
+    for sample in rollout_queue:
+        request = to_uenv_request(sample, current_rollout_context())
+        request.parallel_mode = "fully_async"
+        pending[request.request_id] = sample
+        yield request
+
+def collect_rollouts():
+    for result in client.ExecuteBatchStream(request_stream()):
+        sample = pending.pop(result.request_id)
+        if accept_version(result.rollout_param_version):
+            learner_queue.put(to_framework_output(result, sample))
+
+def learner_loop():
+    while training:
+        update_and_publish_model(learner_queue.get_batch())
+
+run_concurrently(collect_rollouts, learner_loop)
+```
+
+`ExecuteBatchStream` 只是流式传输通道，不是持久化任务队列。断线恢复、在途数量限制、模型权重同步和过旧 rollout 的处理策略都由强化学习框架负责。仅修改 `parallel_mode`，不会自动把同步训练改造成异步训练。
 
 ## 完成接入前检查
 

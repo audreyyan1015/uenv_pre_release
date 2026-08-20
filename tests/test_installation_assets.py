@@ -419,6 +419,44 @@ class InstallationAssetsTest(unittest.TestCase):
         self.assertNotIn("reward-only", integration_text.casefold())
         self.assertNotIn("先看结论", integration_text)
 
+        custom_integration = (
+            integration_root / "01-custom-framework.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("`ExecuteBatch`", custom_integration)
+        self.assertIn("`ExecuteBatchStream`", custom_integration)
+        self.assertIn("`one_step_off_policy`", custom_integration)
+        self.assertIn("持续解耦时，使用 `fully_async`", custom_integration)
+        self.assertIn("`rollout_param_version`", custom_integration)
+        self.assertIn("不是持久化任务队列", custom_integration)
+
+        verl_integration = (integration_root / "02-verl.md").read_text(
+            encoding="utf-8"
+        )
+        verl_sections = (
+            "## VeRL 中的接入位置",
+            "## 同步训练：按照三个步骤接入",
+            "## 异步训练：同样三个步骤如何变化",
+            "## UEnv 与 VeRL 各自负责什么",
+            "## 直接运行现有的同步接入",
+            "## 使用源码中的异步实验接入",
+            "## 完成接入前检查",
+            "## 当前范围",
+        )
+        section_positions = [
+            verl_integration.index(section) for section in verl_sections
+        ]
+        self.assertEqual(section_positions, sorted(section_positions))
+        self.assertIn("不需要修改 VeRL 源码", verl_integration)
+        self.assertIn("`SampleEnvelope`", verl_integration)
+        self.assertIn("`AgentLoopOutput`", verl_integration)
+        self.assertIn("`ExecuteBatch` 会等待本次提交", verl_integration)
+        self.assertIn("公开 release 暂不提供", verl_integration)
+        self.assertIn("VeRL 的 `MessageQueue` 解耦", verl_integration)
+        self.assertIn("当前实验脚本默认仍使用 `ExecuteBatch`", verl_integration)
+        self.assertIn("每个有限请求组内使用 `ExecuteBatchStream`", verl_integration)
+        self.assertIn("不是跨批次的训练队列", verl_integration)
+        self.assertIn("仍需单独验证", verl_integration)
+
         trajectory_text = (
             guide_root / "3-运行任务/12-trajectory.md"
         ).read_text(encoding="utf-8")
