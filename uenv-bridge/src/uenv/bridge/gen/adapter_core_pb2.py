@@ -15,29 +15,27 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12\x61\x64\x61pter_core.proto\x12\x0euenv.bridge.v1\"\xa9\x01\n\x13\x45xecuteBatchRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12/\n\x07samples\x18\x03 \x03(\x0b\x32\x1e.uenv.bridge.v1.SampleEnvelope\x12;\n\x11scheduling_policy\x18\x04 \x01(\x0b\x32 .uenv.bridge.v1.SchedulingPolicy\"\x91\x02\n\x10SchedulingPolicy\x12\x1f\n\x17max_episode_concurrency\x18\x01 \x01(\r\x12\x1d\n\x15max_in_flight_batches\x18\x02 \x01(\r\x12\x1b\n\x13target_worker_slots\x18\x03 \x01(\r\x12\x1f\n\x17max_parallel_per_worker\x18\x04 \x01(\r\x12\x19\n\x11require_warm_slot\x18\x05 \x01(\x08\x12\x1a\n\x12pool_warmup_target\x18\x06 \x01(\r\x12!\n\x19\x61gent_job_max_concurrency\x18\x07 \x01(\r\x12%\n\x1druntime_gateway_session_limit\x18\x08 \x01(\r\"k\n\x14\x45xecuteBatchResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12-\n\x07results\x18\x03 \x03(\x0b\x32\x1c.uenv.bridge.v1.SampleResult\"|\n\rModelEndpoint\x12\x15\n\rendpoint_type\x18\x01 \x01(\t\x12\x0b\n\x03url\x18\x02 \x01(\t\x12\x12\n\nmodel_name\x18\x03 \x01(\t\x12\x1e\n\x16generation_config_json\x18\x04 \x01(\x0c\x12\x13\n\x0bmax_retries\x18\x05 \x01(\x05\"\xa6\x03\n\x0eSampleEnvelope\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x11\n\tframework\x18\x04 \x01(\t\x12\x10\n\x08\x65nv_type\x18\x05 \x01(\t\x12\x15\n\rparallel_mode\x18\x08 \x01(\t\x12\x17\n\x0f\x65nv_config_json\x18\t \x01(\x0c\x12\x1b\n\x13\x65pisode_config_json\x18\n \x01(\x0c\x12\x1a\n\x12reward_config_json\x18\x0b \x01(\x0c\x12\x35\n\x0emodel_endpoint\x18\x0c \x01(\x0b\x32\x1d.uenv.bridge.v1.ModelEndpoint\x12\x17\n\x0ftimeout_seconds\x18\r \x01(\x05\x12\x16\n\x0e\x63orrelation_id\x18\x0e \x01(\t\x12\x1b\n\x13sample_context_json\x18\x0f \x01(\x0c\x12\x16\n\x0e\x65nv_package_id\x18\x10 \x01(\t\x12\x1b\n\x13\x65nv_package_version\x18\x11 \x01(\tJ\x04\x08\x06\x10\x07J\x04\x08\x07\x10\x08J\x04\x08\x12\x10\x13\"\xb2\x02\n\x0cSampleResult\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x0e\n\x06status\x18\x04 \x01(\t\x12\x0e\n\x06reward\x18\x05 \x01(\x01\x12\x0c\n\x04\x64one\x18\x06 \x01(\x08\x12\x1a\n\x12termination_reason\x18\x07 \x01(\t\x12\x17\n\x0ftrajectory_json\x18\x08 \x01(\x0c\x12\x12\n\nerror_code\x18\t \x01(\t\x12\x15\n\rerror_message\x18\n \x01(\t\x12\x1d\n\x15rollout_param_version\x18\x0b \x01(\x03\x12\x1e\n\x16rollout_policy_version\x18\x0c \x01(\t\x12\x19\n\x11rollout_log_probs\x18\r \x03(\x02\"\x14\n\x12HealthCheckRequest\"2\n\x13HealthCheckResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t2\x9f\x02\n\x12\x41\x64\x61pterCoreService\x12Y\n\x0c\x45xecuteBatch\x12#.uenv.bridge.v1.ExecuteBatchRequest\x1a$.uenv.bridge.v1.ExecuteBatchResponse\x12V\n\x12\x45xecuteBatchStream\x12\x1e.uenv.bridge.v1.SampleEnvelope\x1a\x1c.uenv.bridge.v1.SampleResult(\x01\x30\x01\x12V\n\x0bHealthCheck\x12\".uenv.bridge.v1.HealthCheckRequest\x1a#.uenv.bridge.v1.HealthCheckResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12\x61\x64\x61pter_core.proto\x12\x0euenv.bridge.v1\"r\n\x13\x45xecuteBatchRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12/\n\x07samples\x18\x03 \x03(\x0b\x32\x1e.uenv.bridge.v1.SampleEnvelopeJ\x04\x08\x04\x10\x05\"k\n\x14\x45xecuteBatchResponse\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12-\n\x07results\x18\x03 \x03(\x0b\x32\x1c.uenv.bridge.v1.SampleResult\"|\n\rModelEndpoint\x12\x15\n\rendpoint_type\x18\x01 \x01(\t\x12\x0b\n\x03url\x18\x02 \x01(\t\x12\x12\n\nmodel_name\x18\x03 \x01(\t\x12\x1e\n\x16generation_config_json\x18\x04 \x01(\x0c\x12\x13\n\x0bmax_retries\x18\x05 \x01(\x05\"\xa6\x03\n\x0eSampleEnvelope\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x11\n\tframework\x18\x04 \x01(\t\x12\x10\n\x08\x65nv_type\x18\x05 \x01(\t\x12\x15\n\rparallel_mode\x18\x08 \x01(\t\x12\x17\n\x0f\x65nv_config_json\x18\t \x01(\x0c\x12\x1b\n\x13\x65pisode_config_json\x18\n \x01(\x0c\x12\x1a\n\x12reward_config_json\x18\x0b \x01(\x0c\x12\x35\n\x0emodel_endpoint\x18\x0c \x01(\x0b\x32\x1d.uenv.bridge.v1.ModelEndpoint\x12\x17\n\x0ftimeout_seconds\x18\r \x01(\x05\x12\x16\n\x0e\x63orrelation_id\x18\x0e \x01(\t\x12\x1b\n\x13sample_context_json\x18\x0f \x01(\x0c\x12\x16\n\x0e\x65nv_package_id\x18\x10 \x01(\t\x12\x1b\n\x13\x65nv_package_version\x18\x11 \x01(\tJ\x04\x08\x06\x10\x07J\x04\x08\x07\x10\x08J\x04\x08\x12\x10\x13\"\xb2\x02\n\x0cSampleResult\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x02 \x01(\t\x12\x14\n\x0csample_index\x18\x03 \x01(\r\x12\x0e\n\x06status\x18\x04 \x01(\t\x12\x0e\n\x06reward\x18\x05 \x01(\x01\x12\x0c\n\x04\x64one\x18\x06 \x01(\x08\x12\x1a\n\x12termination_reason\x18\x07 \x01(\t\x12\x17\n\x0ftrajectory_json\x18\x08 \x01(\x0c\x12\x12\n\nerror_code\x18\t \x01(\t\x12\x15\n\rerror_message\x18\n \x01(\t\x12\x1d\n\x15rollout_param_version\x18\x0b \x01(\x03\x12\x1e\n\x16rollout_policy_version\x18\x0c \x01(\t\x12\x19\n\x11rollout_log_probs\x18\r \x03(\x02\"\x14\n\x12HealthCheckRequest\"2\n\x13HealthCheckResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07version\x18\x02 \x01(\t2\x9f\x02\n\x12\x41\x64\x61pterCoreService\x12Y\n\x0c\x45xecuteBatch\x12#.uenv.bridge.v1.ExecuteBatchRequest\x1a$.uenv.bridge.v1.ExecuteBatchResponse\x12V\n\x12\x45xecuteBatchStream\x12\x1e.uenv.bridge.v1.SampleEnvelope\x1a\x1c.uenv.bridge.v1.SampleResult(\x01\x30\x01\x12V\n\x0bHealthCheck\x12\".uenv.bridge.v1.HealthCheckRequest\x1a#.uenv.bridge.v1.HealthCheckResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'adapter_core_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_EXECUTEBATCHREQUEST']._serialized_start=39
-  _globals['_EXECUTEBATCHREQUEST']._serialized_end=208
-  _globals['_SCHEDULINGPOLICY']._serialized_start=211
-  _globals['_SCHEDULINGPOLICY']._serialized_end=484
-  _globals['_EXECUTEBATCHRESPONSE']._serialized_start=486
-  _globals['_EXECUTEBATCHRESPONSE']._serialized_end=593
-  _globals['_MODELENDPOINT']._serialized_start=595
-  _globals['_MODELENDPOINT']._serialized_end=719
-  _globals['_SAMPLEENVELOPE']._serialized_start=722
-  _globals['_SAMPLEENVELOPE']._serialized_end=1144
-  _globals['_SAMPLERESULT']._serialized_start=1147
-  _globals['_SAMPLERESULT']._serialized_end=1453
-  _globals['_HEALTHCHECKREQUEST']._serialized_start=1455
-  _globals['_HEALTHCHECKREQUEST']._serialized_end=1475
-  _globals['_HEALTHCHECKRESPONSE']._serialized_start=1477
-  _globals['_HEALTHCHECKRESPONSE']._serialized_end=1527
-  _globals['_ADAPTERCORESERVICE']._serialized_start=1530
-  _globals['_ADAPTERCORESERVICE']._serialized_end=1817
+  _globals['_EXECUTEBATCHREQUEST']._serialized_start=38
+  _globals['_EXECUTEBATCHREQUEST']._serialized_end=152
+  _globals['_EXECUTEBATCHRESPONSE']._serialized_start=154
+  _globals['_EXECUTEBATCHRESPONSE']._serialized_end=261
+  _globals['_MODELENDPOINT']._serialized_start=263
+  _globals['_MODELENDPOINT']._serialized_end=387
+  _globals['_SAMPLEENVELOPE']._serialized_start=390
+  _globals['_SAMPLEENVELOPE']._serialized_end=812
+  _globals['_SAMPLERESULT']._serialized_start=815
+  _globals['_SAMPLERESULT']._serialized_end=1121
+  _globals['_HEALTHCHECKREQUEST']._serialized_start=1123
+  _globals['_HEALTHCHECKREQUEST']._serialized_end=1143
+  _globals['_HEALTHCHECKRESPONSE']._serialized_start=1145
+  _globals['_HEALTHCHECKRESPONSE']._serialized_end=1195
+  _globals['_ADAPTERCORESERVICE']._serialized_start=1198
+  _globals['_ADAPTERCORESERVICE']._serialized_end=1485
 # @@protoc_insertion_point(module_scope)

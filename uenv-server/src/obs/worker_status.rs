@@ -203,6 +203,13 @@ mod tests {
             degraded: heartbeat_age > 30 || (load > 0 && report_age > 400),
             gateway_public_url: String::new(),
             synced_env_packages: Vec::new(),
+            platform_features: Vec::new(),
+            backend_kinds: Vec::new(),
+            trajectory_schemas: Vec::new(),
+            tool_schemas: Vec::new(),
+            package_states: Vec::new(),
+            pool_summary: Vec::new(),
+            pool_slots: Vec::new(),
         }
     }
 

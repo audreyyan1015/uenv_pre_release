@@ -1,110 +1,23 @@
-# UEnv 评测任务样本
+# 评测示例输入
 
-`uenv evaluate` 提供两个评测命令：
+本目录保存案例页使用的输入 JSONL。QA 与 Code 文件是为了说明字段和执行链路而编写的自拟示例，不是 GSM8K 或 DSCodeBench 的原始样本；SWE 文件只保存 catalog 实例选择，任务正文和测试来自安装包 catalog。
 
-- `run-task`：执行 QA、Code 和自定义 process plugin（进程插件）的任务样本。
-- `run-swe`：使用 SWE Runtime Gateway、OpenHands Agent 和 SWE catalog 执行 SWE 任务样本。
+| 文件 | 数据性质 | 案例文档 |
+|---|---|---|
+| `qa-gsm8k.jsonl` | 两条自拟数学问答，使用 `qa/gsm8k` 判分路由 | [数学问答评测](../../../Docs/guide/cases/evaluation-gsm8k.md) |
+| `code-custom.jsonl` | 一个自包含 `add(a,b)` 函数测试 | [代码生成评测](../../../Docs/guide/cases/evaluation-code.md) |
+| `swe-verified.jsonl` | 两个 Verified catalog 实例 ID | [软件工程修复评测](../../../Docs/guide/cases/evaluation-swe-verified.md) |
 
-下文的 Adapter 接收并分配 Episode。Adapter 由 `uenv-adapter-core.service` 运行；其内部使用 UEnv Server（`uenv-server`）模块完成 UEnv Worker 注册、Episode 调度和状态管理。
+## 数据约定
 
-## 通用 `run-task`
+`run-task` 输入每行必须显式声明唯一 `id`、`env_type`、`dataset` 和 `max_steps`，并用 `target` 或 `reward_config` 提供判分信息；任务特有字段放在 `env_config`。
 
-QA 示例：
+`run-swe` 输入每行用 `instance_id` 选择 catalog 实例。问题正文、仓库、commit、测试和镜像信息只保存在 catalog，避免两份数据漂移。
 
-```bash
-uenv evaluate run-task \
-  --endpoint '127.0.0.1:50051' \
-  --env-type qa \
-  --dataset gsm8k \
-  --input /opt/uenv/current/examples/cases/evaluation/qa-gsm8k.jsonl \
-  --output "$PWD/results/qa-gsm8k.jsonl" \
-  --max-steps 1
+安装包路径：
+
+```text
+/opt/uenv/current/examples/cases/evaluation/
 ```
 
-Code 使用同一命令结构：
-
-```bash
-uenv evaluate run-task \
-  --endpoint '127.0.0.1:50051' \
-  --env-type code \
-  --dataset dscodebench \
-  --input /opt/uenv/current/examples/cases/evaluation/code-custom.jsonl \
-  --output "$PWD/results/code.jsonl" \
-  --max-steps 1
-```
-
-已安装的自定义 process plugin 也使用 `run-task`：
-
-```bash
-uenv evaluate run-task \
-  --endpoint '127.0.0.1:50051' \
-  --env-type my-environment \
-  --dataset my-dataset \
-  --input "$HOME/uenv-envs/my-environment/example.jsonl" \
-  --output "$PWD/results/my-environment.jsonl" \
-  --max-steps 1
-```
-
-迁移时按任务替换：
-
-| 任务变化 | 参数或文件 |
-|---|---|
-| Adapter 地址 | `--endpoint` |
-| 环境类型 | `--env-type` |
-| 数据集 ID | `--dataset` |
-| 任务样本和环境配置 | `--input` 指向的 JSONL |
-| 结果位置 | `--output` |
-| 最大交互步数 | `--max-steps` |
-
-命令行中的 `--env-type`、`--dataset` 和 `--max-steps` 适用于本次输入的所有任务样本。JSONL 可以重复对应的 `env_type`、`dataset` 和 `max_steps` 字段；字段值与命令行不一致时，评测命令会报告对应的任务样本。
-
-### JSONL 公共字段
-
-- `id`：任务样本 ID。
-- `question`：模型看到的任务说明。
-- `env_config`：环境初始化配置。
-- `reward_config`：环境判分配置。
-- `target`：静态标准答案。
-
-QA 可以使用 `question + target`；Code 在 `env_config` 中提供测试配置；process plugin 自行判分时使用 `env_config + reward_config`。
-
-新任务的初始化、环境返回内容、模型动作格式或得分方式与已有环境不同时，创建 process plugin：
-
-```bash
-mkdir -p "$HOME/uenv-envs"
-cd "$HOME/uenv-envs"
-uenv env plugin create my-environment --dataset my-dataset
-```
-
-QA、Code 和 process plugin 由 UEnv Worker 调用模型 API。运行前，在每台可能执行任务的 UEnv Worker 上使用 `uenv evaluate configure-model` 配置模型 API 地址、模型名与密钥。
-
-## 批量 SWE 评测
-
-先按 [UEnv 评测指南 7.1](../../../Docs/deployment/UEnv评测指南.md#71-为-uenv-worker-启用-swe-runtime) 选择单机或多机部署，并为 UEnv Worker 启用 SWE Runtime。
-
-SWE 输入 JSONL 每行选择 SWE catalog 中的一个实例：
-
-```json
-{"id":"astropy-7166","instance_id":"astropy__astropy-7166"}
-{"id":"requests-1142","instance_id":"psf__requests-1142"}
-```
-
-在启用了 SWE Runtime 的 UEnv Worker 主机上，调用本地模型 API 批量执行：
-
-```bash
-RUN_ID="verified-$(date +%Y%m%d-%H%M%S)"
-sudo uenv evaluate run-swe \
-  --provider local \
-  --model 'Qwen/Qwen2.5-Coder-7B-Instruct' \
-  --base-url 'http://10.0.0.30:8000/v1' \
-  --gateway 'http://127.0.0.1:28999' \
-  --catalog /opt/uenv/current/share/swe/verified.json \
-  --benchmark-variant verified \
-  --input /opt/uenv/current/examples/cases/evaluation/swe-verified.jsonl \
-  --output "$PWD/results/$RUN_ID.jsonl" \
-  --artifacts-dir "/var/lib/uenv/evaluation-runs/$RUN_ID" \
-  --max-iterations 30 \
-  --batch-size 2
-```
-
-`--batch-size` 控制并发数，结果 JSONL 保持输入顺序。`--artifacts-dir` 每次使用 `/var/lib/uenv/evaluation-runs` 下一个新的评测运行文件目录。火山引擎方舟模型 API、完整 SWE catalog、离线 SWE 实例镜像与结果字段见 [UEnv 评测指南](../../../Docs/deployment/UEnv评测指南.md)。
+完整前置、变量、命令、预期结果与验收位于 `Docs/guide/cases/`。

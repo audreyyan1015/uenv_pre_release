@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
+import types
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -16,7 +18,7 @@ from uenv.bridge.verl_agent_loop import UEnvAgentLoop
 class FakeTokenizer:
     pad_token_id = 0
 
-    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, **_kwargs):
         self.last_messages = messages
         return [10, 11, 12]
 
@@ -25,7 +27,7 @@ class FakeTokenizer:
 
 
 class DictInputIdsTokenizer(FakeTokenizer):
-    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, **_kwargs):
         self.last_messages = messages
         return {"input_ids": [[10, 11, 12]]}
 
@@ -544,6 +546,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.prompt_ids, [10, 11, 12])
         self.assertEqual(output.response_ids, [0])
         self.assertEqual(output.response_mask, [0])
+        self.assertEqual(output.response_logprobs, [0.0])
         self.assertEqual(output.reward_score, 0.0)
         self.assertEqual(output.extra_fields["uenv_status"], "failed")
         self.assertEqual(output.extra_fields["uenv_failed_episode_policy"], "zero_reward")
@@ -563,6 +566,53 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
 
         self.assertEqual(output.prompt_ids, [10, 11, 12])
+
+    def test_run_with_full_verl_base_constructor_uses_legacy_chat_template_path(self) -> None:
+        class StrictUEnvAgentLoop(UEnvAgentLoop):
+            def _init_compat_agent_loop_base(self, kwargs):
+                raise AssertionError("full VeRL constructor must not use compatibility initialization")
+
+        trainer_config = types.SimpleNamespace(
+            config=AttrDict(
+                actor_rollout_ref=AttrDict(
+                    model=AttrDict(path="test-model"),
+                    rollout=AttrDict(
+                        prompt_length=16,
+                        response_length=8,
+                        prometheus=AttrDict(served_model_name="test-model"),
+                    ),
+                )
+            )
+        )
+        data_config = types.SimpleNamespace(
+            config=AttrDict(
+                apply_chat_template_kwargs={},
+                mm_processor_kwargs={},
+                continuous_token=AttrDict(enable=False),
+            )
+        )
+        client = RecordingEpisodeClient(self._result_with_token_ids())
+        loop = StrictUEnvAgentLoop(
+            trainer_config=trainer_config,
+            server_manager=None,
+            tokenizer=FakeTokenizer(),
+            processor=None,
+            dataset_cls=object,
+            data_config=data_config,
+            client=client,
+        )
+
+        output = loop.loop.run_until_complete(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.prompt_ids, [10, 11, 12])
+        self.assertEqual(output.response_ids, [101, 102])
         payload = json.loads(client.last_request.payload.decode("utf-8"))
         self.assertEqual(payload["episode_config"]["initial_observation"]["prompt_ids"], [10, 11, 12])
 
@@ -655,6 +705,7 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(len(outputs), 3)
         self.assertEqual([output.response_ids for output in outputs], [[500], [0], [502]])
         self.assertEqual([output.response_mask for output in outputs], [[1], [0], [1]])
+        self.assertEqual(outputs[1].response_logprobs, [0.0])
         self.assertEqual([output.reward_score for output in outputs], [1.0, 0.0, 1.0])
         self.assertEqual(outputs[1].extra_fields["uenv_status"], "failed")
         self.assertEqual(outputs[1].extra_fields["uenv_failed_episode_policy"], "zero_reward")
@@ -1090,6 +1141,23 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual(output.response_ids, [101, 102])
         self.assertEqual(output.response_logprobs, [-0.25, -0.75])
 
+    def test_run_fills_missing_rollout_log_probs_from_env_flag(self) -> None:
+        result = self._result_with_token_ids()
+        with unittest.mock.patch.dict(os.environ, {"UENV_MISSING_LOGPROBS_AS_ZERO": "1"}):
+            loop = UEnvAgentLoop(tokenizer=FakeTokenizer(), client=RecordingEpisodeClient(result))
+
+        output = asyncio.run(
+            loop.run(
+                {},
+                raw_prompt=[{"role": "user", "content": "2+2?"}],
+                data_source="gsm8k",
+                reward_model={"ground_truth": "4"},
+            )
+        )
+
+        self.assertEqual(output.response_ids, [101, 102])
+        self.assertEqual(output.response_logprobs, [0.0, 0.0])
+
     def test_run_truncates_response_ids_and_rollout_log_probs_together(self) -> None:
         result = self._result_with_token_ids()
         result.rollout_log_probs = [-0.25, -0.75]
@@ -1233,53 +1301,6 @@ class UEnvAgentLoopTest(unittest.TestCase):
         self.assertEqual([sample["sample_index"] for sample in stub.last_request["samples"]], [0, 1, 2])
         self.assertEqual([result.request_id for result in results], [request.request_id for request in requests])
         self.assertEqual([result.summary.total_reward for result in results], [0.0, 1.0, 2.0])
-
-    def test_rust_core_client_forwards_scheduling_policy_to_execute_batch(self) -> None:
-        stub = FakeCoreBatchStub()
-        client = RustCoreEpisodeClient(RustCoreClientConfig(), stub=stub)
-        loop = UEnvAgentLoop(
-            tokenizer=FakeTokenizer(),
-            client=client,
-            max_episode_concurrency=8,
-            max_in_flight_batches=1,
-            target_worker_slots=8,
-            pool_warmup_target=8,
-            max_parallel_per_worker=4,
-            agent_job_max_concurrency=4,
-            runtime_gateway_session_limit=4,
-            require_warm_slot=True,
-        )
-        request = loop.build_episode_request(
-            sampling_params={},
-            prompt_ids=[10],
-            raw_prompt="question",
-            sample_kwargs={
-                "extra_info": {
-                    "env_type": "qa",
-                    "batch_id": "batch-schedule",
-                    "sample_index": 0,
-                }
-            },
-        )
-
-        list(client.submit_episode_stream([request]))
-
-        self.assertEqual(
-            stub.last_request["scheduling_policy"],
-            {
-                "max_episode_concurrency": 8,
-                "max_in_flight_batches": 1,
-                "target_worker_slots": 8,
-                "pool_warmup_target": 8,
-                "max_parallel_per_worker": 4,
-                "agent_job_max_concurrency": 4,
-                "runtime_gateway_session_limit": 4,
-                "require_warm_slot": True,
-            },
-        )
-        context = json.loads(stub.last_request["samples"][0]["sample_context_json"].decode("utf-8"))
-        self.assertNotIn("scheduling_policy", context)
-        self.assertNotIn("scheduling_group_id", context)
 
     def test_rust_core_client_filters_protocol_keys_from_sample_context(self) -> None:
         stub = FakeCoreBatchStub()

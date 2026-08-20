@@ -35,6 +35,11 @@ except Exception:
             data_config: Any = None,
             **_kwargs: Any,
         ) -> None:
+            try:
+                self.loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
             self.config = getattr(trainer_config, "config", trainer_config)
             self.server_manager = server_manager
             self.tokenizer = tokenizer
@@ -141,6 +146,12 @@ def _bool_value(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def _env_bool_value(name: str, value: Any, default: bool = False) -> bool:
+    if value is None:
+        value = os.environ.get(name)
+    return _bool_value(value, default)
+
+
 def _failed_episode_policy(value: Any) -> str:
     text = (_optional_string(value) or "raise").strip().lower().replace("-", "_")
     if text in {"raise", "fail", "fail_fast"}:
@@ -182,16 +193,8 @@ class UEnvAgentLoopConfig:
     model_gateway_max_tokens: int | None = None
     model_gateway_stop_on_close: bool = True
     require_swe_response_trace: bool = True
+    missing_logprobs_as_zero: bool = False
     parallel_mode: str = "sync"
-    expected_worker_parallelism: int | None = None
-    max_episode_concurrency: int | None = None
-    max_in_flight_batches: int | None = None
-    target_worker_slots: int | None = None
-    pool_warmup_target: int | None = None
-    max_parallel_per_worker: int | None = None
-    agent_job_max_concurrency: int | None = None
-    runtime_gateway_session_limit: int | None = None
-    require_warm_slot: bool = False
     failed_episode_policy: str = "raise"
 
 
@@ -240,20 +243,15 @@ class UEnvAgentLoop(AgentLoopBase):
         model_gateway_max_tokens: int | None = None,
         model_gateway_stop_on_close: bool | None = None,
         require_swe_response_trace: bool | None = None,
+        missing_logprobs_as_zero: bool | None = None,
         parallel_mode: str = "sync",
-        expected_worker_parallelism: int | None = None,
-        max_episode_concurrency: int | None = None,
-        max_in_flight_batches: int | None = None,
-        target_worker_slots: int | None = None,
-        pool_warmup_target: int | None = None,
-        max_parallel_per_worker: int | None = None,
-        agent_job_max_concurrency: int | None = None,
-        runtime_gateway_session_limit: int | None = None,
-        require_warm_slot: bool | None = None,
         failed_episode_policy: str | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        if self._needs_compat_agent_loop_base(args, kwargs):
+            self._init_compat_agent_loop_base(kwargs)
+        else:
+            super().__init__(*args, **kwargs)
         client_mode = client_mode or mode
         self.config_for_uenv = UEnvAgentLoopConfig(
             client_mode=_optional_string(client_mode) or "fake",
@@ -289,16 +287,12 @@ class UEnvAgentLoop(AgentLoopBase):
             model_gateway_max_tokens=_optional_int_value(model_gateway_max_tokens),
             model_gateway_stop_on_close=_bool_value(model_gateway_stop_on_close, True),
             require_swe_response_trace=_bool_value(require_swe_response_trace, True),
+            missing_logprobs_as_zero=_env_bool_value(
+                "UENV_MISSING_LOGPROBS_AS_ZERO",
+                missing_logprobs_as_zero,
+                False,
+            ),
             parallel_mode=_optional_string(parallel_mode) or "sync",
-            expected_worker_parallelism=_optional_int_value(expected_worker_parallelism),
-            max_episode_concurrency=_optional_int_value(max_episode_concurrency),
-            max_in_flight_batches=_optional_int_value(max_in_flight_batches),
-            target_worker_slots=_optional_int_value(target_worker_slots),
-            pool_warmup_target=_optional_int_value(pool_warmup_target),
-            max_parallel_per_worker=_optional_int_value(max_parallel_per_worker),
-            agent_job_max_concurrency=_optional_int_value(agent_job_max_concurrency),
-            runtime_gateway_session_limit=_optional_int_value(runtime_gateway_session_limit),
-            require_warm_slot=_bool_value(require_warm_slot, False),
             failed_episode_policy=_failed_episode_policy(failed_episode_policy),
         )
         self.model_gateway = ModelGateway(
@@ -326,6 +320,57 @@ class UEnvAgentLoop(AgentLoopBase):
             fake_reward=self.config_for_uenv.fake_reward,
             fake_response_text=self.config_for_uenv.fake_response_text,
         )
+
+    def _needs_compat_agent_loop_base(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+        """Allow direct unit/smoke construction outside VeRL's AgentLoopWorker."""
+
+        required = ("trainer_config", "server_manager", "tokenizer", "processor", "dataset_cls", "data_config")
+        return len(args) < len(required) and not all(key in kwargs for key in required)
+
+    def _init_compat_agent_loop_base(self, kwargs: dict[str, Any]) -> None:
+        """Small fallback for tests that instantiate UEnvAgentLoop directly.
+
+        Current VeRL initializes AgentLoopBase from AgentLoopWorker with a full
+        trainer config. UEnv's lightweight tests historically instantiated the
+        loop with only a tokenizer; keep that path working without depending on
+        VeRL internals.
+        """
+
+        trainer_config = kwargs.get("trainer_config")
+        data_config = kwargs.get("data_config")
+        self.config = getattr(trainer_config, "config", trainer_config) or {}
+        self.server_manager = kwargs.get("server_manager")
+        self.tokenizer = kwargs.get("tokenizer")
+        self.processor = kwargs.get("processor")
+        self.dataset_cls = kwargs.get("dataset_cls")
+        self.data_config = getattr(data_config, "config", data_config) or {}
+        self.rollout_config = self._nested_value(self.config, ("actor_rollout_ref", "rollout"))
+        self.apply_chat_template_kwargs = self._mapping_get(self.data_config, "apply_chat_template_kwargs", {})
+        self.mm_processor_kwargs = self._mapping_get(self.data_config, "mm_processor_kwargs", {})
+
+        async def apply_chat_template(messages: list[dict[str, Any]], **_kwargs: Any) -> list[int]:
+            if self.tokenizer is None:
+                return []
+            if hasattr(self.tokenizer, "apply_chat_template"):
+                return self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                )
+            return list(self.tokenizer.encode(prompt_text(messages), add_special_tokens=False))
+
+        self.apply_chat_template = apply_chat_template
+
+    def _mapping_get(self, value: Any, key: str, default: Any) -> Any:
+        getter = getattr(value, "get", None)
+        if callable(getter):
+            try:
+                return getter(key, default)
+            except TypeError:
+                pass
+        if isinstance(value, dict):
+            return value.get(key, default)
+        return default
 
     def close(self) -> None:
         if self.config_for_uenv.model_gateway_stop_on_close:
@@ -613,6 +658,7 @@ class UEnvAgentLoop(AgentLoopBase):
             prompt_ids=prompt_ids,
             response_ids=[self._pad_token_id()],
             response_mask=[0],
+            response_logprobs=[0.0],
             reward_score=0.0,
             num_turns=max(result.trajectory.total_steps + 1, 1),
             metrics=AgentLoopMetrics(
@@ -789,12 +835,6 @@ class UEnvAgentLoop(AgentLoopBase):
         metadata["training_run_id"] = training_run_id
         parallel_mode, parallel_metadata = self._parallel_metadata(sample_kwargs)
         metadata.update(parallel_metadata)
-        if self.config_for_uenv.expected_worker_parallelism is not None:
-            metadata["expected_worker_parallelism"] = self.config_for_uenv.expected_worker_parallelism
-        scheduling_policy = self._scheduling_policy()
-        if scheduling_policy:
-            metadata["scheduling_policy"] = scheduling_policy
-            metadata["scheduling_group_id"] = batch_id
         generation_config = {
             "temperature": sampling_params.get("temperature"),
             "top_p": sampling_params.get("top_p"),
@@ -920,6 +960,7 @@ class UEnvAgentLoop(AgentLoopBase):
                 verl_response_mask = verl_response_mask[: len(verl_response_ids)]
                 if len(verl_response_mask) < len(verl_response_ids):
                     verl_response_mask.extend([1] * (len(verl_response_ids) - len(verl_response_mask)))
+                verl_rollout_logprobs = self._response_logprobs_from_result(result, len(verl_response_ids))
                 record = {
                     "ts": time.time(),
                     "phase": phase,
@@ -932,6 +973,7 @@ class UEnvAgentLoop(AgentLoopBase):
                     "rollout_param_version": result.rollout_param_version,
                     "rollout_policy_version": result.rollout_policy_version,
                     "rollout_log_probs_len": len(result.rollout_log_probs),
+                    "verl_rollout_log_probs_len": len(verl_rollout_logprobs or []),
                     "batch_id": metadata.get("batch_id"),
                     "sample_index": metadata.get("sample_index"),
                     "request_metadata": metadata,
@@ -950,24 +992,6 @@ class UEnvAgentLoop(AgentLoopBase):
                     "trajectory": self._trajectory_to_jsonable(result),
                 }
                 file.write(json.dumps(to_jsonable(record), ensure_ascii=False, separators=(",", ":")) + "\n")
-
-    def _scheduling_policy(self) -> dict[str, Any]:
-        config = self.config_for_uenv
-        policy: dict[str, Any] = {}
-        for key, value in {
-            "max_episode_concurrency": config.max_episode_concurrency,
-            "max_in_flight_batches": config.max_in_flight_batches,
-            "target_worker_slots": config.target_worker_slots,
-            "pool_warmup_target": config.pool_warmup_target,
-            "max_parallel_per_worker": config.max_parallel_per_worker,
-            "agent_job_max_concurrency": config.agent_job_max_concurrency,
-            "runtime_gateway_session_limit": config.runtime_gateway_session_limit,
-        }.items():
-            if value is not None and value > 0:
-                policy[key] = int(value)
-        if config.require_warm_slot:
-            policy["require_warm_slot"] = True
-        return policy
 
     def _payload_dict(self, request: EpisodeRequest) -> dict[str, Any]:
         try:
@@ -1014,7 +1038,34 @@ class UEnvAgentLoop(AgentLoopBase):
         )
 
     async def _prompt_ids(self, messages: list[dict[str, Any]]) -> list[int]:
-        prompt_ids = await self.apply_chat_template(messages)
+        ct_build_initial_tokens = getattr(self, "ct_build_initial_tokens", None)
+        continuous_token_builder = getattr(self, "continuous_token_builder", None)
+        if callable(ct_build_initial_tokens) and continuous_token_builder is not None and hasattr(self, "loop"):
+            multi_modal_data: dict[str, Any] = {}
+            if self.processor is not None and hasattr(self, "process_multi_modal_info"):
+                multi_modal_data = await self.process_multi_modal_info(messages)
+                if hasattr(self, "_assert_mm_supported"):
+                    self._assert_mm_supported(bool(multi_modal_data))
+            prompt_ids = await ct_build_initial_tokens(
+                messages,
+                images=multi_modal_data.get("images"),
+                videos=multi_modal_data.get("videos"),
+                audios=multi_modal_data.get("audios"),
+            )
+        else:
+            apply_chat_template = getattr(self, "apply_chat_template", None)
+            if callable(apply_chat_template):
+                prompt_ids = await apply_chat_template(messages)
+            elif self.tokenizer is not None and hasattr(self.tokenizer, "apply_chat_template"):
+                prompt_ids = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                )
+            elif self.tokenizer is not None and hasattr(self.tokenizer, "encode"):
+                prompt_ids = self.tokenizer.encode(prompt_text(messages), add_special_tokens=False)
+            else:
+                prompt_ids = []
         return self._normalize_token_ids(prompt_ids)
 
     def _normalize_token_ids(self, tokenized_output: Any) -> list[int]:
@@ -1497,6 +1548,8 @@ class UEnvAgentLoop(AgentLoopBase):
         response_length: int,
     ) -> list[float] | None:
         if not result.rollout_log_probs:
+            if self.config_for_uenv.missing_logprobs_as_zero and response_length > 0:
+                return [0.0] * response_length
             return None
         source_response_length = len(self._response_ids_from_result(result))
         if len(result.rollout_log_probs) != source_response_length:

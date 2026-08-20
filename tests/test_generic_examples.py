@@ -178,8 +178,76 @@ class GenericExampleTests(unittest.TestCase):
         )
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn("--env-type NAME", help_result.stdout)
-        self.assertIn("--gpus N                 单节点 GPU 数（必填）", help_result.stdout)
+        self.assertIn("--gpus N                 单节点训练设备数（必填；历史参数名保留）", help_result.stdout)
+        self.assertIn("--device-backend cuda|ascend", help_result.stdout)
+        self.assertIn("--ascend-devices LIST", help_result.stdout)
         self.assertIn("--steps N                训练步数（必填）", help_result.stdout)
+
+    def test_low_level_training_runner_passes_ascend_runtime_env_to_ray(self) -> None:
+        script = ROOT / "libexec/uenv/training/verl_runner.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model = root / "model"
+            data = root / "data"
+            work = root / "work"
+            model.mkdir()
+            data.mkdir()
+            (data / "train.parquet").write_bytes(b"placeholder")
+            (data / "test.parquet").write_bytes(b"placeholder")
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "run",
+                    "--env-type",
+                    "swe",
+                    "--model",
+                    str(model),
+                    "--data",
+                    str(data),
+                    "--uenv-endpoint",
+                    "127.0.0.1:50051",
+                    "--gpus",
+                    "2",
+                    "--steps",
+                    "1",
+                    "--rollouts",
+                    "2",
+                    "--train-batch-size",
+                    "1",
+                    "--runtime",
+                    "podman",
+                    "--image",
+                    "example/verl:ascend",
+                    "--device-backend",
+                    "ascend",
+                    "--ascend-devices",
+                    "4,5",
+                    "--print-effective-config",
+                    "--set",
+                    "ray_kwargs.ray_init.num_cpus=2",
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                env={**os.environ, "UENV_VERL_WORK_DIR": str(work)},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "+ray_kwargs.ray_init.runtime_env.env_vars.UENV_DEVICE_BACKEND=ascend",
+            result.stdout,
+        )
+        self.assertIn(
+            "+ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_VISIBLE_DEVICES=4,5",
+            result.stdout,
+        )
+        self.assertIn(
+            "+ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_RT_VISIBLE_DEVICES=4,5",
+            result.stdout,
+        )
 
     def test_verl_config_merges_in_documented_order_and_protects_uenv_keys(self) -> None:
         runner = ROOT / "libexec/uenv/training/verl_runner.sh"

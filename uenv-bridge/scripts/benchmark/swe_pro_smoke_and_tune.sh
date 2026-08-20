@@ -29,7 +29,7 @@ wait_agent_idle() {
   log "wait_agent_idle max=${max_wait}s"
   while [ "$elapsed" -lt "$max_wait" ]; do
     local state
-    state=$(sshpass -p 'dev@BDW2026' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@8.130.208.77 bash <<'OH' 2>/dev/null || echo unreachable
+    state=$(sshpass -p "${UENV_PASS:?set UENV_PASS}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@8.130.208.77 bash <<'OH' 2>/dev/null || echo unreachable
 d=$(ls -td /var/log/uenv/openhands-runs/agent-job-* 2>/dev/null | head -1)
 if [ -z "$d" ]; then echo idle; exit 0; fi
 if [ -f "$d/submit_result.json" ]; then echo idle; else echo busy:$(basename "$d" | cut -c1-50); fi
@@ -109,7 +109,7 @@ verify_smoke_20877() {
   local tag="$1"
   local out_dir="$2"
   log "--- smoke verify $tag on 208.77 ---"
-  sshpass -p 'dev@BDW2026' ssh -o StrictHostKeyChecking=no root@8.130.208.77 \
+  sshpass -p "${UENV_PASS:?set UENV_PASS}" ssh -o StrictHostKeyChecking=no root@8.130.208.77 \
     "python3 -c \"import json,glob,pathlib; runs=sorted(pathlib.Path('/var/log/uenv/openhands-runs').glob('agent-job-*'), key=lambda p:p.stat().st_mtime, reverse=True); 
 for d in runs[:15]:
   inst='$3'

@@ -19,7 +19,6 @@ class GeneratedProtoCompatibilityTest(unittest.TestCase):
 
         self.assertIs(legacy.DESCRIPTOR, canonical.DESCRIPTOR)
         self.assertIs(legacy.ExecuteBatchRequest, canonical.ExecuteBatchRequest)
-        self.assertIs(legacy.SchedulingPolicy, canonical.SchedulingPolicy)
 
 
 if __name__ == "__main__":

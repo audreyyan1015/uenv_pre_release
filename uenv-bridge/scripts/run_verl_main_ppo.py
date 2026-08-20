@@ -11,18 +11,24 @@ def _apply_uenv_patches() -> None:
 
 
 def _patch_task_runner(verl_main_ppo) -> None:
-    runner_cls = verl_main_ppo.TaskRunner
-    if getattr(runner_cls, "_uenv_patch_task_runner_applied", False):
-        return
+    runner_classes = [
+        getattr(verl_main_ppo, attr_name, None)
+        for attr_name in ("TaskRunnerV1", "TaskRunner")
+    ]
+    runner_classes = [runner_cls for runner_cls in runner_classes if runner_cls is not None]
 
-    original_run = runner_cls.run
+    for runner_cls in runner_classes:
+        if getattr(runner_cls, "_uenv_patch_task_runner_applied", False):
+            continue
 
-    def run(self, config):
-        _apply_uenv_patches()
-        return original_run(self, config)
+        original_run = runner_cls.run
 
-    runner_cls.run = run
-    runner_cls._uenv_patch_task_runner_applied = True
+        def run(self, config, _original_run=original_run):
+            _apply_uenv_patches()
+            return _original_run(self, config)
+
+        runner_cls.run = run
+        runner_cls._uenv_patch_task_runner_applied = True
 
 
 def main() -> None:

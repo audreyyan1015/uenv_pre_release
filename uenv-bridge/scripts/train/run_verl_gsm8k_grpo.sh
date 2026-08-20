@@ -41,6 +41,9 @@ Common environment overrides:
   VAL_BEFORE_TRAIN              Evaluate before the first training step. Default: True
   VAL_ONLY                      Evaluate and exit. Default: False
   TEST_FREQ                     Eval every N training steps; -1 disables periodic eval. Default: 5
+  CHECKPOINT_ROOT               Host checkpoint root. Default: <repo>/checkpoints/gsm8k_grpo
+  CHECKPOINT_RUN_DIR            Host checkpoint dir for this run. Default: <CHECKPOINT_ROOT>/<RUN_ID>
+  CONTAINER_CHECKPOINT_RUN_DIR  Container checkpoint dir passed to VeRL. Default: /uenv/uenv-bridge/checkpoints/gsm8k_grpo/<RUN_ID>
   TRAIN_BATCH_SIZE              Prompt batch size per GRPO step. Default: 2
   PPO_MINI_BATCH_SIZE           PPO mini batch size before rollout expansion. Default: 2
   ROLLOUT_N                     Number of sampled responses per prompt. Default: 4
@@ -125,6 +128,9 @@ LOG_ROOT=${LOG_ROOT:-${REPO_DIR}/temp/logs}
 LOG_DIR=${LOG_DIR:-${LOG_ROOT}/verl_gsm8k_native_grpo}
 LOG_FILE=${LOG_FILE:-${LOG_DIR}/${RUN_ID}.log}
 CONTAINER_LOG_ROOT=${CONTAINER_LOG_ROOT:-/uenv/uenv-bridge/temp/logs}
+CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-${REPO_DIR}/checkpoints/gsm8k_grpo}
+CHECKPOINT_RUN_DIR=${CHECKPOINT_RUN_DIR:-${CHECKPOINT_ROOT}/${RUN_ID}}
+CONTAINER_CHECKPOINT_RUN_DIR=${CONTAINER_CHECKPOINT_RUN_DIR:-/uenv/uenv-bridge/checkpoints/gsm8k_grpo/${RUN_ID}}
 EXTRA_VERL_ARGS=${EXTRA_VERL_ARGS:-}
 EXTRA_VERL_ARGS=${EXTRA_VERL_ARGS//$'\n'/ }
 
@@ -194,10 +200,33 @@ ensure_policy_model_exists
 ensure_file_exists "${DATA_DIR}/train.parquet" "Missing GSM8K train parquet"
 ensure_file_exists "${DATA_DIR}/test.parquet" "Missing GSM8K eval parquet"
 ensure_valid_config
-mkdir -p "${LOG_DIR}"
+mkdir -p "${LOG_DIR}" "${CHECKPOINT_RUN_DIR}"
+write_json_metadata "${CHECKPOINT_RUN_DIR}/metadata.json" \
+  "run_id=${RUN_ID}" \
+  "script=run_verl_gsm8k_grpo.sh" \
+  "image=${IMAGE}" \
+  "model_path=${MODEL_PATH}" \
+  "container_model_path=${CONTAINER_MODEL_PATH}" \
+  "data_dir=${DATA_DIR}" \
+  "container_data_dir=${CONTAINER_DATA_DIR}" \
+  "infer_backend=${INFER_BACKEND}" \
+  "train_batch_size=${TRAIN_BATCH_SIZE}" \
+  "ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
+  "rollout_n=${ROLLOUT_N}" \
+  "rollout_tp=${ROLLOUT_TP}" \
+  "ngpus_per_node=${NGPUS_PER_NODE}" \
+  "max_prompt_length=${MAX_PROMPT_LENGTH}" \
+  "data_max_response_length=${DATA_MAX_RESPONSE_LENGTH}" \
+  "training_steps=${TRAINING_STEPS}" \
+  "total_epochs=${TOTAL_EPOCHS}" \
+  "save_freq=${SAVE_FREQ}" \
+  "test_freq=${TEST_FREQ}" \
+  "checkpoint_run_dir=${CHECKPOINT_RUN_DIR}" \
+  "container_checkpoint_run_dir=${CONTAINER_CHECKPOINT_RUN_DIR}"
 
 echo "Running native VeRL GSM8K GRPO; log: ${LOG_FILE}"
 echo "Data: train=${DATA_DIR}/train.parquet eval=${DATA_DIR}/test.parquet"
+echo "Checkpoint dir: ${CHECKPOINT_RUN_DIR}"
 echo "No UEnv Server/Worker/gateway/AgentLoop will be used."
 echo "Metrics to watch: val/test_score/openai/gsm8k"
 
@@ -212,6 +241,7 @@ podman run --rm \
   "${WANDB_ENV_ARGS[@]}" \
   -v "${VERL_WORKSPACE}:/workspace" \
   -v "${REPO_DIR}:/uenv/uenv-bridge" \
+  -v "${CHECKPOINT_RUN_DIR}:${CONTAINER_CHECKPOINT_RUN_DIR}" \
   -v "${MODEL_PATH}:${CONTAINER_MODEL_PATH}:ro" \
   -v "${DATA_DIR}:${CONTAINER_DATA_DIR}:ro" \
   "${IMAGE}" \
@@ -305,7 +335,7 @@ python3 -m verl.trainer.main_ppo \\
   trainer.total_training_steps=${TRAINING_STEPS} \\
   trainer.total_epochs=${TOTAL_EPOCHS} \\
   trainer.resume_mode=disable \\
-  trainer.default_local_dir=/uenv/uenv-bridge/tmp/verl_gsm8k_native_grpo_ckpt \\
+  trainer.default_local_dir=${CONTAINER_CHECKPOINT_RUN_DIR} \\
   ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS} \\
   +ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE} \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src \\

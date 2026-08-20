@@ -14,8 +14,8 @@
   # intentional here: the config file must not silently choose a task.
   default_env_type: ${oc.env:UENV_DEFAULT_ENV_TYPE,""}
   # 留空时 Worker 使用 config/uenv-worker-llm.env 默认 LLM；显式 override 时再设置
-  default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,}
-  default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,}
+  default_model_endpoint: ${oc.env:UENV_ROLLOUT_MODEL_ENDPOINT,""}
+  default_model_name: ${oc.env:UENV_ROLLOUT_MODEL_NAME,""}
   default_max_steps: 10
   episode_max_steps_override: ${oc.env:UENV_EPISODE_MAX_STEPS_OVERRIDE,""}
   default_max_turns: 1
@@ -31,17 +31,9 @@
   model_gateway_max_tokens: ${oc.env:UENV_MODEL_GATEWAY_MAX_TOKENS,""}
   model_gateway_stop_on_close: ${oc.env:UENV_MODEL_GATEWAY_STOP_ON_CLOSE,true}
   require_swe_response_trace: ${oc.env:UENV_REQUIRE_SWE_RESPONSE_TRACE,true}
+  missing_logprobs_as_zero: ${oc.env:UENV_MISSING_LOGPROBS_AS_ZERO,false}
   failed_episode_policy: ${oc.env:UENV_AGENT_LOOP_FAILED_EPISODE_POLICY,raise}
   parallel_mode: ${oc.env:UENV_AGENT_LOOP_PARALLEL_MODE,sync}
-  expected_worker_parallelism: ${oc.env:UENV_EXPECTED_WORKER_PARALLELISM,""}
-  max_episode_concurrency: ${oc.env:UENV_MAX_EPISODE_CONCURRENCY,""}
-  max_in_flight_batches: ${oc.env:UENV_MAX_IN_FLIGHT_BATCHES,""}
-  target_worker_slots: ${oc.env:UENV_TARGET_WORKER_SLOTS,""}
-  pool_warmup_target: ${oc.env:UENV_POOL_WARMUP_TARGET,""}
-  max_parallel_per_worker: ${oc.env:UENV_MAX_PARALLEL_PER_WORKER,""}
-  agent_job_max_concurrency: ${oc.env:UENV_AGENT_JOB_MAX_CONCURRENCY,""}
-  runtime_gateway_session_limit: ${oc.env:UENV_RUNTIME_GATEWAY_SESSION_LIMIT,""}
-  require_warm_slot: ${oc.env:UENV_REQUIRE_WARM_SLOT,false}
   batch_size: ${oc.env:UENV_AGENT_LOOP_BATCH_SIZE,0}
   batch_retry_attempts: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS,3}
   batch_retry_delay_seconds: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS,5}

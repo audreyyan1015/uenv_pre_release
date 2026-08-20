@@ -15,7 +15,7 @@ UEnv + VeRL 底层训练入口
 CPU/UEnv 主机（只需一次）：
   sudo bash train_verl.sh prepare-uenv --uenv-release /opt/uenv/current
 
-GPU 主机（准备固定版本 VeRL 和 Bridge）：
+训练设备主机（准备固定版本 VeRL 和 Bridge）：
   bash train_verl.sh prepare-gpu \
     --uenv-release /opt/uenv/current --work-dir /data/uenv-run/.uenv-verl
 
@@ -39,8 +39,8 @@ GPU 主机（准备固定版本 VeRL 和 Bridge）：
 prepare-uenv 选项：
   --uenv-release DIR       已安装的 UEnv release（默认 /opt/uenv/current）
   --profile PROFILE        single-node、full 或 worker（默认 single-node）
-  --server HOST:PORT       OpenHands Agent 连接的 Adapter gRPC 地址（默认 127.0.0.1:50051）
-  --trajectory-endpoint URL  OpenHands Agent 上传交互轨迹的 Adapter URL
+  --server HOST:PORT       OpenHands Agent 连接的 UEnv Server gRPC 地址（默认 127.0.0.1:50051）
+  --trajectory-endpoint URL  OpenHands Agent 上传交互轨迹的 UEnv Server URL
   --openhands-dir DIR      OpenHands 安装目录
   --skip-openhands         使用已有 OpenHands，不执行安装器
 
@@ -64,16 +64,19 @@ run 选项：
   --model DIR              Hugging Face 模型目录（必填）
   --data DIR               含 train.parquet/test.parquet 的目录（必填）
   --env-type NAME          本批训练数据对应的 UEnv 环境类型（必填）
-  --uenv-endpoint HOST:PORT  UEnv adapter-core 地址（必填）
+  --uenv-endpoint HOST:PORT  UEnv Server 地址（必填）
   --gateway-public-url URL CPU/UEnv 主机可访问的 GPU 模型网关 URL
   --gateway-port PORT      GPU 模型网关监听端口（默认 18080）
   --gateway-bind HOST      监听地址；单机默认 127.0.0.1，双机默认 0.0.0.0
-  --gpus N                 单节点 GPU 数（必填）
+  --gpus N                 单节点训练设备数（必填；历史参数名保留）
   --steps N                训练步数（必填）
   --rollouts N             每个问题的轨迹数，至少为 2（必填）
   --train-batch-size N     每批问题数（必填）
   --runtime docker|podman  容器运行时（必填）
-  --image IMAGE            VeRL CUDA 镜像或 digest（必填）
+  --image IMAGE            VeRL 镜像或 digest（必填）
+  --device-backend cuda|ascend
+                           本机训练设备后端（默认 cuda）
+  --ascend-devices LIST    Ascend 可见设备，如 0,1,2,3；默认取 ASCEND_VISIBLE_DEVICES 或 0
   --verl-config FILE       每行一个 Hydra KEY=VALUE；空行和 # 注释忽略
   --set KEY=VALUE          追加一个 Hydra 覆盖，可重复
   --print-effective-config 打印合并后的覆盖列表并退出
@@ -98,6 +101,29 @@ fail() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "缺少命令：$1"
+}
+
+normalize_device_backend() {
+  local value
+  value="$(printf '%s' "${1:-cuda}" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    cuda|gpu|nvidia) printf 'cuda\n' ;;
+    ascend|npu|910c) printf 'ascend\n' ;;
+    *) fail "--device-backend 必须是 cuda 或 ascend" ;;
+  esac
+}
+
+append_ascend_container_args() {
+  local -n target="$1"
+  local device
+  for device in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc; do
+    [[ -e "$device" ]] && target+=(--device "$device")
+  done
+  for device in /dev/davinci[0-9]*; do
+    [[ -e "$device" ]] && target+=(--device "$device")
+  done
+  [[ -d /usr/local/Ascend/driver ]] \
+    && target+=(-v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro)
 }
 
 absolute_file() {
@@ -249,7 +275,8 @@ EOF
 
   require_command systemctl
   if [[ "$profile" == "single-node" || "$profile" == "full" ]]; then
-    systemctl is-active --quiet uenv-adapter-core.service || fail "uenv-adapter-core 未运行"
+    systemctl is-active --quiet uenv-adapter-core.service \
+      || fail "UEnv Server（服务名 uenv-adapter-core.service）未运行"
   fi
   systemctl is-active --quiet uenv-worker.service || fail "uenv-worker 未运行"
   systemctl daemon-reload
@@ -523,7 +550,7 @@ try:
     with socket.create_connection((host, int(port)), timeout=5):
         pass
 except OSError as exc:
-    raise SystemExit(f"cannot connect to UEnv adapter-core {endpoint}: {exc}")
+    raise SystemExit(f"cannot connect to UEnv Server {endpoint}: {exc}")
 PY
 }
 
@@ -588,6 +615,7 @@ run_training() {
   local env_type="" model="" data="" endpoint="" gateway_url="" gateway_port=18080 gateway_bind=""
   local gateway_port_explicit=0
   local gpus="" steps="" rollouts="" train_batch="" runtime="" image="" dry_run=0
+  local device_backend="${UENV_DEVICE_BACKEND:-cuda}" ascend_devices="${ASCEND_VISIBLE_DEVICES:-0}"
   local verl_config="" print_effective_config=0
   local -a extra_hydra=()
   while (($#)); do
@@ -609,6 +637,8 @@ run_training() {
       --train-batch-size) train_batch="${2:-}"; shift 2 ;;
       --runtime) runtime="${2:-}"; shift 2 ;;
       --image) image="${2:-}"; shift 2 ;;
+      --device-backend) device_backend="${2:-}"; shift 2 ;;
+      --ascend-devices) ascend_devices="${2:-}"; shift 2 ;;
       --verl-config) verl_config="${2:-}"; shift 2 ;;
       --set) extra_hydra+=("${2:-}"); shift 2 ;;
       --print-effective-config) print_effective_config=1; shift ;;
@@ -630,6 +660,10 @@ run_training() {
   [[ -n "$data" ]] || fail "run 需要 --data"
   [[ "$runtime" == docker || "$runtime" == podman ]] || fail "run 需要 --runtime docker|podman"
   [[ -n "$image" ]] || fail "run 需要 --image"
+  device_backend="$(normalize_device_backend "$device_backend")"
+  [[ -n "$ascend_devices" ]] || fail "--ascend-devices 不能为空"
+  local torch_device_backend_autoload="${TORCH_DEVICE_BACKEND_AUTOLOAD:-0}"
+  local ray_noset_ascend_rt_visible_devices="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
   model="$(absolute_dir "$model")"
   data="$(absolute_dir "$data")"
   [[ -f "$data/train.parquet" && -f "$data/test.parquet" ]] \
@@ -680,18 +714,10 @@ run_training() {
     || fail "UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES 必须是正整数"
 
   WORK_DIR="$(mkdir -p "$WORK_DIR" && cd "$WORK_DIR" && printf '%s\n' "$PWD")"
-  if [[ -n "$BUNDLE" || -n "$UENV_RELEASE" || -n "$BRIDGE_WHEEL" || ! -f "$WORK_DIR/assets/state.env" ]]; then
-    stage_gpu_assets "$WORK_DIR" "$BUNDLE" "$UENV_RELEASE" "$BRIDGE_WHEEL"
-  fi
-  # shellcheck disable=SC1090
-  source "$WORK_DIR/assets/state.env"
-  [[ -f "$UENV_BRIDGE_WHEEL" && -f "$UENV_AGENT_CONFIG" ]] || fail "GPU 侧资产不完整，请先 prepare-gpu"
-  local verl_checkout
-  verl_checkout="$(ensure_verl_checkout "$WORK_DIR")"
 
   local effective_batch=$((train_batch * rollouts))
   [[ "$effective_batch" -ge "$gpus" && $((effective_batch % gpus)) -eq 0 ]] \
-    || fail "--train-batch-size × --rollouts 必须不小于 GPU 数，且能被 GPU 数整除"
+    || fail "--train-batch-size × --rollouts 必须不小于训练设备数，且能被训练设备数整除"
   local -a baseline_hydra=(
     "algorithm.adv_estimator=grpo"
     "algorithm.use_kl_in_reward=False"
@@ -743,6 +769,11 @@ run_training() {
     "trainer.resume_mode=disable"
     "trainer.default_local_dir=/outputs/checkpoints"
     "ray_kwargs.ray_init.num_cpus=$((gpus * 4))"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.UENV_DEVICE_BACKEND=$device_backend"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_VISIBLE_DEVICES=$ascend_devices"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-$ascend_devices}"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.TORCH_DEVICE_BACKEND_AUTOLOAD=$torch_device_backend_autoload"
+    "+ray_kwargs.ray_init.runtime_env.env_vars.RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=$ray_noset_ascend_rt_visible_devices"
   )
   VERL_FILE_HYDRA=()
   [[ -z "$verl_config" ]] || read_verl_config "$verl_config"
@@ -763,6 +794,15 @@ run_training() {
     return 0
   fi
 
+  if [[ -n "$BUNDLE" || -n "$UENV_RELEASE" || -n "$BRIDGE_WHEEL" || ! -f "$WORK_DIR/assets/state.env" ]]; then
+    stage_gpu_assets "$WORK_DIR" "$BUNDLE" "$UENV_RELEASE" "$BRIDGE_WHEEL"
+  fi
+  # shellcheck disable=SC1090
+  source "$WORK_DIR/assets/state.env"
+  [[ -f "$UENV_BRIDGE_WHEEL" && -f "$UENV_AGENT_CONFIG" ]] || fail "GPU 侧资产不完整，请先 prepare-gpu"
+  local verl_checkout
+  verl_checkout="$(ensure_verl_checkout "$WORK_DIR")"
+
   runtime="$(choose_runtime "$runtime")"
   require_command python3
   if [[ "$dry_run" -eq 0 ]]; then
@@ -770,7 +810,9 @@ run_training() {
   fi
 
   local -a container_args=(run --rm --network host --shm-size=32g --workdir /workspace/verl)
-  if [[ "$runtime" == docker ]]; then
+  if [[ "$device_backend" == "ascend" ]]; then
+    append_ascend_container_args container_args
+  elif [[ "$runtime" == docker ]]; then
     container_args+=(--gpus all)
   else
     container_args+=(--device nvidia.com/gpu=all)
@@ -783,6 +825,11 @@ run_training() {
     -v "$UENV_AGENT_CONFIG:/uenv-assets/uenv-agent-loop.yaml:ro"
     -v "$WORK_DIR/output:/outputs"
     -e "UENV_ADAPTER_CORE_ENDPOINT=$endpoint"
+    -e "UENV_DEVICE_BACKEND=$device_backend"
+    -e "ASCEND_VISIBLE_DEVICES=$ascend_devices"
+    -e "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-$ascend_devices}"
+    -e "TORCH_DEVICE_BACKEND_AUTOLOAD=$torch_device_backend_autoload"
+    -e "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=$ray_noset_ascend_rt_visible_devices"
     -e "UENV_DEFAULT_ENV_TYPE=$env_type"
     -e "UENV_MODEL_GATEWAY_PORT=$gateway_port"
     -e "UENV_MODEL_GATEWAY_BIND_HOST=$gateway_bind"
@@ -809,6 +856,24 @@ run_training() {
 export HYDRA_FULL_ERROR=1
 export TOKENIZERS_PARALLELISM=false
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+if [[ "${UENV_DEVICE_BACKEND:-cuda}" == "ascend" ]]; then
+  if [[ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]]; then
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+  fi
+  if [[ -f /usr/local/Ascend/nnal/atb/set_env.sh ]]; then
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+  fi
+  if [[ -d /usr/local/Ascend/driver/lib64/driver ]]; then
+    export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:${LD_LIBRARY_PATH:-}
+  fi
+  export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-0}"
+  export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-${ASCEND_VISIBLE_DEVICES}}"
+  export TORCH_DEVICE_BACKEND_AUTOLOAD="${TORCH_DEVICE_BACKEND_AUTOLOAD:-0}"
+  export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES="${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}"
+  unset CUDA_VISIBLE_DEVICES
+  export UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES=0
+  export UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK=0
+fi
 export UENV_AGENT_LOOP_CLIENT=rust_core
 export UENV_ADAPTER_CORE_AUTO_START=0
 export UENV_AGENT_LOOP_BATCH=0
@@ -840,6 +905,7 @@ exec python -m verl.trainer.main_ppo "$@"'
   )
 
   echo "VeRL：$VERL_VERSION ($VERL_COMMIT)"
+  echo "设备后端：$device_backend"
   echo "UEnv：$endpoint"
   echo "模型网关：$gateway_url"
   echo "结果目录：$WORK_DIR/output"

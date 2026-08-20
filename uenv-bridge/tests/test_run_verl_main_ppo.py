@@ -36,6 +36,24 @@ class RunVerlMainPPOTest(unittest.TestCase):
         self.assertEqual(TaskRunner().run({"x": 1}), "ok")
         self.assertEqual(calls, [("patch", None), ("run", {"x": 1})])
 
+    def test_patch_task_runner_supports_task_runner_v1(self) -> None:
+        script = _load_script_module()
+        calls = []
+
+        class TaskRunnerV1:
+            def run(self, config):
+                calls.append(("run_v1", config))
+                return "ok-v1"
+
+        def apply_patch():
+            calls.append(("patch", None))
+
+        script._apply_uenv_patches = apply_patch
+        script._patch_task_runner(types.SimpleNamespace(TaskRunnerV1=TaskRunnerV1))
+
+        self.assertEqual(TaskRunnerV1().run({"version": 1}), "ok-v1")
+        self.assertEqual(calls, [("patch", None), ("run_v1", {"version": 1})])
+
 
 if __name__ == "__main__":
     unittest.main()

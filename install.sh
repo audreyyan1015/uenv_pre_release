@@ -35,7 +35,7 @@ usage() {
     '  --profile single-node|control-plane|worker|hub|full' \
     '  --bundle FILE          use a local release tarball' \
     '  --version VERSION      GitHub release tag (default: latest)' \
-    '  --server HOST:PORT     control-plane address for a worker' \
+    '  --server HOST:PORT     UEnv Server address for a Worker' \
     '  --advertise HOST:PORT  address used to reach this Worker' \
     '  --hub URL              enable the Worker Hub connection' \
     '  --hub-token-file FILE  Worker Reader token; copied to a protected local file' \
@@ -44,7 +44,7 @@ usage() {
     '  --swe-gateway HOST:PORT  SWE gateway bind address (default: 127.0.0.1:28999)' \
     '  --swe-gateway-public URL address advertised to the local/remote Agent' \
     '  --swe-image-policy POLICY  local_only or allow_public (default: local_only)' \
-    '  --swe-trajectory-endpoint URL  Adapter trajectory service used by a Worker' \
+    '  --swe-trajectory-endpoint URL  UEnv Server trajectory service used by a Worker' \
     '  --swe-shared-key-file FILE  protected file containing the shared Gateway key' \
     '  --no-start             install without starting systemd units' \
     '  --force-config         replace existing component configs' \
@@ -330,8 +330,14 @@ warn_if_config_kept_with_flags() {
 
 UNITS=()
 if [[ "$PROFILE" == "single-node" || "$PROFILE" == "control-plane" || "$PROFILE" == "full" ]]; then
+  SERVER_BIND="0.0.0.0:50051"
+  if [[ "$PROFILE" == "single-node" || "$PROFILE" == "full" ]]; then
+    SERVER_BIND="127.0.0.1:50051"
+  fi
+  sed -e "s|^UENV_ADDR=.*|UENV_ADDR=$SERVER_BIND|" \
+    "$RELEASE_DIR/config/server.env" > "$TMP_DIR/server.env"
   install_config "$RELEASE_DIR/config/server.yaml" /etc/uenv/server.yaml
-  install_config "$RELEASE_DIR/config/server.env" /etc/uenv/server.env
+  install_config "$TMP_DIR/server.env" /etc/uenv/server.env
   install -m 0644 "$RELEASE_DIR/systemd/uenv-adapter-core.service" /etc/systemd/system/uenv-adapter-core.service
   UNITS+=(uenv-adapter-core.service)
 fi
@@ -476,7 +482,7 @@ if [[ "$PROFILE" == "hub" || "$PROFILE" == "full" ]]; then
   UNITS+=(uenv-hub.service)
 fi
 
-# control-plane 只包含 Adapter。此前以 single-node/full 安装的主机可能仍运行本机
+# control-plane 只包含 UEnv Server。此前以 single-node/full 安装的主机可能仍运行本机
 # UEnv Worker（和 swe-agent）；留着它会以 127.0.0.1:50054 注册，与"仅控制面"的
 # 预期不符，因此切换 profile 时一并停用。
 if [[ "$PROFILE" == "control-plane" ]]; then
@@ -561,7 +567,7 @@ if [[ "$ENABLE_SWE" -eq 1 ]]; then
   else
     echo "  SWE：控制面共享 Gateway key 已配置"
   fi
-  echo "  指南：/opt/uenv/current/share/docs/UEnv评测指南.md"
+  echo "  指南：/opt/uenv/current/share/docs/guide/usage/evaluation.md"
 fi
 if [[ "$NO_START" -eq 1 ]]; then
   echo "服务尚未启动；检查配置后运行：systemctl enable --now ${UNITS[*]}"

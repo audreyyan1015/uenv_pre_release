@@ -163,22 +163,11 @@ SWE-smith 训练的耗时主要来自 Worker 侧真实环境执行：每条 epis
 
 当前资源条件下，Worker 侧只有一台服务器，因此另一种方案是在一个 Worker 内部启用多个处理进程或会话，让多个 episode 同时在各自环境中运行。
 
-一开始我们讨论过由 Adapter 侧显式传递期望并行数，告诉 Worker 本次训练希望跑多少条 episode 并发。但后续讨论认为，这类参数更适合作为观测和调度提示，而不应成为 Worker 侧并行能力的硬约束。Adapter 侧通常希望并行度越高越好，真正可达到的并行度主要取决于 Worker 机器资源、OpenHands agent 池、Runtime Gateway session 数、CPU/内存和环境容器数量。
+一开始我们讨论过由 Adapter 侧显式传递期望并行数，告诉 Worker 本次训练希望跑多少条 episode 并发。但后续讨论认为，这类参数不应由 Adapter 写入请求协议。Adapter 侧通常希望并行度越高越好，真正可达到的并行度主要取决于 Worker 机器资源、OpenHands agent 池、Runtime Gateway session 数、CPU/内存和环境容器数量。
 
 因此，更合理的方案是 Worker 根据自身资源动态安排最大并行度。当前已实现的阶段性方案是把 Worker 侧并行数设为固定值 4，即一个 Worker 同时处理 4 条 episode。
 
 #### 2.2.2 证据
-
-训练侧已经把调度意图透传到请求元数据中，例如：
-
-```text
-expected_worker_parallelism = 8
-max_episode_concurrency = 8
-target_worker_slots = 8
-max_parallel_per_worker = 4
-agent_job_max_concurrency = 4
-runtime_gateway_session_limit = 4
-```
 
 Worker 侧文档与最近联调结论显示，单 Worker 内部实际并行能力受 OpenHands agent 池和 Runtime Gateway session 管理限制。Worker 侧当前方案是把 OpenHands agent 并发和 Runtime Gateway session 上限对齐到 4，并通过 Worker 自身状态暴露 active session、runtime load 等观测指标。
 
@@ -197,7 +186,7 @@ timing_s/step ~= 1004.99
 
 当前阶段采用 Worker 侧固定并行数 4 的方案，先保证单机多 episode 并发可用，并通过训练日志和前端观测确认实际并行是否生效。
 
-Adapter 侧保留 `UENV_EXPECTED_WORKER_PARALLELISM`、`max_episode_concurrency`、`target_worker_slots`、`max_parallel_per_worker` 等字段，用于表达训练侧期望、记录实验配置和辅助 Server/Worker 调度，但实际并行上限由 Worker 根据资源情况决定。
+Adapter 侧不再向请求协议中写入期望 Worker 并行数或调度提示字段。实际并行上限由 Worker 根据资源情况决定。
 
 后续更完整的方案应由 Worker 侧根据机器资源动态调整并发，例如根据 CPU、内存、可用容器、OpenHands agent 池、Runtime Gateway session 和当前负载自动决定可接收 episode 数。多机资源可用后，再扩展为多 Worker 横向并行。
 

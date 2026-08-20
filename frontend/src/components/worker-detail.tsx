@@ -289,7 +289,7 @@ export function WorkerDetail({
                 <Sparkles className="h-5 w-5" />
               </div>
               <div>
-                <p className="text-sm font-medium text-blue-700">UEnv · Worker 详情</p>
+                <p className="text-sm font-medium text-blue-700">UEnv · 执行节点详情</p>
                 <h1 className="font-mono text-lg font-semibold tracking-tight sm:text-xl">
                   {workerId}
                 </h1>
@@ -304,7 +304,9 @@ export function WorkerDetail({
             </div>
           </div>
 
-          <p className="text-xs text-slate-400">Worker 机器视图 · 舰队实时 · {freshness}</p>
+          <p className="text-xs text-slate-400">
+            执行节点机器视图 · Worker · 舰队实时 · {freshness}
+          </p>
         </header>
 
         {!liveMode && (
@@ -328,7 +330,7 @@ export function WorkerDetail({
         {liveMode && fleetError && (
           <div className="mt-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>舰队实时通道暂不可用（{fleetError}），已回落 Obs Worker 视图。</p>
+            <p>舰队实时通道暂不可用（{fleetError}），已回落 Obs 执行节点视图。</p>
           </div>
         )}
 
@@ -337,9 +339,9 @@ export function WorkerDetail({
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
               <Cpu className="h-5 w-5" />
             </div>
-            <h2 className="mt-5 text-lg font-semibold">暂未找到该 Worker</h2>
+            <h2 className="mt-5 text-lg font-semibold">暂未找到该执行节点</h2>
             <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
-              该 Worker 可能尚未向 Server 注册，或舰队实时名册暂未同步。请返回任务页确认后重试。
+              该执行节点可能尚未向 Server 注册，或舰队实时名册暂未同步。请返回任务页确认后重试。
             </p>
             <Link
               to="/server"
@@ -385,7 +387,7 @@ export function WorkerDetail({
                     </p>
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <p className="text-xs font-medium text-slate-500">实例池槽位</p>
+                    <p className="text-xs font-medium text-slate-500">本地运行时槽位</p>
                     <p className="mt-1 text-2xl font-semibold tabular-nums text-emerald-600">
                       {envInstanceCount}
                     </p>
@@ -402,11 +404,11 @@ export function WorkerDetail({
               <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
                 <div className="flex items-center gap-2 text-sm font-medium text-blue-700">
                   <Layers className="h-4 w-4" />
-                  Worker 实例池
+                  本地环境运行时池
                 </div>
-                <h2 className="mt-1 text-xl font-semibold tracking-tight">当前实例池槽位</h2>
+                <h2 className="mt-1 text-xl font-semibold tracking-tight">当前本地运行时槽位</h2>
                 <p className="mt-2 text-sm text-slate-500">
-                  来自该 Worker 的实时心跳快照，展示本机已准备、执行中和预热中的环境槽。
+                  来自该执行节点的实时快照，仅展示本机已准备、执行中和预热中的环境运行时，不代表全局环境资源池。
                 </p>
 
                 {poolSummary.length > 0 && (
@@ -430,7 +432,7 @@ export function WorkerDetail({
                   <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div>
-                        <p className="text-sm font-semibold text-blue-900">SWE 环境池</p>
+                        <p className="text-sm font-semibold text-blue-900">SWE 本地环境运行时池</p>
                         <p className="mt-1 text-xs leading-5 text-blue-700">
                           SWE 由 Runtime Gateway / SweInstancePool 管理，不会出现在 qa/code 的
                           process-plugin 槽位里。
@@ -453,7 +455,7 @@ export function WorkerDetail({
                         <p className="mt-1 text-lg font-semibold text-blue-600">{sweRuntimeBusy}</p>
                       </div>
                       <div className="rounded-xl bg-white px-3 py-3 ring-1 ring-blue-100">
-                        <p className="text-xs text-slate-500">worker capacity</p>
+                        <p className="text-xs text-slate-500">execution node capacity</p>
                         <p className="mt-1 text-lg font-semibold text-slate-800">
                           {sweRuntimeCapacity ?? "未知"}
                         </p>
@@ -602,7 +604,7 @@ export function WorkerDetail({
                   </div>
                 ) : (
                   <div className="mt-4 rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-400">
-                    该 Worker 尚未上报实例池快照；旧版本 Worker 会回退显示 Obs 环境实例
+                    该执行节点尚未上报本地运行时池快照；旧版本 Worker 会回退显示 Obs 环境运行时
                   </div>
                 )}
               </section>
@@ -613,7 +615,7 @@ export function WorkerDetail({
                   当前执行
                 </div>
                 <h2 className="mt-1 text-xl font-semibold tracking-tight">
-                  Worker 上的实时 Episode
+                  执行节点上的实时 Episode
                 </h2>
                 <p className="mt-2 text-sm text-slate-500">
                   来自 Server 舰队名册，反映该节点此刻正在跑的任务（不限本训练运行历史）。
@@ -662,7 +664,7 @@ export function WorkerDetail({
                 <Server className="h-4 w-4" />
                 模块配置
               </div>
-              <h2 className="mt-1 text-xl font-semibold tracking-tight">Worker 能力与接入信息</h2>
+              <h2 className="mt-1 text-xl font-semibold tracking-tight">执行节点能力与接入信息</h2>
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
@@ -701,14 +703,14 @@ export function WorkerDetail({
                 </div>
 
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                  <p className="text-xs font-medium text-slate-500">环境实例数</p>
+                  <p className="text-xs font-medium text-slate-500">环境运行时数</p>
                   <p className="mt-2 text-sm font-semibold text-slate-800">{envInstanceCount}</p>
                 </div>
               </div>
 
               <div className="mt-4 grid gap-3 lg:grid-cols-3">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                  <p className="text-xs font-medium text-slate-500">Worker 平台能力</p>
+                  <p className="text-xs font-medium text-slate-500">执行节点平台能力</p>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {[...platformFeatures, ...backendKinds].length > 0 ? (
                       [...platformFeatures, ...backendKinds].map((item) => (
@@ -762,7 +764,7 @@ export function WorkerDetail({
               </div>
 
               <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
-                <p className="text-xs font-medium text-slate-500">实例池汇总</p>
+                <p className="text-xs font-medium text-slate-500">本地池汇总</p>
                 {poolSummary.length > 0 || poolSlots.length > 0 || hasSweInstancePool ? (
                   <div className="mt-3 grid gap-3 lg:grid-cols-2">
                     {poolSummary.map((item) => (
@@ -793,13 +795,13 @@ export function WorkerDetail({
                         </div>
                         <p className="mt-2 text-xs text-slate-600">
                           ready packages {readySwePackages.length} · agent-mode load{" "}
-                          {sweRuntimeBusy} · worker capacity {sweRuntimeCapacity ?? "未知"}
+                          {sweRuntimeBusy} · execution node capacity {sweRuntimeCapacity ?? "未知"}
                         </p>
                       </div>
                     )}
                   </div>
                 ) : (
-                  <p className="mt-2 text-sm text-slate-400">未上报实例池快照</p>
+                  <p className="mt-2 text-sm text-slate-400">未上报本地运行时池快照</p>
                 )}
               </div>
             </section>
@@ -807,7 +809,7 @@ export function WorkerDetail({
         )}
 
         <footer className="mt-10 flex flex-col gap-3 py-4 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-          <span>UEnv Worker 详情 · 机器级舰队实时视图</span>
+          <span>UEnv 执行节点详情 · 机器级舰队实时视图</span>
           <Link to="/server" search={backSearch} className="text-blue-600 hover:text-blue-700">
             返回 Episode 进度
           </Link>

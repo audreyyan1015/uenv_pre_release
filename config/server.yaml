@@ -1,4 +1,4 @@
-# UEnv Server 配置示例（uenv-server / adapter-core 共用）
+# UEnv Server 开发配置示例（当前兼容二进制名为 uenv-adapter-core）
 # 实机：/root/UEnv/config/server.yaml 或 UENV_CONFIG_PATH 指定
 # 轨迹 v2.2 环境变量见 config/uenv-server.trajectory.env.example
 

@@ -1,4 +1,4 @@
-# Agent poll 模式依赖：连接 UEnv Adapter Core 的 AgentControlService。
+# Agent poll 模式依赖：连接 UEnv Server 的 AgentControlService。
 grpcio>=1.82.1
 grpcio-tools>=1.82.1
 protobuf>=7.35.0

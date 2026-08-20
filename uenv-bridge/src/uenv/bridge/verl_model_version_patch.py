@@ -125,11 +125,14 @@ def _patch_prometheus_route_name_fallback() -> None:
 
     def get_route_name(request):
         try:
-            return original_get_route_name(request)
+            route_name = original_get_route_name(request)
         except AttributeError as exc:
             if "object has no attribute 'path'" not in str(exc):
                 raise
             return request.scope.get("path")
+        if route_name is None:
+            return request.scope.get("path")
+        return route_name
 
     routing.get_route_name = get_route_name
     routing._uenv_route_name_fallback_patch_applied = True

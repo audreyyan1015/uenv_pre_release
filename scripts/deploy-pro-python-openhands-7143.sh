@@ -30,7 +30,7 @@ PY
 echo "== seed Hub =="
 source /root/.uenv-worker.env 2>/dev/null || true
 if command -v sshpass >/dev/null 2>&1; then
-  sshpass -p 'pku@345' scp -o StrictHostKeyChecking=no config/swe/pro.json \
+  sshpass -p "${UENV_HUB_SSH_PASSWORD:?set UENV_HUB_SSH_PASSWORD}" scp -o StrictHostKeyChecking=no config/swe/pro.json \
     root@8.130.95.176:/root/uenv/uenv-hub/config/swe/pro.json
   if [[ -n "${UENV_HUB_TOKEN:-}" ]]; then
     curl -s -o /tmp/hub_pro.json -w 'hub_http=%{http_code}\n' \
@@ -68,7 +68,7 @@ curl -s http://127.0.0.1:28777/health; echo
 
 echo "== OpenHands Python Pro gold =="
 python3 integrations/openhands/run_swebench.py \
-  --gateway 127.0.0.1:28097 --api-key swe-pro-secret \
+  --gateway 127.0.0.1:28097 --api-key REPLACE_WITH_RANDOM_GATEWAY_API_KEY \
   --instance "$PRO_INSTANCE_ID" \
   --instances config/swe/pro.json \
   --benchmark-variant pro --gold

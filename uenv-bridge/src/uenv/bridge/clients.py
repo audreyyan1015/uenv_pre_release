@@ -42,28 +42,8 @@ _PROTOCOL_METADATA_KEYS = {
     "lease_expire_at",
     "scheduler_epoch",
     "dispatch_token",
-    "scheduling_policy",
-    "scheduling_group_id",
     "scheduling_priority",
-    "max_episode_concurrency",
-    "max_in_flight_batches",
-    "target_worker_slots",
-    "pool_warmup_target",
-    "max_parallel_per_worker",
-    "agent_job_max_concurrency",
-    "runtime_gateway_session_limit",
-    "require_warm_slot",
 }
-
-_SCHEDULING_UINT_FIELDS = (
-    "max_episode_concurrency",
-    "max_in_flight_batches",
-    "target_worker_slots",
-    "max_parallel_per_worker",
-    "pool_warmup_target",
-    "agent_job_max_concurrency",
-    "runtime_gateway_session_limit",
-)
 
 DEFAULT_GRPC_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
@@ -121,9 +101,9 @@ class RustCoreClientConfig:
 
 
 class RustCoreEpisodeClient:
-    """Client boundary for Python shim -> Rust adapter core.
+    """Client boundary for the Python Bridge -> UEnv Server.
 
-    The Rust core API is intentionally local to the adapter. It receives the
+    The Rust core API is intentionally local to the Server implementation. It receives the
     already-normalized EpisodeRequest payload from Python, then calls UEnv
     Server through Rust functions rather than a second gRPC hop.
     """
@@ -234,7 +214,7 @@ class RustCoreEpisodeClient:
         while time.time() < deadline:
             if self._process is not None and self._process.poll() is not None:
                 output = self._process.stdout.read() if self._process.stdout is not None else ""
-                raise RuntimeError(f"Rust adapter core exited during startup with code {self._process.returncode}: {output}")
+                raise RuntimeError(f"UEnv Server exited during startup with code {self._process.returncode}: {output}")
             try:
                 response = self.stub.HealthCheck(self._core_pb2.HealthCheckRequest(), timeout=1)
                 if bool(getattr(response, "ok", False)):
@@ -242,7 +222,7 @@ class RustCoreEpisodeClient:
             except Exception as exc:
                 last_error = exc
                 time.sleep(0.2)
-        raise RuntimeError(f"Rust adapter core did not become healthy at {self.config.endpoint}: {last_error}")
+        raise RuntimeError(f"UEnv Server did not become healthy at {self.config.endpoint}: {last_error}")
 
     def submit_episode(self, request: EpisodeRequest) -> EpisodeResult:
         return next(self.submit_episode_stream([request]))
@@ -325,12 +305,9 @@ class RustCoreEpisodeClient:
     def _to_core_execute_batch_request(self, requests: list[EpisodeRequest]) -> dict[str, Any]:
         batch_id = ""
         samples = []
-        scheduling_policy: dict[str, Any] = {}
         for idx, request in enumerate(requests):
             payload = self._payload_json(request)
             metadata = self._dict_field(payload, "metadata")
-            if not scheduling_policy:
-                scheduling_policy = self._scheduling_policy_from_metadata(metadata)
             sample_context = self._sample_context(metadata)
             env_config = self._dict_field(payload, "env_config")
             episode_config = self._dict_field(payload, "episode_config")
@@ -368,8 +345,6 @@ class RustCoreEpisodeClient:
             "batch_id": batch_id,
             "samples": samples,
         }
-        if scheduling_policy:
-            core_request["scheduling_policy"] = scheduling_policy
         if self._core_pb2 is None:
             return core_request
         kwargs = {
@@ -377,8 +352,6 @@ class RustCoreEpisodeClient:
             "batch_id": core_request["batch_id"],
             "samples": [self._core_pb2.SampleEnvelope(**sample) for sample in samples],
         }
-        if scheduling_policy:
-            kwargs["scheduling_policy"] = self._core_pb2.SchedulingPolicy(**scheduling_policy)
         return self._core_pb2.ExecuteBatchRequest(**kwargs)
 
     def _from_core_result(self, result: Any) -> EpisodeResult:
@@ -500,35 +473,6 @@ class RustCoreEpisodeClient:
             for key, value in metadata.items()
             if str(key) not in _PROTOCOL_METADATA_KEYS
         }
-
-    def _scheduling_policy_from_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        source = self._dict_field(metadata, "scheduling_policy")
-        if not source:
-            source = metadata
-
-        policy: dict[str, Any] = {}
-        for key in _SCHEDULING_UINT_FIELDS:
-            raw = source.get(key)
-            if raw in (None, ""):
-                continue
-            try:
-                value = int(raw)
-            except Exception:
-                continue
-            if value > 0:
-                policy[key] = value
-
-        raw_require_warm_slot = source.get("require_warm_slot")
-        if raw_require_warm_slot not in (None, ""):
-            require_warm_slot = self._bool_from_jsonable(raw_require_warm_slot)
-            if require_warm_slot:
-                policy["require_warm_slot"] = True
-        return policy
-
-    def _bool_from_jsonable(self, value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
 
     def _int_list_from_jsonable(self, value: Any) -> list[int]:
         if not isinstance(value, list):

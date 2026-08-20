@@ -48,16 +48,19 @@ SWE 任务（catalog 和实例选择必须显式）：
   --uenv-release DIR         已安装 release 或训练客户端包根目录
   --bundle FILE              兼容旧流程：从完整 release bundle 读取客户端资产
   --bridge-wheel FILE        仅提供 UEnv Bridge wheel
-  --uenv-endpoint HOST:PORT  Adapter gRPC 地址（run-task/run-swe 必填）
+  --uenv-endpoint HOST:PORT  UEnv Server gRPC 地址（run-task/run-swe 必填）
   --gateway-public-url URL   双机时 UEnv 主机访问 VeRL 模型 API 的 URL
   --gateway-port PORT        VeRL 模型 API 监听端口（默认 18080）
   --gateway-bind HOST        监听地址；单机默认 127.0.0.1，双机默认 0.0.0.0
-  --gpus N                   GPU 数（必填）
+  --gpus N                   训练设备数（必填；历史参数名保留）
   --steps N                  训练步数（必填）
   --rollouts N               每个问题的轨迹数（必填）
   --train-batch-size N       每批问题数（必填）
   --runtime docker|podman    容器运行时（必填）
-  --image IMAGE              VeRL CUDA 镜像或 digest（必填）
+  --image IMAGE              VeRL 镜像或 digest（必填）
+  --device-backend cuda|ascend
+                             本机训练设备后端（默认 cuda）
+  --ascend-devices LIST      Ascend 可见设备，如 0,1,2,3
   --verl-config FILE         每行一个 Hydra KEY=VALUE；适合版本管理
   --set KEY=VALUE            追加 VeRL/Hydra 配置，可重复
   --print-effective-config   打印最终 Hydra 配置并退出，不启动训练
@@ -142,6 +145,8 @@ parse_run_common() {
   TRAIN_BATCH=""
   RUNTIME=""
   IMAGE=""
+  DEVICE_BACKEND=""
+  ASCEND_DEVICES=""
   GATEWAY_PORT=""
   GATEWAY_BIND=""
   DRY_RUN=0
@@ -179,6 +184,8 @@ append_run_common() {
   [[ -n "$GATEWAY_BIND" ]] && RUN_ARGS+=(--gateway-bind "$GATEWAY_BIND")
   [[ -n "$RUNTIME" ]] && RUN_ARGS+=(--runtime "$RUNTIME")
   [[ -n "$IMAGE" ]] && RUN_ARGS+=(--image "$IMAGE")
+  [[ -n "$DEVICE_BACKEND" ]] && RUN_ARGS+=(--device-backend "$DEVICE_BACKEND")
+  [[ -n "$ASCEND_DEVICES" ]] && RUN_ARGS+=(--ascend-devices "$ASCEND_DEVICES")
   [[ -n "$VERL_CONFIG" ]] && RUN_ARGS+=(--verl-config "$VERL_CONFIG")
   [[ "$PRINT_EFFECTIVE_CONFIG" -eq 1 ]] && RUN_ARGS+=(--print-effective-config)
   [[ "$DRY_RUN" -eq 1 ]] && RUN_ARGS+=(--dry-run)
@@ -208,6 +215,8 @@ run_task() {
       --train-batch-size) TRAIN_BATCH="${2:-}"; shift 2 ;;
       --runtime) RUNTIME="${2:-}"; shift 2 ;;
       --image) IMAGE="${2:-}"; shift 2 ;;
+      --device-backend) DEVICE_BACKEND="${2:-}"; shift 2 ;;
+      --ascend-devices) ASCEND_DEVICES="${2:-}"; shift 2 ;;
       --verl-config) VERL_CONFIG="${2:-}"; shift 2 ;;
       --set) EXTRA_HYDRA+=("${2:-}"); shift 2 ;;
       --print-effective-config) PRINT_EFFECTIVE_CONFIG=1; shift ;;
@@ -274,6 +283,8 @@ run_swe() {
       --train-batch-size) TRAIN_BATCH="${2:-}"; shift 2 ;;
       --runtime) RUNTIME="${2:-}"; shift 2 ;;
       --image) IMAGE="${2:-}"; shift 2 ;;
+      --device-backend) DEVICE_BACKEND="${2:-}"; shift 2 ;;
+      --ascend-devices) ASCEND_DEVICES="${2:-}"; shift 2 ;;
       --verl-config) VERL_CONFIG="${2:-}"; shift 2 ;;
       --set) EXTRA_HYDRA+=("${2:-}"); shift 2 ;;
       --print-effective-config) PRINT_EFFECTIVE_CONFIG=1; shift ;;

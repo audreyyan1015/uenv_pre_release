@@ -2,6 +2,23 @@
 
 # Common helpers for uenv-bridge shell entrypoints.
 
+normalize_device_backend() {
+  local value
+  value="$(printf '%s' "${1:-cuda}" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
+    cuda|gpu|nvidia)
+      printf '%s\n' cuda
+      ;;
+    ascend|npu|910c)
+      printf '%s\n' ascend
+      ;;
+    *)
+      echo "unsupported UENV_DEVICE_BACKEND=${1}; expected cuda or ascend" >&2
+      return 1
+      ;;
+  esac
+}
+
 build_podman_gpu_args() {
   local value="$1"
   if [ -z "${value}" ]; then
@@ -34,6 +51,48 @@ build_podman_gpu_args() {
   done
   IFS="${old_ifs}"
   printf '%s\n' "${output# }"
+}
+
+build_podman_ascend_args() {
+  local value="$1"
+  if [ -n "${value}" ]; then
+    printf '%s\n' "${value}"
+    return 0
+  fi
+
+  local output=""
+  for device in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc; do
+    if [ -e "${device}" ]; then
+      output="${output} --device ${device}"
+    fi
+  done
+
+  local davinci
+  for davinci in /dev/davinci[0-9]*; do
+    if [ -e "${davinci}" ]; then
+      output="${output} --device ${davinci}"
+    fi
+  done
+
+  if [ -d /usr/local/Ascend/driver ]; then
+    output="${output} -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro"
+  fi
+  printf '%s\n' "${output# }"
+}
+
+build_podman_accelerator_args() {
+  local backend="$1"
+  local cuda_args="${2:-}"
+  local ascend_args="${3:-}"
+  backend="$(normalize_device_backend "${backend}")" || return 1
+  case "${backend}" in
+    cuda)
+      build_podman_gpu_args "${cuda_args}"
+      ;;
+    ascend)
+      build_podman_ascend_args "${ascend_args}"
+      ;;
+  esac
 }
 
 ensure_file_exists() {
@@ -72,6 +131,32 @@ ensure_positive_int() {
     echo "${name} must be a positive integer, got: ${value}" >&2
     exit 1
   fi
+}
+
+write_json_metadata() {
+  local output="$1"
+  shift
+  python3 - "$output" "$@" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+output = Path(sys.argv[1])
+metadata = {
+    "metadata_version": 1,
+    "created_at": datetime.now(timezone.utc).isoformat(),
+}
+for item in sys.argv[2:]:
+    key, separator, value = item.partition("=")
+    if separator:
+        metadata[key] = value
+
+output.parent.mkdir(parents=True, exist_ok=True)
+with output.open("w", encoding="utf-8") as file:
+    json.dump(metadata, file, ensure_ascii=False, indent=2, sort_keys=True)
+    file.write("\n")
+PY
 }
 
 split_host() {

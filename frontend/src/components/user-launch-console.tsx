@@ -488,7 +488,7 @@ function ObservePanel({
             <span>
               <span className="block text-sm font-semibold text-slate-900">系统拓扑</span>
               <span className="mt-1 block text-xs text-slate-500">
-                adapter / server / worker / hub
+                adapter / server / execution node / hub
               </span>
             </span>
             <ArrowUpRight className="h-4 w-4 text-slate-400" />
@@ -567,7 +567,7 @@ export function UserLaunchConsole({ initialRunId = null }: { initialRunId?: stri
       ? "配置 VeRL + UEnv 训练入口"
       : section === "benchmark"
         ? "配置五类 benchmark 评测入口"
-        : "查看 Server 侧 Episode 与 Worker 进度";
+        : "查看 Server 侧 Episode 与执行节点进度";
 
   useEffect(() => {
     if (demoState !== "running") return undefined;

@@ -1,11 +1,11 @@
-name: Notify website of deployment docs changes
+name: Notify website of guide changes
 
 "on":
   push:
     branches:
       - main
     paths:
-      - "Docs/deployment/**"
+      - "Docs/guide/**"
   workflow_dispatch:
 
 # The job authenticates to the target repository with WEBSITE_DISPATCH_TOKEN,
@@ -58,7 +58,7 @@ jobs:
               --arg source_ref "$GITHUB_REF_NAME" \
               --arg source_run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
               '{
-                event_type: "deployment-docs-updated",
+                event_type: "docs-updated",
                 client_payload: {
                   source_repository: $source_repository,
                   source_sha: $source_sha,
@@ -113,6 +113,6 @@ jobs:
 
           {
             echo
-            echo "Sent \`deployment-docs-updated\` to \`$TARGET_REPOSITORY\`."
+            echo "Sent \`docs-updated\` to \`$TARGET_REPOSITORY\`."
             echo "Source commit: \`$GITHUB_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"

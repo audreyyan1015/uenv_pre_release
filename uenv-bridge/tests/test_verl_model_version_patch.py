@@ -80,7 +80,7 @@ class VerlModelVersionPatchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(module.vLLMHttpServer, patched_cls)
         self.assertTrue(issubclass(patched_cls, BaseServer))
-        self.assertTrue(patched_cls._uenv_model_version_actor_class)
+        self.assertTrue(patched_cls._uenv_model_version_run_server_patch_applied)
         self.assertIs(_patch_vllm_http_server_class(module), patched_cls)
         self.assertEqual(await patched_cls().run_server("args"), "ok")
         self.assertEqual(calls[0], ("parent", "args"))

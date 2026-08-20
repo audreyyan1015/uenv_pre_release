@@ -9,7 +9,10 @@ export const Route = createFileRoute("/system")({
   head: () => ({
     meta: [
       { title: "UEnv · 系统拓扑" },
-      { name: "description", content: "UEnv adapter、server、worker、hub 统一动态拓扑。" },
+      {
+        name: "description",
+        content: "UEnv adapter、server、执行节点、环境资源池与 hub 统一动态拓扑。",
+      },
       { property: "og:title", content: "UEnv · 系统拓扑" },
       { property: "og:description", content: "查看 UEnv 当前调度状态与测试进度。" },
     ],

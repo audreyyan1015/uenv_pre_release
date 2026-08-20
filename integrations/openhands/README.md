@@ -1,110 +1,75 @@
-# UEnv ⇄ OpenHands integration (`UEnvRuntime`)
+# UEnv 与 OpenHands
 
-Adapts an OpenHands agent loop onto the UEnv Worker **External Runtime Gateway**
-(L4, HTTP) so OpenHands can run SWE-bench instances inside UEnv-managed sandboxes
-(plan §5.3.3 / §5.6).
+本目录实现 OpenHands SWE Agent 到 UEnv Worker Runtime Gateway 的适配。Agent 的 shell、文件读取和文件写入在 UEnv 管理的 SWE 实例容器中执行；submit 返回测试、reward、patch 和 trajectory。
 
-```
-OpenHands agent  ──actions──▶  UEnvRuntime  ──HTTP──▶  Worker L4 Gateway
- (CmdRunAction,                (this package)          /runtime/v1/sessions/...
-  FileWriteAction, …)                                   │
-                                                        ▼
-                                              L2 SweInstancePool → L1 Backend (Docker)
+## 运行关系
+
+```text
+OpenHands Agent -> UEnvRuntime Bridge -> Worker Runtime Gateway -> SWE instance
 ```
 
-## Layout
+批量评测和训练仍由 UEnv Server 管理任务与 Agent job。Runtime Gateway 只负责 SWE 实例中的操作，不负责 Worker 注册或任务调度。
 
-| File | Role |
-|------|------|
-| `uenv_runtime/client.py` | `UEnvGatewayClient` / `UEnvSession` — dependency-free (`urllib`) HTTP client for the gateway contract. |
-| `uenv_runtime/runtime.py` | `UEnvRuntime` — duck-typed adapter exposing OpenHands `run`/`read`/`write`/`run_action`. |
-| `run_swebench.py` | End-to-end driver: connect → apply edits as OpenHands actions → `submit`. |
-| `tests/test_client_smoke.py` | Offline adapter unit tests + opt-in live gateway check. |
+## 实现边界
 
-## Design notes / decoupling decision (vs plan §5.3.3)
+当前 `UEnvRuntime` 是独立实现，不 import 或 subclass OpenHands 的经典 `Runtime`：
 
-**Decision (confirmed): this integration is an independent rewrite and has ZERO
-dependency on the OpenHands package — we never `import openhands`.**
+- action 通过 `.command`、`.path`、`.content` 或同名 dict 字段 duck type；
+- observation 以 OpenHands 形态的普通 dict 返回；
+- Runtime Gateway HTTP 契约不绑定某个 OpenHands Python 包结构；
+- benchmarks 与 SDK 使用 `PIN.md` 中的固定 commit，不使用浮动分支。
 
-This is a deliberate deviation from plan §5.3.3, which assumed `UEnvRuntime` would
-**implement/subclass OpenHands' classic `Runtime`** (`run`/`read`/`write`/`copy`)
-and drive evaluation via OpenHands `evaluation/benchmarks/swe_bench` (pinning the
-OpenHands swebench branch, plan Q6).
+这支持已验证的 UEnv SWE 执行链路，但不表示对任意 OpenHands 版本都可作为 drop-in Runtime。
 
-Reason: the vendored OpenHands (`openhands-ai`) is the **new
-`app_server`/`agent_server`/SDK architecture**, which ships **none** of the pieces
-the plan targets:
+## 目录
 
-- no `openhands/runtime/base.py` (classic `Runtime` ABC),
-- no `openhands/events/observation*`,
-- no `evaluation/benchmarks/swe_bench` driver.
+| 路径 | 作用 |
+|---|---|
+| `uenv_runtime/client.py` | session、exec/read/write、submit、trajectory HTTP 客户端 |
+| `uenv_runtime/runtime.py` | action/observation 适配 |
+| `uenv_runtime/agent_client.py` | Adapter 内部 AgentControlService 客户端 |
+| `run_swebench*.py` | release `run-swe` 使用的执行器与开发驱动 |
+| `tests/` | action、client、trace 和 workspace 测试 |
+| `PIN.md` | 固定的 OpenHands 仓库 commit |
 
-(The new architecture instead exposes a *runtime-api* protocol — `/start`,
-`/sessions/{id}`, `/list`, `/pause` … — in `app_server/sandbox/remote_sandbox_service.py`.)
+## 用户入口
 
-So `UEnvRuntime`:
+最终用户使用：
 
-- **duck-types** action objects (reads `.command` / `.path` / `.content`), accepting
-  classic action dataclasses or plain dicts, without binding to any OpenHands release;
-- returns **OpenHands-shaped plain dicts** (same field names as
-  `CmdOutputObservation` / `FileReadObservation` / `FileWriteObservation`); it does
-  **not** import or construct real OpenHands observation types;
-- does **not** subclass OpenHands' `Runtime`.
+```text
+sudo uenv evaluate run-swe ...
+uenv train run-swe ...
+```
 
-The `UEnvGatewayClient` is fully standalone and is the artifact validated against a
-live Worker gateway offline (gold→reward=1.0 / no-gold→0). Wiring a real OpenHands
-LLM agent loop additionally requires OpenHands + model access (online) and is out of
-scope for the offline Worker host.
+这些命令要求显式提供模型/provider、Gateway、catalog、variant、实例、输出与并发。仓库脚本属于内部实现和开发诊断入口，不应另写一套生产流程。
 
-**If a true OpenHands dependency is later required** (plan §5.3.3 literal), pin an
-OpenHands release that still ships the classic `Runtime` + `benchmarks/swe_bench`,
-then add a thin subclass shim that delegates to `UEnvGatewayClient` — the gateway
-contract here is unchanged.
+文档：
 
-## Agent 池控制面（与 ToolEnv 同机隔离）
+- [SWE-bench Verified 评测案例](../../Docs/guide/cases/evaluation-swe-verified.md)
+- [轨迹采集与查询](../../Docs/guide/usage/trajectory.md)
 
-OpenHands runner 通过 `uenv_runtime.agent_client.AgentControlClient` 连 Server
-`AgentControlService`（Register / Poll / Complete / Heartbeat）。
+## 开发驱动
 
-| | OpenHands (SWE) | ToolEnv (code) |
-|--|-----------------|----------------|
-| systemd | `uenv-agent-poller` | `uenv-toolenv-poller` |
-| pool_id | `openhands-default` | `toolenv-default` |
-| bridge_id | `uenv-agent-openhands` | `uenv-agent-toolenv` |
-| 端口 | API `:8888` / health `:8777` | shim `:8099` |
-| AgentJob | `gateway_*` + `instance_id` | `task_payload_json`（gateway 可空） |
-
-`agent_bridge_version` 两侧独立演进。重生 stub：
+需要直接验证 Runtime action 与 grader 契约时，可以对固定 catalog 实例执行：
 
 ```bash
-make proto-agent-python
-# 校验 AgentJob.task_payload_json 存在
-```
-
-ToolEnv bootstrap 会把同一套 stub **合并**进 `uenv-bridge/src/uenv/v1/`，
-避免 `PYTHONPATH` 同时含 `…/gen` 与 `uenv.bridge` 时抢顶层 `uenv` 包。
-
-## Quick start
-
-Start a Worker with the gateway enabled (see `config/uenv-worker.swe-local.yaml`),
-then:
-
-```bash
-# gold-patch replay → reward should be 1.0
 python3 integrations/openhands/run_swebench.py \
-    --gateway 127.0.0.1:48999 \
-    --instance scikit-learn__scikit-learn-14141 \
-    --instances fixtures/swe/swe_instances.json
-
-# negative control → reward 0.0
-python3 integrations/openhands/run_swebench.py ... --no-gold
-
-# offline adapter unit tests
-python3 -m pytest integrations/openhands/tests -q
+  --gateway '127.0.0.1:28999' \
+  --instance 'astropy__astropy-7166' \
+  --instances fixtures/swe/swe_instances.json \
+  --benchmark-variant verified \
+  --save-ref "$PWD/trajectory_ref.json" \
+  --fetch-trajectory
 ```
 
-Environment:
+该开发驱动默认应用 catalog 中的 gold patch，用于验证 create/action/submit/trajectory 契约，不用于报告模型能力。模型评测必须走 `uenv evaluate run-swe`，由实际 Agent 调用目标模型。
 
-- `--gateway` / `UENV_GATEWAY`: gateway `host:port` (or full URL).
-- `--benchmark-variant`: `verified` | `lite` | `pro` (selects the grader server-side).
-- `--command-mode`: `FullShell` (default) | `RestrictedShell`.
+## 接入要求
+
+- catalog、Gateway 实例和 variant 必须一致。
+- 每个 Agent job 使用独立 session/workspace，完成、超时或取消后释放容器。
+- Gateway API Key 通过受保护配置传入，不写入日志或轨迹。
+- complete 必须回填原 `job_id` / `episode_id` 和 `trajectory_id`。
+- 并发受 Agent poller、Gateway session、容器和模型服务共同限制。
+
+修改后应通过 `python3 -m pytest integrations/openhands/tests -q`，并用真实模型、Server 和 Worker 完成目标 SWE 作业，确认没有 workspace/session/result 串线。

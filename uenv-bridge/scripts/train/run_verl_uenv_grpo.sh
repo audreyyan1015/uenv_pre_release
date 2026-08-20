@@ -19,6 +19,8 @@ Usage:
   SERVER_ADAPTER_CORE_ENDPOINT=<server-core-host:port> ./scripts/train/run_verl_uenv_grpo.sh
 
 Common environment overrides:
+  UENV_DEVICE_BACKEND           Device backend for the local training container.
+                                Default: cuda. Use ascend on 910C hosts.
   IMAGE                         VeRL image. Default: localhost/uenv-bridge-verl:qwen35-torch210-vllm019-tf514-kernelfix
   VERL_WORKSPACE                Host VeRL workspace. Default: /data/podman/verl/workspace
   MODEL_PATH                    Host policy model path. Default: /data/ronghao/models/modelscope/Qwen/Qwen2___5-0___5B-Instruct
@@ -36,22 +38,15 @@ Common environment overrides:
   UENV_AGENT_LOOP_BATCH         Batch episodes before Python -> Rust core RPC. Default: 1
   UENV_AGENT_LOOP_BATCH_SIZE    Python -> Rust core micro-batch size; 0 means whole VeRL batch. Default: 0
   UENV_AGENT_LOOP_PARALLEL_MODE Adapter metadata parallel mode. Default: sync
-  UENV_EXPECTED_WORKER_PARALLELISM
-                                  Expected UEnv Worker execution slots for observability only. Default: empty
-  UENV_MAX_EPISODE_CONCURRENCY  Run/batch episode concurrency hint sent to AdapterCore. Default: empty
-  UENV_MAX_IN_FLIGHT_BATCHES    Run-level in-flight batch hint sent to AdapterCore. Default: empty
-  UENV_TARGET_WORKER_SLOTS      Desired Worker slots for this run/env. Default: empty
-  UENV_POOL_WARMUP_TARGET       Desired Worker warm pool ready slots. Default: empty
-  UENV_MAX_PARALLEL_PER_WORKER  Desired per-Worker episode limit for this run/env. Default: empty
-  UENV_AGENT_JOB_MAX_CONCURRENCY Desired Agent job concurrency for this run/env. Default: empty
-  UENV_RUNTIME_GATEWAY_SESSION_LIMIT Desired runtime gateway session limit. Default: empty
-  UENV_REQUIRE_WARM_SLOT        Require pre-warmed slot hint. Default: false
   UENV_AGENT_LOOP_TIMEOUT_SECONDS Default: 1800
   UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES
                                   Python Adapter <-> Rust AdapterCore gRPC max message bytes. Default: 16777216
   UENV_EPISODE_MAX_STEPS_OVERRIDE Runtime max_steps/max_iterations override. Default: empty
   TRAINER_LOGGER                VeRL logger backends. Use "['console','wandb']" to enable wandb. Default: "['console']"
   TRAINER_PROJECT_NAME          VeRL/wandb project name. Default: uenv_bridge_layer4
+  CHECKPOINT_ROOT               Host checkpoint root. Default: <repo>/checkpoints/uenv_grpo
+  CHECKPOINT_RUN_DIR            Host checkpoint dir for this run. Default: <CHECKPOINT_ROOT>/<RUN_ID>
+  CONTAINER_CHECKPOINT_RUN_DIR  Container checkpoint dir passed to VeRL. Default: /uenv/uenv-bridge/checkpoints/uenv_grpo/<RUN_ID>
   WANDB_ENV_FILE                Optional host env file loaded before wandb setup. Default: <repo>/../secrets/wandb.env
   WANDB_API_KEY                 Optional wandb API key; passed through to the container when set.
   WANDB_MODE                    Optional wandb mode, for example online or offline.
@@ -135,6 +130,8 @@ fi
 REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}
 source "${REPO_DIR}/scripts/lib/common.sh"
 VERL_WORKSPACE=${VERL_WORKSPACE:-/data/podman/verl/workspace}
+UENV_DEVICE_BACKEND=${UENV_DEVICE_BACKEND:-cuda}
+UENV_DEVICE_BACKEND=$(normalize_device_backend "${UENV_DEVICE_BACKEND}")
 
 # Server 侧已经启动的 Rust adapter core 地址
 SERVER_ADAPTER_CORE_ENDPOINT=${SERVER_ADAPTER_CORE_ENDPOINT:-8.130.75.157:8088}
@@ -175,9 +172,14 @@ ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.8}
 AGENT_NUM_WORKERS=${AGENT_NUM_WORKERS:-1}
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=${CUDA_VISIBLE_DEVICES_IN_CONTAINER:-"7"}
 PODMAN_GPU_ARGS=${PODMAN_GPU_ARGS:-nvidia.com/gpu=all}
+PODMAN_ASCEND_ARGS=${PODMAN_ASCEND_ARGS:-}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-1}
 RAY_NUM_CPUS=${RAY_NUM_CPUS:-$((NGPUS_PER_NODE * 4))}
 RAY_NOSET_CUDA_VISIBLE_DEVICES=${RAY_NOSET_CUDA_VISIBLE_DEVICES:-$([ "${NGPUS_PER_NODE}" -gt 1 ] && printf 1 || printf 0)}
+ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES:-0}
+ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-${ASCEND_VISIBLE_DEVICES}}
+TORCH_DEVICE_BACKEND_AUTOLOAD=${TORCH_DEVICE_BACKEND_AUTOLOAD:-0}
+RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES:-1}
 PODMAN_NETWORK_ARGS=${PODMAN_NETWORK_ARGS:---network host}
 UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
@@ -196,15 +198,6 @@ UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE:-0}
 UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS:-3}
 UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS:-5}
 UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE:-sync}
-UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM:-}
-UENV_MAX_EPISODE_CONCURRENCY=${UENV_MAX_EPISODE_CONCURRENCY:-}
-UENV_MAX_IN_FLIGHT_BATCHES=${UENV_MAX_IN_FLIGHT_BATCHES:-}
-UENV_TARGET_WORKER_SLOTS=${UENV_TARGET_WORKER_SLOTS:-}
-UENV_POOL_WARMUP_TARGET=${UENV_POOL_WARMUP_TARGET:-}
-UENV_MAX_PARALLEL_PER_WORKER=${UENV_MAX_PARALLEL_PER_WORKER:-}
-UENV_AGENT_JOB_MAX_CONCURRENCY=${UENV_AGENT_JOB_MAX_CONCURRENCY:-}
-UENV_RUNTIME_GATEWAY_SESSION_LIMIT=${UENV_RUNTIME_GATEWAY_SESSION_LIMIT:-}
-UENV_REQUIRE_WARM_SLOT=${UENV_REQUIRE_WARM_SLOT:-false}
 UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS:-3600}
 UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES=${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES:-16777216}
 UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE:-}
@@ -263,10 +256,37 @@ CONTAINER_SERVICE_DIR=${CONTAINER_LOG_ROOT}/layer4_distributed/${RUN_ID}
 AGENT_LOOP_RESULT_RECORD_PATH=${AGENT_LOOP_RESULT_RECORD_PATH:-${CONTAINER_SERVICE_DIR}/agent-loop-results.jsonl}
 AGENT_LOOP_REQUEST_RECORD_PATH=${AGENT_LOOP_REQUEST_RECORD_PATH:-${CONTAINER_SERVICE_DIR}/agent-loop-requests.jsonl}
 MODEL_GATEWAY_LOG_PATH=${MODEL_GATEWAY_LOG_PATH:-${CONTAINER_SERVICE_DIR}/model-gateway.jsonl}
+CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-${REPO_DIR}/checkpoints/uenv_grpo}
+CHECKPOINT_RUN_DIR=${CHECKPOINT_RUN_DIR:-${CHECKPOINT_ROOT}/${RUN_ID}}
+CONTAINER_CHECKPOINT_RUN_DIR=${CONTAINER_CHECKPOINT_RUN_DIR:-/uenv/uenv-bridge/checkpoints/uenv_grpo/${RUN_ID}}
 
-mkdir -p "${DATA_DIR}" "${LOG_DIR}" "${SERVICE_DIR}"
+mkdir -p "${DATA_DIR}" "${LOG_DIR}" "${SERVICE_DIR}" "${CHECKPOINT_RUN_DIR}"
+write_json_metadata "${CHECKPOINT_RUN_DIR}/metadata.json" \
+  "run_id=${RUN_ID}" \
+  "training_run_id=${UENV_TRAINING_RUN_ID}" \
+  "script=run_verl_uenv_grpo.sh" \
+  "device_backend=${UENV_DEVICE_BACKEND}" \
+  "image=${IMAGE}" \
+  "model_path=${MODEL_PATH}" \
+  "container_model_path=${CONTAINER_MODEL_PATH}" \
+  "data_dir=${DATA_DIR}" \
+  "container_data_dir=${CONTAINER_DATA_DIR}" \
+  "infer_backend=${INFER_BACKEND}" \
+  "train_batch_size=${TRAIN_BATCH_SIZE}" \
+  "ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
+  "rollout_n=${ROLLOUT_N}" \
+  "rollout_tp=${ROLLOUT_TP}" \
+  "ngpus_per_node=${NGPUS_PER_NODE}" \
+  "max_prompt_length=${MAX_PROMPT_LENGTH}" \
+  "data_max_response_length=${DATA_MAX_RESPONSE_LENGTH}" \
+  "training_steps=${TRAINING_STEPS}" \
+  "total_epochs=${TOTAL_EPOCHS}" \
+  "save_freq=${SAVE_FREQ}" \
+  "test_freq=${TEST_FREQ}" \
+  "checkpoint_run_dir=${CHECKPOINT_RUN_DIR}" \
+  "container_checkpoint_run_dir=${CONTAINER_CHECKPOINT_RUN_DIR}"
 
-PODMAN_GPU_RUN_ARGS=$(build_podman_gpu_args "${PODMAN_GPU_ARGS}")
+PODMAN_DEVICE_RUN_ARGS=$(build_podman_accelerator_args "${UENV_DEVICE_BACKEND}" "${PODMAN_GPU_ARGS}" "${PODMAN_ASCEND_ARGS}")
 
 run_verl_training() {
   if [ "${TRAINING_STEPS}" != "null" ] && [ "${TRAINING_STEPS}" -gt 0 ]; then
@@ -276,18 +296,13 @@ run_verl_training() {
   fi
   echo "AgentLoop request records: ${SERVICE_DIR}/agent-loop-requests.jsonl"
   echo "AgentLoop result records: ${SERVICE_DIR}/agent-loop-results.jsonl"
-  if [ -n "${UENV_EXPECTED_WORKER_PARALLELISM}" ]; then
-    echo "Expected UEnv worker parallelism: ${UENV_EXPECTED_WORKER_PARALLELISM}"
-  fi
-  if [ -n "${UENV_MAX_EPISODE_CONCURRENCY}" ]; then
-    echo "UEnv max episode concurrency: ${UENV_MAX_EPISODE_CONCURRENCY}"
-  fi
+  echo "Checkpoint dir: ${CHECKPOINT_RUN_DIR}"
   if [ -n "${UENV_OBS_URL}" ]; then
     echo "Frontend run: ${UENV_OBS_URL%/obs}/?run=${UENV_TRAINING_RUN_ID}"
   fi
   podman run --rm \
     ${PODMAN_NETWORK_ARGS} \
-    ${PODMAN_GPU_RUN_ARGS} \
+    ${PODMAN_DEVICE_RUN_ARGS} \
     --shm-size=64g \
     --entrypoint bash \
     --pids-limit=65536 \
@@ -295,6 +310,7 @@ run_verl_training() {
     "${WANDB_ENV_ARGS[@]}" \
     -v "${VERL_WORKSPACE}:/workspace" \
     -v "${REPO_DIR}:/uenv/uenv-bridge" \
+    -v "${CHECKPOINT_RUN_DIR}:${CONTAINER_CHECKPOINT_RUN_DIR}" \
     -v "${MODEL_PATH}:${CONTAINER_MODEL_PATH}:ro" \
     -v "${DATA_DIR}:${CONTAINER_DATA_DIR}:ro" \
     "${IMAGE}" \
@@ -302,7 +318,26 @@ run_verl_training() {
 cd /workspace/verl
 export PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_IN_CONTAINER}
+if [ "${UENV_DEVICE_BACKEND}" = "ascend" ]; then
+  if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+  fi
+  if [ -f /usr/local/Ascend/nnal/atb/set_env.sh ]; then
+    source /usr/local/Ascend/nnal/atb/set_env.sh
+  fi
+  if [ -d /usr/local/Ascend/driver/lib64/driver ]; then
+    export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:\${LD_LIBRARY_PATH:-}
+  fi
+  export ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES}
+  export ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES}
+  export TORCH_DEVICE_BACKEND_AUTOLOAD=${TORCH_DEVICE_BACKEND_AUTOLOAD}
+  export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES}
+  unset CUDA_VISIBLE_DEVICES
+  export UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES=0
+  export UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK=0
+else
+  export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_IN_CONTAINER}
+fi
 export VLLM_USE_V1=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
 export VLLM_NO_USAGE_STATS=1
@@ -317,20 +352,12 @@ export UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER}
 export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN}
 export UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE}
 export UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR}
+export UENV_DEVICE_BACKEND=${UENV_DEVICE_BACKEND}
 export UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH}
 export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
 export UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS=${UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS}
 export UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS=${UENV_AGENT_LOOP_BATCH_RETRY_DELAY_SECONDS}
 export UENV_AGENT_LOOP_PARALLEL_MODE=${UENV_AGENT_LOOP_PARALLEL_MODE}
-export UENV_EXPECTED_WORKER_PARALLELISM=${UENV_EXPECTED_WORKER_PARALLELISM}
-export UENV_MAX_EPISODE_CONCURRENCY=${UENV_MAX_EPISODE_CONCURRENCY}
-export UENV_MAX_IN_FLIGHT_BATCHES=${UENV_MAX_IN_FLIGHT_BATCHES}
-export UENV_TARGET_WORKER_SLOTS=${UENV_TARGET_WORKER_SLOTS}
-export UENV_POOL_WARMUP_TARGET=${UENV_POOL_WARMUP_TARGET}
-export UENV_MAX_PARALLEL_PER_WORKER=${UENV_MAX_PARALLEL_PER_WORKER}
-export UENV_AGENT_JOB_MAX_CONCURRENCY=${UENV_AGENT_JOB_MAX_CONCURRENCY}
-export UENV_RUNTIME_GATEWAY_SESSION_LIMIT=${UENV_RUNTIME_GATEWAY_SESSION_LIMIT}
-export UENV_REQUIRE_WARM_SLOT=${UENV_REQUIRE_WARM_SLOT}
 export UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS}
 export UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE}
 export UENV_OBS_URL=\"${UENV_OBS_URL}\"
@@ -422,11 +449,16 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   trainer.total_training_steps=${TRAINING_STEPS} \\
   trainer.total_epochs=${TOTAL_EPOCHS} \\
   trainer.resume_mode=disable \\
-  trainer.default_local_dir=/uenv/uenv-bridge/tmp/verl_layer4_agent_loop_ckpt \\
+  trainer.default_local_dir=${CONTAINER_CHECKPOINT_RUN_DIR} \\
   ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS} \\
   +ray_kwargs.ray_init.num_gpus=${NGPUS_PER_NODE} \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_DEVICE_BACKEND=${UENV_DEVICE_BACKEND} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.TORCH_DEVICE_BACKEND_AUTOLOAD=${TORCH_DEVICE_BACKEND_AUTOLOAD} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES} \\
   +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=enabled \\
   +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR_RAY} \\
   +ray_kwargs.ray_init.include_dashboard=False \\

@@ -449,21 +449,7 @@ cp /opt/uenv/current/examples/cases/training/verl-grpo-overrides.conf \
 
 SWE/OpenHands 训练依赖 response token trace，默认启用 `calculate_log_probs=True`。SWE 等需要长输出的任务通常需要按模型上下文窗口和显存情况调大 `data.max_response_length`。
 
-训练入口还会把下列调度提示环境变量透传给 UEnv Bridge 和 Adapter，空值表示不发送该约束：
-
-| 环境变量 | 含义 |
-|---|---|
-| `UENV_EXPECTED_WORKER_PARALLELISM` | 期望的 Worker 并行能力，用于日志和调度预检口径 |
-| `UENV_MAX_EPISODE_CONCURRENCY` | 单个训练进程期望同时运行的最大 Episode 数 |
-| `UENV_MAX_IN_FLIGHT_BATCHES` | 允许同时在途的 rollout batch 数 |
-| `UENV_TARGET_WORKER_SLOTS` | 期望占用的 Worker slot 数 |
-| `UENV_POOL_WARMUP_TARGET` | 期望预热的环境/会话数量 |
-| `UENV_MAX_PARALLEL_PER_WORKER` | 单个 Worker 内期望的最大并行 Episode 数 |
-| `UENV_AGENT_JOB_MAX_CONCURRENCY` | OpenHands Agent job 侧期望的最大并发数 |
-| `UENV_RUNTIME_GATEWAY_SESSION_LIMIT` | SWE Runtime Gateway 侧期望的会话上限 |
-| `UENV_REQUIRE_WARM_SLOT` | 是否要求调度到已预热 slot，取值为 `true` 或 `false` |
-
-这些数值型变量需要设为非负整数。`UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES` 控制训练容器与 Adapter 之间的 gRPC 消息大小上限，默认值为 `16777216`（16 MiB）。
+Worker 侧 episode 并行度由 Server/Worker 根据资源、Worker pool、OpenHands agent 池和 Runtime Gateway session 自行调度。训练入口不再向 AdapterCore 请求中写入期望 Worker 并行数或调度提示字段。`UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES` 控制训练容器与 Adapter 之间的 gRPC 消息大小上限，默认值为 `16777216`（16 MiB）。
 
 ### 7.4 配置映射
 

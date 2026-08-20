@@ -14,6 +14,7 @@ import { Route as ServerRouteImport } from './routes/server'
 import { Route as OpsRouteImport } from './routes/ops'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ServerWorkerRouteImport } from './routes/server_.worker'
+import { Route as ServerPoolsRouteImport } from './routes/server_.pools'
 import { Route as ServerAgentsRouteImport } from './routes/server_.agents'
 
 const SystemRoute = SystemRouteImport.update({
@@ -41,6 +42,11 @@ const ServerWorkerRoute = ServerWorkerRouteImport.update({
   path: '/server/worker',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ServerPoolsRoute = ServerPoolsRouteImport.update({
+  id: '/server_/pools',
+  path: '/server/pools',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ServerAgentsRoute = ServerAgentsRouteImport.update({
   id: '/server_/agents',
   path: '/server/agents',
@@ -53,6 +59,7 @@ export interface FileRoutesByFullPath {
   '/server': typeof ServerRoute
   '/system': typeof SystemRoute
   '/server/agents': typeof ServerAgentsRoute
+  '/server/pools': typeof ServerPoolsRoute
   '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesByTo {
@@ -61,6 +68,7 @@ export interface FileRoutesByTo {
   '/server': typeof ServerRoute
   '/system': typeof SystemRoute
   '/server/agents': typeof ServerAgentsRoute
+  '/server/pools': typeof ServerPoolsRoute
   '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesById {
@@ -70,6 +78,7 @@ export interface FileRoutesById {
   '/server': typeof ServerRoute
   '/system': typeof SystemRoute
   '/server_/agents': typeof ServerAgentsRoute
+  '/server_/pools': typeof ServerPoolsRoute
   '/server_/worker': typeof ServerWorkerRoute
 }
 export interface FileRouteTypes {
@@ -80,9 +89,17 @@ export interface FileRouteTypes {
     | '/server'
     | '/system'
     | '/server/agents'
+    | '/server/pools'
     | '/server/worker'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/ops' | '/server' | '/system' | '/server/agents' | '/server/worker'
+  to:
+    | '/'
+    | '/ops'
+    | '/server'
+    | '/system'
+    | '/server/agents'
+    | '/server/pools'
+    | '/server/worker'
   id:
     | '__root__'
     | '/'
@@ -90,6 +107,7 @@ export interface FileRouteTypes {
     | '/server'
     | '/system'
     | '/server_/agents'
+    | '/server_/pools'
     | '/server_/worker'
   fileRoutesById: FileRoutesById
 }
@@ -99,6 +117,7 @@ export interface RootRouteChildren {
   ServerRoute: typeof ServerRoute
   SystemRoute: typeof SystemRoute
   ServerAgentsRoute: typeof ServerAgentsRoute
+  ServerPoolsRoute: typeof ServerPoolsRoute
   ServerWorkerRoute: typeof ServerWorkerRoute
 }
 
@@ -139,6 +158,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServerWorkerRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/server_/pools': {
+      id: '/server_/pools'
+      path: '/server/pools'
+      fullPath: '/server/pools'
+      preLoaderRoute: typeof ServerPoolsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/server_/agents': {
       id: '/server_/agents'
       path: '/server/agents'
@@ -155,6 +181,7 @@ const rootRouteChildren: RootRouteChildren = {
   ServerRoute: ServerRoute,
   SystemRoute: SystemRoute,
   ServerAgentsRoute: ServerAgentsRoute,
+  ServerPoolsRoute: ServerPoolsRoute,
   ServerWorkerRoute: ServerWorkerRoute,
 }
 export const routeTree = rootRouteImport

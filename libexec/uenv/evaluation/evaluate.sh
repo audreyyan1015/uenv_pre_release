@@ -42,7 +42,7 @@ Worker model connection for QA/Code/process plugins:
   sudo uenv evaluate configure-model [OPTIONS]
 
 Required task arguments:
-  --endpoint HOST:PORT  Adapter gRPC address
+  --endpoint HOST:PORT  UEnv Server gRPC address
   --env-type NAME       interaction and scoring implementation
   --dataset NAME        task/dataset route inside that environment
   --input FILE          portable Episode JSONL

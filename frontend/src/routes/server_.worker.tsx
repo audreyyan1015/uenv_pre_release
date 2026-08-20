@@ -20,12 +20,12 @@ export const Route = createFileRoute("/server_/worker")({
   }),
   head: () => ({
     meta: [
-      { title: "UEnv · Worker 详情" },
-      { name: "description", content: "查看单台 Worker 的环境实例、活跃任务与模块配置。" },
-      { property: "og:title", content: "UEnv · Worker 详情" },
+      { title: "UEnv · 执行节点详情" },
+      { name: "description", content: "查看单台执行节点的环境运行时、活跃任务与模块配置。" },
+      { property: "og:title", content: "UEnv · 执行节点详情" },
       {
         property: "og:description",
-        content: "查看单台 Worker 的环境实例、活跃任务与模块配置。",
+        content: "查看单台执行节点的环境运行时、活跃任务与模块配置。",
       },
     ],
   }),
@@ -39,9 +39,9 @@ function WorkerRoute() {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#f7f9fc] px-4">
         <div className="max-w-md rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-          <h1 className="text-lg font-semibold text-slate-900">缺少 Worker 标识</h1>
+          <h1 className="text-lg font-semibold text-slate-900">缺少执行节点标识</h1>
           <p className="mt-2 text-sm text-slate-500">
-            请从 Episode 进度页的 Worker 列表进入，或手动在 URL 中指定 worker 参数。
+            请从 Episode 进度页的执行节点列表进入，或手动在 URL 中指定 worker 参数。
           </p>
         </div>
       </main>

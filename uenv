@@ -400,7 +400,7 @@ def build_parser() -> argparse.ArgumentParser:
     hub.add_argument("hub_args", nargs=argparse.REMAINDER)
     hub.set_defaults(func=cmd_hub)
     evaluate = sub.add_parser(
-        "evaluate", help="通过 Adapter 执行通用评测 JSONL", add_help=False
+        "evaluate", help="通过 UEnv Server 执行通用评测 JSONL", add_help=False
     )
     evaluate.add_argument("evaluate_args", nargs=argparse.REMAINDER)
     evaluate.set_defaults(func=cmd_evaluate)

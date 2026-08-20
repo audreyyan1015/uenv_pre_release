@@ -23,7 +23,6 @@ pub mod service;
 pub use core::AdapterCore;
 pub use protocol::{
     CoreError, ExecuteBatchRequest, ExecuteBatchResponse, SampleEnvelope, SampleResult,
-    SchedulingPolicy,
 };
 pub use server_api::EpisodeService;
 pub use service::AdapterCoreServiceImpl;

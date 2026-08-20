@@ -170,14 +170,9 @@ if [[ -d "$ROOT/templates/process-plugin" ]]; then
     -cf - .) | (cd "$PAYLOAD/share/templates/process-plugin" && tar -xf -)
 fi
 
-for guide in \
-  UEnv基础部署指南.md \
-  UEnv多机部署指南.md \
-  'UEnv Hub使用指南.md' \
-  UEnv评测指南.md \
-  UEnv训练指南.md; do
-  install -m 0644 "$ROOT/Docs/deployment/$guide" "$PAYLOAD/share/docs/"
-done
+# The structured guide is the only user manual shipped with the release and
+# the source used by the website. Keep its layout so relative links work.
+cp -a "$ROOT/Docs/guide" "$PAYLOAD/share/docs/guide"
 
 echo "==> building Python Bridge wheel"
 python3 -m pip wheel --no-deps --wheel-dir "$PAYLOAD/wheels" "$ROOT/uenv-bridge"

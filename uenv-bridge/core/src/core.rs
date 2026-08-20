@@ -25,7 +25,6 @@ use uenv_server::proto::v1::{
 
 use crate::protocol::{
     CoreError, ExecuteBatchRequest, ExecuteBatchResponse, SampleEnvelope, SampleResult,
-    SchedulingPolicy,
 };
 use crate::server_api::EpisodeService;
 
@@ -53,7 +52,8 @@ where
             .map(|sample| sample_to_episode_request(sample, request.batch_id.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
         let episode_results = self
-            .submit_episode_requests(episode_requests, request.scheduling_policy.as_ref())
+            .episode_service
+            .submit_episode_batch(episode_requests)
             .await?;
         validate_episode_results(&episode_results, &sample_context)?;
         let results = episode_results
@@ -85,32 +85,6 @@ where
         })
     }
 
-    async fn submit_episode_requests(
-        &self,
-        episode_requests: Vec<ProtoEpisodeRequest>,
-        scheduling_policy: Option<&SchedulingPolicy>,
-    ) -> Result<Vec<ProtoEpisodeResult>, CoreError> {
-        let max_episode_concurrency = scheduling_policy
-            .map(|policy| policy.max_episode_concurrency as usize)
-            .unwrap_or(0);
-        if max_episode_concurrency == 0 || episode_requests.len() <= max_episode_concurrency {
-            return self
-                .episode_service
-                .submit_episode_batch(episode_requests)
-                .await
-                .map_err(Into::into);
-        }
-
-        let mut episode_results = Vec::with_capacity(episode_requests.len());
-        for chunk in episode_requests.chunks(max_episode_concurrency) {
-            episode_results.extend(
-                self.episode_service
-                    .submit_episode_batch(chunk.to_vec())
-                    .await?,
-            );
-        }
-        Ok(episode_results)
-    }
 }
 
 fn validate_batch(samples: &[SampleEnvelope]) -> Result<(), CoreError> {
@@ -353,17 +327,7 @@ fn is_protocol_metadata_key(key: &str) -> bool {
             | "server_latency_ms"
             | "worker_latency_ms"
             | "model_latency_ms"
-            | "scheduling_policy"
-            | "scheduling_group_id"
             | "scheduling_priority"
-            | "max_episode_concurrency"
-            | "max_in_flight_batches"
-            | "target_worker_slots"
-            | "pool_warmup_target"
-            | "max_parallel_per_worker"
-            | "agent_job_max_concurrency"
-            | "runtime_gateway_session_limit"
-            | "require_warm_slot"
     )
 }
 
@@ -876,7 +840,6 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![make_sample("episode-1", 0, b"{\"framework\":\"verl\"}")],
-                scheduling_policy: None,
             })
             .await
             .unwrap();
@@ -923,7 +886,6 @@ mod tests {
                     7,
                     b"{\"episode_config\":{\"max_steps\":12,\"seed\":99},\"model_endpoint\":{\"url\":\"http://vllm:8000/v1\"}}",
                 )],
-                scheduling_policy: None,
             })
             .await
             .unwrap();
@@ -940,40 +902,6 @@ mod tests {
             "http://vllm:8000/v1"
         );
         assert_eq!(response.results[0].sample_index, 7);
-    }
-
-    #[tokio::test]
-    async fn execute_batch_applies_scheduling_policy_group_and_chunk_limit() {
-        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let core = AdapterCore::new(RecordingEpisodeService {
-            requests: Arc::clone(&recorded),
-        });
-        let samples = (0..3)
-            .map(|index| {
-                let mut sample = make_sample(&format!("episode-{}", index + 1), index, b"{}");
-                sample.batch_id = "batch-schedule".to_string();
-                sample
-            })
-            .collect();
-
-        core.execute_batch(ExecuteBatchRequest {
-            request_id: "request-1".to_string(),
-            batch_id: "batch-schedule".to_string(),
-            samples,
-            scheduling_policy: Some(SchedulingPolicy {
-                max_episode_concurrency: 2,
-                ..Default::default()
-            }),
-        })
-        .await
-        .unwrap();
-
-        let calls = recorded.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].len(), 2);
-        assert_eq!(calls[1].len(), 1);
-        assert_eq!(calls[0][0].scheduling_group_id, "batch-schedule");
-        assert_eq!(calls[1][0].scheduling_group_id, "batch-schedule");
     }
 
     #[tokio::test]
@@ -1000,7 +928,6 @@ mod tests {
             request_id: "request-1".to_string(),
             batch_id: "batch-1".to_string(),
             samples: vec![make_sample("episode-1", 0, payload)],
-            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -1134,7 +1061,6 @@ mod tests {
                 sample.parallel_mode = "one_step_off_policy".to_string();
                 vec![sample]
             },
-            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -1174,7 +1100,6 @@ mod tests {
             request_id: "request-1".to_string(),
             batch_id: "batch-swe".to_string(),
             samples: vec![sample],
-            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -1207,7 +1132,6 @@ mod tests {
             request_id: "request-1".to_string(),
             batch_id: "batch-1".to_string(),
             samples: vec![sample],
-            scheduling_policy: None,
         })
         .await
         .unwrap();
@@ -1231,7 +1155,6 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![sample],
-                scheduling_policy: None,
             })
             .await
             .unwrap_err();
@@ -1248,7 +1171,6 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![make_sample("episode-1", 0, b"{\"framework\":\"verl\"}")],
-                scheduling_policy: None,
             })
             .await
             .unwrap();
@@ -1278,7 +1200,6 @@ mod tests {
                 request_id: "request-1".to_string(),
                 batch_id: "batch-1".to_string(),
                 samples: vec![make_sample("episode-1", 0, b"{\"framework\":\"verl\"}")],
-                scheduling_policy: None,
             })
             .await
             .unwrap_err();
@@ -1296,7 +1217,6 @@ mod tests {
                     make_sample("episode-1", 0, b"{\"framework\":\"verl\"}"),
                     make_sample("episode-2", 1, b"{\"framework\":\"verl\"}"),
                 ],
-                scheduling_policy: None,
             })
             .await
             .unwrap_err();

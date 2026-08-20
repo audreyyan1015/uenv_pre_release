@@ -750,7 +750,7 @@ function buildDiagram({
       status: activeStageName === "DISPATCH" ? "调度中" : "ready",
       href: moduleHref("ops"),
       active: activeStageName === "DISPATCH",
-      metric: `${workerSummary.total} workers`,
+      metric: `${workerSummary.total} execution nodes`,
     },
     {
       id: "control",
@@ -814,7 +814,7 @@ function buildDiagram({
     },
     {
       id: "worker",
-      title: "uenv-worker",
+      title: "执行节点 / Worker",
       subtitle: "DispatchEpisode gRPC",
       x: 195,
       y: 482,
@@ -844,8 +844,8 @@ function buildDiagram({
     },
     {
       id: "pool",
-      title: "资源池 / Pool",
-      subtitle: "WarmupPool / SwelnstancePool",
+      title: "环境资源池",
+      subtitle: "跨执行节点聚合",
       x: 600,
       y: 462,
       w: 250,
@@ -853,7 +853,7 @@ function buildDiagram({
       icon: Boxes,
       tone: "amber",
       status: poolBusy > 0 ? "busy" : poolReady > 0 ? "ready" : "tracked",
-      href: moduleHref("server"),
+      href: "/server/pools",
       active: poolBusy > 0,
       metric: `ready ${poolReady} · busy ${poolBusy}`,
     },
@@ -1319,6 +1319,7 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
         <nav className="mt-3 flex flex-wrap items-center gap-2" aria-label="系统快捷入口">
           <QuickNavLink href={moduleHref("root")} label="主控制台" />
           <QuickNavLink href={moduleHref("server")} label="Episode 进度" />
+          <QuickNavLink href="/server/pools" label="环境资源池" />
           <QuickNavLink href={moduleHref("ops")} label="技术观测台" />
           <QuickNavLink href={moduleHref("agents")} label="Agent 池状态" />
           <QuickNavLink href={moduleHref("hub")} label="Hub 控制台" external />

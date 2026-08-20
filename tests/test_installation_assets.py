@@ -319,23 +319,122 @@ class InstallationAssetsTest(unittest.TestCase):
 
     def test_public_user_guides_are_packaged(self) -> None:
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")
-        guides = []
-        for name in (
+        guide_root = ROOT / "Docs/guide"
+        canonical_pages = (
+            "index.md",
+            "concepts/architecture.md",
+            "concepts/episode-lifecycle.md",
+            "deployment/single-node.md",
+            "deployment/multi-node.md",
+            "deployment/server.md",
+            "deployment/worker-registration.md",
+            "deployment/hub.md",
+            "deployment/operations.md",
+            "usage/README.md",
+            "usage/evaluation.md",
+            "usage/post-training.md",
+            "usage/trajectory.md",
+            "integration/README.md",
+            "integration/contract.md",
+            "integration/verl.md",
+            "integration/custom-framework.md",
+            "integration/support-matrix.md",
+            "cases/README.md",
+            "reference/glossary.md",
+            "reference/ports.md",
+            "reference/configuration.md",
+            "reference/protocols.md",
+            "reference/troubleshooting.md",
+        )
+        self.assertIn('cp -a "$ROOT/Docs/guide"', release)
+        for old_name in (
             "UEnv基础部署指南.md",
             "UEnv多机部署指南.md",
             "UEnv Hub使用指南.md",
             "UEnv评测指南.md",
             "UEnv训练指南.md",
         ):
-            path = ROOT / "Docs/deployment" / name
-            self.assertTrue(path.is_file(), name)
-            self.assertIn(name, release)
+            self.assertNotIn(old_name, release)
+        for relative in canonical_pages:
+            path = guide_root / relative
+            self.assertTrue(path.is_file(), relative)
             text = path.read_text(encoding="utf-8")
-            guides.append(text)
-            self.assertNotIn("smoke", text.casefold())
-            self.assertNotIn("Adapter Core", text)
-            self.assertIn("Adapter", text)
-        self.assertTrue(any("UEnv Server" in text for text in guides))
+            self.assertNotIn("smoke test", text.casefold())
+            self.assertNotIn("冒烟", text)
+            self.assertNotIn("快速开始", text)
+            self.assertNotIn("5分钟", text)
+            self.assertNotIn("五分钟", text)
+
+        for removed in (
+            "deployment/adapter.md",
+            "integration/openhands.md",
+            "cases/trajectory-swe-openhands.md",
+        ):
+            self.assertFalse((guide_root / removed).exists(), removed)
+
+        beginner_pages = (
+            "index.md",
+            "concepts/architecture.md",
+            "concepts/episode-lifecycle.md",
+            "usage/README.md",
+            "usage/evaluation.md",
+            "usage/post-training.md",
+            "usage/trajectory.md",
+            "cases/README.md",
+        )
+        for relative in beginner_pages:
+            text = (guide_root / relative).read_text(encoding="utf-8")
+            self.assertNotIn("UEnv Adapter", text, relative)
+            self.assertNotIn("Adapter Core", text, relative)
+            self.assertNotIn("Control Plane", text, relative)
+
+        index = (guide_root / "index.md").read_text(encoding="utf-8")
+        ordered_links = (
+            "deployment/single-node.md",
+            "deployment/multi-node.md",
+            "usage/evaluation.md",
+            "usage/post-training.md",
+            "usage/trajectory.md",
+        )
+        positions = [index.index(link) for link in ordered_links]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("二选一", index)
+
+        case_titles = {
+            "evaluation-gsm8k.md": "# 数学问答",
+            "evaluation-code.md": "# 代码生成",
+            "evaluation-swe-verified.md": "# 软件工程修复",
+            "training-gsm8k-verl.md": "# 数学问答",
+            "training-code-verl.md": "# 代码生成",
+            "training-process-plugin.md": "# 自定义环境",
+            "training-swe-smith-verl.md": "# 软件工程修复",
+        }
+        for name, title in case_titles.items():
+            first_line = (guide_root / "cases" / name).read_text(
+                encoding="utf-8"
+            ).splitlines()[0]
+            self.assertEqual(first_line, title, name)
+
+        integration_text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((guide_root / "integration").glob("*.md"))
+        )
+        self.assertNotIn("OpenHands", integration_text)
+
+    def test_release_data_interfaces_are_loopback_by_default(self) -> None:
+        server_env = (ROOT / "deploy/config/server.env.example").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("UENV_OBS_HTTP_LISTEN=127.0.0.1:50053", server_env)
+        self.assertIn("UENV_TRAJECTORY_HTTP_LISTEN=127.0.0.1:8077", server_env)
+        self.assertNotIn("UENV_OBS_HTTP_LISTEN=0.0.0.0", server_env)
+        self.assertNotIn("UENV_TRAJECTORY_HTTP_LISTEN=0.0.0.0", server_env)
+
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('SERVER_BIND="127.0.0.1:50051"', installer)
+        self.assertIn('SERVER_BIND="0.0.0.0:50051"', installer)
+        self.assertIn('"$PROFILE" == "single-node" || "$PROFILE" == "full"', installer)
+        self.assertIn('"$TMP_DIR/server.env"', installer)
 
     def test_generic_examples_and_plugin_template_are_packaged(self) -> None:
         release = (ROOT / "scripts/build-release.sh").read_text(encoding="utf-8")

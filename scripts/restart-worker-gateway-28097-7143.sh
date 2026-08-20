@@ -90,6 +90,6 @@ done
 
 echo "== local health/gateway =="
 curl -sS -m 3 http://127.0.0.1:28777/health; echo
-curl -sS -m 3 -H 'X-API-Key: swe-pro-secret' http://127.0.0.1:28097/health; echo
+curl -sS -m 3 -H 'X-API-Key: REPLACE_WITH_RANDOM_GATEWAY_API_KEY' http://127.0.0.1:28097/health; echo
 ss -tlnp | grep -E '28097|28888|28777' || true
 echo "Ensure A100 NAT maps public 219.147.100.43:28097 -> 10.10.20.143:28097"

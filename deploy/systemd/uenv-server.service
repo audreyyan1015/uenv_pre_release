@@ -1,5 +1,5 @@
 [Unit]
-Description=UENV Adapter-Core Server (gRPC control-plane :8088 + trajectory store :8077)
+Description=Legacy UEnv Server unit (gRPC :8088 + trajectory store :8077)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60

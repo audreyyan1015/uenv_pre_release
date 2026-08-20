@@ -114,8 +114,13 @@ async fn global_worker_snapshot_is_overlaid_on_run_state() {
     })
     .unwrap();
 
-    let observation =
-        |worker_id: &str, status: &str, reason: &str, load: u32| WorkerStatusObservation {
+    let observation = |worker_id: &str,
+                       status: &str,
+                       reason: &str,
+                       load: u32,
+                       active_episodes: Vec<String>|
+     -> WorkerStatusObservation {
+        WorkerStatusObservation {
             worker_id: worker_id.into(),
             status: status.into(),
             status_reason: reason.into(),
@@ -124,14 +129,28 @@ async fn global_worker_snapshot_is_overlaid_on_run_state() {
             capacity: 1,
             endpoint: format!("{worker_id}:9000"),
             supported_env_types: vec!["math".into()],
+            active_episodes,
             ..Default::default()
-        };
+        }
+    };
     obs.ingest_sync(worker_status_snapshot(
         vec![
-            observation("worker-busy", "BUSY", "RUNNING_EPISODES", 1),
-            observation("worker-idle", "IDLE", "READY", 0),
-            observation("worker-offline", "OFFLINE", "UNREGISTERED", 0),
-            observation("worker-attention", "ATTENTION", "HEARTBEAT_LATE", 0),
+            observation(
+                "worker-busy",
+                "BUSY",
+                "RUNNING_EPISODES",
+                1,
+                vec!["ep-worker-status".into()],
+            ),
+            observation("worker-idle", "IDLE", "READY", 0, Vec::new()),
+            observation("worker-offline", "OFFLINE", "UNREGISTERED", 0, Vec::new()),
+            observation(
+                "worker-attention",
+                "ATTENTION",
+                "HEARTBEAT_LATE",
+                0,
+                Vec::new(),
+            ),
         ],
         42,
         true,

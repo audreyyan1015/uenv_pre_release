@@ -9,6 +9,17 @@ from __future__ import annotations
 import os
 
 
+def _device_backend() -> str:
+    text = os.environ.get("UENV_DEVICE_BACKEND", "cuda").strip().lower()
+    if text in {"ascend", "npu", "910c"}:
+        return "ascend"
+    return "cuda"
+
+
+def _using_cuda_backend() -> bool:
+    return _device_backend() == "cuda"
+
+
 def _run_when_module_imported(module_name: str, callback) -> None:
     """Run ``callback`` after ``module_name`` is imported, without importing it now."""
 
@@ -344,7 +355,7 @@ def _patch_torch_cuda_is_available_no_devices() -> None:
     cuda._uenv_is_available_no_devices_patch_applied = True
 
 
-if os.environ.get("UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES") == "1":
+if os.environ.get("UENV_PATCH_TORCH_CUDA_IS_AVAILABLE_NO_DEVICES") == "1" and _using_cuda_backend():
     _run_when_module_imported("torch", _patch_torch_cuda_is_available_no_devices)
 
 
@@ -392,7 +403,7 @@ def _patch_verl_device_capability_fallback() -> None:
     verl_device._uenv_device_capability_fallback_patch_applied = True
 
 
-if os.environ.get("UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK") == "1":
+if os.environ.get("UENV_PATCH_VERL_DEVICE_CAPABILITY_FALLBACK") == "1" and _using_cuda_backend():
     _run_when_module_imported("verl.utils.device", _patch_verl_device_capability_fallback)
 
 
