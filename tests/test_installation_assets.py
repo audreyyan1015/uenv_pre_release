@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ast
+import builtins
 import http.server
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import symtable
 import tempfile
 import threading
 import unittest
@@ -477,6 +481,118 @@ class InstallationAssetsTest(unittest.TestCase):
             trajectory_text,
         )
         self.assertIn("`TrajectoryBundle` JSON", trajectory_text)
+
+    def test_custom_framework_guide_python_examples_are_complete(self) -> None:
+        path = ROOT / "Docs/guide/4-接入强化学习框架/01-custom-framework.md"
+        text = path.read_text(encoding="utf-8")
+
+        def python_source(markdown: str) -> str:
+            blocks = re.findall(r"```python\n(.*?)\n```", markdown, re.DOTALL)
+            self.assertTrue(blocks)
+            return "\n\n".join(blocks)
+
+        source = python_source(text)
+        tree = ast.parse(source, filename=str(path))
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        expected_arguments = {
+            "to_uenv_request": ["framework_sample", "rollout_context"],
+            "to_framework_output": ["uenv_result", "original_sample"],
+        }
+        for name, arguments in expected_arguments.items():
+            function = functions[name]
+            self.assertEqual(
+                [argument.arg for argument in function.args.args], arguments
+            )
+            self.assertFalse(
+                any(
+                    isinstance(node, ast.Constant) and node.value is Ellipsis
+                    for node in ast.walk(function)
+                ),
+                f"{name} must not contain an ellipsis placeholder",
+            )
+            self.assertFalse(
+                any(isinstance(node, ast.Pass) for node in ast.walk(function)),
+                f"{name} must not contain a pass placeholder",
+            )
+
+            call_lines = [
+                node.lineno
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == name
+            ]
+            self.assertTrue(call_lines, f"{name} is never used by the examples")
+            self.assertGreater(min(call_lines), function.lineno)
+
+        request_source = ast.get_source_segment(
+            source, functions["to_uenv_request"]
+        )
+        output_source = ast.get_source_segment(
+            source, functions["to_framework_output"]
+        )
+        self.assertIn("pb.SampleEnvelope", request_source)
+        for token in (
+            "trajectory_json",
+            "response_ids",
+            "response_mask",
+            "reward",
+        ):
+            self.assertIn(token, output_source)
+
+        sync_section = text[
+            text.index("## 最小可运行示例") : text.index("## 如果框架采用异步训练")
+        ]
+        async_section = text[
+            text.index("## 如果框架采用异步训练") : text.index("## 完成接入前检查")
+        ]
+        for section, rpc_name in (
+            (sync_section, "ExecuteBatch"),
+            (async_section, "ExecuteBatchStream"),
+        ):
+            section_tree = ast.parse(python_source(section))
+            calls = {
+                node.func.id
+                for node in ast.walk(section_tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            self.assertIn("to_uenv_request", calls)
+            self.assertIn("to_framework_output", calls)
+            self.assertTrue(
+                any(
+                    isinstance(node, ast.Attribute) and node.attr == rpc_name
+                    for node in ast.walk(section_tree)
+                )
+            )
+
+        module_symbols = symtable.symtable(source, str(path), "exec")
+        module_definitions = {
+            symbol.get_name()
+            for symbol in module_symbols.get_symbols()
+            if symbol.is_assigned() or symbol.is_imported() or symbol.is_namespace()
+        }
+        builtin_names = set(dir(builtins))
+        undefined_globals: set[str] = set()
+
+        def find_undefined_globals(table: symtable.SymbolTable) -> None:
+            for symbol in table.get_symbols():
+                name = symbol.get_name()
+                if (
+                    symbol.is_referenced()
+                    and symbol.is_global()
+                    and name not in module_definitions
+                    and name not in builtin_names
+                ):
+                    undefined_globals.add(name)
+            for child in table.get_children():
+                find_undefined_globals(child)
+
+        find_undefined_globals(module_symbols)
+        self.assertEqual(undefined_globals, set())
 
     def test_release_data_interfaces_are_loopback_by_default(self) -> None:
         server_env = (ROOT / "deploy/config/server.env.example").read_text(
