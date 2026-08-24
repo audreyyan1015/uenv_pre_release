@@ -27,6 +27,8 @@
 
 `advertise_endpoint` 是 UEnv Worker 注册时上报给 UEnv Server 的回连地址，UEnv Server 通过它向 UEnv Worker 派发 Episode、取消任务和准备环境。它必须填写 **UEnv Server 实际能够访问** 的地址：多机部署中填写 `127.0.0.1` 会让 UEnv Server 连回自己，填写 `0.0.0.0` 则无法定位具体主机。UEnv Server 的 Admin HTTP 默认保持在 `127.0.0.1:50052`，只供本机运维使用。
 
+**检查 UEnv Server 的实际监听地址。** gRPC 监听由 `/etc/uenv/server.env` 的 `UENV_ADDR` 决定：`control-plane` 全新安装写入 `0.0.0.0:50051`，而 `single-node`/`full` 安装写入 `127.0.0.1:50051`。安装器默认保留已有 `/etc/uenv`：在同一台主机上从单机部署升级为多机（本指南推荐的顺序）时，旧的回环地址会被保留，远端 UEnv Worker 无法注册——Worker 日志报 `serve failed: transport error` 并被 systemd 反复重启（注意服务启动后立刻 `systemctl is-active` 会显示 `active`，数秒后才开始失败重启）。在 UEnv Server 主机执行 `ss -lntp | grep 50051` 确认监听的是内网地址；如果仍是 `127.0.0.1`，按[配置 UEnv Server](./03-server.md) 把 `UENV_ADDR` 改为受控内网地址（或 `0.0.0.0` 配合防火墙），校验并重启后再继续。
+
 ## 在所有主机准备相同版本
 
 把 `install.sh` 和发布压缩包复制到每台主机的安装目录。部署后用 `uenv version` 确认所有节点版本相同。版本不一致的 UEnv Worker 可能仍能注册和心跳，但不保证协议与行为一致；验收以所有节点 `uenv version` 完全相同为准，不要混用不同版本长期运行。
@@ -52,7 +54,7 @@ uenv status
 
 `control-plane` 是当前安装器中“只安装中心服务”的 profile 名称，装出的就是 UEnv Server 本身。此时 `uenv status` 显示 0 台 UEnv Worker 是正常的。
 
-注意：`uenv doctor` 会检查本机全部组件，在只安装 control-plane 的主机上，`uenv-worker.service` 不存在、Worker 健康检查失败（如 `6/8 通过`）是预期结果；只需确认 `uenv-adapter-core.service: active` 和`管理面健康检查: ok`两项通过。
+注意：`uenv doctor` 会检查本机全部组件，在只安装 control-plane 的主机上，`uenv-worker.service` 不存在、Worker 健康检查失败（输出为 `4/6 项通过`）是预期结果；只需确认 `uenv-adapter-core.service: active` 和 `控制面健康检查: ok` 两项通过。
 
 ## 在第一台 UEnv Worker 主机安装执行节点
 
@@ -77,6 +79,12 @@ sudo -u uenv uenv doctor
 
 - `--server` 是 UEnv Worker 主动连接的 UEnv Server 地址。
 - `--advertise` 是 UEnv Worker 上报给 UEnv Server 的回连地址，即上文的 `advertise_endpoint`。
+
+**多机轨迹采集（必须配置，否则轨迹静默丢失）。** UEnv Worker 在 Episode 结束后自动把轨迹上传到 UEnv Server 的轨迹接口（8077/TCP），无需手工触发；但安装器为 UEnv Worker 默认写入 `UENV_TRAJECTORY_ENDPOINT=http://127.0.0.1:8077`，这只在单机部署时正确。上传失败不会阻塞任务，只在 UEnv Worker 的 `/var/log/uenv/worker.log` 中留下 WARN（重试后放弃），UEnv Server 上查询该轨迹会得到 404。多机部署需要同时满足三点：
+
+1. 安装时增加 `--trajectory-endpoint http://<SERVER_HOST>:8077`，或事后修改 `/etc/uenv/worker.env` 的 `UENV_TRAJECTORY_ENDPOINT` 并重启 `uenv-worker.service`；
+2. 每台 UEnv Worker 的 `/etc/uenv/secrets/swe.env` 中 `UENV_TRAJECTORY_TOKEN` 必须与 UEnv Server 主机同文件中的值一致——安装器在每台主机各自随机生成，多机部署需要把 UEnv Server 的值手工同步到每台 UEnv Worker（不一致时上传返回 `401 bad upload token`）。注意每次执行 `prepare-swe` 都会重写该文件并重新生成该 token，执行后需要重新同步；
+3. UEnv Server 的 `UENV_TRAJECTORY_HTTP_LISTEN` 监听 UEnv Worker 可达的地址，见[配置 UEnv Server](./03-server.md)。
 
 ## 验证网络和注册
 
@@ -145,7 +153,7 @@ uenv workers
 
 再在两台 UEnv Worker 主机分别执行 `sudo systemctl is-active uenv-worker.service`（预期 `active`）和 `uenv version`，所有节点版本应一致。
 
-如果主机上重装或重启过 `worker.id=auto` 的 UEnv Worker，`uenv status` 的 `Worker=N` 可能大于实际台数：每次重新注册会生成新 ID，旧 ID 的记录转为 `[DEGRADED]` 并长期保留、不参与调度。验收时只统计 `[READY]` 记录；需要精确计数或替换节点时，为每台 Worker 设置固定的 `worker.id`（见[配置并注册 UEnv Worker](./04-worker-registration.md#常见问题)）。
+`worker.id` 为 `auto` 时，每次重装或重启都可能注册出一个新 ID。同一 endpoint 的重新注册会替换旧记录，`uenv status` 的 `Worker=N` 保持准确；如果重新注册时上报的 endpoint 发生了变化（例如更换网卡或地址），旧 ID 的记录会转为 `[DEGRADED]`、暂停参与新调度，并可能长期保留、计入 `Worker=N`（当前版本没有删除单条 Worker 记录的命令，记录随持久化数据保留）。验收 Worker 数量时应只统计 `[READY]` 记录。需要稳定 ID 时，在 `/etc/uenv/worker.yaml` 中为每台 Worker 设置集群内唯一的固定 `worker.id`（见[配置并注册 UEnv Worker](./04-worker-registration.md#常见问题)）。
 
 安装器默认保留已有 `/etc/uenv`。重复安装时，新传入的地址不会覆盖旧配置；确认要用本次命令行参数替换旧配置时，在安装命令中增加 `--force-config`，或先备份再手动替换。变更前建议阅读[运行维护](../5-运维UEnv/01-operations.md)中的安全变更流程。
 

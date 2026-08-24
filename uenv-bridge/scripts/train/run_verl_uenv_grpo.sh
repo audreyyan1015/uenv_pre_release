@@ -32,6 +32,7 @@ Common environment overrides:
   TRAIN_BATCH_SIZE              Default: 256
   PPO_MINI_BATCH_SIZE           Default: 64
   ROLLOUT_N                     Default: 5
+  ROLLOUT_TEMPERATURE           Rollout sampling temperature. Default: 1.0
   ROLLOUT_TP                    Default: 1
   ROLLOUT_CALCULATE_LOG_PROBS   Ask rollout engine to return token logprobs. Default: False for sync.
   DATA_MAX_RESPONSE_LENGTH      Default: 1024
@@ -55,6 +56,8 @@ Common environment overrides:
   WANDB_BASE_URL                Optional wandb server URL for private deployments.
   UENV_OBS_URL                   Server Obs base URL for frontend visualization. Default: empty.
   UENV_OBS_TOKEN                 Optional Server Obs auth token. Default: empty.
+  UENV_OBS_HEARTBEAT_INTERVAL_SECONDS
+                                  Run heartbeat interval for Obs. Set <=0 to disable. Default: 30
   UENV_TRAINING_RUN_ID           Frontend/Obs run id. Default: RUN_ID.
   UENV_MODEL_GATEWAY_ENABLED    Start adapter-side model gateway and send its URL to Worker. Default: 0
   UENV_MODEL_GATEWAY_PORT       Adapter-side model gateway port. Default: 18080
@@ -70,6 +73,8 @@ Common environment overrides:
                                   Failed episode handling: raise or zero_reward. Default: raise
   UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR
                                   Treat known text-only MoE checkpoints as having no multimodal processor. Default: 0
+  UENV_PATCH_VERL_EMPTY_RESPONSE_BATCH
+                                  Treat empty-response rollout batches as no-op instead of aborting training. Default: 1
   EXTRA_VERL_ARGS               Extra Hydra overrides appended to the VeRL command. Default: empty
   RAY_NUM_CPUS                  Default: NGPUS_PER_NODE * 4
   SERVER_ADAPTER_CORE_ENDPOINT  Server-side Rust adapter core gRPC endpoint. Default: 8.130.75.157:8088
@@ -157,6 +162,7 @@ ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PE
 REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 ROLLOUT_N=${ROLLOUT_N:-5}
+ROLLOUT_TEMPERATURE=${ROLLOUT_TEMPERATURE:-1.0}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
 ROLLOUT_CALCULATE_LOG_PROBS=${ROLLOUT_CALCULATE_LOG_PROBS:-False}
 DATA_MAX_RESPONSE_LENGTH=${DATA_MAX_RESPONSE_LENGTH:-1024}
@@ -185,6 +191,7 @@ UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER:-1}
 UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN:-1}
 UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE:-1}
 UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR:-0}
+UENV_PATCH_VERL_EMPTY_RESPONSE_BATCH=${UENV_PATCH_VERL_EMPTY_RESPONSE_BATCH:-1}
 case "${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR}" in
   1|true|True|enabled|yes|on)
     UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR_RAY=enabled
@@ -203,6 +210,7 @@ UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BYTES=${UENV_ADAPTER_CORE_GRPC_MAX_MESSAGE_BY
 UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE:-}
 UENV_OBS_URL=${UENV_OBS_URL:-}
 UENV_OBS_TOKEN=${UENV_OBS_TOKEN:-}
+UENV_OBS_HEARTBEAT_INTERVAL_SECONDS=${UENV_OBS_HEARTBEAT_INTERVAL_SECONDS:-30}
 UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED:-0}
 UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST:-0.0.0.0}
 UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT:-18080}
@@ -260,6 +268,56 @@ CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-${REPO_DIR}/checkpoints/uenv_grpo}
 CHECKPOINT_RUN_DIR=${CHECKPOINT_RUN_DIR:-${CHECKPOINT_ROOT}/${RUN_ID}}
 CONTAINER_CHECKPOINT_RUN_DIR=${CONTAINER_CHECKPOINT_RUN_DIR:-/uenv/uenv-bridge/checkpoints/uenv_grpo/${RUN_ID}}
 
+infer_parquet_rows() {
+  local parquet_path="$1"
+  if [ ! -f "${parquet_path}" ]; then
+    return 0
+  fi
+  python3 - "${parquet_path}" <<'PY' 2>/dev/null || true
+import sys
+try:
+    import pyarrow.parquet as pq
+    print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)
+except Exception:
+    pass
+PY
+}
+
+is_positive_int() {
+  case "$1" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+    *)
+      [ "$1" -gt 0 ]
+      ;;
+  esac
+}
+
+if [ -z "${UENV_OBS_PLANNED_STEP_TOTAL:-}" ]; then
+  if is_positive_int "${TRAINING_STEPS}"; then
+    UENV_OBS_PLANNED_STEP_TOTAL=${TRAINING_STEPS}
+  else
+    TRAIN_ROWS=$(infer_parquet_rows "${DATA_DIR}/train.parquet")
+    if is_positive_int "${TRAIN_ROWS}" && is_positive_int "${TRAIN_BATCH_SIZE}" && is_positive_int "${TOTAL_EPOCHS}"; then
+      UENV_OBS_PLANNED_STEP_TOTAL=$(( ((TRAIN_ROWS + TRAIN_BATCH_SIZE - 1) / TRAIN_BATCH_SIZE) * TOTAL_EPOCHS ))
+    else
+      UENV_OBS_PLANNED_STEP_TOTAL=
+    fi
+  fi
+fi
+
+if [ -z "${UENV_OBS_PLANNED_EPISODE_TOTAL:-}" ]; then
+  TRAIN_ROWS_FOR_PLAN=$(infer_parquet_rows "${DATA_DIR}/train.parquet")
+  if is_positive_int "${TRAINING_STEPS}" && is_positive_int "${TRAIN_BATCH_SIZE}" && is_positive_int "${ROLLOUT_N}"; then
+    UENV_OBS_PLANNED_EPISODE_TOTAL=$(( TRAINING_STEPS * TRAIN_BATCH_SIZE * ROLLOUT_N ))
+  elif is_positive_int "${TRAIN_ROWS_FOR_PLAN}" && is_positive_int "${ROLLOUT_N}" && is_positive_int "${TOTAL_EPOCHS}"; then
+    UENV_OBS_PLANNED_EPISODE_TOTAL=$(( TRAIN_ROWS_FOR_PLAN * ROLLOUT_N * TOTAL_EPOCHS ))
+  else
+    UENV_OBS_PLANNED_EPISODE_TOTAL=
+  fi
+fi
+
 mkdir -p "${DATA_DIR}" "${LOG_DIR}" "${SERVICE_DIR}" "${CHECKPOINT_RUN_DIR}"
 write_json_metadata "${CHECKPOINT_RUN_DIR}/metadata.json" \
   "run_id=${RUN_ID}" \
@@ -275,12 +333,15 @@ write_json_metadata "${CHECKPOINT_RUN_DIR}/metadata.json" \
   "train_batch_size=${TRAIN_BATCH_SIZE}" \
   "ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
   "rollout_n=${ROLLOUT_N}" \
+  "rollout_temperature=${ROLLOUT_TEMPERATURE}" \
   "rollout_tp=${ROLLOUT_TP}" \
   "ngpus_per_node=${NGPUS_PER_NODE}" \
   "max_prompt_length=${MAX_PROMPT_LENGTH}" \
   "data_max_response_length=${DATA_MAX_RESPONSE_LENGTH}" \
   "training_steps=${TRAINING_STEPS}" \
   "total_epochs=${TOTAL_EPOCHS}" \
+  "obs_planned_step_total=${UENV_OBS_PLANNED_STEP_TOTAL}" \
+  "obs_planned_episode_total=${UENV_OBS_PLANNED_EPISODE_TOTAL}" \
   "save_freq=${SAVE_FREQ}" \
   "test_freq=${TEST_FREQ}" \
   "checkpoint_run_dir=${CHECKPOINT_RUN_DIR}" \
@@ -352,6 +413,7 @@ export UENV_PATCH_RESOURCE_TRACKER=${UENV_PATCH_RESOURCE_TRACKER}
 export UENV_PATCH_VERL_VLLM_SHUTDOWN=${UENV_PATCH_VERL_VLLM_SHUTDOWN}
 export UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=${UENV_PATCH_VERL_MODEL_VERSION_RESPONSE}
 export UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR}
+export UENV_PATCH_VERL_EMPTY_RESPONSE_BATCH=${UENV_PATCH_VERL_EMPTY_RESPONSE_BATCH}
 export UENV_DEVICE_BACKEND=${UENV_DEVICE_BACKEND}
 export UENV_AGENT_LOOP_BATCH=${UENV_AGENT_LOOP_BATCH}
 export UENV_AGENT_LOOP_BATCH_SIZE=${UENV_AGENT_LOOP_BATCH_SIZE}
@@ -362,7 +424,10 @@ export UENV_AGENT_LOOP_TIMEOUT_SECONDS=${UENV_AGENT_LOOP_TIMEOUT_SECONDS}
 export UENV_EPISODE_MAX_STEPS_OVERRIDE=${UENV_EPISODE_MAX_STEPS_OVERRIDE}
 export UENV_OBS_URL=\"${UENV_OBS_URL}\"
 export UENV_OBS_TOKEN=\"${UENV_OBS_TOKEN}\"
+export UENV_OBS_HEARTBEAT_INTERVAL_SECONDS=${UENV_OBS_HEARTBEAT_INTERVAL_SECONDS}
 export UENV_TRAINING_RUN_ID=\"${UENV_TRAINING_RUN_ID}\"
+export UENV_OBS_PLANNED_STEP_TOTAL=\"${UENV_OBS_PLANNED_STEP_TOTAL}\"
+export UENV_OBS_PLANNED_EPISODE_TOTAL=\"${UENV_OBS_PLANNED_EPISODE_TOTAL}\"
 export UENV_MODEL_GATEWAY_ENABLED=${UENV_MODEL_GATEWAY_ENABLED}
 export UENV_MODEL_GATEWAY_BIND_HOST=${UENV_MODEL_GATEWAY_BIND_HOST}
 export UENV_MODEL_GATEWAY_PORT=${UENV_MODEL_GATEWAY_PORT}
@@ -417,6 +482,7 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   actor_rollout_ref.rollout.name=${INFER_BACKEND} \\
   actor_rollout_ref.rollout.disable_log_stats=False \\
   actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \\
+  actor_rollout_ref.rollout.temperature=${ROLLOUT_TEMPERATURE} \\
   actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEMORY_UTILIZATION} \\
   actor_rollout_ref.rollout.n=${ROLLOUT_N} \\
   actor_rollout_ref.rollout.agent.num_workers=${AGENT_NUM_WORKERS} \\
@@ -455,12 +521,19 @@ python3 /uenv/uenv-bridge/scripts/run_verl_main_ppo.py \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=/workspace/verl:/uenv/uenv-bridge/src \\
   +ray_kwargs.ray_init.runtime_env.env_vars.PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \\
   +ray_kwargs.ray_init.runtime_env.env_vars.UENV_DEVICE_BACKEND=${UENV_DEVICE_BACKEND} \\
-  +ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_VISIBLE_DEVICES=${ASCEND_VISIBLE_DEVICES} \\
-  +ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES} \\
-  +ray_kwargs.ray_init.runtime_env.env_vars.TORCH_DEVICE_BACKEND_AUTOLOAD=${TORCH_DEVICE_BACKEND_AUTOLOAD} \\
-  +ray_kwargs.ray_init.runtime_env.env_vars.RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_OBS_URL=\\\"${UENV_OBS_URL}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_OBS_TOKEN=\\\"${UENV_OBS_TOKEN}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_OBS_HEARTBEAT_INTERVAL_SECONDS=\\\"${UENV_OBS_HEARTBEAT_INTERVAL_SECONDS}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_TRAINING_RUN_ID=\\\"${UENV_TRAINING_RUN_ID}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_OBS_PLANNED_STEP_TOTAL=\\\"${UENV_OBS_PLANNED_STEP_TOTAL}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_OBS_PLANNED_EPISODE_TOTAL=\\\"${UENV_OBS_PLANNED_EPISODE_TOTAL}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_VISIBLE_DEVICES=\\\"${ASCEND_VISIBLE_DEVICES}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.ASCEND_RT_VISIBLE_DEVICES=\\\"${ASCEND_RT_VISIBLE_DEVICES}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.TORCH_DEVICE_BACKEND_AUTOLOAD=\\\"${TORCH_DEVICE_BACKEND_AUTOLOAD}\\\" \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=\\\"${RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES}\\\" \\
   +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_MODEL_VERSION_RESPONSE=enabled \\
   +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR=${UENV_PATCH_VERL_TEXT_ONLY_PROCESSOR_RAY} \\
+  +ray_kwargs.ray_init.runtime_env.env_vars.UENV_PATCH_VERL_EMPTY_RESPONSE_BATCH=enabled \\
   +ray_kwargs.ray_init.include_dashboard=False \\
   ${EXTRA_VERL_ARGS}" 2>&1 | tee "${LOG_FILE}"
 }
@@ -510,6 +583,70 @@ for filename in ("agent-loop-requests.jsonl", "agent-loop-results.jsonl", "model
 PY
 }
 
+emit_obs_run_terminal() {
+  local status=$1
+  local reason=$2
+  local exit_code=${3:-0}
+  if [ -z "${UENV_OBS_URL}" ]; then
+    return 0
+  fi
+  UENV_OBS_URL="${UENV_OBS_URL}" \
+  UENV_OBS_TOKEN="${UENV_OBS_TOKEN}" \
+  python3 - "${UENV_TRAINING_RUN_ID}" "${status}" "${reason}" "${exit_code}" <<'PY' || true
+import json
+import os
+import sys
+import time
+import uuid
+from urllib import error, request
+
+run_id, status, reason, exit_code = sys.argv[1:5]
+event_type = {
+    "completed": "RUN_COMPLETED",
+    "terminated": "RUN_TERMINATED",
+    "failed": "RUN_FAILED",
+}[status]
+base = os.environ.get("UENV_OBS_URL", "").rstrip("/")
+token = os.environ.get("UENV_OBS_TOKEN", "").strip()
+if not base:
+    raise SystemExit(0)
+now_ms = int(time.time() * 1000)
+event = {
+    "event_id": str(uuid.uuid4()),
+    "schema_version": "1",
+    "correlation_id": f"run:{run_id}:terminal",
+    "training_run_id": run_id,
+    "source_id": f"train-script:{os.getpid()}",
+    "module": "adapter",
+    "entity_type": "training_run",
+    "entity_id": run_id,
+    "event_type": event_type,
+    "seq": 1,
+    "source_ts": now_ms,
+    "payload": {
+        "run_status": status,
+        "terminal_reason": reason,
+        "exit_code": int(exit_code),
+    },
+}
+headers = {"Content-Type": "application/json"}
+if token:
+    headers["Authorization"] = f"Bearer {token}"
+    headers["X-Obs-Token"] = token
+req = request.Request(
+    f"{base}/api/v1/events",
+    data=json.dumps(event).encode("utf-8"),
+    headers=headers,
+    method="POST",
+)
+try:
+    with request.urlopen(req, timeout=5.0) as resp:
+        resp.read()
+except error.URLError as exc:
+    print(f"obs terminal event failed: {exc}", file=sys.stderr)
+PY
+}
+
 wait_for_addr "server-side adapter core" "${SERVER_ADAPTER_CORE_ENDPOINT}" 20
 ensure_policy_model_exists
 
@@ -519,11 +656,17 @@ run_status=$?
 set -e
 
 if [ "${run_status}" -ne 0 ]; then
-    echo "VeRL UEnv GRPO training failed. VeRL log: ${LOG_FILE}" >&2
+  if [ "${run_status}" -eq 130 ] || [ "${run_status}" -eq 143 ]; then
+    emit_obs_run_terminal "terminated" "terminated" "${run_status}"
+  else
+    emit_obs_run_terminal "failed" "failed" "${run_status}"
+  fi
+  echo "VeRL UEnv GRPO training failed. VeRL log: ${LOG_FILE}" >&2
   tail -120 "${LOG_FILE}" >&2 2>/dev/null || true
   exit "${run_status}"
 fi
 
+emit_obs_run_terminal "completed" "completed" "0"
 echo "VeRL UEnv GRPO training completed."
 echo "VeRL log: ${LOG_FILE}"
 grep -E "Training Progress: 100%|critic/score/mean|critic/rewards/mean" "${LOG_FILE}" | tail -5 || true

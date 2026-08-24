@@ -18,6 +18,8 @@ pub const VERIFIED_IMAGE_PREFIX: &str = "swebench/sweb.eval.";
 
 /// SWE-smith 官方镜像命名空间（SWE-smith `RepoProfile.image_name`）。
 pub const SMITH_IMAGE_PREFIX: &str = "swebench/swesmith.";
+/// 历史非官方 SWE-smith 镜像命名空间；读取旧 catalog 时自动归一化到官方前缀。
+pub const LEGACY_SMITH_IMAGE_PREFIX: &str = "jyangballin/swesmith.";
 pub const SMITH_IMAGE_MARKER: &str = "swesmith";
 
 /// 标准 conda 环境激活前缀（SWE-bench 镜像内 `testbed` env）。
@@ -207,7 +209,7 @@ impl SweInstance {
 
     /// 镜像命名空间是否与变体一致（plan §6.2 启动校验）：
     /// Verified/Lite 应在 `swebench/sweb.eval.*`；Pro/Smith 不得占用该命名空间；
-    /// Smith 应使用官方 `swebench/swesmith.*` 镜像。
+    /// Smith 应使用官方 `swebench/swesmith.*` 镜像；旧 `jyangballin/...` 读取时会归一化。
     pub fn image_namespace_consistent(&self) -> bool {
         let img = self.image_ref();
         match self.variant() {
@@ -288,17 +290,18 @@ pub fn smith_image_ref(instance_id: &str) -> String {
     .to_lowercase()
 }
 
-/// 校验官方 SWE-smith 镜像引用并补齐缺省 latest tag。
+/// 兼容旧 catalog / parquet 中的非官方 namespace，并补齐缺省 latest tag。
 pub fn normalize_swesmith_image_ref(image: &str) -> String {
     let trimmed = image.trim();
-    let last_segment = trimmed.rsplit('/').next().unwrap_or("");
-    if !trimmed.starts_with(SMITH_IMAGE_PREFIX) {
-        return String::new();
-    }
-    if !trimmed.is_empty() && !last_segment.contains(':') {
-        format!("{trimmed}:latest")
+    let with_official_prefix = trimmed
+        .strip_prefix(LEGACY_SMITH_IMAGE_PREFIX)
+        .map(|tail| format!("{SMITH_IMAGE_PREFIX}{tail}"))
+        .unwrap_or_else(|| trimmed.to_string());
+    let last_segment = with_official_prefix.rsplit('/').next().unwrap_or("");
+    if !with_official_prefix.is_empty() && !last_segment.contains(':') {
+        format!("{with_official_prefix}:latest")
     } else {
-        trimmed.to_string()
+        with_official_prefix
     }
 }
 
@@ -409,7 +412,7 @@ mod tests {
         );
         assert_eq!(
             normalize_swesmith_image_ref(
-                "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536"
+                "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536"
             ),
             "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest"
         );
@@ -503,7 +506,7 @@ mod tests {
             "repo": "oauthlib/oauthlib",
             "base_commit": "1fd52536",
             "benchmark_variant": "smith",
-            "image_cache_key": "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest",
+            "image_cache_key": "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.1fd52536:latest",
             "FAIL_TO_PASS": ["tests/test_oauth.py::test_fix"],
             "PASS_TO_PASS": []
           }

@@ -1,107 +1,275 @@
-# UEnv 协议总览
+# UEnv 通信协议与数据结构规范
 
-本文面向源码维护者，说明当前协议边界和权威定义。部署与使用文档统一采用下面的对外组件关系：
+> **版本**：v1.1（2026-05-31）  
+> **依据**：[Docs/uenv-design-prd-v7.2.md](Docs/uenv-design-prd-v7.2.md) §4、[Docs/worker-pool-layer-design.md](Docs/worker-pool-layer-design.md) §7  
+> **Proto 权威路径**：[proto/](proto/)（L1）、[uenv-worker/proto/](uenv-worker/proto/)（Worker gRPC）、[plugin_proto/](plugin_proto/)（L2）
 
-```text
-评测程序 / 强化学习框架 -> UEnv Bridge -> UEnv Server -> UEnv Worker
+本文档描述当前仓库 **已统一并落地** 的 gRPC 服务边界、消息结构与层间约束。实现以 `proto/` 目录为准；若代码与本文冲突，以 `proto/` 为准并提 PR 修正实现。
+
+---
+
+## 1. 架构与链路
+
+```
+训练框架 (Python)
+    │  EpisodeRequest / EpisodeResult
+    ▼
+uenv-bridge (Adapter) ──gRPC──► uenv-server (UEnvService)
+                                    │
+                    ControlPlaneService ◄──► uenv-worker (Client)
+                    WorkerGrpcService   ──► uenv-worker (Server)
+                                    │
+                                    ▼
+                              plugins/* (L2 UDS)
 ```
 
-- Bridge 在框架一侧完成 sample 与 UEnv 请求/结果的转换。
-- Server 是唯一的中心服务。当前兼容二进制名为 `uenv-adapter-core`。
-- `uenv-server` 是 Server 使用的 Rust library crate，不是另一个运行进程。
-- `ControlPlaneService` 是 Server 对 Worker 提供的一组兼容 RPC 名称，不是另一个组件。
-- Hub 是可选的环境版本和 EnvPackage 服务，不在 Episode 热路径。
+| 链路 | 协议 | 序列化 | 说明 |
+|------|------|--------|------|
+| Bridge ↔ Server | gRPC `UEnvService` | Protobuf | 训练侧提交 Episode |
+| Worker ↔ Server/Mock | gRPC `ControlPlaneService` | Protobuf | 注册、心跳、结果上报 |
+| Server/Mock → Worker | gRPC `WorkerGrpcService` | Protobuf | **主动** `DispatchEpisode` |
+| Worker ↔ 插件 | Protobuf over UDS | Protobuf | L2，与 L1 隔离 |
+| Hub ↔ CLI/Server/Worker | HTTP REST | JSON | 环境元数据；Worker 可选启动 pull（M-5），**非 Episode 热路径** |
+| Worker ↔ 推理服务 | HTTP/gRPC | 框架自定 | 不经 Server |
 
-用户侧的完整解释见 [协议与调用方向](./Docs/guide/6-查阅参考/04-protocols.md) 和 [架构与组件](./Docs/guide/1-了解UEnv/02-architecture.md)。
+**冻结原则**（PRD §4.1）：
 
-## 权威协议文件
+- 不使用 Redis/Kafka 等消息中间件做 Episode 转发
+- 控制面与数据面均使用 **gRPC + Protobuf**，训练热路径不用 JSON
+- Scheduler **主动**调用 Worker `DispatchEpisode`；Worker **禁止** `subscribe_dispatch` 拉任务
 
-| 路径 | 内容 |
-|---|---|
-| `proto/uenv/v1/adapter_core.proto` | Bridge 调用 Server 的批次与流式接口 |
-| `proto/uenv/v1/scheduler.proto` | Worker 注册、心跳、结果上报与 Worker 列表 |
-| `proto/uenv/v1/server.proto` | Episode、Admin 与 Agent 管理接口 |
-| `proto/uenv/v1/episode.proto` | Episode 请求、结果、轨迹与进度类型 |
-| `proto/uenv/v1/wal.proto` | Worker 结果 WAL 类型 |
-| `uenv-worker/proto/worker_service.proto` | Server 反向调用 Worker 的派发接口 |
-| `plugin_proto/uenv/plugin/v1/plugin.proto` | Worker 与进程插件之间的 L2 接口 |
+---
 
-实现与本文不一致时，以 proto 和当前实现为准，并同步修正文档。
+## 2. Proto 文件与 Package
 
-## Server 进程中的服务
+### 2.1 L1 共享（`proto/uenv/v1/`）
 
-`uenv-adapter-core` 在同一个 gRPC listener 上装载：
+| 文件 | Package | 内容 |
+|------|---------|------|
+| `common.proto` | `uenv.v1` | `ErrorCode`、`ResourceSpec`、`ExecutionMode` |
+| `episode.proto` | `uenv.v1` | `EpisodeRequest`、`EpisodeResult`、`Trajectory`、`StreamReport` |
+| `wal.proto` | `uenv.v1` | `WalRecord`、`ReplayState`（Worker WAL，§7.5 冻结） |
+| `scheduler.proto` | `uenv.scheduler.v1` | `ControlPlaneService` 及注册/心跳/上报消息 |
+| `server.proto` | `uenv.v1` | `UEnvService`、`AdminService` 及批量/运维消息 |
 
-- `AdapterCoreService`
-- `ControlPlaneService`
-- `AgentControlService`
-- `AdminService`
+### 2.2 Worker gRPC Server（`uenv-worker/proto/worker_service.proto`）
 
-Server 的兼容进程入口位于 `uenv-bridge/core/`，注册、调度、租约、持久化和结果管理实现位于 `uenv-server/`。目录布局不改变其运行时边界。
+| Package | Service | 方法 |
+|---------|---------|------|
+| `uenv.worker.v1` | `WorkerGrpcService` | `DispatchEpisode`、`HealthCheck` |
 
-## 调用方向
+### 2.3 L2 插件（`plugin_proto/uenv/plugin/v1/plugin.proto`）
 
-| 发起方 | 目标 | RPC / 接口 | 作用 |
-|---|---|---|---|
-| Bridge | Server | `ExecuteBatch`、`ExecuteBatchStream` | 提交 sample，接收 reward、trajectory 和状态 |
-| Worker | Server | `RegisterWorker` | 上报身份、回连 endpoint、容量、资源和环境能力 |
-| Worker | Server | `WorkerHeartbeat` | 刷新负载、容量、能力并发现 Server epoch 变化 |
-| Worker | Server | `ReportResult` | 上报带 lease、token 和幂等键的最终结果 |
-| Server | Worker | `DispatchEpisode` | 主动派发 Episode；stream 只承载执行进度 |
-| Server | Worker | `CancelEpisode`、`PrepareEnvironment`、`HealthCheck` | 取消、准备环境和探活 |
-| Worker | 环境插件 | L2 IPC / UDS | `reset`、`step`、`close`、`health_check` |
-| Worker | 模型服务 | HTTP / gRPC | 调用推理服务，不经 Server 转发 |
+| Package | 说明 |
+|---------|------|
+| `uenv.plugin.v1` | `reset` / `step` / `close` / `health_check`；**不得**被 L1 crate import |
 
-Server 与 Worker 之间必须双向可达。默认发布端口为 Server `50051/TCP`、Worker `50054/TCP`。
+---
 
-## Worker 注册与心跳
+## 3. gRPC Service 规范
 
-`RegisterWorkerRequest` 包含：
+### 3.1 UEnvService（训练侧 → Server）
 
-- `worker_id` 与 Server 可回连的 `endpoint`
-- `supported_env_types`、资源与并发容量
-- 当前 `load` / `max_load`
-- EnvPackage、backend、platform feature、trajectory/tool schema
-- 实例池与 package 状态
+**定义**：`proto/uenv/v1/server.proto`  
+**实现**：`uenv-server`  
+**PRD 对照**：§4.2 UEnvService
 
-`worker_id` 为空或为 `auto` 时由 Server 分配。响应返回是否接受、最终 Worker ID 和当前 `server_epoch`。
+| RPC | 模式 | 状态 |
+|-----|------|------|
+| `SubmitEpisode` | unary | ✅ 已实现 |
+| `SubmitEpisodeStream` | bidi stream | Phase 2+（unimplemented） |
+| `SubmitBatch` | unary | Phase 2+（unimplemented） |
+| `SubmitEpisodeAsync` | unary | Phase 2+（unimplemented） |
+| `GetEpisodeResult` | unary | Phase 2+（unimplemented） |
+| `WatchEpisodes` | server stream | Phase 2+（unimplemented） |
 
-协议把 `WorkerHeartbeat` 定义为双向 stream；当前 Worker 每个周期重新建立一次只发送一条请求的 stream。Server 默认 30 秒未收到心跳时停止向该 Worker 分配新任务，但不会因超时自动删除注册记录。
+### 3.2 ControlPlaneService（Worker → Server/Mock）
 
-心跳响应中的 `drain` 是预留字段，当前 Server 不下发，Worker 也不读取。实际排空由 `AdminService.DrainWorker` 修改 Server 注册表状态。
+**定义**：`proto/uenv/v1/scheduler.proto`  
+**实现**：`uenv-server`、`uenv-mock-scheduler`  
+**PRD 对照**：§4.2 DispatcherService + WorkerDirectService（合并为单一控制面服务）
 
-## 派发、租约与结果
+| RPC | 方向 | 说明 |
+|-----|------|------|
+| `RegisterWorker` | Worker → Server | 上报 `worker_id`、`endpoint`、`supported_env_types`、`max_concurrent`、`resource` |
+| `WorkerHeartbeat` | 双向流 | Worker 上报 `load`；Server 回复 `server_epoch`、`next_heartbeat_interval_ms`、`DrainCommand` |
+| `ReportResult` | Worker → Server | 幂等键：`episode_id:attempt_id:worker_id` |
+| `ListWorkers` | 查询 | 只读资源目录（Admin 亦复用此消息） |
 
-Server 选择满足环境、资源、EnvPackage、状态和容量要求的 Worker。每次派发包含：
+### 3.3 WorkerGrpcService（Server/Mock → Worker）
 
-- `episode_id` 与 `attempt_id`
-- `dispatch_lease_id`
-- `dispatch_token`
-- `scheduler_epoch`
-- `lease_expire_at`
+**定义**：`uenv-worker/proto/worker_service.proto`  
+**实现**：`uenv-worker`  
+**PRD 对照**：§4.2 `DispatchEpisode` 服务端流
 
-`DispatchEpisode` 的服务端 stream 只传送 `StreamReport` 进度。Worker 完成后先把最终结果写入本地 WAL，再通过独立的 `ReportResult` RPC 上报 `EpisodeResult`。
+| RPC | 模式 | 说明 |
+|-----|------|------|
+| `DispatchEpisode(DispatchEpisodeRequest)` | **server stream** `StreamReport` | 请求体为完整 `EpisodeRequest`（含租约字段） |
+| `HealthCheck` | unary | Worker 探活 |
 
-Server 校验 Worker、epoch、lease、token 和幂等键。确定的重复终态会让 Worker 清理 WAL；暂时性错误保留记录并退避重放。
+### 3.4 AdminService（运维 → Server）
 
-`max_attempts=3` 表示最多三次总 attempt（首次加最多两次重试），不是首次执行后再重试三次。
+**定义**：`proto/uenv/v1/server.proto`
 
-## Epoch 与重启
+| RPC | 说明 |
+|-----|------|
+| `ListWorkers` | 复用 `scheduler.proto` 的 `ListWorkersRequest/Response` |
+| `DrainWorker` | 排空 Worker |
+| `CancelEpisode` | 取消在途 Episode |
+| `GetServerStatus` | 返回 `server_epoch`、Worker/Episode 计数 |
 
-Server 每次启动生成新的 `server_epoch`。Worker 在心跳响应中发现 epoch 变化，或收到 `ok=false`，会自动重新注册。下发给 Worker 的相同标识在 Episode 请求中名为 `scheduler_epoch`。
+---
 
-同一 endpoint 被新 Worker ID 注册替换时，旧 Worker 的在途 lease 以 `ERR_LEASE_SUPERSEDED` 收口，避免迟到结果无限重试。
+## 4. 核心消息结构
 
-## 稳定性约束
+### 4.1 EpisodeRequest
 
-- Episode 热路径不依赖 Redis/Kafka 等消息中间件。
-- Server 主动调用 Worker，不使用 Worker 拉取任务的订阅模型。
-- Bridge 用 `request_id` 对齐乱序结果，不能按数组位置猜测。
-- 传输重试保持原逻辑请求 ID；新的 rollout 使用新的 ID。
-- 密钥不进入 sample payload、trajectory 或普通日志。
+```protobuf
+message EpisodeRequest {
+    string episode_id = 1;
+    uint32 attempt_id = 2;
+    string env_type   = 3;              // Phase 0: "math" (MathEnv)
+    bytes payload     = 4;                // UTF-8 JSON；benchmark 如 {"question":"...","dataset":"gsm8k"}
+    ExecutionMode mode = 5;
+    int32 max_steps   = 6;
+    ResourceSpec resource_spec = 7;
+    string model_endpoint = 8;
+    optional int32 seed = 9;
+    string correlation_id = 10;           // 日志 trace_id 映射
+    int32 timeout_seconds = 11;
+    bytes reward_config = 12;             // JSON，如 rule_reward target
 
-更详细的字段、状态与运维含义见：
+    // 派发租约（design §7.7）
+    string dispatch_lease_id = 13;
+    google.protobuf.Timestamp lease_expire_at = 14;
+    uint64 scheduler_epoch = 15;
+    bytes dispatch_token = 16;
+}
+```
 
-- [自定义强化学习框架接入](./Docs/guide/4-接入强化学习框架/01-custom-framework.md)
-- [配置并注册 UEnv Worker](./Docs/guide/2-部署UEnv/04-worker-registration.md)
-- [一次 Episode 如何完成](./Docs/guide/1-了解UEnv/03-episode-lifecycle.md)
+**约定**：
+
+- Phase 0 调度键为 **`env_type=math`**（MathEnv）；GSM8K 等 benchmark 通过 **`payload.dataset`**（如 `"gsm8k"`）表达，**不得**再作为独立 `env_type`
+- `payload`、`reward_config` 为 **bytes 承载的 UTF-8 JSON**，类型约束由 Hub `interface` schema 或本地 `plugins/{env_type}/manifest.yaml` 描述
+- Server 在 `DispatchEpisode` 前 MUST 填充 `dispatch_lease_id`、`lease_expire_at`、`scheduler_epoch`
+- Episode 级重试由 Scheduler 递增 `attempt_id` 触发；Worker **禁止**对 `env.step()` 默认自动重试
+
+### 4.2 EpisodeResult
+
+```protobuf
+message EpisodeResult {
+    string episode_id     = 1;
+    uint32 attempt_id     = 2;
+    string status         = 3;            // "completed" | "failed" | "timeout"
+    Trajectory trajectory = 4;
+    Summary summary       = 5;
+    optional ErrorCode error_code = 6;
+    string error_message  = 7;
+    string trajectory_checksum = 8;       // SHA-256 hex
+    bool integrity_verified = 9;
+}
+```
+
+**回报路径**：
+
+1. `DispatchEpisode` 流推送 `StreamReport`（进度）
+2. Worker 经 `ControlPlaneService.ReportResult` 上报完整 `EpisodeResult`（权威结果）
+3. Server `SubmitEpisode` 阻塞等待 `ReportResult` 后返回客户端
+
+### 4.3 StreamReport
+
+```protobuf
+enum ReportType {
+    REPORT_TYPE_UNSPECIFIED = 0;
+    PROGRESS       = 1;
+    STEP_COMPLETE  = 2;
+    REWARD_SIGNAL  = 3;
+    LOG            = 4;
+    PACING         = 5;
+}
+
+message StreamReport {
+    string episode_id = 1;
+    uint32 attempt_id = 2;
+    int32 current_step = 3;
+    int32 total_steps = 4;
+    double current_reward = 5;
+    string phase = 6;                     // MVP 兼容："step_complete" 等
+    optional StepRecord last_step = 7;
+    ReportType report_type = 8;           // PRD §4.2，新实现应填充
+    // … 延迟、步调字段见 episode.proto
+}
+```
+
+MVP 阶段 Worker 至少发送 1 条 `STEP_COMPLETE`；`PACING` 等为 Phase 1+ 目标。
+
+### 4.4 WalRecord
+
+见 `proto/uenv/v1/wal.proto`。幂等键：`episode_id + attempt_id + worker_id`。
+
+### 4.5 ErrorCode
+
+见 `proto/uenv/v1/common.proto`。gRPC `Status` code 与 `ErrorCode` 映射见各 crate 错误处理模块。
+
+---
+
+## 5. 典型时序（MathEnv / gsm8k benchmark 单轮）
+
+```
+Worker                          Server/Mock                         Bridge
+  |                                 |                                  |
+  |-- RegisterWorker (math) ------->|                                  |
+  |<-- server_epoch -----------------|                                  |
+  |-- WorkerHeartbeat (stream) ----->|                                  |
+  |                                 |<-------- SubmitEpisode ----------|
+  |                                 |  env_type=math, payload.dataset  |
+  |                                 |  (schedule + fill lease)         |
+  |<-- DispatchEpisode -------------|                                  |
+  |-- StreamReport (step_complete) ->|                                  |
+  |-- ReportResult ---------------->|                                  |
+  |                                 |-------- EpisodeResult ---------->|
+```
+
+---
+
+## 6. 各 Crate 实现对照
+
+| Crate | 实现的 Service | 作为 Client 调用 |
+|-------|----------------|------------------|
+| `uenv-server` | `UEnvService`、`AdminService`、`ControlPlaneService` | `WorkerGrpcService` |
+| `uenv-worker` | `WorkerGrpcService` | `ControlPlaneService`；可选 Hub manifest pull（M-5） |
+| `uenv-mock-scheduler` | `ControlPlaneService` | `WorkerGrpcService` |
+| `uenv-bridge` | — | `UEnvService`（serve mode 经 `serve_client.rs`；三联调待验收） |
+| `uenv-hub` | HTTP REST | — |
+
+---
+
+## 7. 配置与环境变量（Worker 侧摘要）
+
+| 变量 | 说明 |
+|------|------|
+| `UENV_SCHEDULER_MODE` | `remote` \| `mock` |
+| `UENV_SERVER_ENDPOINT` | ControlPlane 地址（Server 或 Mock） |
+| `UENV_WORKER_LISTEN` | Worker gRPC 对外地址（供 Dispatch 回连） |
+| `UENV_ENV_TYPES` | 如 `math`（Phase 0 MathEnv） |
+| `UENV_PLUGIN_DIR` | 插件目录（默认 `./plugins`，含 `math/`） |
+| `UENV_HUB_ENDPOINT` | Hub HTTP 基址；设置后可选启动 manifest pull（M-5） |
+
+完整配置见 `config/uenv-worker.yaml`。
+
+---
+
+## 8. 变更记录
+
+| 日期 | 变更 |
+|------|------|
+| 2026-05-31 | Phase 0 `env_type` 示例改为 **`math`**；GSM8K 通过 `payload.dataset`；补充 Hub M-5 浅层 pull 与 `UENV_HUB_ENDPOINT` |
+| 2026-05-30 | 统一 `uenv-server` 至共享 proto；删除 `uenv-server/proto/server.proto` 重复定义；`StreamReport` 增加 `ReportType`；Server 实现 `ControlPlaneService` + `WorkerGrpcService` 客户端 |
+
+---
+
+## 参考
+
+- [proto/README.md](proto/README.md)
+- [Docs/worker-pool-mvp-checklist.md](Docs/worker-pool-mvp-checklist.md)
+- [secrets/README.md](secrets/README.md)（A100 联调，已 gitignore）

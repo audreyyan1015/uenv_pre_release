@@ -179,7 +179,7 @@ sudo uenv hub token create \
   --out /root/uenv-hub-tokens/environment-publisher.token
 ```
 
-生成的令牌文件权限为 `0600`。把只读令牌安全复制到每台 UEnv Worker 主机，把发布者令牌安全复制到发布主机。
+生成的令牌文件权限为 `0600`。`token create --out` 不覆盖已存在的文件：目标文件已存在时会报 `File exists` 错误，需要先移走或删除旧文件再重新创建。把只读令牌安全复制到每台 UEnv Worker 主机，把发布者令牌安全复制到发布主机。
 
 ## 让 UEnv Worker 连接 UEnv Hub
 

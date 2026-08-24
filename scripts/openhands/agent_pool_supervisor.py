@@ -247,7 +247,7 @@ def parse_args() -> Config:
     p.add_argument("--runner-python", default=os.environ.get("OPENHANDS_AGENT_RUNNER_PYTHON", "/root/uenv-agent-venv/bin/python"))
     p.add_argument("--runner-script", default=os.environ.get("OPENHANDS_AGENT_RUNNER_SCRIPT", "/root/UEnv/scripts/openhands/openhands_runner.py"))
     p.add_argument("--gateway-local", default=os.environ.get("UENV_GATEWAY_LOCAL", "http://127.0.0.1:28097"))
-    p.add_argument("--gateway-api-key", default=os.environ.get("UENV_GATEWAY_API_KEY", "REPLACE_WITH_RANDOM_GATEWAY_API_KEY"))
+    p.add_argument("--gateway-api-key", default=os.environ.get("UENV_GATEWAY_API_KEY", "swe-pro-secret"))
     p.add_argument("--runs-root", default=os.environ.get("OPENHANDS_AGENT_RUNS_ROOT", "/var/log/uenv"))
     p.add_argument("--api-base-port", type=int, default=int(os.environ.get("OPENHANDS_AGENT_API_BASE_PORT", "8888")))
     p.add_argument("--health-base-port", type=int, default=int(os.environ.get("OPENHANDS_AGENT_HEALTH_BASE_PORT", "8777")))

@@ -215,6 +215,10 @@ export function normalizeChainState(raw: unknown, fallbackRunId = "_orphan"): Ch
   return {
     training_run_id: runId,
     run_state: asRunState(obj.run_state),
+    run_status: asString(obj.run_status) || empty.run_status,
+    terminal_reason: asString(obj.terminal_reason) || "",
+    last_heartbeat_ts: asNumber(obj.last_heartbeat_ts, 0),
+    heartbeat_state: asString(obj.heartbeat_state) || "unknown",
     updated_at: asNumber(obj.updated_at, Date.now()),
     global_event_seq: asNumber(obj.global_event_seq, 0),
     workflow: normalizeWorkflow(obj.workflow, empty.workflow),

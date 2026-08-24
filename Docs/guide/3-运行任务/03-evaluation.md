@@ -11,6 +11,19 @@
 
 `run-task` 覆盖输入、执行和结果的最小链路，本页后续内容只讲这条路径；当任务涉及仓库、容器、patch 与测试时，SWE Runtime、catalog、variant 和 Agent 运行细节统一在[代码修复](./06-evaluation-swe-verified.md)中说明。SWE 当前通过固定版本的 OpenHands Agent 执行修改，它是 SWE 的运行实现。
 
+### 客户端主机准备
+
+`run-task` 只需客户端主机上有可用的 `uenv` CLI 并能访问 UEnv Server 的 `50051/TCP`，不需要在客户端主机安装或启动任何服务。`uenv` 命令默认以 `/opt/uenv/current` 为安装根目录，未运行过 `install.sh` 的主机上直接解包发布包即可使用：
+
+```bash
+tar -xzf uenv-linux-x86_64.tar.gz
+export UENV_INSTALL_ROOT="$PWD/uenv-<version>"   # 以解包出的实际目录名为准
+export PATH="$UENV_INSTALL_ROOT/bin:$PATH"
+uenv version
+```
+
+不设 `UENV_INSTALL_ROOT` 时，命令会解析到本机 `/opt/uenv/current` 下已安装的版本；该版本过旧时可能报"当前 release 不包含通用评测入口"之类的错误。
+
 三类内置任务的本质区别：
 
 | 维度 | 问答（`qa`） | 代码生成（`code`） | 代码修复（SWE） |
@@ -60,7 +73,7 @@ sudo uenv evaluate configure-model \
 sudo systemctl is-active uenv-worker.service
 ```
 
-云端模型 API（以火山引擎方舟为例，`--model` 填方舟的推理接入点 ID）：
+云端模型 API（以火山引擎方舟为例，`--model` 填方舟的推理接入点 ID 或模型 ID，如 `ep-xxxxxxxx` 或 `deepseek-v4-flash-260425`）：
 
 ```bash
 export MODEL_API='https://ark.cn-beijing.volces.com/api/v3'
@@ -133,6 +146,8 @@ uenv evaluate run-task \
 ```
 
 正常结束时终端打印 `cases`、`completed`、`failed`、`mean_reward` 和输出路径。`--streaming` 允许结果按完成顺序返回，因此用 ID 关联输入，不按行号假设顺序。
+
+注意区分两个标识：上面的 `RUN_ID` 只用于本地输出目录命名，不会传给 UEnv；终端汇总中的 `batch_id`（例如 `eval-20260824-000959`）才是服务端记录本次运行的 `run_id`，[获取轨迹](./12-trajectory.md) 中的 `uenv trajectory list --run-id` 要用它。
 
 验收基础设施结果：
 

@@ -6,6 +6,7 @@ PYTHONPATH. Keep behavior behind explicit environment flags.
 
 from __future__ import annotations
 
+import logging
 import os
 
 
@@ -415,3 +416,83 @@ def _patch_verl_agent_loop_batch() -> None:
 
 if os.environ.get("UENV_AGENT_LOOP_BATCH", "0").strip().lower() in {"1", "true", "yes", "on"}:
     _run_when_module_imported("verl.experimental.agent_loop.agent_loop", _patch_verl_agent_loop_batch)
+
+
+def _patch_verl_empty_response_batch_filter() -> None:
+    """Treat fully empty rollout batches as a no-op instead of aborting training."""
+
+    import torch
+
+    from verl.trainer.ppo import core_algos, rollout_corr_helper
+
+    if getattr(rollout_corr_helper, "_uenv_empty_response_batch_filter_applied", False):
+        return
+
+    logger = logging.getLogger(__name__)
+    original_compute_rollout_correction_and_rejection_mask = (
+        rollout_corr_helper.compute_rollout_correction_and_rejection_mask
+    )
+    original_agg_loss = core_algos.agg_loss
+
+    def compute_rollout_correction_and_rejection_mask(
+        old_log_prob,
+        rollout_log_prob,
+        response_mask,
+        *args,
+        **kwargs,
+    ):
+        try:
+            has_valid_token = bool(torch.as_tensor(response_mask).any().item())
+        except Exception:
+            has_valid_token = True
+        if not has_valid_token:
+            logger.warning("UEnv patch: skipped empty response_mask rollout batch; continuing as a no-op update.")
+            empty_response_mask = response_mask.clone() if hasattr(response_mask, "clone") else response_mask
+            empty_batch_size = int(response_mask.shape[0]) if hasattr(response_mask, "shape") and response_mask.ndim > 0 else 0
+            return None, empty_response_mask, {
+                "rollout_corr/empty_response_batch": 1.0,
+                "rollout_corr/empty_response_batch_size": float(empty_batch_size),
+                "rollout_corr/empty_response_tokens": 0.0,
+            }
+        return original_compute_rollout_correction_and_rejection_mask(
+            old_log_prob,
+            rollout_log_prob,
+            response_mask,
+            *args,
+            **kwargs,
+        )
+
+    def agg_loss(
+        loss_mat,
+        loss_mask,
+        loss_agg_mode,
+        dp_size=1,
+        batch_num_tokens=None,
+        global_batch_size=None,
+        loss_scale_factor=None,
+    ):
+        try:
+            has_valid_token = bool(torch.as_tensor(loss_mask).any().item())
+        except Exception:
+            has_valid_token = True
+        if not has_valid_token:
+            return loss_mat.sum() * 0.0
+        return original_agg_loss(
+            loss_mat,
+            loss_mask,
+            loss_agg_mode,
+            dp_size=dp_size,
+            batch_num_tokens=batch_num_tokens,
+            global_batch_size=global_batch_size,
+            loss_scale_factor=loss_scale_factor,
+        )
+
+    rollout_corr_helper.compute_rollout_correction_and_rejection_mask = compute_rollout_correction_and_rejection_mask
+    core_algos.agg_loss = agg_loss
+    rollout_corr_helper._uenv_empty_response_batch_filter_applied = True
+    core_algos._uenv_empty_response_batch_filter_applied = True
+
+
+if os.environ.get("UENV_PATCH_VERL_EMPTY_RESPONSE_BATCH") in {"1", "true", "True", "enabled"}:
+    _run_when_module_imported("verl.trainer.ppo.rollout_corr_helper", _patch_verl_empty_response_batch_filter)
+    _run_when_module_imported("verl.trainer.ppo.core_algos", _patch_verl_empty_response_batch_filter)

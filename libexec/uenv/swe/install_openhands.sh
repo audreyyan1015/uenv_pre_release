@@ -25,8 +25,12 @@ usage() {
   UENV_UV_VERSION          用于安装依赖的 uv 版本（默认 0.8.14）
   UENV_AGENT_USER         运行 OpenHands 的系统用户（默认 uenv-agent）
   UV_HTTP_TIMEOUT         uv 单个请求超时秒数（默认 120；慢网络可调大）
-  UV_INDEX_URL            自定义 Python 包索引。注意：依赖由 uv.lock 固定哈希，
-                          镜像与 PyPI 文件不一致时会校验失败，不要混用镜像
+  UV_INDEX_URL            自定义 Python 包索引。未设置时自动沿用 pip 的
+                          global.index-url 配置，未配置 pip 镜像则直连 PyPI。
+                          注意：依赖由 uv.lock 固定哈希，镜像与 PyPI 文件
+                          不一致时会校验失败，不要混用镜像
+  UV_INSECURE_HOST        允许 http 协议的索引主机（沿用 http 版 pip 镜像时
+                          自动设为该镜像主机，一般无需手动设置）
 EOF
 }
 
@@ -114,6 +118,24 @@ fi
 install -d -o "$AGENT_USER" -g uenv -m 0750 \
   "$AGENT_HOME" "$AGENT_HOME/.cache" /opt/uenv/agent
 
+# uv 默认直连 pypi.org，不读 pip 配置；国内环境这会慢数十倍甚至超时。
+# 若用户未显式设置 UV_INDEX_URL，沿用本机 pip 的全局镜像配置，与 pip 系的
+# `uenv env plugin publish` 行为保持一致。uv.lock 的固定哈希校验仍然生效：
+# 镜像与 PyPI 文件一致（如阿里云镜像）时校验可通过。
+if [[ -z "${UV_INDEX_URL:-}" ]] && command -v pip3 >/dev/null 2>&1; then
+  pip_index="$(pip3 config get global.index-url 2>/dev/null || true)"
+  pip_index="${pip_index#\'}"; pip_index="${pip_index%\'}"
+  if [[ "$pip_index" =~ ^https?://[^[:space:]]+$ ]]; then
+    UV_INDEX_URL="$pip_index"
+    echo "==> 沿用 pip 镜像作为 uv 索引：$UV_INDEX_URL"
+    # uv 默认拒绝 http 协议的索引主机，放行镜像主机本身（等价于 pip 的 trusted-host）
+    if [[ "$pip_index" =~ ^http://([^/]+) && -z "${UV_INSECURE_HOST:-}" ]]; then
+      UV_INSECURE_HOST="${BASH_REMATCH[1]}"
+      echo "==> 放行 http 索引主机：$UV_INSECURE_HOST"
+    fi
+  fi
+fi
+
 run_agent() {
   runuser -u "$AGENT_USER" -- env \
     HOME="$AGENT_HOME" \
@@ -121,6 +143,7 @@ run_agent() {
     UV_CACHE_DIR="$AGENT_HOME/.cache/uv" \
     UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}" \
     ${UV_INDEX_URL:+UV_INDEX_URL="$UV_INDEX_URL"} \
+    ${UV_INSECURE_HOST:+UV_INSECURE_HOST="$UV_INSECURE_HOST"} \
     "$@"
 }
 

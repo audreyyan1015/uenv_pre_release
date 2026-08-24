@@ -44,7 +44,7 @@ poll_20877() {
     echo "208.77=sshpass_missing"
     return
   fi
-  sshpass -p "${UENV_PASS:?set UENV_PASS}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@8.130.208.77 bash <<'OH' 2>/dev/null || echo "208.77=unreachable"
+  sshpass -p 'dev@BDW2026' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@8.130.208.77 bash <<'OH' 2>/dev/null || echo "208.77=unreachable"
 RUNS=/var/log/uenv/openhands-runs
 d=$(ls -td "$RUNS"/agent-job-* 2>/dev/null | head -1)
 if [ -z "$d" ]; then echo "208.77=no_runs"; exit 0; fi

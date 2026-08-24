@@ -24,7 +24,7 @@ use crate::wal::WalWriter;
 
 const DEFAULT_DISPATCH_ACQUIRE_TIMEOUT_SECS: u64 = 30;
 /// 覆盖 OlymMATH thinking 长输出（数分钟级）并留回传余量；可用 env / EpisodeRequest.timeout_seconds 覆盖。
-const DEFAULT_EPISODE_TIMEOUT_SECS: u64 = 1800;
+const DEFAULT_EPISODE_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_DISPATCH_HEARTBEAT_SECS: u64 = 15;
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -342,8 +342,6 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                     _ = cancel_token.cancelled() => {
                         clear_active_lease(&active_leases, &key_for_task).await;
                         active_cancellations.lock().await.remove(&key_for_task);
-                        // v2.3：cancel 终态丢弃 inflight 部分轨迹（server 已取消，无需留存）。
-                        executor.drop_inflight_trajectory(&episode_for_task);
                         tracing::info!(
                             trace_id = %trace_id_for_task,
                             episode_id = %episode_for_task.episode_id,
@@ -404,9 +402,6 @@ impl WorkerGrpcService for WorkerGrpcServiceImpl {
                 Err(_) => {
                     clear_active_lease(&active_leases, &key_for_task).await;
                     active_cancellations.lock().await.remove(&key_for_task);
-                    // v2.3：timeout 终态——seal 进行中的部分轨迹（尽力而为，不阻断超时返回）。
-                    // 执行 future 已被 tokio timeout 丢弃，部分轨迹只能从 executor 的 inflight 表取。
-                    executor.seal_timeout_trajectory(&episode_for_task, &worker_id_for_task);
                     tracing::warn!(
                         trace_id = %trace_id_for_task,
                         episode_id = %episode_for_task.episode_id,

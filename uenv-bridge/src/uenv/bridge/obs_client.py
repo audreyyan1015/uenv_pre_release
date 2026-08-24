@@ -22,6 +22,8 @@ _LOG = logging.getLogger(__name__)
 _SEQ_LOCK = threading.Lock()
 _SEQ = 0
 _SOURCE_ID = f"bridge:{os.getpid()}"
+_HEARTBEAT_LOCK = threading.Lock()
+_HEARTBEAT_STOPS: dict[str, threading.Event] = {}
 
 
 def _next_seq() -> int:
@@ -83,8 +85,53 @@ def emit_run_event(
     _post_event(event)
 
 
+def _heartbeat_interval_seconds() -> float:
+    raw_value = os.environ.get("UENV_OBS_HEARTBEAT_INTERVAL_SECONDS", "30").strip()
+    try:
+        return float(raw_value)
+    except ValueError:
+        return 30.0
+
+
+def start_run_heartbeat(training_run_id: str) -> None:
+    if not obs_enabled():
+        return
+    interval = _heartbeat_interval_seconds()
+    if interval <= 0:
+        return
+
+    with _HEARTBEAT_LOCK:
+        if training_run_id in _HEARTBEAT_STOPS:
+            return
+        stop_event = threading.Event()
+        _HEARTBEAT_STOPS[training_run_id] = stop_event
+
+    def loop() -> None:
+        run_heartbeat(training_run_id)
+        while not stop_event.wait(interval):
+            run_heartbeat(training_run_id)
+
+    thread = threading.Thread(
+        target=loop,
+        name=f"uenv-obs-heartbeat-{training_run_id[:24]}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def stop_run_heartbeat(training_run_id: str) -> None:
+    with _HEARTBEAT_LOCK:
+        stop_event = _HEARTBEAT_STOPS.pop(training_run_id, None)
+    if stop_event is not None:
+        stop_event.set()
+
+
 def run_started(training_run_id: str, **kwargs: Any) -> None:
     emit_run_event("RUN_STARTED", training_run_id, **kwargs)
+
+
+def run_heartbeat(training_run_id: str, **kwargs: Any) -> None:
+    emit_run_event("RUN_HEARTBEAT", training_run_id, **kwargs)
 
 
 def run_stopped(training_run_id: str, **kwargs: Any) -> None:
@@ -93,3 +140,18 @@ def run_stopped(training_run_id: str, **kwargs: Any) -> None:
 
 def run_closed(training_run_id: str, **kwargs: Any) -> None:
     emit_run_event("RUN_CLOSED", training_run_id, **kwargs)
+
+
+def run_completed(training_run_id: str, **kwargs: Any) -> None:
+    emit_run_event("RUN_COMPLETED", training_run_id, **kwargs)
+    stop_run_heartbeat(training_run_id)
+
+
+def run_terminated(training_run_id: str, **kwargs: Any) -> None:
+    emit_run_event("RUN_TERMINATED", training_run_id, **kwargs)
+    stop_run_heartbeat(training_run_id)
+
+
+def run_failed(training_run_id: str, **kwargs: Any) -> None:
+    emit_run_event("RUN_FAILED", training_run_id, **kwargs)
+    stop_run_heartbeat(training_run_id)

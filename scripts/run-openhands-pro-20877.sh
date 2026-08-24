@@ -11,7 +11,7 @@ UENV="${UENV_REPO:-/root/UEnv}"
 # Gateway：Server 编排模式下由 AgentJob（UENV_AGENT_JOB_FILE）注入，driver 会覆盖此值，
 # 故此处默认留空；旁路/手动模式仍可用 UENV_GATEWAY 显式指定。driver 在两者皆空时报错。
 GATEWAY="${UENV_GATEWAY:-}"
-API_KEY="${UENV_GATEWAY_API_KEY:-REPLACE_WITH_RANDOM_GATEWAY_API_KEY}"
+API_KEY="${UENV_GATEWAY_API_KEY:-swe-pro-secret}"
 LLM_JSON="${OPENHANDS_LLM_CONFIG:-$UENV/config/openhands-llm-20877.json}"
 # 手动评测默认尽力采集但不因 trace 缺失而失败；训练 poller 会显式设为 required。
 ROLLOUT_TRACE="${UENV_ROLLOUT_TRACE:-best-effort}"

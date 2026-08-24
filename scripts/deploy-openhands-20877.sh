@@ -108,7 +108,7 @@ if [[ "\$ENABLE_POLL" == "1" ]]; then
   grep -q '^UENV_GATEWAY_LOCAL=' /root/.openhands-20877.env || \
     echo 'UENV_GATEWAY_LOCAL=http://127.0.0.1:28097' >> /root/.openhands-20877.env
   grep -q '^UENV_GATEWAY_API_KEY=' /root/.openhands-20877.env || \
-    echo 'UENV_GATEWAY_API_KEY=REPLACE_WITH_RANDOM_GATEWAY_API_KEY' >> /root/.openhands-20877.env
+    echo 'UENV_GATEWAY_API_KEY=swe-pro-secret' >> /root/.openhands-20877.env
   grep -q '^OPENHANDS_RUN_TIMEOUT_SEC=' /root/.openhands-20877.env || \
     echo 'OPENHANDS_RUN_TIMEOUT_SEC=7200' >> /root/.openhands-20877.env
   grep -q '^OPENHANDS_MAX_OUTPUT_TOKENS=' /root/.openhands-20877.env || \
@@ -142,7 +142,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -lc 'set -a; . /root/.openhands-20877.env; set +a; export OPENHANDS_AGENT_POLL=1 UENV_SERVER_ENDPOINT=8.130.75.157:8088 OPENHANDS_AGENT_POOL_ID=openhands-default OPENHANDS_AGENT_BRIDGE_ID=uenv-agent-openhands OPENHANDS_AGENT_BRIDGE_VERSION=1.0.0 OPENHANDS_AGENT_MAX_CONCURRENT=1 OPENHANDS_POLL_INTERVAL_SEC=1 OPENHANDS_HEARTBEAT_INTERVAL_SEC=5 UENV_AGENT_BRIDGE_DIR=/root/UEnv/integrations/openhands OPENHANDS_RUN_SCRIPT=/root/UEnv/scripts/run-openhands-pro-20877.sh UENV_GATEWAY_LOCAL=http://127.0.0.1:28097 UENV_GATEWAY_API_KEY=REPLACE_WITH_RANDOM_GATEWAY_API_KEY OPENHANDS_AGENT_ID=openhands-20877-extra-\$slot OPENHANDS_RUNS_DIR=\$runs_dir OPENHANDS_COMPLETION_SPOOL_DIR=\$runs_dir/completion-spool OPENHANDS_RUNNER_API_BIND=127.0.0.1:\$api OPENHANDS_RUNNER_HEALTH_BIND=127.0.0.1:\$health OPENHANDS_AGENT_LABELS=role=openhands,slot=extra-\$slot; exec /root/uenv-agent-venv/bin/python /root/UEnv/scripts/openhands/openhands_runner.py'
+ExecStart=/bin/bash -lc 'set -a; . /root/.openhands-20877.env; set +a; export OPENHANDS_AGENT_POLL=1 UENV_SERVER_ENDPOINT=8.130.75.157:8088 OPENHANDS_AGENT_POOL_ID=openhands-default OPENHANDS_AGENT_BRIDGE_ID=uenv-agent-openhands OPENHANDS_AGENT_BRIDGE_VERSION=1.0.0 OPENHANDS_AGENT_MAX_CONCURRENT=1 OPENHANDS_POLL_INTERVAL_SEC=1 OPENHANDS_HEARTBEAT_INTERVAL_SEC=5 UENV_AGENT_BRIDGE_DIR=/root/UEnv/integrations/openhands OPENHANDS_RUN_SCRIPT=/root/UEnv/scripts/run-openhands-pro-20877.sh UENV_GATEWAY_LOCAL=http://127.0.0.1:28097 UENV_GATEWAY_API_KEY=swe-pro-secret OPENHANDS_AGENT_ID=openhands-20877-extra-\$slot OPENHANDS_RUNS_DIR=\$runs_dir OPENHANDS_COMPLETION_SPOOL_DIR=\$runs_dir/completion-spool OPENHANDS_RUNNER_API_BIND=127.0.0.1:\$api OPENHANDS_RUNNER_HEALTH_BIND=127.0.0.1:\$health OPENHANDS_AGENT_LABELS=role=openhands,slot=extra-\$slot; exec /root/uenv-agent-venv/bin/python /root/UEnv/scripts/openhands/openhands_runner.py'
 Restart=always
 RestartSec=5
 
@@ -170,7 +170,7 @@ Environment=OPENHANDS_AGENT_AUTOSCALE_MIN=1
 Environment=OPENHANDS_AGENT_AUTOSCALE_MAX=4
 Environment=OPENHANDS_AGENT_AUTOSCALE_INTERVAL_SEC=10
 Environment=UENV_GATEWAY_LOCAL=http://127.0.0.1:28097
-Environment=UENV_GATEWAY_API_KEY=REPLACE_WITH_RANDOM_GATEWAY_API_KEY
+Environment=UENV_GATEWAY_API_KEY=swe-pro-secret
 ExecStart=/root/uenv-agent-venv/bin/python /root/UEnv/scripts/openhands/agent_pool_supervisor.py
 Restart=always
 RestartSec=5
@@ -192,7 +192,7 @@ fi
 systemctl is-active uenv-gateway-tunnel.service >/dev/null 2>&1 && systemctl restart uenv-gateway-tunnel.service || true
 sleep 3
 curl -sf http://127.0.0.1:8777/health && echo " runner_ok" || echo " runner_not_ready"
-curl -sf -H 'X-API-Key: REPLACE_WITH_RANDOM_GATEWAY_API_KEY' http://127.0.0.1:28097/health && echo " tunnel_gateway_ok" || echo " tunnel_gateway_fail"
+curl -sf -H 'X-API-Key: swe-pro-secret' http://127.0.0.1:28097/health && echo " tunnel_gateway_ok" || echo " tunnel_gateway_fail"
 if [[ "\$ENABLE_POLL" == "1" ]]; then
   systemctl is-active uenv-agent-poller.service && echo " agent_poller_active" || echo " agent_poller_inactive"
   if [[ "\$AGENT_REPLICAS" =~ ^[0-9]+$ && "\$AGENT_REPLICAS" -gt 1 ]]; then

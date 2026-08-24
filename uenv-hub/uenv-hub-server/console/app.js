@@ -232,7 +232,7 @@
 
   const PACKAGE_KINDS = {
     benchmark: { label: "基准数据集", badge: "info", desc: "任务目录 + 评测规格，喂给某个环境契约" },
-    agent_scaffold: { label: "Agent 运行时", badge: "ok", desc: "决定「怎么答」，由 Agent 宿主同步" },
+    agent_scaffold: { label: "Agent 脚手架", badge: "ok", desc: "决定「怎么答」，由 Agent 宿主同步" },
     rubric: { label: "评分契约", badge: "warn", desc: "判分口径与对齐证据" },
     image_bundle: { label: "镜像包", badge: "", desc: "只有 docker load 输入，无任务数据" },
     fixture: { label: "测试夹具", badge: "", desc: "回归用，不参与正式训练" },
@@ -459,9 +459,9 @@
         el("p", {
           style: "margin:-4px 0 10px;font-size:12.5px;color:var(--muted-foreground)",
           text:
-            "Episode Stack 将「环境契约 + 基准数据集 + Agent 运行时 + 运行时网关要求」" +
+            "Episode Stack 将「环境契约 + 基准数据集 + Agent 脚手架 + 运行时网关要求」" +
             "固定为可解析组合；自身不含字节，仅按版本引用构件。" +
-            "因此同一份数据搭配不同 Agent 运行时会形成两个 Stack，而非两份数据副本。",
+            "因此同一份数据搭配不同脚手架会形成两个 Stack，而非两份数据副本。",
         }),
         el("div", { class: "grid cols-4" }, [
           clickable(
@@ -477,7 +477,7 @@
             nav("#/benchmarks"),
           ),
           clickable(
-            statTile("Agent 运行时", fmtNum(byKind.agent_scaffold ?? r.agent_bridges), "决定「怎么答」"),
+            statTile("Agent 脚手架", fmtNum(byKind.agent_scaffold ?? r.agent_bridges), "决定「怎么答」"),
             nav("#/scaffolds"),
           ),
           clickable(
@@ -959,7 +959,7 @@
         ]),
         el("p", {
           class: "model-note",
-          text: "Episode Stack 位于更上层，将「环境契约 + 基准数据集 + Agent 运行时」固定为可运行组合。",
+          text: "Episode Stack 位于更上层，将「环境契约 + 基准数据集 + Agent 脚手架」固定为可运行组合。",
         }),
       ]),
     );
@@ -1077,7 +1077,7 @@
   // ------------------------------------------------------- 视图：Agent 脚手架
 
   routes.scaffolds = async () => {
-    setCrumbs("Agent 运行时", "kind=agent_scaffold · GET /api/v1/agent-bridges");
+    setCrumbs("Agent 脚手架", "kind=agent_scaffold · GET /api/v1/agent-bridges");
     const [{ groups }, bridges] = await Promise.all([
       packagesByKind(),
       api("/api/v1/agent-bridges").catch(() => []),
@@ -1089,12 +1089,12 @@
 
     return el("div", {}, [
       lead(
-        "Agent 运行时决定「怎么答」：它跑在 Agent 宿主上，通过 Worker Runtime Gateway 把命令" +
+        "脚手架决定「怎么答」：它跑在 Agent 宿主上，通过 Worker Runtime Gateway 把命令" +
           "路由回任务容器。它本身也是环境包，只是在 agent_defaults 里声明了 agent_kind，" +
           "因此同时出现在 Agent Bridge 目录里 —— 是同一个对象的两种视图，不是两样东西。",
       ),
       card(
-        "Agent 运行时注册表",
+        "脚手架注册表",
         table(
           ["包 ID", "最新版本", "agent_kind", "可驱动环境", "描述", "更新时间"],
           scaffolds.map((p) =>
@@ -1106,9 +1106,9 @@
               ];
             }),
           ),
-          { empty: "尚未发布 Agent 运行时" },
+          { empty: "尚未发布 Agent 脚手架" },
         ),
-        { tight: true, hint: `${scaffolds.length} 个运行时` },
+        { tight: true, hint: `${scaffolds.length} 个脚手架` },
       ),
     ]);
   };
@@ -1195,7 +1195,7 @@
     const meta = kindMeta(entry?.kind);
     const backTo =
       entry?.kind === "agent_scaffold"
-        ? ["← 返回 Agent 运行时", "#/scaffolds"]
+        ? ["← 返回 Agent 脚手架", "#/scaffolds"]
         : entry?.kind === "benchmark"
           ? ["← 返回基准与数据集", "#/benchmarks"]
           : ["← 返回制品与镜像", "#/artifacts"];
@@ -1350,14 +1350,14 @@
       el("p", {
         style: "margin:0 0 14px;color:var(--muted-foreground);font-size:13px",
         text:
-          "Episode Stack 将「任务环境 + Agent 运行时 + 运行时网关」登记为可解析整体；" +
+          "Episode Stack 将「任务环境 + Agent 脚手架 + 运行时网关」登记为可解析整体；" +
           "解析时会将浮动约束固定到具体版本，并生成可写入训练记录的 stack_digest。",
       }),
       card(
         "Episode Stack 注册表",
         el("div", {}, [
           table(
-            ["Stack ID", "最新版本", "执行模式", "任务环境", "Agent 运行时", "运行时网关", "描述"],
+            ["Stack ID", "最新版本", "执行模式", "任务环境", "Agent 脚手架", "运行时网关", "描述"],
             rows,
             { empty: "尚未发布任何 Episode Stack" },
           ),
@@ -1421,7 +1421,7 @@
           kv([
             ["任务环境", `${manifest.task_env?.env_type || "—"}@${manifest.task_env?.version || "—"}`],
             ["数据集", manifest.task_env?.dataset || "—"],
-            ["Agent 运行时", scaffoldRef(manifest.agent_scaffold)],
+            ["Agent 脚手架", scaffoldRef(manifest.agent_scaffold)],
             ["环境包", (manifest.env_packages || []).join(", ") || "—"],
             [
               "运行时网关",
@@ -1473,7 +1473,7 @@
       if ((resolved.package_plans || []).length) {
         body.appendChild(disclose(`环境包同步计划（${resolved.package_plans.length}）`, jsonBlock(resolved.package_plans)));
       }
-      if (resolved.agent_scaffold) body.appendChild(disclose("Agent 运行时", jsonBlock(resolved.agent_scaffold)));
+      if (resolved.agent_scaffold) body.appendChild(disclose("Agent 脚手架", jsonBlock(resolved.agent_scaffold)));
       body.appendChild(disclose("任务环境清单", jsonBlock(resolved.task_env_manifest)));
       body.appendChild(disclose("完整解析结果 JSON", jsonBlock(resolved)));
 
@@ -1501,13 +1501,13 @@
       el("p", {
         style: "margin:0 0 14px;color:var(--muted-foreground);font-size:13px",
         text:
-          "这是「Agent 运行时」按 agent_kind 的投影视图，内容与该页同源；" +
+          "这是「Agent 脚手架」按 agent_kind 的投影视图，内容与该页同源；" +
           "bundle_digest 与 Agent 注册时上报的字段同名同值，两侧可以直接比对。",
       }),
       card(
         "Agent Bridge 投影",
         table(
-          ["包 ID", "版本", "运行时族", "驱动的环境", "Worker 特性要求", "Bundle 摘要", "发布时间"],
+          ["包 ID", "版本", "脚手架族", "驱动的环境", "Worker 特性要求", "Bundle 摘要", "发布时间"],
           items.map((b) => ({
             onclick: () => go(`#/packages/${encodeURIComponent(b.package_id)}/${encodeURIComponent(b.version)}`),
             cells: [
@@ -1520,9 +1520,9 @@
               fmtTime(b.published_at),
             ],
           })),
-          { empty: "没有已发布的 Agent 运行时" },
+          { empty: "没有已发布的 Agent 脚手架" },
         ),
-        { tight: true, hint: `${items.length} 个运行时` },
+        { tight: true, hint: `${items.length} 个脚手架` },
       ),
     ]);
   };
@@ -1608,10 +1608,10 @@
   // -------------------------------------------------------- 视图：模板
 
   routes.templates = async () => {
-    setCrumbs("环境模板", "GET /api/v1/templates");
+    setCrumbs("脚手架模板", "GET /api/v1/templates");
     const items = await api("/api/v1/templates");
     return card(
-      "环境模板",
+      "环境脚手架模板",
       table(
         ["名称", "版本", "描述", "归档 SHA256", "更新时间", "操作"],
         items.map((t) => ({

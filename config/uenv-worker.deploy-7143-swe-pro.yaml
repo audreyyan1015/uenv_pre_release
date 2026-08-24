@@ -55,7 +55,7 @@ runtime_gateway:
   enabled: true
   listen: "0.0.0.0:28097"
   capacity: 1
-  api_key: "REPLACE_WITH_RANDOM_GATEWAY_API_KEY"
+  api_key: "swe-pro-secret"
 
 trajectory_upload:
   endpoint: "http://8.130.75.157:8077"

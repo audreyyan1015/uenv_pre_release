@@ -128,6 +128,18 @@ struct TokenQuery {
     token: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct PaginationQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+fn pagination_window(limit: Option<usize>, offset: Option<usize>) -> (usize, usize) {
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    let offset = offset.unwrap_or(0);
+    (limit, offset)
+}
+
 async fn get_state(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -139,6 +151,23 @@ async fn get_state(
     }
     let state = st.obs.ensure_run_maybe_mock(&run_id);
     cors((StatusCode::OK, Json(state)).into_response())
+}
+
+async fn get_timeline(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorized(&st.obs, &headers, q.token.as_deref()) {
+        return cors((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
+    }
+    match st.obs.run_timeline(&run_id) {
+        Ok(timeline) => {
+            cors((StatusCode::OK, Json(json!({ "timeline": timeline }))).into_response())
+        }
+        Err(e) => cors((StatusCode::INTERNAL_SERVER_ERROR, e).into_response()),
+    }
 }
 
 async fn stream(
@@ -225,12 +254,71 @@ async fn seed_run(
     cors((StatusCode::OK, Json(state)).into_response())
 }
 
-async fn list_runs(State(st): State<AppState>, headers: HeaderMap) -> Response {
+async fn list_runs(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<PaginationQuery>,
+) -> Response {
     if !authorized(&st.obs, &headers, None) {
         return cors((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
     }
+    let (limit, offset) = pagination_window(q.limit, q.offset);
     let runs = st.obs.list_run_ids();
-    cors((StatusCode::OK, Json(json!({ "runs": runs }))).into_response())
+    let total = runs.len();
+    let runs: Vec<_> = runs.into_iter().skip(offset).take(limit).collect();
+    cors(
+        (
+            StatusCode::OK,
+            Json(json!({ "runs": runs, "total": total, "limit": limit, "offset": offset })),
+        )
+            .into_response(),
+    )
+}
+
+async fn list_run_summaries(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<PaginationQuery>,
+) -> Response {
+    if !authorized(&st.obs, &headers, None) {
+        return cors((StatusCode::UNAUTHORIZED, "unauthorized").into_response());
+    }
+    let (limit, offset) = pagination_window(q.limit, q.offset);
+    let runs = st.obs.list_run_summaries();
+    let total = runs.len();
+    let running = runs
+        .iter()
+        .filter(|run| run.run_status == "running" || run.run_status == "stopping")
+        .count();
+    let completed = runs
+        .iter()
+        .filter(|run| run.run_status == "completed")
+        .count();
+    let terminated = runs
+        .iter()
+        .filter(|run| run.run_status == "terminated" || run.run_status == "failed")
+        .count();
+    let pending = total.saturating_sub(running + completed + terminated);
+    let runs: Vec<_> = runs.into_iter().skip(offset).take(limit).collect();
+    cors(
+        (
+            StatusCode::OK,
+            Json(json!({
+                "runs": runs,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "status_counts": {
+                    "total": total,
+                    "running": running,
+                    "completed": completed,
+                    "terminated": terminated,
+                    "pending": pending,
+                },
+            })),
+        )
+            .into_response(),
+    )
 }
 
 pub fn router(obs: ObsHandle) -> Router {
@@ -244,8 +332,16 @@ pub fn router(obs: ObsHandle) -> Router {
         )
         .route("/api/v1/runs", get(list_runs).options(options_ok))
         .route(
+            "/api/v1/runs/summary",
+            get(list_run_summaries).options(options_ok),
+        )
+        .route(
             "/api/v1/runs/{run_id}/state",
             get(get_state).options(options_ok),
+        )
+        .route(
+            "/api/v1/runs/{run_id}/timeline",
+            get(get_timeline).options(options_ok),
         )
         .route(
             "/api/v1/runs/{run_id}/stream",

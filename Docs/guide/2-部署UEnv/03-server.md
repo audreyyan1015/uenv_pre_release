@@ -36,7 +36,7 @@ UENV_TRAJECTORY_HTTP_LISTEN=127.0.0.1:8077
 UENV_TRAJECTORY_DATA_DIR=/var/lib/uenv/server/trajectory
 ```
 
-多机轨迹采集确实需要 UEnv Worker 访问 `8077/TCP` 时，再把该接口改为受控内网地址，同时设置高熵 `UENV_TRAJECTORY_TOKEN`、在 UEnv Worker 使用相同 token，并只向需要的主机放行端口。远程 Obs 同理设置 `UENV_OBS_TOKEN`。跨不受信任网络时还需要 TLS 终止或 VPN；Bearer token 本身不加密链路。
+多机轨迹采集确实需要 UEnv Worker 访问 `8077/TCP` 时，再把该接口改为受控内网地址，同时设置高熵 `UENV_TRAJECTORY_TOKEN`、在 UEnv Worker 使用相同 token，并只向需要的主机放行端口。UEnv Worker 侧的对应配置是 `/etc/uenv/worker.env` 的 `UENV_TRAJECTORY_ENDPOINT`（安装时可用 install.sh 的 `--trajectory-endpoint` 指定）和 `/etc/uenv/secrets/swe.env` 的 `UENV_TRAJECTORY_TOKEN`；安装器在每台主机各自生成回环地址和随机 token，多机部署需逐台修改并与 UEnv Server 保持一致，否则轨迹不会集中保存。注意 `prepare-swe --reset-swe-key` 会重新生成该 token，执行后需重新同步到各 UEnv Worker。远程 Obs 同理设置 `UENV_OBS_TOKEN`。跨不受信任网络时还需要 TLS 终止或 VPN；Bearer token 本身不加密链路。
 
 ## 常用调度设置
 

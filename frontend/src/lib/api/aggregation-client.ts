@@ -8,6 +8,59 @@ export interface AggregationConfig {
   useFixture: boolean;
 }
 
+export interface RunSummary {
+  training_run_id: string;
+  run_state: string;
+  run_status?: string;
+  terminal_reason?: string;
+  last_heartbeat_ts?: number;
+  heartbeat_state?: string;
+  updated_at: number;
+  global_event_seq: number;
+  planned_episode_total?: number;
+  planned_step_total?: number;
+  started_at: number;
+  active_stage: string;
+  active_stage_label: string;
+  episode_total: number;
+  episode_active: number;
+  episode_done: number;
+  episode_failed: number;
+  worker_total: number;
+}
+
+export interface RunTimelineItem {
+  stage: string;
+  label: string;
+  status: string;
+  first_source_ts: number;
+  last_source_ts: number;
+  event_count: number;
+  episode_count: number;
+}
+
+export interface RunSummaryStatusCounts {
+  total: number;
+  running: number;
+  completed: number;
+  pending: number;
+  terminated?: number;
+  failed?: number;
+}
+
+export interface RunSummaryPage {
+  runs: RunSummary[];
+  total: number;
+  limit?: number;
+  offset?: number;
+  status_counts?: RunSummaryStatusCounts;
+}
+
+export interface ListRunsOptions {
+  limit?: number;
+  offset?: number;
+}
+
 /**
  * 读取 `VITE_AGGREGATION_BASE_URL` / `VITE_AGGREGATION_TOKEN`。
  * 未配置根地址时视为 FE-0 离线演示模式（fixture），不尝试联网。
@@ -62,6 +115,13 @@ export class AggregationClient {
     return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
 
+  private buildUrl(path: string, opts?: ListRunsOptions): string {
+    const url = new URL(`${this.baseUrl}${path}`, window.location.origin);
+    if (typeof opts?.limit === "number") url.searchParams.set("limit", String(opts.limit));
+    if (typeof opts?.offset === "number") url.searchParams.set("offset", String(opts.offset));
+    return url.toString();
+  }
+
   async getState(runId: string): Promise<ChainState> {
     const res = await fetch(`${this.baseUrl}/api/v1/runs/${encodeURIComponent(runId)}/state`, {
       headers: { ...this.authHeaders() },
@@ -70,6 +130,100 @@ export class AggregationClient {
       throw new Error(`获取 ChainState 失败：HTTP ${res.status}`);
     }
     return (await res.json()) as ChainState;
+  }
+
+  async listRuns(opts?: ListRunsOptions): Promise<string[]> {
+    const res = await fetch(this.buildUrl("/api/v1/runs", opts), {
+      headers: { ...this.authHeaders() },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(`获取 run 列表失败：HTTP ${res.status}`);
+    }
+    const payload = (await res.json()) as { runs?: unknown; total?: unknown };
+    const runs = Array.isArray(payload.runs)
+      ? payload.runs.filter((runId): runId is string => typeof runId === "string")
+      : [];
+    if (typeof payload.total !== "number" && typeof opts?.limit === "number") {
+      const offset = opts.offset ?? 0;
+      return runs.slice(offset, offset + opts.limit);
+    }
+    return runs;
+  }
+
+  async listRunSummaryPage(opts?: ListRunsOptions): Promise<RunSummaryPage> {
+    const res = await fetch(this.buildUrl("/api/v1/runs/summary", opts), {
+      headers: { ...this.authHeaders() },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(`获取 run 摘要失败：HTTP ${res.status}`);
+    }
+    const payload = (await res.json()) as {
+      runs?: unknown;
+      total?: unknown;
+      limit?: unknown;
+      offset?: unknown;
+      status_counts?: unknown;
+    };
+    const runs = Array.isArray(payload.runs)
+      ? payload.runs.filter((run): run is RunSummary => {
+          if (!run || typeof run !== "object") return false;
+          const item = run as Partial<RunSummary>;
+          return typeof item.training_run_id === "string" && typeof item.run_state === "string";
+        })
+      : [];
+    const statusCounts =
+      payload.status_counts && typeof payload.status_counts === "object"
+        ? (payload.status_counts as Partial<RunSummaryStatusCounts>)
+        : undefined;
+    return {
+      runs,
+      total: typeof payload.total === "number" ? payload.total : runs.length,
+      limit: typeof payload.limit === "number" ? payload.limit : opts?.limit,
+      offset: typeof payload.offset === "number" ? payload.offset : opts?.offset,
+      status_counts:
+        typeof statusCounts?.total === "number" &&
+        typeof statusCounts.running === "number" &&
+        typeof statusCounts.completed === "number" &&
+        typeof statusCounts.pending === "number"
+          ? {
+              total: statusCounts.total,
+              running: statusCounts.running,
+              completed: statusCounts.completed,
+              pending: statusCounts.pending,
+              terminated: typeof statusCounts.terminated === "number" ? statusCounts.terminated : undefined,
+              failed: typeof statusCounts.failed === "number" ? statusCounts.failed : undefined,
+            }
+          : undefined,
+    };
+  }
+
+  async listRunSummaries(opts?: ListRunsOptions): Promise<RunSummary[]> {
+    return (await this.listRunSummaryPage(opts)).runs;
+  }
+
+  async getRunTimeline(runId: string): Promise<RunTimelineItem[]> {
+    const res = await fetch(`${this.baseUrl}/api/v1/runs/${encodeURIComponent(runId)}/timeline`, {
+      headers: { ...this.authHeaders() },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(`获取 run 时间轴失败：HTTP ${res.status}`);
+    }
+    const payload = (await res.json()) as { timeline?: unknown };
+    return Array.isArray(payload.timeline)
+      ? payload.timeline.filter((item): item is RunTimelineItem => {
+          if (!item || typeof item !== "object") return false;
+          const timelineItem = item as Partial<RunTimelineItem>;
+          return (
+            typeof timelineItem.stage === "string" &&
+            typeof timelineItem.label === "string" &&
+            typeof timelineItem.first_source_ts === "number" &&
+            typeof timelineItem.last_source_ts === "number"
+          );
+        })
+      : [];
   }
 
   /**

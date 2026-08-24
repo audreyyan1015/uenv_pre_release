@@ -11,11 +11,13 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SystemRouteImport } from './routes/system'
 import { Route as ServerRouteImport } from './routes/server'
+import { Route as ProgressRouteImport } from './routes/progress'
 import { Route as OpsRouteImport } from './routes/ops'
+import { Route as LaunchRouteImport } from './routes/launch'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ServerWorkerRouteImport } from './routes/server_.worker'
-import { Route as ServerPoolsRouteImport } from './routes/server_.pools'
 import { Route as ServerAgentsRouteImport } from './routes/server_.agents'
+import { Route as ProgressTaskIdRouteImport } from './routes/progress_.$taskId'
 
 const SystemRoute = SystemRouteImport.update({
   id: '/system',
@@ -27,9 +29,19 @@ const ServerRoute = ServerRouteImport.update({
   path: '/server',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProgressRoute = ProgressRouteImport.update({
+  id: '/progress',
+  path: '/progress',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const OpsRoute = OpsRouteImport.update({
   id: '/ops',
   path: '/ops',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LaunchRoute = LaunchRouteImport.update({
+  id: '/launch',
+  path: '/launch',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -42,82 +54,96 @@ const ServerWorkerRoute = ServerWorkerRouteImport.update({
   path: '/server/worker',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ServerPoolsRoute = ServerPoolsRouteImport.update({
-  id: '/server_/pools',
-  path: '/server/pools',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ServerAgentsRoute = ServerAgentsRouteImport.update({
   id: '/server_/agents',
   path: '/server/agents',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProgressTaskIdRoute = ProgressTaskIdRouteImport.update({
+  id: '/progress_/$taskId',
+  path: '/progress/$taskId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/launch': typeof LaunchRoute
   '/ops': typeof OpsRoute
+  '/progress': typeof ProgressRoute
   '/server': typeof ServerRoute
   '/system': typeof SystemRoute
+  '/progress/$taskId': typeof ProgressTaskIdRoute
   '/server/agents': typeof ServerAgentsRoute
-  '/server/pools': typeof ServerPoolsRoute
   '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/launch': typeof LaunchRoute
   '/ops': typeof OpsRoute
+  '/progress': typeof ProgressRoute
   '/server': typeof ServerRoute
   '/system': typeof SystemRoute
+  '/progress/$taskId': typeof ProgressTaskIdRoute
   '/server/agents': typeof ServerAgentsRoute
-  '/server/pools': typeof ServerPoolsRoute
   '/server/worker': typeof ServerWorkerRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/launch': typeof LaunchRoute
   '/ops': typeof OpsRoute
+  '/progress': typeof ProgressRoute
   '/server': typeof ServerRoute
   '/system': typeof SystemRoute
+  '/progress_/$taskId': typeof ProgressTaskIdRoute
   '/server_/agents': typeof ServerAgentsRoute
-  '/server_/pools': typeof ServerPoolsRoute
   '/server_/worker': typeof ServerWorkerRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/launch'
     | '/ops'
+    | '/progress'
     | '/server'
     | '/system'
+    | '/progress/$taskId'
     | '/server/agents'
-    | '/server/pools'
     | '/server/worker'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/launch'
     | '/ops'
+    | '/progress'
     | '/server'
     | '/system'
+    | '/progress/$taskId'
     | '/server/agents'
-    | '/server/pools'
     | '/server/worker'
   id:
     | '__root__'
     | '/'
+    | '/launch'
     | '/ops'
+    | '/progress'
     | '/server'
     | '/system'
+    | '/progress_/$taskId'
     | '/server_/agents'
-    | '/server_/pools'
     | '/server_/worker'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  LaunchRoute: typeof LaunchRoute
   OpsRoute: typeof OpsRoute
+  ProgressRoute: typeof ProgressRoute
   ServerRoute: typeof ServerRoute
   SystemRoute: typeof SystemRoute
+  ProgressTaskIdRoute: typeof ProgressTaskIdRoute
   ServerAgentsRoute: typeof ServerAgentsRoute
-  ServerPoolsRoute: typeof ServerPoolsRoute
   ServerWorkerRoute: typeof ServerWorkerRoute
 }
 
@@ -137,11 +163,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServerRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/progress': {
+      id: '/progress'
+      path: '/progress'
+      fullPath: '/progress'
+      preLoaderRoute: typeof ProgressRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/ops': {
       id: '/ops'
       path: '/ops'
       fullPath: '/ops'
       preLoaderRoute: typeof OpsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/launch': {
+      id: '/launch'
+      path: '/launch'
+      fullPath: '/launch'
+      preLoaderRoute: typeof LaunchRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -158,13 +198,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServerWorkerRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/server_/pools': {
-      id: '/server_/pools'
-      path: '/server/pools'
-      fullPath: '/server/pools'
-      preLoaderRoute: typeof ServerPoolsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/server_/agents': {
       id: '/server_/agents'
       path: '/server/agents'
@@ -172,16 +205,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ServerAgentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/progress_/$taskId': {
+      id: '/progress_/$taskId'
+      path: '/progress/$taskId'
+      fullPath: '/progress/$taskId'
+      preLoaderRoute: typeof ProgressTaskIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  LaunchRoute: LaunchRoute,
   OpsRoute: OpsRoute,
+  ProgressRoute: ProgressRoute,
   ServerRoute: ServerRoute,
   SystemRoute: SystemRoute,
+  ProgressTaskIdRoute: ProgressTaskIdRoute,
   ServerAgentsRoute: ServerAgentsRoute,
-  ServerPoolsRoute: ServerPoolsRoute,
   ServerWorkerRoute: ServerWorkerRoute,
 }
 export const routeTree = rootRouteImport

@@ -62,7 +62,7 @@ class SweCatalogToolTests(unittest.TestCase):
         row.update(
             {
                 "repo": "swesmith/oauthlib__oauthlib.issue-1",
-                "image_name": "swebench/swesmith.x86_64.oauthlib_1776_oauthlib.issue-1",
+                "image_name": "jyangballin/swesmith.x86_64.oauthlib_1776_oauthlib.issue-1",
                 "test_cmd": None,
             }
         )

@@ -51,6 +51,8 @@ case "$VARIANT" in verified|lite|pro|smith) ;; *) fail "无效 benchmark variant
 [[ "$INSTANCE" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "instance_id 含不支持的字符"
 [[ -f "$CATALOG" && -r "$CATALOG" ]] || fail "无法读取 catalog：$CATALOG"
 [[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || fail "case 制品目录无效：$OUTPUT_DIR"
+# 归一化为绝对路径：本脚本结尾会 cd 进该目录再降权启动 Agent，相对路径会失效
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)" || fail "无法进入 case 制品目录：$OUTPUT_DIR"
 id "$AGENT_USER" >/dev/null 2>&1 || fail "缺少 $AGENT_USER；请先运行 prepare-swe"
 command -v runuser >/dev/null 2>&1 || fail "缺少 runuser"
 
@@ -81,6 +83,9 @@ RUNTIME="${UENV_SWE_RUNTIME:-$(config_value /etc/uenv/swe.env UENV_SWE_RUNTIME)}
 TRAJECTORY_ENDPOINT="${UENV_TRAJECTORY_ENDPOINT:-$(config_value /etc/uenv/swe.env UENV_TRAJECTORY_ENDPOINT)}"
 [[ -z "$TRAJECTORY_ENDPOINT" || "$TRAJECTORY_ENDPOINT" =~ ^https?://[^[:space:]]+$ ]] \
   || fail "UENV_TRAJECTORY_ENDPOINT 必须是 http(s) URL"
+# Agent 回读/校验服务器侧轨迹需要同一个 token；Worker 上传用的是 systemd 加载的
+# /etc/uenv/secrets/swe.env，这里显式读出并随 env 传入（env -i 会清空父进程环境）。
+TRAJECTORY_TOKEN="${UENV_TRAJECTORY_TOKEN:-$(config_value /etc/uenv/secrets/swe.env UENV_TRAJECTORY_TOKEN)}"
 if [[ -z "$RUNTIME" ]]; then
   command -v docker >/dev/null 2>&1 && RUNTIME=docker
   [[ -n "$RUNTIME" ]] || { command -v podman >/dev/null 2>&1 && RUNTIME=podman; }
@@ -149,6 +154,11 @@ chown "$AGENT_USER:uenv" "$LLM_CONFIG" "$GATEWAY_KEY_FILE"
 chown "$AGENT_USER:uenv" "$OUTPUT_DIR"
 chmod 0700 "$OUTPUT_DIR"
 
+# 调用者的 cwd（如 /root）对 agent 不可读；Python editable install 的 finder
+# 在 cwd 不可读时会崩溃并抛出误导性 KeyError: 'openhands.sdk'，导致所有实例
+# 瞬时 failed。降权启动前切到 agent 拥有的 case 制品目录。
+cd "$OUTPUT_DIR" || fail "无法进入 case 制品目录：$OUTPUT_DIR"
+
 cleanup() {
   unlink "$LLM_CONFIG" 2>/dev/null || true
   unlink "$GATEWAY_KEY_FILE" 2>/dev/null || true
@@ -177,6 +187,7 @@ runuser -u "$AGENT_USER" -- /usr/bin/env -i \
   TMPDIR="$TMP_DIR" XDG_CACHE_HOME="$AGENT_HOME/.cache" UV_CACHE_DIR="$AGENT_HOME/.cache/uv" \
   OPENHANDS_BENCHMARKS_DIR="$OPENHANDS_DIR" \
   UENV_TRAJECTORY_ENDPOINT="$TRAJECTORY_ENDPOINT" \
+  UENV_TRAJECTORY_TOKEN="$TRAJECTORY_TOKEN" \
   UENV_INTERNAL_GATEWAY_KEY_FILE="$GATEWAY_KEY_FILE" \
   /bin/bash -c '
     set -euo pipefail

@@ -46,19 +46,6 @@ COLUMNS = [
     "problem_statement",
 ]
 
-OFFICIAL_SWESMITH_PREFIX = "swebench/swesmith."
-
-
-def normalize_image(image: str) -> str:
-    """Emit the official SWE-smith repository image reference."""
-    value = str(image or "").strip()
-    if "/swesmith." in value:
-        value = value[value.index("swesmith.") :]
-    if not value.startswith("swesmith."):
-        raise ValueError(f"invalid SWE-smith image: {image!r}")
-    value = f"{OFFICIAL_SWESMITH_PREFIX}{value[len('swesmith.') :]}"
-    return value.removesuffix(":latest")
-
 
 def sha256_file(path: Path, chunk: int = 8 << 20) -> tuple[str, int]:
     """Digest and size of a file, streamed so multi-GB tarballs stay off the heap."""
@@ -76,7 +63,7 @@ def sha256_file(path: Path, chunk: int = 8 << 20) -> tuple[str, int]:
 
 def tar_name_for(image: str) -> str:
     """The tarball filename `docker save` output is stored under."""
-    return image.replace("swebench/", "").replace(":", "_").replace("/", "_") + ".tar"
+    return image.replace("jyangballin/", "").replace(":", "_").replace("/", "_") + ".tar"
 
 
 def build(args: argparse.Namespace) -> int:
@@ -102,7 +89,7 @@ def build(args: argparse.Namespace) -> int:
         for i, repo in enumerate(cols["repo"]):
             if repo not in wanted:
                 continue
-            image = normalize_image(cols["image_name"][i])
+            image = cols["image_name"][i]
             images.setdefault(repo, image)
             statement = cols["problem_statement"][i] or ""
             if not statement.strip():
@@ -140,7 +127,7 @@ def build(args: argparse.Namespace) -> int:
     image_rows = []
     total_tar_bytes = 0
     for repo in sorted(images):
-        image = normalize_image(images[repo])
+        image = images[repo]
         tar = tar_dir / tar_name_for(image)
         if not tar.is_file():
             sys.exit(f"image tarball missing for {image}: {tar}")
@@ -166,7 +153,7 @@ def build(args: argparse.Namespace) -> int:
             {
                 "variant": "smith",
                 "source": "https://huggingface.co/datasets/SWE-bench/SWE-smith",
-                "image_namespace": f"{OFFICIAL_SWESMITH_PREFIX}x86_64.*",
+                "image_namespace": "jyangballin/swesmith.x86_64.*",
                 "hosted_by_hub": True,
                 "images": image_rows,
             },

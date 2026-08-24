@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -20,27 +19,13 @@ use crate::pool::warmup_pool::WarmupPool;
 use crate::proto::v1::{
     EpisodeRequest, EpisodeResult, ReportType, StepRecord, StreamReport, Trajectory,
 };
-use crate::swe::artifact::EpisodeArtifact;
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
 use crate::swe::harness::{ContainerRuntime, RunOptions, run_instance};
 use crate::swe::instance_pool::SweInstancePool;
-use crate::swe::trajectory::{
-    StepAction, StepObservation, StepRolloutTrace, StepTrace, TrajectoryBundle, TrajectoryStore,
-    now_ms, resolve_run_id,
-};
-use crate::swe::trajectory_upload::TrajectoryUploader;
 
 /// SWE-bench episode 的 env_type（DispatchEpisode 路由键）。
 pub const SWE_ENV_TYPE: &str = "swe";
-
-/// v2.3：进行中的通用 episode 部分轨迹；episode 终态或 timeout 时取走 seal。
-#[derive(Debug, Default)]
-struct InflightTrajectory {
-    instance_id: String,
-    steps: Vec<StepRecord>,
-    total_reward: f64,
-}
 
 #[derive(Clone)]
 pub struct EpisodeExecutor {
@@ -54,12 +39,6 @@ pub struct EpisodeExecutor {
     /// L2 共享会话池（M2-2）：与 L4 Gateway 共用，native 路径经此 acquire/submit/release。
     /// `None` 时回退一次性 `harness::run_instance`（无池环境，如部分单测）。
     swe_pool: Option<Arc<SweInstancePool>>,
-    /// v2.3：通用 episode 轨迹本地 seal（None=未配置 artifact 目录，跳过）。
-    trajectory_store: Option<TrajectoryStore>,
-    /// v2.3：轨迹上传旁路（与 SWE pool 共享同一 uploader，避免重复 drainer 线程）。
-    trajectory_uploader: Option<TrajectoryUploader>,
-    /// v2.3：inflight 部分轨迹表（key = `{episode_id}:{attempt_id}`）。
-    inflight: Arc<Mutex<HashMap<String, InflightTrajectory>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,9 +68,6 @@ impl EpisodeExecutor {
             swe_store: Arc::new(InstanceStore::default()),
             swe_runtime: ContainerRuntime::Docker,
             swe_pool: None,
-            trajectory_store: None,
-            trajectory_uploader: None,
-            inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -110,93 +86,6 @@ impl EpisodeExecutor {
     pub fn with_swe_pool(mut self, pool: Arc<SweInstancePool>) -> Self {
         self.swe_pool = Some(pool);
         self
-    }
-
-    /// v2.3：注入轨迹上传旁路（与 SWE pool 共享同一 uploader）；本地 store 按环境变量解析
-    /// （`UENV_TRAJECTORY_ARTIFACT_DIR` 优先，回退 `UENV_SWE_ARTIFACT_DIR`）。
-    /// artifact 目录未配置时 store 为 None，通用 episode 跳过 seal。
-    pub fn with_trajectory_uploader(mut self, uploader: Option<TrajectoryUploader>) -> Self {
-        self.trajectory_store = TrajectoryStore::from_env();
-        self.trajectory_uploader = uploader;
-        self
-    }
-
-    /// v2.3：登记进行中的通用 episode（timeout 时由 worker_service 取走部分轨迹 seal）。
-    /// store 未配置时不登记，后续 record/seal 均为 no-op。
-    fn inflight_register(&self, episode: &EpisodeRequest, instance_id: &str) {
-        if self.trajectory_store.is_none() {
-            return;
-        }
-        self.inflight.lock().expect("inflight lock").insert(
-            inflight_key(episode),
-            InflightTrajectory {
-                instance_id: instance_id.to_string(),
-                ..Default::default()
-            },
-        );
-    }
-
-    /// v2.3：累积一步（含当前累计 reward）。
-    fn inflight_record_step(&self, episode: &EpisodeRequest, step: &StepRecord, total_reward: f64) {
-        if self.trajectory_store.is_none() {
-            return;
-        }
-        if let Some(entry) = self.inflight.lock().expect("inflight lock").get_mut(&inflight_key(episode)) {
-            entry.steps.push(step.clone());
-            entry.total_reward = total_reward;
-        }
-    }
-
-    /// v2.3：取出并 seal inflight 轨迹（completed/failed/timeout 共用）；返回
-    /// `(trajectory_id, storage_url)`（endpoint 未配置时 storage_url 为空串，id 照填）。
-    /// inflight 无记录或 store 未配置时返回 None；seal 失败仅告警，不阻断 episode。
-    fn seal_inflight(
-        &self,
-        episode: &EpisodeRequest,
-        worker_id: &str,
-        resolved: bool,
-    ) -> Option<(String, String)> {
-        let partial = self
-            .inflight
-            .lock()
-            .expect("inflight lock")
-            .remove(&inflight_key(episode))?;
-        let store = self.trajectory_store.as_ref()?;
-        let reward = partial.total_reward;
-        let bundle = build_generic_bundle(episode, worker_id, &partial);
-        match store.seal(bundle, resolved, reward) {
-            Ok(mut r) => {
-                // 与 SWE submit 一致：seal 成功后登记上传（失败不阻断 reward）。
-                if let Some(up) = &self.trajectory_uploader {
-                    up.enqueue(&r.trajectory_id);
-                    r.upload_status = uenv_common::UploadStatus::Pending;
-                    r.storage_url = Some(up.endpoint().to_string());
-                }
-                Some((r.trajectory_id, r.storage_url.unwrap_or_default()))
-            }
-            Err(err) => {
-                tracing::warn!(
-                    episode_id = %episode.episode_id,
-                    error = %err,
-                    msg = "generic_trajectory_seal_failed"
-                );
-                None
-            }
-        }
-    }
-
-    /// v2.3：timeout 终态——seal 进行中的部分轨迹（尽力而为；worker_service 在
-    /// tokio timeout 丢弃执行 future 后调用，故部分轨迹必须留在 self.inflight 中）。
-    pub fn seal_timeout_trajectory(&self, episode: &EpisodeRequest, worker_id: &str) {
-        let _ = self.seal_inflight(episode, worker_id, false);
-    }
-
-    /// v2.3：cancel 终态——丢弃 inflight 记录（server 已取消，无需留存）。
-    pub fn drop_inflight_trajectory(&self, episode: &EpisodeRequest) {
-        self.inflight
-            .lock()
-            .expect("inflight lock")
-            .remove(&inflight_key(episode));
     }
 
     pub async fn execute_single_round(
@@ -267,19 +156,13 @@ impl EpisodeExecutor {
             msg = "episode_phase"
         );
 
-        // v2.3：登记 inflight 部分轨迹，failed/timeout 终态也能 seal。
-        // （放在 build_reset_config 之后：payload 解析失败时尚无环境交互，无需轨迹。）
         let reset_config =
             build_reset_config(&episode.payload, &episode.reward_config, episode.seed)?;
-        self.inflight_register(episode, &lease.instance_id);
-
-        let observation = match self
+        let observation = self
             .plugin_host
             .reset(&lease.instance_id, episode.seed, Some(&reset_config))
             .await
-        {
-            Ok(observation) => observation,
-            Err(err) => {
+            .map_err(|err| {
                 log_phase_error(
                     &trace_id,
                     &episode.episode_id,
@@ -287,11 +170,8 @@ impl EpisodeExecutor {
                     "ERR_ENV_RESET_FAILED",
                     &*err,
                 );
-                // v2.3：reset 失败也 seal（空 steps），轨迹不丢。
-                self.seal_inflight(episode, &ctx.worker_id, false);
-                return Err(err);
-            }
-        };
+                err
+            })?;
 
         let mut steps = Vec::new();
         let mut stream_reports = Vec::new();
@@ -324,7 +204,7 @@ impl EpisodeExecutor {
                     let _ = self.warmup_pool.release(lease.clone()).await;
                     if require_rollout {
                         let async_err = err.into_async_rollout();
-                        let mut out = failed_output(
+                        return Ok(failed_output(
                             episode,
                             ctx,
                             &parallel_mode,
@@ -333,13 +213,7 @@ impl EpisodeExecutor {
                             start.elapsed().as_millis() as u64,
                             model_callback_duration_ms,
                             lease.warmup_hit,
-                        );
-                        // v2.3：失败终态也 seal 部分轨迹，并把指针回填到 failed result。
-                        if let Some((tid, url)) = self.seal_inflight(episode, &ctx.worker_id, false) {
-                            out.result.trajectory_id = tid;
-                            out.result.trajectory_storage_url = url;
-                        }
-                        return Ok(out);
+                        ));
                     }
                     let err_msg = match err {
                         ModelInferError::Rollout(async_err) => async_err.message(),
@@ -353,8 +227,6 @@ impl EpisodeExecutor {
                         "ERR_MODEL_CALL_FAILED",
                         &*boxed,
                     );
-                    // v2.3：失败终态也 seal 部分轨迹（不阻断原有错误返回）。
-                    self.seal_inflight(episode, &ctx.worker_id, false);
                     return Err(boxed);
                 }
             };
@@ -391,26 +263,15 @@ impl EpisodeExecutor {
                         &*err,
                     );
                     let _ = self.warmup_pool.release(lease.clone()).await;
-                    // v2.3：失败终态也 seal 部分轨迹（不阻断原有错误返回）。
-                    self.seal_inflight(episode, &ctx.worker_id, false);
                     return Err(err);
                 }
             };
             let step_duration_ms = step_start.elapsed().as_millis() as u64;
             env_step_duration_ms += step_duration_ms;
 
-            let reward = match self.reward_engine.resolve_reward(
-                &action,
-                &episode.reward_config,
-                step.reward,
-            ) {
-                Ok(reward) => reward,
-                Err(err) => {
-                    // v2.3：reward 解析失败也 seal 部分轨迹（不阻断原有错误返回）。
-                    self.seal_inflight(episode, &ctx.worker_id, false);
-                    return Err(err);
-                }
-            };
+            let reward =
+                self.reward_engine
+                    .resolve_reward(&action, &episode.reward_config, step.reward)?;
             total_reward += reward;
             last_reward = reward;
 
@@ -437,8 +298,6 @@ impl EpisodeExecutor {
             previous_action = Some(action.clone());
             current_observation = step.observation;
             steps.push(step_record.clone());
-            // v2.3：同步累积 inflight 部分轨迹（timeout 时可取走 seal）。
-            self.inflight_record_step(episode, &step_record, total_reward);
 
             // StreamReport 须带 correlation_id / worker_id / report_type，供 Server Obs 转译 STEP_*。
             stream_reports.push(StreamReport {
@@ -473,18 +332,19 @@ impl EpisodeExecutor {
             }
         }
 
-        if let Err(err) = self.warmup_pool.release(lease.clone()).await {
-            log_phase_error(
-                &trace_id,
-                &episode.episode_id,
-                "release",
-                "ERR_POOL_RELEASE_FAILED",
-                &*err,
-            );
-            // v2.3：release 失败也 seal 已收集的完整轨迹（不阻断原有错误返回）。
-            self.seal_inflight(episode, &ctx.worker_id, false);
-            return Err(err);
-        }
+        self.warmup_pool
+            .release(lease.clone())
+            .await
+            .map_err(|err| {
+                log_phase_error(
+                    &trace_id,
+                    &episode.episode_id,
+                    "release",
+                    "ERR_POOL_RELEASE_FAILED",
+                    &*err,
+                );
+                err
+            })?;
 
         let total_steps = steps.len() as i32;
         let trajectory = Trajectory {
@@ -499,7 +359,7 @@ impl EpisodeExecutor {
 
         if require_rollout {
             if let Err(err) = validate_async_completed(&parallel_mode, &episode_rollout_meta) {
-                let mut out = failed_output(
+                return Ok(failed_output(
                     episode,
                     ctx,
                     &parallel_mode,
@@ -508,18 +368,10 @@ impl EpisodeExecutor {
                     duration_ms,
                     model_callback_duration_ms,
                     lease.warmup_hit,
-                );
-                // v2.3：失败终态也 seal 轨迹，并把指针回填到 failed result。
-                if let Some((tid, url)) = self.seal_inflight(episode, &ctx.worker_id, false) {
-                    out.result.trajectory_id = tid;
-                    out.result.trajectory_storage_url = url;
-                }
-                return Ok(out);
+                ));
             }
         }
 
-        // v2.3：通用 episode 的 resolved 语义 = 环境自然终止（terminated）。
-        let episode_resolved = terminate_reason == "terminated";
         let mut result = EpisodeResult {
             episode_id: episode.episode_id.clone(),
             attempt_id: episode.attempt_id,
@@ -548,12 +400,6 @@ impl EpisodeExecutor {
                 worker_latency_ms,
                 episode_rollout_meta.model_latency_ms,
             );
-        }
-
-        // v2.3：completed 终态 seal + 登记上传，回填轨迹指针（endpoint 未配置时 url 为空、id 照填）。
-        if let Some((tid, url)) = self.seal_inflight(episode, &ctx.worker_id, episode_resolved) {
-            result.trajectory_id = tid;
-            result.trajectory_storage_url = url;
         }
 
         if let Some(last) = stream_reports.last_mut() {
@@ -1018,161 +864,4 @@ fn checksum_trajectory(
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Ok(format!("{:x}", hasher.finalize()))
-}
-
-
-/// v2.3：inflight 表 key（`{episode_id}:{attempt_id}`）。
-fn inflight_key(episode: &EpisodeRequest) -> String {
-    format!("{}:{}", episode.episode_id, episode.attempt_id)
-}
-
-/// v2.3：把 inflight 累积的 proto StepRecord 序列映射为通用 TrajectoryBundle。
-/// run_id 优先级：metadata["run_id"] → ["training_run_id"] → ["batch_id"] → run-{episode_id}。
-fn build_generic_bundle(
-    episode: &EpisodeRequest,
-    worker_id: &str,
-    partial: &InflightTrajectory,
-) -> TrajectoryBundle {
-    TrajectoryBundle {
-        trajectory_id: TrajectoryStore::next_trajectory_id(worker_id),
-        run_id: resolve_run_id(&episode.metadata, &episode.episode_id),
-        batch_id: episode
-            .metadata
-            .get("batch_id")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        correlation_id: if episode.correlation_id.is_empty() {
-            None
-        } else {
-            Some(episode.correlation_id.clone())
-        },
-        episode_id: Some(episode.episode_id.clone()),
-        // 通用路径无 gateway session 概念，用 warmup 环境实例句柄充当 session/instance。
-        session_id: partial.instance_id.clone(),
-        instance_id: partial.instance_id.clone(),
-        benchmark_variant: episode.env_type.clone(),
-        worker_id: worker_id.to_string(),
-        // native 路径无 gateway，留空。
-        gateway_base_url: String::new(),
-        steps: partial.steps.iter().map(generic_step_trace).collect(),
-        artifact: EpisodeArtifact::new(&episode.episode_id, &partial.instance_id)
-            .with_reward(partial.total_reward),
-        reward: 0.0,     // seal() 写入
-        resolved: false, // seal() 写入
-        sealed_at_ms: now_ms(),
-    }
-}
-
-/// v2.3：proto StepRecord → 通用 StepTrace（action/observation 为不透明字节）。
-fn generic_step_trace(rec: &StepRecord) -> StepTrace {
-    let (action, action_encoding) = encode_step_bytes(&rec.action);
-    let (raw, raw_encoding) = encode_step_bytes(&rec.observation);
-    StepTrace {
-        step_index: rec.step_index.max(0) as u32,
-        action: StepAction::Generic {
-            action,
-            action_encoding,
-        },
-        observation: StepObservation {
-            raw: if raw.is_empty() { None } else { Some(raw) },
-            raw_encoding,
-            reward: Some(rec.reward),
-            terminated: Some(rec.terminated),
-            // 通用 episode 的单步截断标记复用既有 truncated 字段。
-            truncated: rec.truncated,
-            ..Default::default()
-        },
-        // proto StepRecord 不带时间戳；通用步骤只记录耗时。
-        timestamp_ms: 0,
-        duration_ms: rec.duration_ms.max(0) as u64,
-        rollout_trace: rec.rollout_trace.as_ref().map(|t| StepRolloutTrace {
-            response_ids: t.response_ids.clone(),
-            response_mask: t.response_mask.clone(),
-        }),
-    }
-}
-
-/// v2.3：不透明字节编码——UTF-8 可读按文本（encoding 为空），否则 hex（`encoding="hex"`）。
-fn encode_step_bytes(data: &[u8]) -> (String, String) {
-    match std::str::from_utf8(data) {
-        Ok(s) => (s.to_string(), String::new()),
-        Err(_) => (
-            data.iter().map(|b| format!("{b:02x}")).collect(),
-            "hex".to_string(),
-        ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn generic_episode(metadata: &[(&str, &str)]) -> EpisodeRequest {
-        EpisodeRequest {
-            episode_id: "ep-1".to_string(),
-            attempt_id: 2,
-            env_type: "math".to_string(),
-            correlation_id: "corr-1".to_string(),
-            metadata: metadata
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn generic_bundle_resolves_run_id_and_maps_steps() {
-        let episode = generic_episode(&[("training_run_id", "train-7"), ("batch_id", "batch-9")]);
-        let partial = InflightTrajectory {
-            instance_id: "inst-0".to_string(),
-            steps: vec![StepRecord {
-                step_index: 1,
-                observation: b"obs-text".to_vec(),
-                action: b"{\"cmd\":\"look\"}".to_vec(),
-                reward: 0.5,
-                terminated: true,
-                truncated: false,
-                ..Default::default()
-            }],
-            total_reward: 0.5,
-        };
-        let bundle = build_generic_bundle(&episode, "w1", &partial);
-        assert_eq!(bundle.run_id, "train-7");
-        assert_eq!(bundle.batch_id.as_deref(), Some("batch-9"));
-        assert_eq!(bundle.episode_id.as_deref(), Some("ep-1"));
-        assert_eq!(bundle.benchmark_variant, "math");
-        assert_eq!(bundle.session_id, "inst-0");
-        assert_eq!(bundle.steps.len(), 1);
-        let step = &bundle.steps[0];
-        assert_eq!(
-            step.action,
-            StepAction::Generic {
-                action: "{\"cmd\":\"look\"}".to_string(),
-                action_encoding: String::new(),
-            }
-        );
-        assert_eq!(step.observation.raw.as_deref(), Some("obs-text"));
-        assert_eq!(step.observation.reward, Some(0.5));
-        assert_eq!(step.observation.terminated, Some(true));
-    }
-
-    #[test]
-    fn generic_bundle_run_id_fallbacks() {
-        // metadata 全空 → run-{episode_id}
-        let bundle = build_generic_bundle(&generic_episode(&[]), "w1", &InflightTrajectory::default());
-        assert_eq!(bundle.run_id, "run-ep-1");
-        // run_id 键最高优先
-        let episode = generic_episode(&[("run_id", "run-3"), ("training_run_id", "train-7")]);
-        let bundle = build_generic_bundle(&episode, "w1", &InflightTrajectory::default());
-        assert_eq!(bundle.run_id, "run-3");
-    }
-
-    #[test]
-    fn encode_step_bytes_hex_for_non_utf8() {
-        let (text, enc) = encode_step_bytes(b"hello");
-        assert_eq!((text.as_str(), enc.as_str()), ("hello", ""));
-        let (text, enc) = encode_step_bytes(&[0x00, 0xff]);
-        assert_eq!((text.as_str(), enc.as_str()), ("00ff", "hex"));
-    }
 }

@@ -24,6 +24,10 @@ export function emptyChainState(runId: string): ChainState {
   return {
     training_run_id: runId,
     run_state: "PENDING",
+    run_status: "pending",
+    terminal_reason: "",
+    last_heartbeat_ts: 0,
+    heartbeat_state: "unknown",
     updated_at: now,
     global_event_seq: 0,
     workflow: {

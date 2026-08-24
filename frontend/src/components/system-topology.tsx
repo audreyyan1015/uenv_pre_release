@@ -14,10 +14,8 @@ import {
   CheckCircle2,
   CircleAlert,
   Code2,
-  Cpu,
   Database,
   ExternalLink,
-  GitBranch,
   Hand,
   Layers3,
   Link2,
@@ -46,8 +44,8 @@ import {
 
 const STATE_POLL_INTERVAL_MS = 3_000;
 const CLOCK_REFRESH_INTERVAL_MS = 2_000;
-const CANVAS_WIDTH = 1230;
-const CANVAS_HEIGHT = 1060;
+const CANVAS_WIDTH = 1280;
+const CANVAS_HEIGHT = 640;
 const DRAG_THRESHOLD_PX = 4;
 
 const stageLabels: Record<WorkflowStage, string> = {
@@ -109,6 +107,10 @@ interface FlowEdge {
 function compactId(id: string, max = 18): string {
   if (id.length <= max) return id;
   return `${id.slice(0, Math.max(5, max - 8))}...${id.slice(-5)}`;
+}
+
+function canvasPercent(value: number, total: number): string {
+  return `${(value / total) * 100}%`;
 }
 
 function formatTime(timestamp: number | null | undefined): string {
@@ -351,8 +353,12 @@ function ModuleCard({
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
+    const parent = event.currentTarget.offsetParent as HTMLElement | null;
+    const rect = parent?.getBoundingClientRect();
+    const scaleX = rect?.width ? CANVAS_WIDTH / rect.width : 1;
+    const scaleY = rect?.height ? CANVAS_HEIGHT / rect.height : 1;
+    const dx = (event.clientX - drag.startX) * scaleX;
+    const dy = (event.clientY - drag.startY) * scaleY;
     const moved = drag.moved || Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX;
     drag.moved = moved;
     if (!moved) return;
@@ -396,10 +402,15 @@ function ModuleCard({
   };
   return (
     <div
-      className={`absolute cursor-grab touch-none select-none rounded-md border bg-white p-3 shadow-sm transition hover:z-20 hover:border-blue-300 hover:shadow-md active:cursor-grabbing ${
+      className={`absolute cursor-grab touch-none select-none overflow-hidden rounded-md border bg-white p-2.5 shadow-sm transition hover:z-20 hover:border-blue-300 hover:shadow-md active:cursor-grabbing ${
         module.active ? "ring-2 ring-blue-300" : ""
       }`}
-      style={{ left: module.x, top: module.y, width: module.w, height: module.h }}
+      style={{
+        left: canvasPercent(module.x, CANVAS_WIDTH),
+        top: canvasPercent(module.y, CANVAS_HEIGHT),
+        width: canvasPercent(module.w, CANVAS_WIDTH),
+        height: canvasPercent(module.h, CANVAS_HEIGHT),
+      }}
       role={module.href ? "link" : undefined}
       tabIndex={module.href ? 0 : undefined}
       aria-label={module.title}
@@ -414,31 +425,33 @@ function ModuleCard({
     >
       <div className="flex items-start gap-2">
         <span
-          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md border ${toneClass[module.tone]}`}
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${toneClass[module.tone]}`}
         >
-          <Icon className="h-4.5 w-4.5" />
+          <Icon className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
-            <span className="truncate text-sm font-semibold text-slate-900">{module.title}</span>
+          <span className="flex items-start gap-1.5">
+            <span className="break-words text-[13px] font-semibold leading-tight text-slate-900">
+              {module.title}
+            </span>
             {module.active && (
-              <span className="relative flex h-2.5 w-2.5 shrink-0">
+              <span className="relative mt-0.5 flex h-2 w-2 shrink-0">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-70" />
-                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-500" />
               </span>
             )}
           </span>
-          <span className="mt-0.5 block truncate text-[11px] text-slate-500">
+          <span className="mt-0.5 block break-words text-[11px] leading-tight text-slate-500">
             {module.subtitle}
           </span>
         </span>
       </div>
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+      <div className="mt-1.5 flex items-center justify-between gap-1.5">
+        <span className="rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[11px] font-medium leading-none text-slate-600">
           {module.status}
         </span>
         {module.metric && (
-          <span className="truncate text-right text-[11px] font-semibold tabular-nums text-slate-700">
+          <span className="break-words text-right text-[11px] font-semibold leading-tight text-slate-700">
             {module.metric}
           </span>
         )}
@@ -464,8 +477,13 @@ function LayerFrame({
 }) {
   return (
     <div
-      className={`absolute rounded-lg border px-3 py-2 ${tone}`}
-      style={{ left: x, top: y, width: w, height: h }}
+      className={`absolute rounded-lg border px-2 py-1 ${tone}`}
+      style={{
+        left: canvasPercent(x, CANVAS_WIDTH),
+        top: canvasPercent(y, CANVAS_HEIGHT),
+        width: canvasPercent(w, CANVAS_WIDTH),
+        height: canvasPercent(h, CANVAS_HEIGHT),
+      }}
     >
       <div className="text-sm font-semibold text-slate-900">{title}</div>
     </div>
@@ -478,9 +496,10 @@ function FlowLayer({ modules, edges }: { modules: DiagramModule[]; edges: FlowEd
   return (
     <svg
       className="absolute inset-0 pointer-events-none"
-      width={CANVAS_WIDTH}
-      height={CANVAS_HEIGHT}
+      width="100%"
+      height="100%"
       viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`}
+      preserveAspectRatio="none"
     >
       <defs>
         {(["data", "control", "infer", "duplex"] as const).map((kind) => (
@@ -533,9 +552,9 @@ function FlowLayer({ modules, edges }: { modules: DiagramModule[]; edges: FlowEd
             )}
             <text
               x={mid.x}
-              y={mid.y - 6}
+              y={mid.y - 5}
               textAnchor="middle"
-              className="fill-slate-600 text-[11px] font-medium"
+              className="fill-slate-600 text-[10px] font-medium"
               style={{ paintOrder: "stroke", stroke: "white", strokeWidth: 4 }}
             >
               {edge.label}
@@ -559,11 +578,11 @@ function Legend() {
       { label: "双向通信", kind: "duplex" },
     ];
   return (
-    <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-3 rounded-md border border-slate-200 bg-white/95 px-4 py-2 text-[11px] text-slate-600 shadow-sm">
+    <div className="absolute bottom-3 right-3 flex max-w-[480px] flex-wrap items-center justify-end gap-x-3 gap-y-2 rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-[11px] text-slate-600 shadow-sm">
       {items.map((item) => (
         <span key={item.label} className="flex items-center gap-1.5">
           <span
-            className="h-px w-8 rounded-full"
+            className="h-px w-6 rounded-full"
             style={{
               height: item.progress === "active" ? 3 : 2,
               background:
@@ -593,7 +612,7 @@ function ProgressRail({
   const completed = done + failed;
   const ratio = total > 0 ? Math.round((completed / total) * 100) : 0;
   return (
-    <div className="absolute right-4 top-9 w-[250px] rounded-md border border-slate-200 bg-white/95 p-3 shadow-sm">
+    <div className="absolute right-3 top-3 w-[320px] rounded-md border border-slate-200 bg-white/95 p-3.5 shadow-sm">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
           <Play className="h-4 w-4 text-emerald-600" />
@@ -601,10 +620,10 @@ function ProgressRail({
         </div>
         <span className="text-xs font-semibold tabular-nums text-slate-600">{ratio}%</span>
       </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
         <div className="h-full rounded-full bg-emerald-500" style={{ width: `${ratio}%` }} />
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 text-center text-[11px]">
+      <div className="mt-2 grid grid-cols-4 gap-2 text-center text-[11px]">
         <span className="rounded-md bg-slate-50 px-2 py-1 text-slate-600">
           总计 <b className="tabular-nums">{total}</b>
         </span>
@@ -628,7 +647,6 @@ function buildDiagram({
   agents,
   workers,
   runId,
-  nowLabel,
   liveMode,
 }: {
   state: ChainState | null;
@@ -636,7 +654,6 @@ function buildDiagram({
   agents: AgentStatusPayload | null;
   workers: WorkerView[];
   runId: string | null;
-  nowLabel: string;
   liveMode: boolean;
 }) {
   const active = activeStage(state);
@@ -679,12 +696,12 @@ function buildDiagram({
   const modules: DiagramModule[] = [
     {
       id: "training",
-      title: "Training Framework",
+      title: "Training",
       subtitle: "VeRL / 评测脚本",
-      x: 32,
-      y: 62,
+      x: 40,
+      y: 50,
       w: 160,
-      h: 128,
+      h: 70,
       icon: Code2,
       tone: "blue",
       status: state?.run_state ?? "PENDING",
@@ -693,43 +710,13 @@ function buildDiagram({
       metric: runId ? compactId(runId, 16) : "_orphan",
     },
     {
-      id: "bridge",
-      title: "uenv-bridge",
-      subtitle: "EpisodeRequest 转换",
-      x: 270,
-      y: 88,
-      w: 190,
-      h: 76,
-      icon: GitBranch,
-      tone: "blue",
-      status: statusLabel(active?.status),
-      href: moduleHref("ops"),
-      active: activeStageName === "SUBMIT",
-      metric: liveMode ? "real" : "fixture",
-    },
-    {
-      id: "adapter",
-      title: "adapter-core",
-      subtitle: "gRPC AdapterCoreService",
-      x: 520,
-      y: 88,
-      w: 175,
-      h: 76,
-      icon: Cpu,
-      tone: "blue",
-      status: liveMode ? "connected" : "demo",
-      href: moduleHref("ops"),
-      active: activeStageName === "SUBMIT",
-      metric: nowLabel,
-    },
-    {
       id: "server",
       title: "uenv-server",
-      subtitle: "Scheduler / Control Plane",
-      x: 750,
-      y: 88,
-      w: 190,
-      h: 72,
+      subtitle: "Scheduler / Control",
+      x: 225,
+      y: 50,
+      w: 175,
+      h: 70,
       icon: Server,
       tone: "green",
       status: fleet?.ready === false ? "degraded" : "ready",
@@ -739,27 +726,27 @@ function buildDiagram({
     },
     {
       id: "scheduler",
-      title: "scheduler",
-      subtitle: "选 Worker / Dispatch",
-      x: 230,
-      y: 292,
-      w: 150,
-      h: 72,
+      title: "Scheduler",
+      subtitle: "Dispatch",
+      x: 55,
+      y: 185,
+      w: 160,
+      h: 66,
       icon: Workflow,
       tone: "green",
       status: activeStageName === "DISPATCH" ? "调度中" : "ready",
       href: moduleHref("ops"),
       active: activeStageName === "DISPATCH",
-      metric: `${workerSummary.total} execution nodes`,
+      metric: `${workerSummary.total} workers`,
     },
     {
       id: "control",
-      title: "control_plane",
-      subtitle: "Register / HB / Report",
-      x: 420,
-      y: 292,
+      title: "Control",
+      subtitle: "Register / HB",
+      x: 250,
+      y: 185,
       w: 165,
-      h: 72,
+      h: 66,
       icon: Radio,
       tone: "green",
       status: activeWorkers > 0 ? "busy" : "ready",
@@ -769,12 +756,12 @@ function buildDiagram({
     },
     {
       id: "backend",
-      title: "execution_backend",
+      title: "Backend",
       subtitle: "native / swe-agent",
-      x: 620,
-      y: 292,
+      x: 450,
+      y: 185,
       w: 165,
-      h: 72,
+      h: 66,
       icon: Layers3,
       tone: "green",
       status: activeStageName === "EXECUTE" ? "active" : "idle",
@@ -784,12 +771,12 @@ function buildDiagram({
     },
     {
       id: "agentjob",
-      title: "agent_job / pool",
+      title: "Agent Pool",
       subtitle: "AgentJob queue",
-      x: 815,
-      y: 292,
-      w: 160,
-      h: 72,
+      x: 645,
+      y: 185,
+      w: 175,
+      h: 66,
       icon: BrainCircuit,
       tone: "purple",
       status: runningAgentJobs > 0 ? "running" : pendingAgentJobs > 0 ? "pending" : "idle",
@@ -799,12 +786,12 @@ function buildDiagram({
     },
     {
       id: "trajectory",
-      title: "trajectory",
+      title: "Trace Store",
       subtitle: "结果 / trace 存储",
-      x: 1010,
-      y: 292,
-      w: 140,
-      h: 72,
+      x: 845,
+      y: 185,
+      w: 165,
+      h: 66,
       icon: Database,
       tone: "green",
       status: activeStageName === "REPORT" ? "写入中" : "ready",
@@ -814,12 +801,12 @@ function buildDiagram({
     },
     {
       id: "worker",
-      title: "执行节点 / Worker",
-      subtitle: "DispatchEpisode gRPC",
-      x: 195,
-      y: 482,
-      w: 160,
-      h: 76,
+      title: "uenv-worker",
+      subtitle: "DispatchEpisode",
+      x: 60,
+      y: 326,
+      w: 170,
+      h: 70,
       icon: Server,
       tone: "amber",
       status: activeWorkers > 0 ? "执行中" : "等待",
@@ -829,12 +816,12 @@ function buildDiagram({
     },
     {
       id: "executor",
-      title: "EpisodeExecutor",
-      subtitle: "reset / step / close",
-      x: 395,
-      y: 482,
-      w: 160,
-      h: 76,
+      title: "Executor",
+      subtitle: "reset / step",
+      x: 255,
+      y: 326,
+      w: 170,
+      h: 70,
       icon: Play,
       tone: "amber",
       status: activeStageName === "EXECUTE" ? "step" : "idle",
@@ -844,16 +831,16 @@ function buildDiagram({
     },
     {
       id: "pool",
-      title: "环境资源池",
-      subtitle: "跨执行节点聚合",
-      x: 600,
-      y: 462,
-      w: 250,
-      h: 104,
+      title: "资源池 / Pool",
+      subtitle: "Warmup / SWE pool",
+      x: 440,
+      y: 310,
+      w: 230,
+      h: 82,
       icon: Boxes,
       tone: "amber",
       status: poolBusy > 0 ? "busy" : poolReady > 0 ? "ready" : "tracked",
-      href: "/server/pools",
+      href: moduleHref("server"),
       active: poolBusy > 0,
       metric: `ready ${poolReady} · busy ${poolBusy}`,
     },
@@ -861,10 +848,10 @@ function buildDiagram({
       id: "workspace",
       title: "Workspace",
       subtitle: "缓存 / 运行态",
-      x: 900,
-      y: 452,
-      w: 150,
-      h: 66,
+      x: 715,
+      y: 302,
+      w: 165,
+      h: 64,
       icon: Package,
       tone: "green",
       status: activeStageName === "EXECUTE" ? "mounted" : "ready",
@@ -873,12 +860,12 @@ function buildDiagram({
     },
     {
       id: "gateway",
-      title: "Runtime Gateway",
+      title: "Runtime GW",
       subtitle: "HTTP /runtime/v1",
-      x: 900,
-      y: 560,
-      w: 150,
-      h: 66,
+      x: 715,
+      y: 380,
+      w: 165,
+      h: 64,
       icon: Link2,
       tone: "blue",
       status: runningAgentJobs > 0 ? "active" : "idle",
@@ -888,11 +875,11 @@ function buildDiagram({
     {
       id: "plugin",
       title: "plugin host",
-      subtitle: "UDS reset / step / close",
-      x: 600,
-      y: 602,
-      w: 185,
-      h: 70,
+      subtitle: "UDS step",
+      x: 255,
+      y: 483,
+      w: 170,
+      h: 62,
       icon: Layers3,
       tone: "purple",
       status: activeStageName === "EXECUTE" ? "active" : "idle",
@@ -902,11 +889,11 @@ function buildDiagram({
     {
       id: "math",
       title: "plugins/math",
-      subtitle: "Verifier / dataset",
-      x: 335,
-      y: 712,
-      w: 160,
-      h: 64,
+      subtitle: "Verifier",
+      x: 450,
+      y: 485,
+      w: 140,
+      h: 62,
       icon: Activity,
       tone: "purple",
       status: "available",
@@ -915,11 +902,11 @@ function buildDiagram({
     {
       id: "code",
       title: "plugins/code",
-      subtitle: "harness 执行",
-      x: 550,
-      y: 712,
-      w: 160,
-      h: 64,
+      subtitle: "harness",
+      x: 625,
+      y: 485,
+      w: 140,
+      h: 62,
       icon: Code2,
       tone: "purple",
       status: "available",
@@ -928,11 +915,11 @@ function buildDiagram({
     {
       id: "swe",
       title: "plugins/swe",
-      subtitle: "Docker + pytest",
-      x: 765,
-      y: 712,
-      w: 160,
-      h: 64,
+      subtitle: "Docker pytest",
+      x: 800,
+      y: 485,
+      w: 140,
+      h: 62,
       icon: Boxes,
       tone: "purple",
       status: "available",
@@ -941,11 +928,11 @@ function buildDiagram({
     {
       id: "hub",
       title: "uenv-hub",
-      subtitle: "EnvPackage 元数据 / 镜像",
-      x: 285,
-      y: 890,
-      w: 245,
-      h: 58,
+      subtitle: "EnvPackage",
+      x: 55,
+      y: 565,
+      w: 250,
+      h: 62,
       icon: Package,
       tone: "slate",
       status: "registry",
@@ -954,12 +941,12 @@ function buildDiagram({
     },
     {
       id: "agent",
-      title: "Agent Scaffold",
-      subtitle: "OpenHands / CodeAct",
-      x: 1070,
-      y: 442,
-      w: 140,
-      h: 138,
+      title: "OpenHands",
+      subtitle: "CodeAct",
+      x: 945,
+      y: 326,
+      w: 160,
+      h: 88,
       icon: Hand,
       tone: "purple",
       status: agentCount > 0 ? "online" : "waiting",
@@ -969,12 +956,12 @@ function buildDiagram({
     },
     {
       id: "model",
-      title: "Model Gateway",
-      subtitle: "vLLM / remote API",
-      x: 1070,
-      y: 632,
-      w: 140,
-      h: 98,
+      title: "Model GW",
+      subtitle: "vLLM API",
+      x: 1120,
+      y: 326,
+      w: 135,
+      h: 74,
       icon: BrainCircuit,
       tone: "purple",
       status: activeStageName === "EXECUTE" ? "infer" : "idle",
@@ -991,29 +978,10 @@ function buildDiagram({
 
   const edges: FlowEdge[] = [
     {
-      id: "training-bridge",
+      id: "training-server",
       from: "training",
-      to: "bridge",
-      label: "pre-rollout",
-      kind: "control",
-      active: activeSubmit,
-      progress: workflowProgress(activeStageName, "SUBMIT"),
-    },
-    {
-      id: "bridge-adapter",
-      from: "bridge",
-      to: "adapter",
-      label: "batch",
-      kind: "duplex",
-      bidirectional: true,
-      active: activeSubmit,
-      progress: workflowProgress(activeStageName, "SUBMIT"),
-    },
-    {
-      id: "bridge-server",
-      from: "bridge",
       to: "server",
-      label: "gRPC SubmitEpisode",
+      label: "submit",
       kind: "duplex",
       bidirectional: true,
       active: activeSubmit || activeReport,
@@ -1034,7 +1002,7 @@ function buildDiagram({
       id: "server-control",
       from: "server",
       to: "control",
-      label: "Register / HB",
+      label: "HB",
       kind: "control",
       active: activeWorkers > 0,
       progress: activityProgress(activeWorkers > 0, workers.length > 0),
@@ -1052,7 +1020,7 @@ function buildDiagram({
       id: "server-agentjob",
       from: "server",
       to: "agentjob",
-      label: "AgentJob",
+      label: "agent job",
       kind: "data",
       active: activeAgent,
       progress: activityProgress(activeAgent, agentCount > 0),
@@ -1070,7 +1038,7 @@ function buildDiagram({
       id: "scheduler-worker",
       from: "scheduler",
       to: "worker",
-      label: "DispatchEpisode",
+      label: "dispatch",
       kind: "data",
       active: activeDispatch || activeExecute,
       progress: activeExecute ? "done" : workflowProgress(activeStageName, "DISPATCH"),
@@ -1107,7 +1075,7 @@ function buildDiagram({
       id: "pool-workspace",
       from: "pool",
       to: "workspace",
-      label: "workspace",
+      label: "mount",
       kind: "data",
       active: activeExecute,
       progress: workflowProgress(activeStageName, "EXECUTE"),
@@ -1125,7 +1093,7 @@ function buildDiagram({
       id: "pool-plugin",
       from: "pool",
       to: "plugin",
-      label: "reset / step",
+      label: "step",
       kind: "duplex",
       bidirectional: true,
       active: activeExecute,
@@ -1162,7 +1130,7 @@ function buildDiagram({
       id: "hub-worker",
       from: "hub",
       to: "worker",
-      label: "启动前 sync",
+      label: "sync",
       kind: "control",
       dashed: true,
       active: workers.length > 0,
@@ -1190,7 +1158,7 @@ function buildDiagram({
       id: "model-plugin",
       from: "model",
       to: "swe",
-      label: "单轮 Infer",
+      label: "infer",
       kind: "infer",
       dashed: true,
       active: activeExecute,
@@ -1200,7 +1168,7 @@ function buildDiagram({
       id: "worker-training",
       from: "worker",
       to: "training",
-      label: "reward / output",
+      label: "reward",
       kind: "control",
       dashed: true,
       active: activeReport,
@@ -1228,7 +1196,6 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
   const liveMode = !usingFixture && !usingMockFallback;
   const telemetry = useSystemTelemetry(true);
   const clientReady = now > 0;
-  const nowLabel = clientReady ? formatTime(now) : "同步中";
 
   useEffect(() => {
     setNow(Date.now());
@@ -1250,10 +1217,9 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
         agents: telemetry.agents,
         workers,
         runId: effectiveRunId,
-        nowLabel,
         liveMode,
       }),
-    [chainState, effectiveRunId, liveMode, nowLabel, telemetry.agents, telemetry.fleet, workers],
+    [chainState, effectiveRunId, liveMode, telemetry.agents, telemetry.fleet, workers],
   );
   const displayedDiagram = useMemo(
     () => ({
@@ -1283,7 +1249,7 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
               <Network className="h-4 w-4" />
               <span>UEnv 动态系统结构图</span>
             </div>
-            <h1 className="mt-1 truncate text-xl font-semibold tracking-tight">
+            <h1 className="mt-1 break-all text-lg font-semibold">
               {effectiveRunId ? `Run ${effectiveRunId}` : "当前系统工作流"}
             </h1>
           </div>
@@ -1319,61 +1285,68 @@ export function SystemTopology({ initialRunId = null }: { initialRunId?: string 
         <nav className="mt-3 flex flex-wrap items-center gap-2" aria-label="系统快捷入口">
           <QuickNavLink href={moduleHref("root")} label="主控制台" />
           <QuickNavLink href={moduleHref("server")} label="Episode 进度" />
-          <QuickNavLink href="/server/pools" label="环境资源池" />
           <QuickNavLink href={moduleHref("ops")} label="技术观测台" />
           <QuickNavLink href={moduleHref("agents")} label="Agent 池状态" />
           <QuickNavLink href={moduleHref("hub")} label="Hub 控制台" external />
         </nav>
       </header>
 
-      <section className="p-4 sm:p-6">
-        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm">
+      <section className="px-3 py-3 sm:px-4 sm:py-4">
+        <div className="rounded-lg border border-slate-200 bg-white p-2 shadow-sm">
           <div
-            className="relative bg-[#fbfcff]"
-            style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
+            className="relative mx-auto w-full max-w-[1280px] overflow-hidden rounded-md bg-[#fbfcff]"
+            style={{ aspectRatio: `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}` }}
           >
             <LayerFrame
               title="Layer 4 · Training Adapter"
-              x={220}
-              y={24}
-              w={760}
-              h={170}
+              x={20}
+              y={12}
+              w={890}
+              h={122}
               tone="border-blue-200 bg-blue-50/35"
             />
             <LayerFrame
               title="Layer 3 · Scheduler / Control Plane"
-              x={205}
-              y={225}
-              w={950}
-              h={185}
+              x={20}
+              y={140}
+              w={1080}
+              h={122}
               tone="border-emerald-200 bg-emerald-50/35"
             />
             <LayerFrame
               title="Layer 2 · Env Execution"
-              x={170}
-              y={430}
-              w={895}
-              h={250}
+              x={20}
+              y={272}
+              w={980}
+              h={174}
               tone="border-amber-200 bg-amber-50/35"
             />
             <LayerFrame
               title="Task Environment 插件"
-              x={315}
-              y={690}
-              w={630}
-              h={88}
+              x={240}
+              y={448}
+              w={760}
+              h={98}
               tone="border-violet-200 bg-violet-50/35"
             />
             <LayerFrame
               title="Layer 1 · Env Registry"
-              x={260}
-              y={842}
-              w={300}
-              h={130}
+              x={20}
+              y={548}
+              w={260}
+              h={88}
               tone="border-slate-200 bg-slate-50"
             />
-            <div className="absolute left-[1048px] top-[420px] h-[330px] w-[172px] rounded-lg border border-violet-200 bg-violet-50/30 px-3 py-2">
-              <div className="text-sm font-semibold text-slate-900">Agent Scaffold（策略侧）</div>
+            <div
+              className="absolute rounded-lg border border-violet-200 bg-violet-50/30 px-2 py-1"
+              style={{
+                left: canvasPercent(1005, CANVAS_WIDTH),
+                top: canvasPercent(250, CANVAS_HEIGHT),
+                width: canvasPercent(255, CANVAS_WIDTH),
+                height: canvasPercent(240, CANVAS_HEIGHT),
+              }}
+            >
+              <div className="text-xs font-semibold text-slate-900">Agent Scaffold（策略侧）</div>
             </div>
             <FlowLayer modules={displayedDiagram.modules} edges={displayedDiagram.edges} />
             {displayedDiagram.modules.map((module) => (

@@ -167,6 +167,6 @@ curl -fsS http://127.0.0.1:50052/status | \
 | 固定 ID 注册被拒绝 | 旧实例是否仍在运行或仍有活动 Episode |
 | UEnv Worker 为 `degraded` | 心跳、当前负载、环境执行和结果上报是否正常 |
 
-`worker.id` 为 `auto` 时，每次重装或重启都可能注册出一个新 ID，旧 ID 的记录不会自动删除：它转为 `degraded`、暂停参与新调度，但仍计入 `uenv status` 的 `Worker=N` 并在列表中长期保留（当前版本没有删除单条 Worker 记录的命令，记录随持久化数据保留）。验收 Worker 数量时应只统计 `ready` 记录。需要稳定 ID 时，在 `/etc/uenv/worker.yaml` 中为每台 Worker 设置集群内唯一的固定 `worker.id`。
+`worker.id` 为 `auto` 时，每次重装或重启都可能注册出一个新 ID。同一 endpoint 的重新注册会替换旧记录，`uenv status` 的 `Worker=N` 保持准确；endpoint 发生变化时，旧 ID 的记录转为 `degraded`、暂停参与新调度，并可能长期保留、计入 `Worker=N`（当前版本没有删除单条 Worker 记录的命令，记录随持久化数据保留）。验收 Worker 数量时应只统计 `ready` 记录。需要稳定 ID 时，在 `/etc/uenv/worker.yaml` 中为每台 Worker 设置集群内唯一的固定 `worker.id`。
 
 日志和进一步处理见[故障排查](../5-运维UEnv/02-troubleshooting.md)。

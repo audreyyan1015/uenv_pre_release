@@ -26,8 +26,11 @@
 sudo uenv evaluate prepare-swe \
   --bundle /home/uenv-install/uenv-linux-x86_64.tar.gz \
   --profile control-plane \
-  --shared-key-file /home/uenv-install/uenv-swe-shared.key
+  --shared-key-file /home/uenv-install/uenv-swe-shared.key \
+  --reset-swe-key
 ```
+
+`prepare-swe` 会在 UEnv Worker 主机安装固定版本的 OpenHands Agent 及其 Python 依赖。依赖安装使用 `uv`、默认从 pypi.org 下载，**不沿用 pip 的镜像配置**；在访问 pypi.org 较慢的网络中该步骤可能需要数十分钟（实测约 25 分钟），属正常现象。可先为 `uv` 配置可用镜像（如 `UV_INDEX_URL`）再执行。
 
 `--shared-key-file` 指向的文件不存在时，会自动生成一个权限为 `0600` 的密钥；已存在则复用。把同一个密钥文件安全复制到每台 SWE UEnv Worker，然后在每台 Worker 上执行（替换为实际地址）：
 
@@ -42,7 +45,8 @@ sudo uenv evaluate prepare-swe \
   --server 10.0.0.10:50051 \
   --advertise 10.0.0.21:50054 \
   --trajectory-endpoint http://10.0.0.10:8077 \
-  --shared-key-file /home/uenv-install/uenv-swe-shared.key
+  --shared-key-file /home/uenv-install/uenv-swe-shared.key \
+  --reset-swe-key
 ```
 
 单机部署（`single-node` 或 `full` profile）不需要共享密钥和地址参数，一条命令完成：
@@ -69,6 +73,8 @@ sudo -u uenv docker info >/dev/null
 启用后 UEnv Worker 上报的环境类型自动包含 `swe`（核对方法见[通用评测流程](./03-evaluation.md#检查共同前置条件)）。注意事项：
 
 - 已存在 `/etc/uenv/swe.env` 且与本次参数不同时，`prepare-swe` 会中止并提示 `--force-swe-config`；先备份并确认差异，再带该参数重跑。
+- **首次准备 SWE 的每台主机都需要 `--reset-swe-key`**：安装器在装 Server 或 Worker 时已为每台主机生成只含 `UENV_TRAJECTORY_TOKEN` 的 `/etc/uenv/secrets/swe.env`（Gateway key 缺失），`prepare-swe` 检测到这种不完整记录会中止并提示"两项 Gateway key 缺失、无效或不一致"。携带 `--reset-swe-key` 与同一个 `--shared-key-file` 重跑即可完成配置；`--shared-key-file` 中的 key 与已安装 key 一致时，重复执行该命令是幂等的，不会轮换 key。
+- **`prepare-swe` 每次运行都会重写 `/etc/uenv/secrets/swe.env` 并重新生成 `UENV_TRAJECTORY_TOKEN`**（不只在使用 `--reset-swe-key` 时）。多机部署中，必须在每台主机最后一次执行 `prepare-swe` 之后，再把 UEnv Server 主机 `/etc/uenv/secrets/swe.env` 中的 `UENV_TRAJECTORY_TOKEN` 同步到各 UEnv Worker 并重启 `uenv-worker.service`；否则轨迹上传返回 `401 bad upload token`，轨迹静默缺失（见[多机部署](../2-部署UEnv/02-multi-node.md)）。
 - `control-plane` 形式的 `prepare-swe` 只配置密钥，不安装 Worker 组件；但安装器在 `control-plane` profile 下会停用同机的 `uenv-worker.service`，如果该主机同时运行 UEnv Worker，准备完成后用 `sudo systemctl enable --now uenv-worker.service` 恢复。
 - `--trajectory-endpoint` 指向 UEnv Server 的轨迹接口；多机使用时需按[配置 UEnv Server](../2-部署UEnv/03-server.md)把 Server 侧 `8077` 改为受控内网地址并分发 token。
 
@@ -138,7 +144,7 @@ SWE 输入 JSONL 每行只选择 catalog 中的一个实例：
 
 SWE 的模型调用方不是 UEnv Worker 主进程，而是实例容器中的 OpenHands Agent，因此模型配置不经过 `configure-model`，在 `run-swe` 命令行上直接声明 provider。与普通 Episode 支持的模型来源相同（本地 OpenAI-compatible 服务或云端方舟 API），只是配置位置不同：普通 Episode 的模型配置持久化在 UEnv Worker 上、所有任务共用；SWE 的模型参数随每次 `run-swe` 传入、只作用于当次运行。
 
-本地部署的模型服务用 `--provider local --base-url "$MODEL_API" --model "$MODEL_NAME"`，完整命令见下文[执行](#执行)。云端火山引擎方舟的完整命令如下（`--model` 填推理接入点 ID，密钥从权限为 `0600` 的单行文件读取，或省略 `--api-key-file` 按提示交互输入）：
+本地部署的模型服务用 `--provider local --base-url "$MODEL_API" --model "$MODEL_NAME"`，完整命令见下文[执行](#执行)。云端火山引擎方舟的完整命令如下（`--model` 填推理接入点 ID 或模型 ID，密钥从权限为 `0600` 的单行文件读取，或省略 `--api-key-file` 按提示交互输入）：
 
 ```bash
 sudo uenv evaluate run-swe \
@@ -158,6 +164,8 @@ sudo uenv evaluate run-swe \
 不要把密钥写进输入文件或提交到仓库。
 
 ## 执行
+
+`run-swe` 会以 `uenv-agent` 用户启动 Agent 进程。**请从该用户可读的目录执行命令**（如 `/tmp` 或本案例的结果目录）；从 `/root` 等不可读目录执行时，Agent 进程会因 Python 路径初始化失败而立即报错，错误信息是误导性的 `KeyError: 'openhands.sdk'`，结果表现为所有实例瞬时 `failed`。
 
 ```bash
 sudo uenv evaluate run-swe \
@@ -217,6 +225,8 @@ done < <(sudo jq -r '.artifact_dir' "$OUTPUT")
 | 现象 | 处理 |
 |---|---|
 | output 或 artifacts 已存在 | 生成新的 `RUN_ID`，不覆盖历史结果 |
+| 所有实例立即失败，error 含 `KeyError: 'openhands.sdk'` | 当前目录对 `uenv-agent` 不可读（如 `/root`）；换到 `/tmp` 等可读目录重新执行 |
+| Agent 依赖安装极慢 | `prepare-swe` 的依赖由 `uv` 从 pypi.org 下载，不走 pip 镜像；为 `uv` 配置镜像后重试 |
 | catalog 与 Gateway 不一致 | 核对同一 instance 的 repo、commit、variant 和 image key |
 | 容器镜像不存在 | 预拉取/导入；离线模式不能临时访问 registry |
 | completed、resolved false | 查看 patch、测试和 trajectory；这是业务未解决 |

@@ -28,6 +28,11 @@ LLM_TEMPLATE="${OPENHANDS_LLM_TEMPLATE:-/etc/uenv/openhands-llm.json}"
 }
 
 mkdir -p "$OPENHANDS_OUT_DIR"
+# 调用者继承的 cwd（如 /root）对 Agent 进程可能不可读；Python editable install
+# 的 finder 在 cwd 不可读时会崩溃并抛出误导性 KeyError。切到输出目录再启动，
+# 并归一化为绝对路径供 --output-dir 使用。
+OPENHANDS_OUT_DIR="$(cd "$OPENHANDS_OUT_DIR" && pwd)"
+cd "$OPENHANDS_OUT_DIR"
 export OPENHANDS_BENCHMARKS_DIR="$OPENHANDS_DIR"
 export UENV_ROLLOUT_TRACE=required
 export UENV_REQUIRE_SWE_RESPONSE_TRACE=1

@@ -256,6 +256,10 @@ export function buildFixtureState(runId: string = FIXTURE_RUN_ID): ChainState {
   return {
     training_run_id: runId,
     run_state: "RUNNING",
+    run_status: "running",
+    terminal_reason: "",
+    last_heartbeat_ts: ts(0),
+    heartbeat_state: "alive",
     updated_at: ts(0),
     global_event_seq: 100,
     workflow: {

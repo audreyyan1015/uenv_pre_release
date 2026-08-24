@@ -7,7 +7,7 @@
 | 项目 | 要求 |
 |---|---|
 | 系统 | x86_64 Linux、systemd、Python 3.10 或更高版本 |
-| 工具 | `sudo`、`tar`、`curl` |
+| 工具 | `sudo`、`tar`、`curl`、`jq`（第 3 部分案例的验收命令使用） |
 | 空间 | 至少 2 GiB 可用磁盘空间 |
 | 安装文件 | `install.sh` 和发布压缩包 |
 

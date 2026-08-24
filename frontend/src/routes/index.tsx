@@ -2,9 +2,6 @@ import { createFileRoute } from "@tanstack/react-router";
 import { UserLaunchConsole } from "@/components/user-launch-console";
 
 export const Route = createFileRoute("/")({
-  validateSearch: (search: Record<string, unknown>) => ({
-    run: typeof search.run === "string" && search.run.trim() ? search.run.trim() : null,
-  }),
   head: () => ({
     meta: [
       { title: "UEnv · 训练与评测控制台" },
@@ -23,6 +20,5 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
-  const { run } = Route.useSearch();
-  return <UserLaunchConsole initialRunId={run} />;
+  return <UserLaunchConsole />;
 }

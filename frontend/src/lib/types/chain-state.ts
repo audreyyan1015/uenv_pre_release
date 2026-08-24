@@ -183,8 +183,14 @@ export interface StateDelta {
 export interface ChainState {
   training_run_id: string;
   run_state: RunState;
+  run_status?: string;
+  terminal_reason?: string;
+  last_heartbeat_ts?: number;
+  heartbeat_state?: string;
   updated_at: number;
   global_event_seq: number;
+  planned_episode_total?: number;
+  planned_step_total?: number;
   workflow: WorkflowGraph;
   tree: TreeGraph;
   episodes: Record<string, EpisodeView>;
@@ -209,6 +215,10 @@ export interface ClientSnapshot {
 export interface RunStatusPayload {
   training_run_id: string;
   run_state: RunState;
+  run_status?: string;
+  terminal_reason?: string;
+  last_heartbeat_ts?: number;
+  heartbeat_state?: string;
   updated_at: number;
   reason?: string;
 }

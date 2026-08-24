@@ -138,6 +138,17 @@ def _optional_int_value(value: Any) -> int | None:
     return int(text) if text is not None else None
 
 
+def _optional_positive_int_env(name: str) -> int | None:
+    text = _optional_string(os.environ.get(name))
+    if text is None:
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def _bool_value(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -320,6 +331,8 @@ class UEnvAgentLoop(AgentLoopBase):
             fake_reward=self.config_for_uenv.fake_reward,
             fake_response_text=self.config_for_uenv.fake_response_text,
         )
+        self._obs_started_runs: set[str] = set()
+        self._obs_terminal_runs: set[str] = set()
 
     def _needs_compat_agent_loop_base(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
         """Allow direct unit/smoke construction outside VeRL's AgentLoopWorker."""
@@ -373,6 +386,7 @@ class UEnvAgentLoop(AgentLoopBase):
         return default
 
     def close(self) -> None:
+        self._stop_obs_heartbeats()
         if self.config_for_uenv.model_gateway_stop_on_close:
             self.model_gateway.stop()
         close = getattr(self.client, "close", None)
@@ -457,14 +471,14 @@ class UEnvAgentLoop(AgentLoopBase):
             or batch_id
             or f"verl-{uuid.uuid4().hex[:8]}"
         )
-        obs_client.run_started(training_run_id, correlation_id=f"batch:{batch_id}")
+        requests = await self._build_batch_requests(
+            sampling_params_by_sample,
+            sample_kwargs_by_sample,
+            batch_id=batch_id,
+            training_run_id=training_run_id,
+        )
+        self._emit_obs_run_started(training_run_id, batch_id=batch_id, batch_episode_count=len(requests))
         try:
-            requests = await self._build_batch_requests(
-                sampling_params_by_sample,
-                sample_kwargs_by_sample,
-                batch_id=batch_id,
-                training_run_id=training_run_id,
-            )
             outputs: list[AgentLoopOutput] = []
             for chunk in self._request_chunks(requests):
                 chunk_results = await self._submit_episode_chunk_with_retry(chunk)
@@ -475,9 +489,61 @@ class UEnvAgentLoop(AgentLoopBase):
                     ]
                 )
             return outputs
-        finally:
-            obs_client.run_stopped(training_run_id, correlation_id=f"batch:{batch_id}")
-            obs_client.run_closed(training_run_id, correlation_id=f"batch:{batch_id}")
+        except Exception as exc:
+            self._emit_obs_run_failed(
+                training_run_id,
+                error_message=str(exc),
+            )
+            raise
+
+    def _emit_obs_run_started(self, training_run_id: str, *, batch_id: str, batch_episode_count: int) -> None:
+        if training_run_id in self._obs_started_runs:
+            return
+        self._obs_started_runs.add(training_run_id)
+        obs_client.run_started(
+            training_run_id,
+            correlation_id=f"batch:{batch_id}",
+            payload=self._obs_run_plan_payload(batch_episode_count),
+        )
+        obs_client.start_run_heartbeat(training_run_id)
+
+    def _emit_obs_run_failed(self, training_run_id: str, *, error_message: str) -> None:
+        self._emit_obs_terminal(
+            training_run_id,
+            "failed",
+            payload={
+                "terminal_reason": "failed",
+                "error_message": error_message[:4000],
+            },
+        )
+
+    def _stop_obs_heartbeats(self) -> None:
+        for training_run_id in list(self._obs_started_runs):
+            obs_client.stop_run_heartbeat(training_run_id)
+
+    def _emit_obs_terminal(self, training_run_id: str, status: str, *, payload: dict[str, Any] | None = None) -> None:
+        if training_run_id in self._obs_terminal_runs:
+            return
+        self._obs_terminal_runs.add(training_run_id)
+        event_payload = payload or {"terminal_reason": status}
+        if status == "completed":
+            obs_client.run_completed(training_run_id, payload=event_payload)
+        elif status == "failed":
+            obs_client.run_failed(training_run_id, payload=event_payload)
+        else:
+            obs_client.run_terminated(training_run_id, payload=event_payload)
+
+    def _obs_run_plan_payload(self, batch_episode_count: int) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "planned_episode_batch": max(0, batch_episode_count),
+        }
+        planned_episode_total = _optional_positive_int_env("UENV_OBS_PLANNED_EPISODE_TOTAL")
+        planned_step_total = _optional_positive_int_env("UENV_OBS_PLANNED_STEP_TOTAL")
+        if planned_episode_total:
+            payload["planned_episode_total"] = planned_episode_total
+        if planned_step_total:
+            payload["planned_step_total"] = planned_step_total
+        return payload
 
     async def _build_batch_requests(
         self,

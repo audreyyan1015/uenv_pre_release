@@ -23,7 +23,7 @@ usage() {
   --output FILE   输出 tar.gz（默认 ./uenv-training-client.tar.gz）
 
 客户端包只包含 VeRL 入口、UEnv Bridge wheel/config 和示例数据，不包含
-UEnv Server、UEnv Worker、UEnv Hub 或 systemd 服务。把它复制到 GPU 主机解压即可。
+Adapter、UEnv Worker、UEnv Hub 或 systemd 服务。把它复制到 GPU 主机解压即可。
 EOF
 }
 
@@ -109,7 +109,7 @@ cat > "$root/README.txt" <<'EOF'
     --runtime docker \
     --image docker.io/verlai/verl:vllm017.latest
 
-UEnv 主机必须已经运行 UEnv Server 和 UEnv Worker；本包不会安装服务。
+UEnv 主机必须已经运行 Adapter 和 UEnv Worker；本包不会安装服务。
 EOF
 
 tar -czf "$OUTPUT" -C "$temporary" uenv-training-client

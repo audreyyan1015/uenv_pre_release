@@ -1,110 +1,328 @@
-# UEnv Bridge
+# uenv-bridge
 
-UEnv Bridge 是评测程序或训练框架一侧的适配层。当前主线实现把 VeRL v0.7.1 的 sample 在 pre-rollout 阶段交给 UEnv，并把 response token、mask、reward 和 trajectory 还原成 `AgentLoopOutput`。
+`uenv-bridge` 是 UEnv 面向 VeRL 的训练框架适配层。当前主线只保留 pre-rollout 接管：VeRL 在 AgentLoop 阶段把 prompt/sample 交给 UEnv，UEnv Server/Worker 负责模型生成、环境 step、reward 和 trajectory，Bridge 再把结果包装成 VeRL 可继续训练的 `AgentLoopOutput`。
 
-## 组件边界
-
-```text
-VeRL → UEnv Bridge → UEnv Server → UEnv Worker
-```
-
-- Bridge：本目录的 Python 包 `src/uenv/bridge/`。
-- Server：中心服务，接收 Bridge 请求并选择 Worker。
-- Worker：执行模型生成、环境 step 和 reward。
-
-本页面向 Bridge 维护者。`core/`、`AdapterCoreService` 和 `UENV_ADAPTER_CORE_ENDPOINT` 是现有源码与协议名称；普通用户只需把它们理解为 UEnv Server 的实现入口或连接地址。
-
-## 主流程
+## 当前架构
 
 ```text
-VeRL AgentLoop sample
+verl.trainer.main_ppo
+  -> AgentLoopManager / AgentLoopWorker
   -> UEnvAgentLoop
-  -> SampleEnvelope / EpisodeRequest
-  -> Server 调度 Worker
-  -> EpisodeResult / SampleResult
+  -> EpisodeRequest(prompt only)
+  -> RustCoreEpisodeClient
+  -> Rust adapter core
+  -> EpisodeService function call
+  -> UEnv Server / Worker
+  -> EpisodeResult(response_ids, response_mask, trajectory, reward)
+  -> UEnvAgentLoop
   -> AgentLoopOutput
-  -> VeRL logprob / advantage / update
+  -> VeRL logprob / advantage / actor update
 ```
 
-Bridge 在 Server 乱序返回时按 `request_id` 对齐结果。未知、重复或缺失 ID 都是协议错误。
+关键边界：
+
+- VeRL 接入口是 `UEnvAgentLoop`，位置在 rollout 生成之前。
+- Python 和 Rust adapter core 之间使用本地 gRPC，proto 位于 `../proto/uenv/v1/adapter_core.proto`。
+- Rust adapter core 和 UEnv Server/Worker 之间是 Rust 函数调用，不要求 Serve 侧暴露 Python gRPC。
+- 请求中只携带 prompt、采样参数、reward 配置和元数据；response 由 UEnv Server/Worker 生成并返回。
 
 ## 代码结构
 
-| 路径 | 作用 |
-|---|---|
-| `src/uenv/bridge/verl_agent_loop.py` | VeRL pre-rollout hook 与字段映射 |
-| `src/uenv/bridge/clients.py` | Bridge 到 Server 的 gRPC 客户端 |
-| `src/uenv/bridge/protocol.py` | Python 内部 Episode 类型 |
-| `src/uenv/bridge/model_gateway.py` | 向 Worker 暴露当前训练模型 |
-| `configs/uenv-agent-loop.yaml` | VeRL AgentLoop 配置 |
-| `core/` | Server 可执行程序的 Rust 源码（现有代码名 adapter-core） |
-
-## VeRL 配置
-
 ```text
-actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent
-actor_rollout_ref.rollout.agent.agent_loop_config_path=/path/uenv-bridge/configs/uenv-agent-loop.yaml
+configs/uenv-agent-loop.yaml
+scripts/run_verl_grpo_1step_with_uenv_agent_loop.sh
+scripts/run_layer4_smoke_with_services.sh
+scripts/verify_pre_rollout_rust_core_loop.py
+scripts/dump_verl_pre_rollout_request.py
+
+src/uenv/bridge/
+  verl_agent_loop.py      # VeRL AgentLoop pre-rollout 入口
+  agent_loop_clients.py   # fake / rust_core client 选择
+  clients.py              # Python -> Rust adapter core client
+  protocol.py             # Python 内部 EpisodeRequest / EpisodeResult dataclass
+  utils.py                # JSON 和 prompt 工具函数
+
+core/
+  src/core.rs             # SampleEnvelope -> server EpisodeRequest -> SampleResult
+  src/server_api.rs       # EpisodeService 函数边界
+  src/service.rs          # adapter core gRPC service
 ```
 
-正式部署的最小连接配置：
+## VeRL 接入方式
+
+VeRL 配置中启用自定义 AgentLoop：
+
+```bash
+actor_rollout_ref.rollout.agent.default_agent_loop=uenv_agent
+actor_rollout_ref.rollout.agent.agent_loop_config_path=/tmp/uenv-bridge/configs/uenv-agent-loop.yaml
+```
+
+`configs/uenv-agent-loop.yaml` 会加载：
+
+```yaml
+- name: uenv_agent
+  _target_: uenv.bridge.verl_agent_loop.UEnvAgentLoop
+```
+
+常用环境变量：
 
 ```bash
 export UENV_AGENT_LOOP_CLIENT=rust_core
-export UENV_ADAPTER_CORE_ENDPOINT='SERVER_HOST:50051'
-export UENV_ADAPTER_CORE_AUTO_START=false
+export UENV_ADAPTER_CORE_ENDPOINT=127.0.0.1:50053
+export UENV_ADAPTER_CORE_AUTO_START=1
+export UENV_ADAPTER_CORE_BINARY=/tmp/uenv-bridge/core/target/debug/uenv-adapter-core
+export UENV_ROLLOUT_MODEL_ENDPOINT=http://127.0.0.1:18080/v1
+export UENV_ROLLOUT_MODEL_NAME=policy-model
 ```
 
-每条训练数据都应显式提供 `env_type`。不要用全局默认值掩盖数据缺失。
+默认 `UENV_AGENT_LOOP_CLIENT=rust_core` 走 adapter-core `server` backend 与远端 Worker 真实链路；仅 Python 单测可显式注入 `StaticRolloutEpisodeClient`。
 
-GPU 主机和 Worker 分开时，还需要向 Worker 暴露当前策略模型：
+## EpisodeRequest
 
-```bash
-export UENV_MODEL_GATEWAY_ENABLED=true
-export UENV_MODEL_GATEWAY_BIND_HOST='GPU_HOST'
-export UENV_MODEL_GATEWAY_PORT=18080
-export UENV_MODEL_GATEWAY_PUBLIC_URL='http://GPU_HOST:18080/v1'
+`UEnvAgentLoop.build_episode_request()` 生成的请求是 prompt-only。典型 payload：
+
+```json
+{
+  "protocol_version": "1.0",
+  "framework": "verl",
+  "correlation_id": "batch-a-0",
+  "env_config": {
+    "task_name": "math",
+    "data_source": "openai/gsm8k",
+    "raw_prompt": "user: What is 2 + 2?"
+  },
+  "model_endpoint": {
+    "endpoint_type": "http",
+    "url": "http://127.0.0.1:18080/v1",
+    "model_name": "policy-model",
+    "generation_config": {
+      "temperature": 1.0,
+      "max_new_tokens": 32
+    }
+  },
+  "episode_config": {
+    "max_steps": 10,
+    "max_turns": 1,
+    "seed": 42,
+    "initial_observation": {
+      "raw_prompt": [{"role": "user", "content": "What is 2 + 2?"}],
+      "prompt_text": "user: What is 2 + 2?",
+      "prompt_ids": [10, 11, 12],
+      "token_source": "verl_agent_loop"
+    },
+    "stop_conditions": ["done", "max_steps", "timeout"]
+  },
+  "reward_config": {
+    "reward_type": "rubric",
+    "rubric_config": {
+      "ground_truth": "4"
+    }
+  },
+  "metadata": {
+    "batch_id": "batch-a",
+    "sample_index": 0,
+    "data_source": "openai/gsm8k",
+    "required_result_fields": [
+      "response_ids",
+      "response_mask",
+      "response_text",
+      "reward",
+      "trajectory",
+      "finish_reason"
+    ]
+  }
+}
 ```
 
-`PUBLIC_URL` 必须从 Worker 可达。密钥不进入 sample payload、请求记录或轨迹。
+## EpisodeResult
 
-## 结果要求
+UEnv Server/Worker 返回的 `EpisodeResult` 至少需要满足：
 
-训练结果至少提供：
-
-| UEnv 字段 | VeRL 用途 |
+| 字段 | 要求 |
 |---|---|
-| `request_id` | 回填原 sample |
-| terminal `status` | 判断是否可进入训练 |
-| response IDs / mask | 构造训练 token 与 loss mask |
-| reward | `AgentLoopOutput.reward_score` |
-| trajectory / trajectory ID | 调试与可追溯 |
-| policy version / logprobs（异步时） | 新鲜度和 off-policy 处理 |
+| `episode_id` / `request_id` | 必须等于输入请求 id，用于回填原 sample |
+| `status` | `completed` 表示可用于训练 |
+| `summary.total_reward` | 写入 `AgentLoopOutput.reward_score` |
+| `summary.terminate_reason` | 记录结束原因 |
+| `trajectory.steps` | 保留环境执行轨迹 |
+| 最后一步 `info.response_ids` | 推荐返回 JSON 数组字符串，例如 `[201,202]` |
+| 最后一步 `info.response_mask` | 推荐返回 JSON 数组字符串，例如 `[1,1]` |
+| 最后一步 `info.response_text` | 调试和 fallback 编码使用 |
 
-Bridge 优先使用 Worker 返回的原始 token。只有通用兼容路径可以从 response text 重新编码；SWE 训练默认要求完整 response trace。
+如果没有 `response_ids`，`UEnvAgentLoop` 会把最后一步 `action` 或 `response_text` 用 VeRL tokenizer 重新编码。真实训练联调建议直接返回 token ids，避免 tokenizer 或 chat template 不一致。
 
-## 用户入口
+Adapter 侧结果记录里的 `response_ids` 表示 Server/Worker 原始返回的 token ids；`verl_response_ids` 表示 Python shim 最终交给 VeRL 的 token ids。如果 Server/Worker 只返回 `response_text`，`response_ids` 可能为空，但 `verl_response_ids` 仍会由 tokenizer fallback 得到。
 
-用户通过 release 命令运行，不直接调用仓库内部脚本：
+## Serve 侧对接
+
+Serve 侧只需要关注 Rust adapter core 暴露的函数边界：
+
+```rust
+pub trait EpisodeService: Send + Sync {
+    fn submit_episode_batch(
+        &self,
+        requests: Vec<EpisodeRequest>,
+    ) -> impl Future<Output = Result<Vec<EpisodeResult>, EpisodeServiceError>> + Send;
+}
+```
+
+定义位置：
 
 ```text
-uenv train run-task ...
-uenv train run-swe ...
+core/src/server_api.rs
 ```
 
-完整文档：
+数据结构来自 `uenv-server` 的 proto 生成类型。Adapter core 会把 Python 传入的 sample payload 转成 server `EpisodeRequest`，Serve 实现负责调度 worker、调用模型、执行环境和计算 reward，然后返回同数量的 `EpisodeResult`。
 
-- [自定义强化学习框架接入](../Docs/guide/4-接入强化学习框架/01-custom-framework.md)
-- [以 VeRL 为例接入 UEnv](../Docs/guide/4-接入强化学习框架/02-verl.md)
-- [强化学习训练指南](../Docs/guide/3-运行任务/07-post-training.md)
-- [强化学习训练案例](../Docs/guide/3-运行任务/02-cases.md#强化学习训练)
+Serve 返回顺序可以不同，但每个结果的 `episode_id` 必须能对应输入请求。缺失、重复或未知 id 会被 adapter core 视为错误。
 
-## 开发验证
+## 四层验证
 
-修改 Bridge 或 Server 映射后，验证以下边界：
+以下命令统一使用 `localhost/uenv-bridge-verl:layer4-build`。首次运行 Layer 2 会下载 Rust 依赖，建议保留 `tmp/cargo-home` 和 `tmp/cargo-target` 作为本地缓存。
 
-1. `tests/test_verl_agent_loop.py` 的 sample/request 和 result/output 映射。
-2. `cargo test -p uenv-adapter-core` 的批次、ID 与 Episode 转换。
-3. Bridge 连接真实 Server/Worker 后的 response、reward、trajectory 闭环。
-4. 目标 VeRL 作业完成计划的模型更新，并写出指标和 checkpoint。
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+export IMAGE=localhost/uenv-bridge-verl:layer4-build
+mkdir -p tmp/cargo-home tmp/cargo-target
+```
 
-不要使用 `fake` client 作为真实接入验收；它只用于孤立的 Python 单元测试。
+| Layer | 内容 | 前置条件 | 期望结果 |
+|---|---|---|---|
+| 1 | Python AgentLoop 单测 | bridge image | `test_verl_agent_loop` 通过 |
+| 2 | Rust adapter core 单测 | bridge image | core request/result 映射通过 |
+| 3 | Python 自动启动 Rust core | Layer 2 已构建 Rust binary | 输出 `reward_score` 和 `response_ids` |
+| 4 | 真实 VeRL + Serve/Worker pre-rollout 联动 smoke test | bridge image、GPU、Rust binaries | VeRL `Training Progress: 100%`，`critic/score/mean` 可见 |
+
+Layer 1：Python AgentLoop 单测。
+
+```bash
+podman run --rm --entrypoint bash --network host \
+  -v /data/ronghao/uenv:/data/ronghao/uenv \
+  -w /data/ronghao/uenv/uenv-bridge \
+  "$IMAGE" \
+  -lc 'set -euo pipefail
+export PYTHONPATH=src
+python3 -m unittest discover -s tests -v'
+```
+
+Layer 2：Rust adapter core 单测。
+
+```bash
+podman run --rm --entrypoint bash --network host \
+  -v /data/ronghao/uenv:/data/ronghao/uenv \
+  -w /data/ronghao/uenv/uenv-bridge \
+  "$IMAGE" \
+  -lc 'set -euo pipefail
+export CARGO_HOME=/data/ronghao/uenv/uenv-bridge/tmp/cargo-home
+export CARGO_TARGET_DIR=/data/ronghao/uenv/uenv-bridge/tmp/cargo-target
+cargo build --manifest-path ../Cargo.toml -p uenv-adapter-core --bin uenv-adapter-core
+cargo test --manifest-path ../Cargo.toml -p uenv-adapter-core'
+```
+
+Layer 3：Python AgentLoop 自动连接 Rust core 的本地 gRPC 闭环。
+
+```bash
+podman run --rm --entrypoint bash --network host \
+  -v /data/ronghao/uenv:/data/ronghao/uenv \
+  -w /data/ronghao/uenv/uenv-bridge \
+  "$IMAGE" \
+  -lc 'set -euo pipefail
+export PYTHONPATH=src
+export UENV_ADAPTER_CORE_BINARY=/data/ronghao/uenv/uenv-bridge/tmp/cargo-target/debug/uenv-adapter-core
+python3 scripts/verify_pre_rollout_rust_core_loop.py --skip-build'
+```
+
+Layer 4：真实 VeRL + Serve/Worker pre-rollout 联动 smoke test。
+
+Layer 4 当前主入口是 pre-rollout AgentLoop wrapper。下面这个本地脚本会启动本地 mock OpenAI-compatible model endpoint、Rust adapter core 和 worker，然后让真实 `verl.trainer.main_ppo` 通过 `UEnvAgentLoop` 在 rollout 前把 sample 交给 UEnv：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+TRAINING_STEPS=1 \
+SAMPLE_COUNT=2 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+./scripts/run_layer4_smoke_with_services.sh
+```
+
+分布式联调时使用 `scripts/run_layer4_distributed_smoke.sh`，该脚本只运行 VeRL/adapter 侧逻辑，并连接 server 侧已经启动的 Rust adapter core。此时 Worker 可以使用自己的模型服务，adapter 不负责启动或替代 Worker 的模型。
+
+每次 Layer 4 运行都会在对应服务日志目录写入 adapter 侧结果记录：
+
+```text
+logs/layer4_distributed/<RUN_ID>/agent-loop-results.jsonl
+tmp/layer4_smoke/<RUN_ID>/agent-loop-results.jsonl
+```
+
+可以直接汇总 reward、response 和 trajectory 摘要：
+
+```bash
+python3 scripts/summarize_agent_loop_results.py \
+  logs/layer4_distributed/<RUN_ID>/agent-loop-results.jsonl
+```
+
+结果记录中重点看 `reward`、`trajectory`、`response_ids` 和 `verl_response_ids`。前者表示 Server/Worker 是否直接返回 token ids，后者表示最终回填给 VeRL 的 token ids。
+
+如果需要验证多步训练，把 `TRAINING_STEPS` 改为 2。Layer 4 脚本默认设置 `ROLLOUT_FREE_CACHE_ENGINE=False` 和 `ROLLOUT_ENABLE_SLEEP_MODE=False`，用于避开 vLLM 在多步 smoke test 中每步 sleep/free cache 时可能触发的 Python `multiprocessing.resource_tracker` shared-memory 清理异常。
+
+```bash
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+TRAINING_STEPS=2 \
+SAMPLE_COUNT=4 \
+TRAIN_BATCH_SIZE=2 \
+ROLLOUT_N=2 \
+CUDA_VISIBLE_DEVICES_IN_CONTAINER=0 \
+ROLLOUT_GPU_MEMORY_UTILIZATION=0.2 \
+./scripts/run_layer4_smoke_with_services.sh
+```
+
+`CUDA_VISIBLE_DEVICES_IN_CONTAINER` 用于选择容器内训练 GPU；`ROLLOUT_GPU_MEMORY_UTILIZATION` 会传给 VeRL 的 vLLM rollout server。显存紧张时可以降低该值，避免 vLLM 启动时报 free memory 不足。
+
+如需接入真实模型服务，设置：
+
+```bash
+START_MOCK_MODEL=0 \
+UENV_ROLLOUT_MODEL_ENDPOINT=http://<model-host>:<port>/v1 \
+UENV_ROLLOUT_MODEL_NAME=<model-name> \
+IMAGE=localhost/uenv-bridge-verl:layer4-build \
+./scripts/run_layer4_smoke_with_services.sh
+```
+
+## 构建 VeRL image
+
+如果本地还没有 `localhost/uenv-bridge-verl:layer4-build`，使用下面的命令构建：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+IMAGE=localhost/uenv-bridge-verl:layer4-build ./scripts/build_verl_bridge_image.sh
+```
+
+该脚本默认基于 `docker.io/verlai/verl:vllm011.latest`，安装 Rust、Cargo 和 `protoc`，并把当前 `uenv-bridge` 代码放入镜像，供 Layer 1-4 验证使用。如需指定基础镜像，可以设置 `BASE_IMAGE=<verl-image>`。
+
+dump VeRL prompt batch 的 pre-rollout 请求形状：
+
+```bash
+PYTHONPATH=/workspace/verl:src \
+python3 scripts/dump_verl_pre_rollout_request.py \
+  --data-file tmp/verl_grpo_1step_agent_loop_data/train.parquet \
+  --out-dir /tmp/uenv-verl-pre-rollout-dump \
+  --batch-size 2 \
+  --rollout-n 2
+```
+
+输出重点文件：
+
+```text
+episode_request_batch.json
+episode_request_0.json
+mock_episode_result_batch.json
+combined_gen_batch_summary.json
+```
+
+## 说明
+
+- 当前 Bridge 只维护 VeRL pre-rollout AgentLoop 路线。
+- 多卡、权重同步和高并发吞吐还没有作为验收目标。
+- Worker 调用的模型服务必须与 VeRL 当前 actor 权重保持一致，否则训练信号不可信。
+- `SampleEnvelope` / `SampleResult` 只属于 Python 到 Rust adapter core 的本地协议，Serve 协作者通常不需要直接处理。

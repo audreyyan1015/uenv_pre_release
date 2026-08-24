@@ -14,6 +14,7 @@ export function SystemHomeLink({
   return (
     <Link
       to="/system"
+      search={{ run: undefined }}
       className={cn(buttonVariants({ variant: "outline", size: "sm" }), className)}
       aria-label="返回系统拓扑"
     >

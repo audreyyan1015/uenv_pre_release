@@ -230,14 +230,14 @@ def run(args: argparse.Namespace) -> int:
             for result in client.submit_episode_stream(request_batch):
                 pair = by_id.get(result.request_id)
                 if pair is None:
-                    raise RuntimeError(f"UEnv Server returned unknown request_id={result.request_id}")
+                    raise RuntimeError(f"Adapter Core returned unknown request_id={result.request_id}")
                 case, request = pair
                 records.append(result_record(case, request, result))
 
     returned = {record["request_id"] for record in records}
     missing = [request.request_id for request in requests if request.request_id not in returned]
     if missing:
-        raise RuntimeError(f"UEnv Server did not return {len(missing)} request(s): {missing[:3]}")
+        raise RuntimeError(f"Adapter Core did not return {len(missing)} request(s): {missing[:3]}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
@@ -261,14 +261,14 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="uenv-evaluate",
-        description="Run JSONL evaluation cases through UEnv Bridge, Server, and Worker.",
+        description="Run JSONL evaluation cases through UEnv Adapter Core, Server, and Worker.",
     )
     parser.add_argument("--input", type=Path, required=True, help="JSONL evaluation cases")
     parser.add_argument("--output", type=Path, required=True, help="JSONL result path")
     parser.add_argument(
         "--endpoint",
         required=True,
-        help="UEnv Server endpoint",
+        help="UEnv Adapter Core endpoint",
     )
     parser.add_argument(
         "--env-type",

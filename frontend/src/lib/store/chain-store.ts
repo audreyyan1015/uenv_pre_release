@@ -102,6 +102,10 @@ export class ChainStore {
       chainState: {
         ...this.state.chainState,
         run_state: runState,
+        run_status: payload.run_status ?? this.state.chainState.run_status,
+        terminal_reason: payload.terminal_reason ?? this.state.chainState.terminal_reason,
+        last_heartbeat_ts: payload.last_heartbeat_ts ?? this.state.chainState.last_heartbeat_ts,
+        heartbeat_state: payload.heartbeat_state ?? this.state.chainState.heartbeat_state,
         updated_at: typeof payload.updated_at === "number" ? payload.updated_at : Date.now(),
       },
     });

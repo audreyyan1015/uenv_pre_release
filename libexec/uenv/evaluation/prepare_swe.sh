@@ -36,10 +36,10 @@ usage() {
   --image-policy POLICY      Worker 使用的 local_only 或 allow_public
   --gateway HOST:PORT        SWE Runtime Gateway 监听地址
   --gateway-public URL       OpenHands Agent 访问 SWE Runtime Gateway 的 URL
-  --server HOST:PORT         UEnv Worker 连接的 UEnv Server gRPC 地址
-  --advertise HOST:PORT      UEnv Server 访问 UEnv Worker gRPC 的地址
-  --trajectory-endpoint URL  UEnv Worker/OpenHands Agent 上传交互轨迹的 UEnv Server URL
-  --shared-key-file FILE     多机共享密钥；Server 主机可使用尚不存在的路径安全生成
+  --server HOST:PORT         UEnv Worker 连接的 Adapter gRPC 地址
+  --advertise HOST:PORT      Adapter 访问 UEnv Worker gRPC 的地址
+  --trajectory-endpoint URL  UEnv Worker/OpenHands Agent 上传交互轨迹的 Adapter URL
+  --shared-key-file FILE     多机共享密钥；Adapter 主机可使用尚不存在的路径安全生成
   --force-swe-config         用本次参数替换已有 /etc/uenv/swe.env
   --reset-swe-key            协调所有节点后轮换为 --shared-key-file 中的 key
 

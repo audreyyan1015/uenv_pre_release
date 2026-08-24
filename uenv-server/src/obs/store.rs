@@ -141,4 +141,25 @@ impl ObsStore {
         }
         Ok(out)
     }
+
+    pub fn load_run_events(&self, run_id: &str) -> Result<Vec<ObservabilityEvent>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT body_json FROM events
+                 WHERE training_run_id = ?1 AND disposition = 'accepted'
+                 ORDER BY source_ts ASC, ingest_ts ASC, seq ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![run_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            let body = row.map_err(|e| e.to_string())?;
+            let ev: ObservabilityEvent = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+            out.push(ev);
+        }
+        Ok(out)
+    }
 }

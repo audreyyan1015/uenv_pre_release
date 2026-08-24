@@ -22,7 +22,7 @@ SWE_TRAJECTORY_ENDPOINT=""
 # 全任务类型轨迹 endpoint：默认可由 --swe-trajectory-endpoint 派生（见下方解析），
 # 均未提供时回退 http://127.0.0.1:8077。
 TRAJECTORY_ENDPOINT=""
-TRAJECTORY_SERVER="0.0.0.0:8077"
+TRAJECTORY_SERVER="127.0.0.1:8077"
 SWE_SHARED_KEY_FILE=""
 HAS_SERVER=0
 HAS_WORKER=0
@@ -51,7 +51,7 @@ usage() {
     '  --swe-trajectory-endpoint URL  UEnv Server trajectory service used by a Worker' \
     '  --swe-shared-key-file FILE  protected file containing the shared Gateway key' \
     '  --trajectory-endpoint URL  trajectory store address used by Workers (default: http://127.0.0.1:8077)' \
-    '  --trajectory-server HOST:PORT  trajectory HTTP listen address on the Server (default: 0.0.0.0:8077)' \
+    '  --trajectory-server HOST:PORT  trajectory HTTP listen address on the Server (default: 127.0.0.1:8077)' \
     '  --no-start             install without starting systemd units' \
     '  --force-config         replace existing component configs' \
     '  --force-swe-config     replace only the generated SWE runtime config' \
@@ -611,7 +611,7 @@ if [[ "$ENABLE_SWE" -eq 1 ]]; then
   else
     echo "  SWE：控制面共享 Gateway key 已配置"
   fi
-  echo "  指南：/opt/uenv/current/share/docs/guide/usage/evaluation.md"
+  echo "  指南：/opt/uenv/current/share/docs/guide/3-运行任务/06-evaluation-swe-verified.md"
 fi
 if [[ "$NO_START" -eq 1 ]]; then
   echo "服务尚未启动；检查配置后运行：systemctl enable --now ${UNITS[*]}"

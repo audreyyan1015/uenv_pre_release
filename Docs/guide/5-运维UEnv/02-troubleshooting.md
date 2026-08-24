@@ -2,6 +2,8 @@
 
 先定位故障所在的组件或连接方向，再查看详细日志。不要只根据“进程存在”判断系统可用。
 
+注意日志位置：UEnv Worker 的详细运行日志（注册重试、Episode 执行、轨迹上传失败等）写入 `worker.yaml` 的 `logging.file`（默认 `/var/log/uenv/worker.log`）；`journalctl -u uenv-worker.service` 和 `uenv logs worker` 只包含服务级输出（启动、停止、配置校验）。定位 Worker 问题时两者都要看，关键错误通常只在日志文件中。
+
 ## 首轮检查
 
 | 顺序 | 执行主机 | 命令或检查 | 正常结果 |

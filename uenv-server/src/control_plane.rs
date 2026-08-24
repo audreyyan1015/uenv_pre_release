@@ -335,13 +335,6 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                             heartbeat.load.max(0) as u32,
                             heartbeat.max_load.max(0) as u32,
                         );
-                        let registered = capacity_change.is_some();
-                        if !registered {
-                            warn!(
-                                worker_id = %heartbeat.worker_id,
-                                "heartbeat_from_unregistered_worker"
-                            );
-                        }
                         state.scheduler.write().update_worker_runtime_state(
                             &heartbeat.worker_id,
                             heartbeat.supported_env_types.clone(),
@@ -385,7 +378,7 @@ impl ControlPlaneService for ControlPlaneServiceImpl {
                         );
 
                         let resp = HeartbeatResponse {
-                            ok: registered,
+                            ok: true,
                             drain: None,
                             server_epoch: state.epoch(),
                             next_heartbeat_interval_ms: state.heartbeat_interval_ms as i32,

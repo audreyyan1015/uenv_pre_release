@@ -14,8 +14,8 @@ scheduler:
   worker_offline_timeout_secs: 90
 
 episode:
-  default_timeout_secs: 1800
-  stale_warning_secs: 900
+  default_timeout_secs: 300
+  stale_warning_secs: 150
   max_attempts: 3
   broadcast_capacity: 1024
   queue_dynamic: true

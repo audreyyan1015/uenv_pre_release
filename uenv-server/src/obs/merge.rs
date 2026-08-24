@@ -19,6 +19,7 @@ pub struct EntityVersion {
 pub struct RunLifecycle {
     pub run_state: String,
     pub closed: bool,
+    pub terminal: bool,
 }
 
 #[derive(Debug)]
@@ -70,14 +71,24 @@ impl MergeEngine {
             .or_insert_with(|| RunLifecycle {
                 run_state: "PENDING".into(),
                 closed: false,
+                terminal: false,
             });
 
         if life.closed
+            && !life.terminal
             && !matches!(
                 ev.event_type.as_str(),
                 "RUN_STARTED" | "RUN_STOPPED" | "RUN_CLOSED"
             )
         {
+            return MergeOutcome {
+                disposition: Disposition::RejectedClosed,
+                training_run_id,
+                delta: None,
+                full_hint: false,
+            };
+        }
+        if life.closed && life.terminal && !matches!(ev.event_type.as_str(), "RUN_CLOSED") {
             return MergeOutcome {
                 disposition: Disposition::RejectedClosed,
                 training_run_id,
@@ -129,7 +140,10 @@ impl MergeEngine {
             disposition: Disposition::Accepted,
             training_run_id,
             delta,
-            full_hint: matches!(ev.event_type.as_str(), "RUN_STARTED" | "RUN_CLOSED"),
+            full_hint: matches!(
+                ev.event_type.as_str(),
+                "RUN_STARTED" | "RUN_COMPLETED" | "RUN_TERMINATED" | "RUN_FAILED" | "RUN_CLOSED"
+            ),
         }
     }
 
@@ -145,12 +159,34 @@ impl MergeEngine {
                 if let Some(life) = self.lifecycles.get_mut(run_id) {
                     life.run_state = "RUNNING".into();
                     life.closed = false;
+                    life.terminal = false;
                 }
                 let state = self.get_or_create(run_id);
+                apply_run_plan(state, ev);
+                state.run_status = "running".into();
+                state.terminal_reason.clear();
+                state.heartbeat_state = "alive".into();
+                state.last_heartbeat_ts = ev.source_ts;
                 state.run_state = "RUNNING".into();
                 set_run_tree_status(state, "ACTIVE");
                 set_workflow_active(state, "submit", "ACTIVE", ev);
                 Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
+            }
+            "RUN_HEARTBEAT" => {
+                if let Some(life) = self.lifecycles.get_mut(run_id) {
+                    if !life.closed {
+                        life.run_state = "RUNNING".into();
+                    }
+                }
+                let state = self.get_or_create(run_id);
+                if state.run_state != "CLOSED" {
+                    state.run_state = "RUNNING".into();
+                    state.run_status = "running".into();
+                    state.heartbeat_state = "alive".into();
+                    state.last_heartbeat_ts = ev.source_ts;
+                    set_run_tree_status(state, "ACTIVE");
+                }
+                Some(run_lifecycle_delta(run_id, event_seq, ingest_ts, ev, state))
             }
             "RUN_STOPPED" => {
                 if let Some(life) = self.lifecycles.get_mut(run_id) {
@@ -158,7 +194,54 @@ impl MergeEngine {
                 }
                 let state = self.get_or_create(run_id);
                 state.run_state = "STOPPING".into();
+                state.run_status = "stopping".into();
+                state.heartbeat_state = "alive".into();
                 set_run_tree_status(state, "ACTIVE");
+                Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
+            }
+            "RUN_COMPLETED" => {
+                if let Some(life) = self.lifecycles.get_mut(run_id) {
+                    life.run_state = "CLOSED".into();
+                    life.closed = true;
+                    life.terminal = true;
+                }
+                let state = self.get_or_create(run_id);
+                state.run_state = "CLOSED".into();
+                state.run_status = "completed".into();
+                state.terminal_reason = terminal_reason(ev, "completed");
+                state.heartbeat_state = "closed".into();
+                set_run_tree_status(state, "CLOSED");
+                set_workflow_stage_status(state, "done", "DONE");
+                Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
+            }
+            "RUN_TERMINATED" => {
+                if let Some(life) = self.lifecycles.get_mut(run_id) {
+                    life.run_state = "CLOSED".into();
+                    life.closed = true;
+                    life.terminal = true;
+                }
+                let state = self.get_or_create(run_id);
+                state.run_state = "CLOSED".into();
+                state.run_status = "terminated".into();
+                state.terminal_reason = terminal_reason(ev, "terminated");
+                state.heartbeat_state = "closed".into();
+                set_run_tree_status(state, "CLOSED");
+                set_workflow_stage_status(state, "done", "FAILED");
+                Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
+            }
+            "RUN_FAILED" => {
+                if let Some(life) = self.lifecycles.get_mut(run_id) {
+                    life.run_state = "CLOSED".into();
+                    life.closed = true;
+                    life.terminal = true;
+                }
+                let state = self.get_or_create(run_id);
+                state.run_state = "CLOSED".into();
+                state.run_status = "failed".into();
+                state.terminal_reason = terminal_reason(ev, "failed");
+                state.heartbeat_state = "closed".into();
+                set_run_tree_status(state, "FAILED");
+                set_workflow_stage_status(state, "done", "FAILED");
                 Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
             }
             "RUN_CLOSED" => {
@@ -168,6 +251,15 @@ impl MergeEngine {
                 }
                 let state = self.get_or_create(run_id);
                 state.run_state = "CLOSED".into();
+                if state.run_status.is_empty()
+                    || state.run_status == "pending"
+                    || state.run_status == "running"
+                    || state.run_status == "stopping"
+                {
+                    state.run_status = terminal_status(ev, "completed");
+                    state.terminal_reason = terminal_reason(ev, state.run_status.as_str());
+                }
+                state.heartbeat_state = "closed".into();
                 set_run_tree_status(state, "CLOSED");
                 set_workflow_stage_status(state, "done", "DONE");
                 Some(run_delta(run_id, event_seq, ingest_ts, ev, state))
@@ -498,10 +590,41 @@ fn run_delta(
         entity_key: "run".into(),
         patch: json!({
             "run_state": state.run_state,
+            "run_status": state.run_status,
+            "terminal_reason": state.terminal_reason,
+            "last_heartbeat_ts": state.last_heartbeat_ts,
+            "heartbeat_state": state.heartbeat_state,
             "workflow": state.workflow,
             "tree": state.tree,
             "episodes": state.episodes,
             "workers": state.workers,
+            "planned_episode_total": state.planned_episode_total,
+            "planned_step_total": state.planned_step_total,
+            "updated_at": state.updated_at,
+        }),
+        source_ts: ev.source_ts,
+        ingest_ts,
+        cursor: state.cursor.clone(),
+    }
+}
+
+fn run_lifecycle_delta(
+    run_id: &str,
+    event_seq: u64,
+    ingest_ts: i64,
+    ev: &ObservabilityEvent,
+    state: &ChainState,
+) -> StateDelta {
+    StateDelta {
+        training_run_id: run_id.to_string(),
+        event_seq,
+        entity_key: "run".into(),
+        patch: json!({
+            "run_state": state.run_state,
+            "run_status": state.run_status,
+            "terminal_reason": state.terminal_reason,
+            "last_heartbeat_ts": state.last_heartbeat_ts,
+            "heartbeat_state": state.heartbeat_state,
             "updated_at": state.updated_at,
         }),
         source_ts: ev.source_ts,
@@ -521,6 +644,57 @@ fn chain_patch_delta(
     state: &ChainState,
 ) -> StateDelta {
     run_delta(run_id, event_seq, ingest_ts, ev, state)
+}
+
+fn apply_run_plan(state: &mut ChainState, ev: &ObservabilityEvent) {
+    let Some(payload) = ev.payload.as_ref() else {
+        return;
+    };
+    if let Some(total) = payload_u64(payload, "planned_episode_total") {
+        state.planned_episode_total = total;
+    }
+    if let Some(total) = payload_u64(payload, "planned_step_total") {
+        state.planned_step_total = total;
+    }
+}
+
+fn payload_u64(payload: &serde_json::Value, key: &str) -> Option<u64> {
+    payload
+        .get(key)
+        .or_else(|| payload.pointer(&format!("/run_plan/{key}")))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+        })
+        .filter(|value| *value > 0)
+}
+
+fn payload_string(payload: &serde_json::Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .or_else(|| payload.pointer(&format!("/run_plan/{key}")))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn terminal_status(ev: &ObservabilityEvent, default: &str) -> String {
+    ev.payload
+        .as_ref()
+        .and_then(|payload| {
+            payload_string(payload, "run_status")
+                .or_else(|| payload_string(payload, "terminal_status"))
+        })
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn terminal_reason(ev: &ObservabilityEvent, default: &str) -> String {
+    ev.payload
+        .as_ref()
+        .and_then(|payload| payload_string(payload, "terminal_reason"))
+        .unwrap_or_else(|| default.to_string())
 }
 
 fn set_run_tree_status(state: &mut ChainState, status: &str) {
@@ -713,6 +887,8 @@ pub fn ensure_seed_run(engine: &mut MergeEngine, run_id: &str) {
     if let Some(state) = engine.runs.get_mut(run_id) {
         if state.run_state == "PENDING" {
             state.run_state = "RUNNING".into();
+            state.run_status = "running".into();
+            state.heartbeat_state = "unknown".into();
             state.updated_at = now_ms();
         }
     }

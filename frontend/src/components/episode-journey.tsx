@@ -626,7 +626,7 @@ export function EpisodeJourney({ initialRunId = null }: { initialRunId?: string 
                                 ·
                               </span>
                               <span className="shrink-0">
-                                {episode.workerId || "执行节点待分配"}
+                                {episode.workerId || "Worker 待分配"}
                               </span>
                               <span className="shrink-0" aria-hidden="true">
                                 ·

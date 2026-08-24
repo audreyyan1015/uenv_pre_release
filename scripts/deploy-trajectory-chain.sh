@@ -7,7 +7,7 @@ WORKER_HOST="${UENV_WORKER_HOST:-219.147.100.43}"
 WORKER_PORT="${UENV_WORKER_SSH_PORT:-7143}"
 SERVER_HOST="${UENV_SERVER_HOST:-8.130.75.157}"
 OH_HOST="${OPENHANDS_HOST:-8.130.208.77}"
-SERVER_PASS="${UENV_SERVER_PASS:-}"
+SERVER_PASS="${UENV_SERVER_PASS:-dev@BDW2026}"
 
 resolve_worker_key() {
   if [[ -n "${UENV_SSH_KEY:-}" && -f "${UENV_SSH_KEY}" ]]; then echo "${UENV_SSH_KEY}"; return; fi
@@ -44,7 +44,6 @@ REMOTE
 
 deploy_server() {
   echo "== deploy Server $SERVER_HOST =="
-  [[ -n "$SERVER_PASS" ]] || { echo "ERROR: set UENV_SERVER_PASS or deploy with an SSH key" >&2; return 1; }
   tar -C "$REPO_ROOT" -czf /tmp/uenv-server-sync.tgz \
     --exclude=target --exclude=.git \
     Cargo.toml Cargo.lock uenv-server uenv-bridge uenv-common config proto

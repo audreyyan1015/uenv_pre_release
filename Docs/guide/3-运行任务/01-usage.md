@@ -63,4 +63,4 @@ python3 -c 'import os,socket; socket.create_connection((os.environ["UENV_SERVER_
 
 源码、服务单元或协议中偶尔出现的历史兼容名称，以旁边命令要求的字面值为准；它们不增加新的部署角色。
 
-协议字段的完整定义以 `proto/` 和 `Docs/trajectory/frozen-spec-v2.2.md` 为准；日常使用按本指南操作即可。
+协议字段的完整定义以 `proto/` 和 `Docs/trajectory/frozen-spec-v2.3.md` 为准；日常使用按本指南操作即可。

@@ -419,7 +419,7 @@ async fn swe_instance_catalog_served_by_variant() {
     // Seed a temp catalog dir and point the handler at it (M1-1 / M6-1).
     let dir = tempfile::tempdir().unwrap();
     let verified = r#"{"astropy__astropy-7166":{"instance_id":"astropy__astropy-7166","repo":"astropy/astropy","base_commit":"deadbeef","FAIL_TO_PASS":["t::a"],"PASS_TO_PASS":[]}}"#;
-    let smith = r#"{"oauthlib__smith-1":{"instance_id":"oauthlib__smith-1","repo":"oauthlib/oauthlib","base_commit":"","benchmark_variant":"smith","image_cache_key":"swebench/swesmith.x86_64.oauthlib:latest","FAIL_TO_PASS":["t::smith"],"PASS_TO_PASS":[]}}"#;
+    let smith = r#"{"oauthlib__smith-1":{"instance_id":"oauthlib__smith-1","repo":"oauthlib/oauthlib","base_commit":"","benchmark_variant":"smith","image_cache_key":"jyangballin/swesmith.x86_64.oauthlib:latest","FAIL_TO_PASS":["t::smith"],"PASS_TO_PASS":[]}}"#;
     std::fs::write(dir.path().join("verified.json"), verified).unwrap();
     std::fs::write(dir.path().join("smith-smoke.json"), smith).unwrap();
     // SAFETY: single-threaded test setup before the server handles requests.

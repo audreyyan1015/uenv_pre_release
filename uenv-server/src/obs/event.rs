@@ -194,8 +194,20 @@ pub struct WorkerStatusObservation {
 pub struct ChainState {
     pub training_run_id: String,
     pub run_state: String,
+    #[serde(default)]
+    pub run_status: String,
+    #[serde(default)]
+    pub terminal_reason: String,
+    #[serde(default)]
+    pub last_heartbeat_ts: i64,
+    #[serde(default)]
+    pub heartbeat_state: String,
     pub updated_at: i64,
     pub global_event_seq: u64,
+    #[serde(default)]
+    pub planned_episode_total: u64,
+    #[serde(default)]
+    pub planned_step_total: u64,
     pub workflow: WorkflowGraph,
     pub tree: TreeGraph,
     pub episodes: HashMap<String, EpisodeView>,
@@ -213,8 +225,14 @@ impl ChainState {
         Self {
             training_run_id: training_run_id.to_string(),
             run_state: "PENDING".to_string(),
+            run_status: "pending".to_string(),
+            terminal_reason: String::new(),
+            last_heartbeat_ts: 0,
+            heartbeat_state: "unknown".to_string(),
             updated_at: now,
             global_event_seq: 0,
+            planned_episode_total: 0,
+            planned_step_total: 0,
             workflow: default_workflow(),
             tree: TreeGraph {
                 // 与根节点 node_id 一致，避免前端 byId.get(root_id) 落空。
@@ -313,6 +331,14 @@ pub enum SsePayload {
 pub struct RunStatusPayload {
     pub training_run_id: String,
     pub run_state: String,
+    #[serde(default)]
+    pub run_status: String,
+    #[serde(default)]
+    pub terminal_reason: String,
+    #[serde(default)]
+    pub last_heartbeat_ts: i64,
+    #[serde(default)]
+    pub heartbeat_state: String,
     pub updated_at: i64,
 }
 

@@ -63,6 +63,190 @@ async fn ingest_and_state() {
 }
 
 #[tokio::test]
+async fn run_summaries_count_episodes_without_full_state_payload() {
+    let dir = std::env::temp_dir().join(format!("uenv-obs-summary-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = ObsConfig {
+        enabled: true,
+        http_listen: "127.0.0.1:0".into(),
+        data_dir: dir.clone(),
+        db_path: dir.join("obs.db"),
+        token: None,
+        queue_capacity: 128,
+        seed_on_start: false,
+        auto_mock_empty_run: false,
+    };
+    let obs = open(&cfg).expect("obs open");
+    let run = "summary-run";
+    let ts = now_ms();
+    let base = ObservabilityEvent {
+        event_id: "summary-0".into(),
+        schema_version: "1".into(),
+        correlation_id: "summary-correlation".into(),
+        training_run_id: Some(run.into()),
+        adapter_run_id: None,
+        batch_id: Some("summary-batch".into()),
+        episode_id: None,
+        attempt_id: Some(1),
+        worker_id: Some("summary-worker".into()),
+        env_instance_id: None,
+        step_index: None,
+        dispatch_lease_id: None,
+        scheduler_epoch: None,
+        env_type: Some("swe".into()),
+        source_id: "summary-test".into(),
+        module: "server".into(),
+        entity_type: "episode".into(),
+        entity_id: String::new(),
+        event_type: "RUN_STARTED".into(),
+        seq: 0,
+        source_ts: ts,
+        payload: None,
+    };
+
+    let mut seq = 0u64;
+    for (event_type, episode_id) in [
+        ("RUN_STARTED", ""),
+        ("EPISODE_SUBMITTED", "ep-done"),
+        ("EPISODE_DISPATCHED", "ep-done"),
+        ("EPISODE_COMPLETED", "ep-done"),
+        ("EPISODE_SUBMITTED", "ep-failed"),
+        ("EPISODE_FAILED", "ep-failed"),
+        ("RUN_HEARTBEAT", ""),
+        ("RUN_COMPLETED", ""),
+    ] {
+        seq += 1;
+        let ev = ObservabilityEvent {
+            event_id: format!("summary-{seq}"),
+            event_type: event_type.into(),
+            payload: (event_type == "RUN_STARTED").then(|| {
+                serde_json::json!({
+                    "planned_episode_total": 8,
+                    "planned_step_total": 2,
+                })
+            }),
+            episode_id: if episode_id.is_empty() {
+                None
+            } else {
+                Some(episode_id.into())
+            },
+            entity_id: episode_id.into(),
+            seq,
+            source_ts: ts + seq as i64,
+            ..base.clone()
+        };
+        assert!(matches!(
+            obs.ingest_sync(ev).unwrap(),
+            event::Disposition::Accepted
+        ));
+    }
+
+    let summaries = obs.list_run_summaries();
+    let summary = summaries
+        .iter()
+        .find(|summary| summary.training_run_id == run)
+        .expect("summary run");
+    assert_eq!(summary.run_state, "CLOSED");
+    assert_eq!(summary.run_status, "completed");
+    assert_eq!(summary.terminal_reason, "completed");
+    assert_eq!(summary.heartbeat_state, "closed");
+    assert!(summary.last_heartbeat_ts > 0);
+    assert_eq!(summary.planned_episode_total, 8);
+    assert_eq!(summary.planned_step_total, 2);
+    assert_eq!(summary.episode_total, 2);
+    assert_eq!(summary.episode_done, 1);
+    assert_eq!(summary.episode_failed, 1);
+    assert_eq!(summary.episode_active, 0);
+    assert_eq!(summary.worker_total, 1);
+    assert!(summary.started_at <= summary.updated_at);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn run_timeline_uses_event_history_timestamps() {
+    let dir = std::env::temp_dir().join(format!("uenv-obs-timeline-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = ObsConfig {
+        enabled: true,
+        http_listen: "127.0.0.1:0".into(),
+        data_dir: dir.clone(),
+        db_path: dir.join("obs.db"),
+        token: None,
+        queue_capacity: 128,
+        seed_on_start: false,
+        auto_mock_empty_run: false,
+    };
+    let obs = open(&cfg).expect("obs open");
+    let run = "timeline-run";
+    let episode = "timeline-episode";
+    let ts = 1_800_000_000_000i64;
+
+    for (seq, event_type, offset, episode_id) in [
+        (1, "RUN_STARTED", 0, ""),
+        (2, "EPISODE_SUBMITTED", 100, episode),
+        (3, "EPISODE_DISPATCHED", 200, episode),
+        (4, "STEP_STARTED", 300, episode),
+        (5, "STEP_COMPLETE", 700, episode),
+        (6, "EPISODE_REPORTING", 800, episode),
+        (7, "EPISODE_COMPLETED", 900, episode),
+        (8, "EPISODE_CLOSED", 950, episode),
+        (9, "RUN_CLOSED", 1_000, ""),
+    ] {
+        let is_episode = !episode_id.is_empty();
+        let ev = ObservabilityEvent {
+            event_id: format!("timeline-{seq}"),
+            schema_version: "1".into(),
+            correlation_id: "timeline-correlation".into(),
+            training_run_id: Some(run.into()),
+            adapter_run_id: None,
+            batch_id: Some("timeline-batch".into()),
+            episode_id: is_episode.then(|| episode_id.into()),
+            attempt_id: is_episode.then_some(1),
+            worker_id: is_episode.then(|| "timeline-worker".into()),
+            env_instance_id: None,
+            step_index: None,
+            dispatch_lease_id: None,
+            scheduler_epoch: None,
+            env_type: is_episode.then(|| "swe".into()),
+            source_id: "timeline-test".into(),
+            module: "server".into(),
+            entity_type: if is_episode {
+                "episode".into()
+            } else {
+                "training_run".into()
+            },
+            entity_id: if is_episode {
+                episode_id.into()
+            } else {
+                run.into()
+            },
+            event_type: event_type.into(),
+            seq,
+            source_ts: ts + offset,
+            payload: None,
+        };
+        assert!(matches!(
+            obs.ingest_sync(ev).unwrap(),
+            event::Disposition::Accepted
+        ));
+    }
+
+    let timeline = obs.run_timeline(run).expect("run timeline");
+    let execute = timeline
+        .iter()
+        .find(|item| item.stage == "EXECUTE")
+        .expect("execute stage");
+    assert_eq!(execute.first_source_ts, ts + 200);
+    assert_eq!(execute.last_source_ts, ts + 700);
+    assert_eq!(execute.event_count, 3);
+    assert_eq!(execute.episode_count, 1);
+    assert!(timeline.iter().any(|item| item.stage == "RUN_CLOSED"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn global_worker_snapshot_is_overlaid_on_run_state() {
     let dir = std::env::temp_dir().join(format!(
         "uenv-obs-worker-status-test-{}",
@@ -455,6 +639,66 @@ fn terminal_events_close_run_and_step_tree_nodes() {
             .map(|n| n.status.as_str()),
         Some("DONE")
     );
+}
+
+#[test]
+fn explicit_run_terminal_status_rejects_late_restart() {
+    let mut engine = MergeEngine::default();
+    let run = "explicit-terminal-run";
+    let ts = now_ms();
+    let base = ObservabilityEvent {
+        event_id: "terminal-0".into(),
+        schema_version: "1".into(),
+        correlation_id: "terminal-correlation".into(),
+        training_run_id: Some(run.into()),
+        adapter_run_id: None,
+        batch_id: None,
+        episode_id: None,
+        attempt_id: None,
+        worker_id: None,
+        env_instance_id: None,
+        step_index: None,
+        dispatch_lease_id: None,
+        scheduler_epoch: None,
+        env_type: None,
+        source_id: "terminal-test".into(),
+        module: "adapter".into(),
+        entity_type: "training_run".into(),
+        entity_id: run.into(),
+        event_type: "RUN_STARTED".into(),
+        seq: 1,
+        source_ts: ts,
+        payload: None,
+    };
+
+    for (seq, event_type) in [(1, "RUN_STARTED"), (2, "RUN_COMPLETED")] {
+        let ev = ObservabilityEvent {
+            event_id: format!("terminal-{seq}"),
+            event_type: event_type.into(),
+            seq,
+            source_ts: ts + seq as i64,
+            ..base.clone()
+        };
+        assert!(matches!(
+            engine.apply(&ev, ts + seq as i64).disposition,
+            event::Disposition::Accepted
+        ));
+    }
+
+    let late_started = ObservabilityEvent {
+        event_id: "terminal-late-started".into(),
+        event_type: "RUN_STARTED".into(),
+        seq: 3,
+        source_ts: ts + 3,
+        ..base
+    };
+    assert!(matches!(
+        engine.apply(&late_started, ts + 3).disposition,
+        event::Disposition::RejectedClosed
+    ));
+    let state = engine.get(run).expect("run state");
+    assert_eq!(state.run_state, "CLOSED");
+    assert_eq!(state.run_status, "completed");
 }
 
 /// 读取某 workflow 阶段节点的 payload_summary.count（缺省 0）。

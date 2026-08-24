@@ -856,7 +856,7 @@ impl UEnvEpisodeService {
             instance_id = %spec.instance_id,
             "gateway_session_create_start"
         );
-        let gateway_api_key = swe_gateway_api_key()?;
+        let gateway_api_key = swe_gateway_api_key();
         // 创建 gateway session 可能访问外部 runtime，因此放进 tokio::select! 同时监听取消和 deadline。
         let session = tokio::select! {
             _ = handle.cancel_token.cancelled() => {

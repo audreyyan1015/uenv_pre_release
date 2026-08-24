@@ -101,9 +101,9 @@ class RustCoreClientConfig:
 
 
 class RustCoreEpisodeClient:
-    """Client boundary for the Python Bridge -> UEnv Server.
+    """Client boundary for Python shim -> Rust adapter core.
 
-    The Rust core API is intentionally local to the Server implementation. It receives the
+    The Rust core API is intentionally local to the adapter. It receives the
     already-normalized EpisodeRequest payload from Python, then calls UEnv
     Server through Rust functions rather than a second gRPC hop.
     """
@@ -214,7 +214,7 @@ class RustCoreEpisodeClient:
         while time.time() < deadline:
             if self._process is not None and self._process.poll() is not None:
                 output = self._process.stdout.read() if self._process.stdout is not None else ""
-                raise RuntimeError(f"UEnv Server exited during startup with code {self._process.returncode}: {output}")
+                raise RuntimeError(f"Rust adapter core exited during startup with code {self._process.returncode}: {output}")
             try:
                 response = self.stub.HealthCheck(self._core_pb2.HealthCheckRequest(), timeout=1)
                 if bool(getattr(response, "ok", False)):
@@ -222,7 +222,7 @@ class RustCoreEpisodeClient:
             except Exception as exc:
                 last_error = exc
                 time.sleep(0.2)
-        raise RuntimeError(f"UEnv Server did not become healthy at {self.config.endpoint}: {last_error}")
+        raise RuntimeError(f"Rust adapter core did not become healthy at {self.config.endpoint}: {last_error}")
 
     def submit_episode(self, request: EpisodeRequest) -> EpisodeResult:
         return next(self.submit_episode_stream([request]))

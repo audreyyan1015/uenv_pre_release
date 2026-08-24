@@ -21,6 +21,8 @@ pub use worker_status::{WorkerStatusSyncConfig, spawn_worker_status_sync};
 use event::RunStatusPayload;
 use merge::{MergeEngine, ensure_seed_run};
 use parking_lot::RwLock;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -104,6 +106,39 @@ pub struct ObsHandle {
     inner: Arc<ObsInner>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSummary {
+    pub training_run_id: String,
+    pub run_state: String,
+    pub run_status: String,
+    pub terminal_reason: String,
+    pub last_heartbeat_ts: i64,
+    pub heartbeat_state: String,
+    pub updated_at: i64,
+    pub global_event_seq: u64,
+    pub planned_episode_total: u64,
+    pub planned_step_total: u64,
+    pub started_at: i64,
+    pub active_stage: String,
+    pub active_stage_label: String,
+    pub episode_total: usize,
+    pub episode_active: usize,
+    pub episode_done: usize,
+    pub episode_failed: usize,
+    pub worker_total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunTimelineItem {
+    pub stage: String,
+    pub label: String,
+    pub status: String,
+    pub first_source_ts: i64,
+    pub last_source_ts: i64,
+    pub event_count: usize,
+    pub episode_count: usize,
+}
+
 impl ObsHandle {
     pub fn token(&self) -> Option<&str> {
         self.inner.cfg.token.as_deref()
@@ -161,7 +196,27 @@ impl ObsHandle {
     }
 
     pub fn list_run_ids(&self) -> Vec<String> {
-        self.inner.engine.read().runs.keys().cloned().collect()
+        let mut runs: Vec<_> = self.inner.engine.read().runs.keys().cloned().collect();
+        runs.sort_by(|a, b| b.cmp(a));
+        runs
+    }
+
+    pub fn list_run_summaries(&self) -> Vec<RunSummary> {
+        let eng = self.inner.engine.read();
+        let mut summaries: Vec<_> = eng.runs.values().map(run_summary).collect();
+        summaries.sort_by(|a, b| {
+            b.started_at
+                .cmp(&a.started_at)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+                .then_with(|| b.training_run_id.cmp(&a.training_run_id))
+        });
+        summaries
+    }
+
+    pub fn run_timeline(&self, run_id: &str) -> Result<Vec<RunTimelineItem>, String> {
+        let events = self.inner.store.load_run_events(run_id)?;
+        let state = self.chain_state(run_id);
+        Ok(run_timeline_from_events(&events, state.as_ref()))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SsePayload> {
@@ -308,6 +363,10 @@ impl ObsHandle {
                             .send(SsePayload::RunStatus(RunStatusPayload {
                                 training_run_id: run_id.clone(),
                                 run_state: state.run_state.clone(),
+                                run_status: state.run_status.clone(),
+                                terminal_reason: state.terminal_reason.clone(),
+                                last_heartbeat_ts: state.last_heartbeat_ts,
+                                heartbeat_state: state.heartbeat_state.clone(),
                                 updated_at: state.updated_at,
                             }));
                     }
@@ -350,6 +409,201 @@ impl ObsHandle {
                 Ok(Disposition::LateArrival)
             }
         }
+    }
+}
+
+fn run_summary(state: &ChainState) -> RunSummary {
+    let mut started_at = state.updated_at;
+    for node in &state.workflow.nodes {
+        if node.source_ts > 0 {
+            started_at = started_at.min(node.source_ts);
+        }
+    }
+    for episode in state.episodes.values() {
+        if episode.last_source_ts > 0 {
+            started_at = started_at.min(episode.last_source_ts);
+        }
+    }
+
+    let active_stage_node = state
+        .workflow
+        .nodes
+        .iter()
+        .find(|node| node.node_id == state.workflow.active_node_id)
+        .or_else(|| {
+            state
+                .workflow
+                .nodes
+                .iter()
+                .find(|node| node.status == "ACTIVE")
+        });
+    let active_stage = active_stage_node
+        .map(|node| node.stage.clone())
+        .unwrap_or_default();
+    let active_stage_label = active_stage_node
+        .map(|node| node.label.clone())
+        .unwrap_or_default();
+
+    let mut episode_active = 0usize;
+    let mut episode_done = 0usize;
+    let mut episode_failed = 0usize;
+    for episode in state.episodes.values() {
+        match episode.status.as_str() {
+            "DONE" | "CLOSED" => episode_done += 1,
+            "FAILED" => episode_failed += 1,
+            "ACTIVE" => episode_active += 1,
+            _ => {}
+        }
+    }
+
+    RunSummary {
+        training_run_id: state.training_run_id.clone(),
+        run_state: state.run_state.clone(),
+        run_status: state.run_status.clone(),
+        terminal_reason: state.terminal_reason.clone(),
+        last_heartbeat_ts: state.last_heartbeat_ts,
+        heartbeat_state: state.heartbeat_state.clone(),
+        updated_at: state.updated_at,
+        global_event_seq: state.global_event_seq,
+        planned_episode_total: state.planned_episode_total,
+        planned_step_total: state.planned_step_total,
+        started_at,
+        active_stage,
+        active_stage_label,
+        episode_total: state.episodes.len(),
+        episode_active,
+        episode_done,
+        episode_failed,
+        worker_total: state.workers.len(),
+    }
+}
+
+struct TimelineAccumulator {
+    stage: String,
+    label: String,
+    status: String,
+    order: u8,
+    first_source_ts: i64,
+    last_source_ts: i64,
+    event_count: usize,
+    episodes: HashSet<String>,
+}
+
+fn run_timeline_from_events(
+    events: &[ObservabilityEvent],
+    state: Option<&ChainState>,
+) -> Vec<RunTimelineItem> {
+    let active_stage = state
+        .filter(|state| state.run_state == "RUNNING" || state.run_state == "STOPPING")
+        .and_then(|state| {
+            state
+                .workflow
+                .nodes
+                .iter()
+                .find(|node| node.node_id == state.workflow.active_node_id)
+                .or_else(|| {
+                    state
+                        .workflow
+                        .nodes
+                        .iter()
+                        .find(|node| node.status == "ACTIVE")
+                })
+                .map(|node| node.stage.clone())
+        });
+    let mut failed_episodes = HashSet::new();
+    let mut stages: HashMap<String, TimelineAccumulator> = HashMap::new();
+
+    for ev in events {
+        let episode_id = timeline_episode_id(ev).map(ToOwned::to_owned);
+        let episode_failed = episode_id
+            .as_ref()
+            .is_some_and(|id| failed_episodes.contains(id));
+        let Some((stage, label, order, status)) =
+            timeline_stage(ev.event_type.as_str(), episode_failed)
+        else {
+            continue;
+        };
+        let entry = stages
+            .entry(stage.to_string())
+            .or_insert_with(|| TimelineAccumulator {
+                stage: stage.to_string(),
+                label: label.to_string(),
+                status: status.to_string(),
+                order,
+                first_source_ts: ev.source_ts,
+                last_source_ts: ev.source_ts,
+                event_count: 0,
+                episodes: HashSet::new(),
+            });
+        entry.first_source_ts = entry.first_source_ts.min(ev.source_ts);
+        entry.last_source_ts = entry.last_source_ts.max(ev.source_ts);
+        entry.event_count += 1;
+        if status == "FAILED" {
+            entry.status = "FAILED".to_string();
+        }
+        if active_stage.as_deref() == Some(stage) && entry.status != "FAILED" {
+            entry.status = "ACTIVE".to_string();
+        }
+        if let Some(id) = episode_id.as_ref() {
+            entry.episodes.insert(id.clone());
+        }
+        if ev.event_type == "EPISODE_FAILED" {
+            if let Some(id) = episode_id {
+                failed_episodes.insert(id);
+            }
+        }
+    }
+
+    let mut out: Vec<_> = stages.into_values().collect();
+    out.sort_by(|a, b| {
+        a.first_source_ts
+            .cmp(&b.first_source_ts)
+            .then_with(|| a.order.cmp(&b.order))
+    });
+    out.into_iter()
+        .map(|item| RunTimelineItem {
+            stage: item.stage,
+            label: item.label,
+            status: item.status,
+            first_source_ts: item.first_source_ts,
+            last_source_ts: item.last_source_ts,
+            event_count: item.event_count,
+            episode_count: item.episodes.len(),
+        })
+        .collect()
+}
+
+fn timeline_episode_id(ev: &ObservabilityEvent) -> Option<&str> {
+    ev.episode_id.as_deref().or_else(|| {
+        if ev.entity_type == "episode" && !ev.entity_id.is_empty() {
+            Some(ev.entity_id.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn timeline_stage(
+    event_type: &str,
+    episode_failed: bool,
+) -> Option<(&'static str, &'static str, u8, &'static str)> {
+    match event_type {
+        "RUN_STARTED" => Some(("RUN_STARTED", "任务启动", 0, "DONE")),
+        "EPISODE_SUBMITTED" => Some(("SUBMIT", "提交任务", 10, "DONE")),
+        "EPISODE_SCHEDULING" => Some(("DISPATCH", "调度下发", 20, "DONE")),
+        "EPISODE_DISPATCHED" | "ATTEMPT_STARTED" | "STEP_STARTED" | "STEP_COMPLETE"
+        | "ATTEMPT_CLOSED" => Some(("EXECUTE", "环境执行", 30, "DONE")),
+        "EPISODE_REPORTING" => Some(("REPORT", "结果回传", 40, "DONE")),
+        "EPISODE_COMPLETED" => Some(("DONE", "完成收口", 50, "DONE")),
+        "EPISODE_FAILED" => Some(("FAILED", "失败收口", 60, "FAILED")),
+        "EPISODE_CLOSED" if episode_failed => Some(("FAILED", "失败收口", 60, "FAILED")),
+        "EPISODE_CLOSED" => Some(("DONE", "完成收口", 50, "DONE")),
+        "RUN_STOPPED" => Some(("RUN_STOPPED", "停止请求", 90, "DONE")),
+        "RUN_COMPLETED" => Some(("RUN_COMPLETED", "任务完成", 95, "DONE")),
+        "RUN_TERMINATED" => Some(("RUN_TERMINATED", "任务终止", 96, "DONE")),
+        "RUN_FAILED" => Some(("RUN_FAILED", "任务失败", 97, "FAILED")),
+        "RUN_CLOSED" => Some(("RUN_CLOSED", "任务关闭", 99, "DONE")),
+        _ => None,
     }
 }
 

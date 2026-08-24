@@ -39,8 +39,8 @@ CPU/UEnv 主机（只需一次）：
 prepare-uenv 选项：
   --uenv-release DIR       已安装的 UEnv release（默认 /opt/uenv/current）
   --profile PROFILE        single-node、full 或 worker（默认 single-node）
-  --server HOST:PORT       OpenHands Agent 连接的 UEnv Server gRPC 地址（默认 127.0.0.1:50051）
-  --trajectory-endpoint URL  OpenHands Agent 上传交互轨迹的 UEnv Server URL
+  --server HOST:PORT       OpenHands Agent 连接的 Adapter gRPC 地址（默认 127.0.0.1:50051）
+  --trajectory-endpoint URL  OpenHands Agent 上传交互轨迹的 Adapter URL
   --openhands-dir DIR      OpenHands 安装目录
   --skip-openhands         使用已有 OpenHands，不执行安装器
 
@@ -64,7 +64,7 @@ run 选项：
   --model DIR              Hugging Face 模型目录（必填）
   --data DIR               含 train.parquet/test.parquet 的目录（必填）
   --env-type NAME          本批训练数据对应的 UEnv 环境类型（必填）
-  --uenv-endpoint HOST:PORT  UEnv Server 地址（必填）
+  --uenv-endpoint HOST:PORT  UEnv adapter-core 地址（必填）
   --gateway-public-url URL CPU/UEnv 主机可访问的 GPU 模型网关 URL
   --gateway-port PORT      GPU 模型网关监听端口（默认 18080）
   --gateway-bind HOST      监听地址；单机默认 127.0.0.1，双机默认 0.0.0.0
@@ -275,8 +275,7 @@ EOF
 
   require_command systemctl
   if [[ "$profile" == "single-node" || "$profile" == "full" ]]; then
-    systemctl is-active --quiet uenv-adapter-core.service \
-      || fail "UEnv Server（服务名 uenv-adapter-core.service）未运行"
+    systemctl is-active --quiet uenv-adapter-core.service || fail "uenv-adapter-core 未运行"
   fi
   systemctl is-active --quiet uenv-worker.service || fail "uenv-worker 未运行"
   systemctl daemon-reload
@@ -550,7 +549,7 @@ try:
     with socket.create_connection((host, int(port)), timeout=5):
         pass
 except OSError as exc:
-    raise SystemExit(f"cannot connect to UEnv Server {endpoint}: {exc}")
+    raise SystemExit(f"cannot connect to UEnv adapter-core {endpoint}: {exc}")
 PY
 }
 
