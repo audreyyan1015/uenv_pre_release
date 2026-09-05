@@ -251,10 +251,9 @@ mod tests {
                 "rubric_config": {"ground_truth": "yes"}
             }
         }"#;
-        let cfg: Value = serde_json::from_slice(
-            &build_reset_config(payload, b"", None).expect("reset config"),
-        )
-        .expect("valid sidecar json");
+        let cfg: Value =
+            serde_json::from_slice(&build_reset_config(payload, b"", None).expect("reset config"))
+                .expect("valid sidecar json");
 
         assert_eq!(cfg["question"], "Is this supported?");
         assert_eq!(cfg["dataset"], "pubmedqa");

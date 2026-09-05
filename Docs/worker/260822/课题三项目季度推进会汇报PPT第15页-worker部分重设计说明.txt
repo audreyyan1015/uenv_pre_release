@@ -1,0 +1,87 @@
+课题三项目季度推进会汇报 PPT 第 15 页 worker 部分重设计说明
+日期：2026-08-22
+
+一、重设计目标
+
+本页不再从“执行节点 / 本地运行时池 / 隔离运行时 / Agent 与模型调用”的模块静态结构出发，而改为从训练负载的真实执行链路出发：
+
+一个训练任务包含多条 Episode 时，UEnv 如何把 Episode 分发到多个执行节点，并在每个执行节点内通过并发准入、本地环境运行时池复用、执行期心跳、结果幂等回传和故障恢复，形成高并发、高容错的 worker 负载能力。
+
+二、术语规范
+
+根据 Docs/worker/概念对照表-代码协议字段与对外展示名称.md，页面展示文案采用以下术语：
+
+1. worker 对外展示为“执行节点”。
+2. env_instance / runtime 对外展示为“环境运行时”或“隔离环境运行时”。
+3. WarmupPool 对外展示为“本地环境运行时池”。
+4. pool_summary / pool_slots 对外展示为“本地池汇总 / 本地运行时槽位”。
+5. 跨执行节点聚合能力称为“环境资源池”。
+6. 不使用“Worker 服务器”“容器实例”等容易混淆的说法。
+
+三、页面叙事
+
+页面标题建议：
+多 Episode 训练负载如何在执行节点上稳定并发推进
+
+页面副标题建议：
+训练任务拆成多条 Episode 后，Server 通过租约派发到执行节点；执行节点用本地环境运行时池承接执行，并持续回传进度与结果。
+
+四、单页结构
+
+保留原 PPT 的视觉风格：
+
+1. 顶部蓝色横条和右上角实验室文字。
+2. 左上红色章节眉题“成果一 · UEnv 系统实现”。
+3. 主标题采用深蓝大号字体。
+4. 内容区采用红色描边、白底信息块，底部保留红色描边总结条。
+
+重新排版为“流程 + 能力点”的组合：
+
+1. 左侧：训练任务示例
+   - 一个训练任务包含 Episode 01、Episode 02、Episode 03、Episode N。
+   - 这些 Episode 可按环境类型和容量被并行派发，而不是等待单一串行执行链路。
+
+2. 中间：执行节点内核心流程
+   - 租约准入：校验 dispatch_lease_id、lease_expire_at，避免重复派发和过期派发。
+   - 并发准入：用最大并发容量限制 active episode，超出容量时快速返回资源不足。
+   - 运行时承接：从本地环境运行时池 acquire 就绪环境运行时，命中则直接复用；未命中则按环境类型拉起。
+   - 执行与回传：EpisodeExecutor 执行 reset / step / reward，流式回传 StreamReport。
+   - 释放与补池：执行后 release，健康则回到就绪队列，异常或达到使用上限则销毁并补齐。
+
+3. 右侧：高并发与高容错能力
+   - 高并发：执行节点容量、信号量准入、本地环境运行时池预热共同约束并发。
+   - 高容错：租约冲突、过期租约、取消、超时、控制面断连、环境运行时异常都有明确处理。
+   - 可观测：心跳上报当前负载、本地池汇总、本地运行时槽位；结果上报使用幂等键和 WAL 保底。
+
+4. 底部总结
+   - 执行层目标：把多 Episode 训练负载拆到多个执行节点并发推进，同时用租约、容量、心跳和本地环境运行时池保证稳定性。
+
+五、代码依据
+
+1. uenv-worker/src/grpc_server/worker_service.rs
+   - DispatchEpisode 入口校验 dispatch_lease_id、lease_expire_at。
+   - active_leases / active_cancellations 记录活跃 Episode，处理租约冲突和取消。
+   - Semaphore(max_concurrent) 控制执行节点最大并发。
+   - dispatch_acquire_timeout、episode_timeout 和周期性 progress heartbeat 避免长耗时 Episode 静默。
+   - 执行完成后通过 report_result 回传，幂等键由 episode_id、attempt_id、worker_id、dispatch_lease_id 组合生成。
+
+2. uenv-worker/src/pool/warmup_pool.rs
+   - WarmupPool 维护每种环境类型的就绪队列和 active 集合。
+   - acquire 优先取健康的就绪环境运行时，未命中时按 env_type 创建。
+   - release 后执行 reset 和 health_check，健康则回到就绪队列；异常或达到 max_episode_count 则销毁并补池。
+   - snapshot 对外形成本地池汇总和本地运行时槽位。
+
+3. uenv-worker/src/control_plane/client.rs
+   - register / heartbeat 上报执行节点支持的环境类型、当前负载、最大并发、本地池汇总和本地运行时槽位。
+   - 心跳被拒绝或 server_epoch 变化时触发重新注册。
+
+4. uenv-worker/src/runtime.rs 与 uenv-worker/src/swe/instance_pool.rs
+   - SWE 路径共享会话池能力，并用容量保护避免并发创建超限。
+   - Runtime Gateway 容量不得超过执行节点最大并发。
+
+六、生成方式
+
+生成一个独立单页 PPTX，命名为：
+Docs/worker/260822/课题三项目季度推进会汇报PPT_0811(2)_第15页_worker重排.pptx
+
+页面中所有主要文字、线条和流程块使用 PowerPoint 可编辑矢量对象生成；流程图采用类似 SVG 的矢量表达方式，避免把内容整体栅格化成图片，便于后续在 PowerPoint 中继续编辑。

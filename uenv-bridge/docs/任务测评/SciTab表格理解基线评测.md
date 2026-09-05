@@ -132,7 +132,7 @@ cd /data/ronghao/uenv/uenv-bridge
 GATEWAY_LOG_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/scitab/gateway-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$GATEWAY_LOG_DIR"
 
-PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
+PYTHONPATH=src python3 scripts/benchmark/common/run_model_gateway.py \
   --upstream http://127.0.0.1:18081/v1 \
   --bind-host 0.0.0.0 \
   --port 18094 \
@@ -176,7 +176,7 @@ TEMPERATURE=0.0 \
 TOP_P=1.0 \
 TIMEOUT_SECONDS=7200 \
 CLIENT_TIMEOUT_SECONDS=7800 \
-./scripts/benchmark/run_scitab_uenv_baseline.sh 2>&1 | tee "$OUT/run.log"
+./scripts/benchmark/scitab/run_scitab_uenv_baseline.sh 2>&1 | tee "$OUT/run.log"
 ```
 
 关闭本轮 vLLM 和 gateway：
@@ -186,8 +186,8 @@ cd /data/ronghao/uenv/uenv-bridge
 
 podman rm -f uenv-benchmark-vllm-18081
 
-pgrep -af 'scripts/benchmark/run_model_gateway.py.*--port 18094'
-pkill -f 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+pgrep -af 'scripts/benchmark/common/run_model_gateway.py.*--port 18094'
+pkill -f 'scripts/benchmark/common/run_model_gateway.py.*--port 18094'
 
 ss -ltnp | grep -E ':18081|:18094' || echo "vLLM/gateway ports are closed"
 ```

@@ -1,16 +1,14 @@
-# uenv-hub — UEnv Environment Registry (UEnvHub)
+# uenv-hub — UEnv 环境版本服务
 
-UEnvHub is UEnv's **persistent environment metadata registry** — the "training
-environment registry" analogous to Docker Hub / npm / Hugging Face Hub. It is an
-**offline directory service**: it does not participate in runtime scheduling, it
-durably stores environment metadata, versions, image references, resource
-requirements and config/interface schemas.
+本页面向维护 Hub 源码的开发者。首次部署 UEnv 时可以先跳过 Hub；需要集中管理和分发环境版本时，请阅读[部署和使用 UEnv Hub](../Docs/guide/2-部署UEnv/05-hub.md)。
 
-This implements **Phase 3** of the PRD: HTTP REST API + persistent SQLite.
+UEnv Hub 是可选的环境版本服务。它保存环境元数据、版本、镜像引用、资源要求和接口定义，但不参与每个 Episode 的任务调度。可以把它理解为团队内部的环境制品目录。
 
-## Workspace layout (4 crates)
+当前实现提供 HTTP REST API，并使用 SQLite 持久化数据。
 
-| Crate | Responsibility | Doc tasks |
+## 源码结构（4 个 crate）
+
+| Crate | 职责 | 开发任务编号 |
 |-------|----------------|-----------|
 | [`uenv-hub-types`](uenv-hub-types) | Shared API DTOs (server/client/CLI contract) | shared |
 | [`uenv-hub-core`](uenv-hub-core) | Data layer + domain: models, SQLite repository, version/manifest/interface validation, seed, templates | L1–L13 |
@@ -21,14 +19,14 @@ This implements **Phase 3** of the PRD: HTTP REST API + persistent SQLite.
 uenv-cli ──► uenv-hub-client (SDK) ──HTTP──► uenv-hub-server ──► uenv-hub-core ──► SQLite (WAL)
 ```
 
-## Build & test
+## 构建与测试
 
 ```bash
 cargo build              # build everything
 cargo test               # unit + repository + e2e integration tests
 ```
 
-## Run the server
+## 启动开发服务
 
 ```bash
 # Dev (no auth), ephemeral DB next to cwd:
@@ -41,7 +39,7 @@ cargo run -p uenv-hub-server -- --config config/hub.example.toml
 Public endpoints: `GET /healthz`, `GET /version`, `GET /metrics`.
 Full API: see [docs/api.md](docs/api.md).
 
-## Use the CLI
+## 使用 CLI
 
 ```bash
 cargo build -p uenv-hub-client          # builds the `uenv` binary
@@ -64,7 +62,7 @@ uenv hub login --endpoint http://hub.internal:8080 --token-file ./reader.token
 uenv hub token create --name worker-01 --role reader --namespace default --out ./worker-01.token
 ```
 
-## Configuration
+## 配置
 
 Defaults < TOML file (`--config`) < environment (`UENV_HUB_` prefix, `__`
 nesting). Example: [`config/hub.example.toml`](config/hub.example.toml).
@@ -77,20 +75,20 @@ nesting). Example: [`config/hub.example.toml`](config/hub.example.toml).
 | `UENV_HUB_AUTH__BOOTSTRAP_ADMIN_TOKEN_FILE` | mode-0600 file used to create the first admin token |
 | `UENV_HUB_RATE_LIMIT__*`, `UENV_HUB_CORS__*` | limits / CORS |
 
-## Documentation
+## 开发参考
 
 * [docs/api.md](docs/api.md) — full HTTP API reference (per-endpoint params, request/response schemas, examples, flows, CLI).
 * [docs/openapi.yaml](docs/openapi.yaml) — machine-readable OpenAPI 3.0 spec (import into Swagger UI / Postman / codegen).
 * [docs/data-model.md](docs/data-model.md) — SQLite schema, constraints, migrations.
 * [docs/errors.md](docs/errors.md) — error codes ↔ HTTP status.
 
-## Deployment
+## 源码部署资产
 
 See [deploy/](deploy): `Dockerfile`, `docker-compose.yml`, `uenv-hub.service`
 (systemd). Ops scripts in [scripts/](scripts): `backup.sh` (VACUUM INTO),
 `seed-export.sh` / `seed-import.sh`.
 
-## Relationship to OpenEnv
+## 与 OpenEnv 的关系
 
 The environment construction conventions (Gymnasium-style `reset()/step()/state`,
 strongly-typed Action/Observation/State, `FROM <base-image>` layering, project

@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uenv-worker
+  labels:
+    app.kubernetes.io/part-of: uenv
+    uenv.io/component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: uenv
+      uenv.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: uenv
+        uenv.io/component: worker
+    spec:
+      serviceAccountName: uenv-worker
+      containers:
+        - name: worker
+          # Replace with the administrator-pushed amd64 image before applying.
+          image: registry.h.pjlab.org.cn/ailab-sys/uenv-worker:amd64-dev
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/uenv/worker.yaml", "serve"]
+          ports:
+            - containerPort: 28888
+              name: control
+            - containerPort: 28097
+              name: gateway
+            - containerPort: 19090
+              name: metrics
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 19090
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 19090
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/uenv
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/uenv
+      volumes:
+        - name: config
+          configMap:
+            name: uenv-worker-config
+        - name: data
+          emptyDir: {}

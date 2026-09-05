@@ -307,8 +307,8 @@ VeRL 小 step smoke 能进入 rollout 和训练
 相关文件：
 
 ```text
-uenv-bridge/scripts/train/run_verl_uenv_grpo.sh
-uenv-bridge/scripts/train/presets/swe_smith_grpo_train_ascend.sh
+uenv-bridge/scripts/train/launchers/common/run_verl_uenv_grpo.sh
+uenv-bridge/scripts/train/launchers/swe/ascend/swe_smith_grpo_train_ascend.sh
 libexec/uenv/training/verl_runner.sh
 ```
 
@@ -324,4 +324,3 @@ libexec/uenv/training/verl_runner.sh
 | https://gitee.com/ascend/MindSpeed-LLM/issues/IBHHBV | MindSpeed 场景中 `torch.zeros(device="npu")` 同类失败 |
 | https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/aolapi/atlasascendc_api_07_1205.html | ACLNN 错误码说明 |
 | https://www.hiascend.com/dev/forum/thread-02177215788123559300-1-1.html | 华为论坛对 dynamic kernel config fail 的排查方向 |
-

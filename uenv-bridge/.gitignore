@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 /temp/
 /output/
+/scripts/**/logs/
+/scripts/**/output/
 /AGENTS.md
 /logs/*
 /data/

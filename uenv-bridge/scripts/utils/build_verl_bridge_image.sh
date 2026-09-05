@@ -6,7 +6,7 @@ usage() {
 Build a VeRL image with uenv-bridge, Rust, Cargo, and protoc installed.
 
 Usage:
-  scripts/build_verl_bridge_image.sh [--no-verify]
+  scripts/utils/build_verl_bridge_image.sh [--no-verify]
 
 Environment:
   CONTAINER_TOOL  Container runtime. Default: podman
@@ -15,8 +15,8 @@ Environment:
   BUILD_NETWORK   Build network mode. Default: host
 
 Examples:
-  ./scripts/build_verl_bridge_image.sh
-  CONTAINER_TOOL=docker IMAGE=uenv-bridge-verl:latest ./scripts/build_verl_bridge_image.sh
+  ./scripts/utils/build_verl_bridge_image.sh
+  CONTAINER_TOOL=docker IMAGE=uenv-bridge-verl:latest ./scripts/utils/build_verl_bridge_image.sh
 EOF
 }
 
@@ -39,7 +39,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
+REPO_DIR=${REPO_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}
 CONTAINER_TOOL=${CONTAINER_TOOL:-podman}
 IMAGE=${IMAGE:-localhost/uenv-bridge-verl:latest}
 BASE_IMAGE=${BASE_IMAGE:-docker.io/verlai/verl:vllm011.latest}

@@ -455,10 +455,8 @@ mod tests {
 
     #[tokio::test]
     async fn later_plugin_root_overrides_builtin_manifest_and_entry_directory() {
-        let root = std::env::temp_dir().join(format!(
-            "uenv-plugin-roots-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("uenv-plugin-roots-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let builtin = root.join("builtin/demo");
         let packages = root.join("packages/demo");
@@ -475,8 +473,8 @@ mod tests {
             std::fs::write(dir.join("run.sh"), "#!/bin/sh\n").unwrap();
         }
 
-        let host = PluginHost::load_from_dirs([root.join("builtin"), root.join("packages")])
-            .unwrap();
+        let host =
+            PluginHost::load_from_dirs([root.join("builtin"), root.join("packages")]).unwrap();
         let manifest = host.get_manifest("demo").await.unwrap();
         assert_eq!(manifest.version.as_deref(), Some("2.0.0"));
         let state = host.state.lock().await;
@@ -505,10 +503,8 @@ mod tests {
 
     #[tokio::test]
     async fn hub_manifest_can_bind_to_existing_manifestless_plugin_directory() {
-        let root = std::env::temp_dir().join(format!(
-            "uenv-plugin-hub-bind-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("uenv-plugin-hub-bind-test-{}", std::process::id()));
         let env_dir = root.join("demo");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&env_dir).unwrap();
@@ -541,10 +537,11 @@ mod tests {
             entry: "../run.sh".into(),
             description: None,
         };
-        assert!(host
-            .register_manifest_from_dir(escaping, root.join("escape"))
-            .await
-            .is_err());
+        assert!(
+            host.register_manifest_from_dir(escaping, root.join("escape"))
+                .await
+                .is_err()
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

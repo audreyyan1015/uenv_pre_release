@@ -73,6 +73,42 @@ Benchmark 数据集
 | SWE-bench-Pro | 开启 | 131072 | 8192 | 4096 | 0.0 |
 | OlymMATH | 开启 | 65536 | 32768 | 16384 | 0.0 |
 
+### 3.3 Checkpoint 评测方式
+
+五类 UEnv benchmark 入口脚本均支持两种模型来源：
+
+| 模型来源 | 使用方式 | 说明 |
+|---|---|---|
+| 已有模型服务 | 设置 `UENV_ROLLOUT_MODEL_ENDPOINT` 或 `MODEL_ENDPOINT` | 复用已经启动好的 OpenAI-compatible `/v1` endpoint。 |
+| 训练 checkpoint / HF 目录 | 设置 `CHECKPOINT_DIR`、`HF_DIR` 或 `MODEL_DIR` | 脚本会启动本地 vLLM 和 Adapter Model Gateway，再把生成的 endpoint 传给评测 driver。 |
+
+`CHECKPOINT_DIR` 可以指向 VeRL 的 `global_step_xxx` 目录，也可以直接指向其中的 `actor` 目录。若还没有 HuggingFace 权重，脚本会先调用 VeRL FSDP merger，默认输出到 `actor/huggingface/`；若已经有可加载的 HF 权重，可以直接设置 `HF_DIR` 或 `MODEL_DIR` 跳过合并。
+
+通用入口示例：
+
+```bash
+cd /data/ronghao/uenv/uenv-bridge
+
+CHECKPOINT_DIR=/data/ronghao/uenv/uenv-bridge/checkpoints/uenv_grpo/<run_id>/global_step_xxx \
+OUTPUT_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/<benchmark>/<run_id> \
+LIMIT=100 \
+./scripts/benchmark/<benchmark>/run_<benchmark>_uenv_baseline.sh
+```
+
+可覆盖的关键变量：
+
+| 变量 | 说明 |
+|---|---|
+| `CHECKPOINT_DIR` | VeRL checkpoint 目录，支持 `global_step_xxx` 或 `global_step_xxx/actor`。 |
+| `HF_DIR` | 已合并或待输出的 HuggingFace 目录。 |
+| `MODEL_DIR` | 已可直接被 vLLM 加载的模型目录。 |
+| `SKIP_MERGE=1` | 跳过 checkpoint merge，直接使用 `HF_DIR`。 |
+| `KEEP_SERVE=1` | 评测结束后保留 vLLM 和 model gateway。 |
+| `VLLM_PORT` / `GATEWAY_PORT` | 本机 vLLM 与 Adapter Model Gateway 端口。 |
+| `MODEL_GATEWAY_PUBLIC_URL` | Worker / Agent 实际访问的 gateway 地址。 |
+
+SWE-bench-Pro 仍有一个额外约束：OpenHands Agent 侧的 `LLM_CONFIG_PATH` 或本地隧道必须指向同一个 Adapter Model Gateway。脚本只负责在 Adapter 侧启动模型与 gateway，不会自动修改远端 Agent 配置文件。
+
 
 下面给出 Adapter 当前实际放入请求的 prompt 模板。`{...}` 表示每条样本动态填充的数据字段。
 

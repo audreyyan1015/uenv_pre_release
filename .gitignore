@@ -119,3 +119,22 @@ uenv-bridge/build/
 
 # 本地联调截图/导出产物（非仓库产物）
 /output/
+/.tmp
+
+# Worker 架构图和 PPT 导出/检查产物（非仓库产物）
+/Docs/worker/260813/*.svg
+/Docs/worker/260816/
+.codex_tmp_ppt_worker/
+Docs/worker/**/*.pptx
+Docs/worker/**/*.mp4
+Docs/worker/**/*.inspect.ndjson
+Docs/worker/**/slide-*.png
+Docs/worker/260825/uenv-env-composition-architecture.png
+Docs/worker/**/测试大纲/**
+**/.~lock.*
+
+# cargo vendor 离线依赖缓存（本地构建产物，不入库）
+/vendor/
+
+# K8s 部署打包时下载的 protoc 工具链（不入库）
+deploy/kubernetes/**/tooling/

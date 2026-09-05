@@ -1,109 +1,140 @@
-# uenv-worker — UEnv Worker Pool 执行层
+# uenv-worker — UEnv Worker
 
-Worker 是 UEnv **Layer 2 Worker Pool** 的执行节点：gRPC **Server** 接收 Scheduler 主动下发的 `DispatchEpisode`，并通过 ControlPlane **Client** 上报 `RegisterWorker` / `Heartbeat` / `ReportResult`。
+UEnv Worker 是环境执行节点。它接收 UEnv Server 派发的 Episode，运行环境、调用模型接口、计算回报，并把轨迹与最终结果返回 Server。
 
-权威设计文档：[Docs/worker-pool-layer-design.md](../Docs/worker-pool-layer-design.md)
-
-## 职责
-
-- **Episode 执行**：`EpisodeExecutor` 管理 reset → N×step → close（M2+）
-- **模型回调**：`ModelClient` 直连推理服务（HTTP/gRPC）
-- **预热池**：`WarmupPool` 本地持有 Warm 实例；缺实例时自行 `spawn`；Episode 结束归还 Warm 复用（M6+）
-- **Hub 元数据**：`EnvResolver` 在 spawn 前拉取/合并 Hub manifest（M-5+）；可执行制品来自本地 `plugins/`、Hub 激活的 `package_plugin_dir` 或 SWE 本地 EnvPackage 目录
-- **插件子进程**：`ProcessBackend` + `plugins/math/`（M4+）；**非**内嵌 Python 主路径
-- **Worker WAL**：断连重放（schema M1 冻结，持久化 M8）
-
-## 模块结构（design §13）
-
-```
-src/
-├── cli/                 # serve / version / health
-├── config/              # YAML/JSON（ADR-002）
-├── runtime.rs
-├── control_plane/       # RegisterWorker / Heartbeat / ReportResult
-├── grpc_server/         # DispatchEpisode / HealthCheck
-├── episode/             # executor, model_client
-├── pool/                # warmup_pool
-├── hub/                 # env_resolver, hub pull
-├── plugin/              # host, instance, arpc (L2)
-├── backend/             # process, podman
-├── wal/
-└── logging/
+```text
+评测程序 / 强化学习框架 → UEnv Bridge → UEnv Server → UEnv Worker
 ```
 
-## CLI
+本页主要面向 Worker 维护者。首次部署请先阅读 [配置并注册 UEnv Worker](../Docs/guide/2-部署UEnv/04-worker-registration.md)。
+
+## 运行时职责
+
+- `WorkerGrpcService`：接收 Server 的 `DispatchEpisode`、取消和环境准备请求。
+- `ControlPlaneService` client：向 Server 执行 `RegisterWorker`、`WorkerHeartbeat` 和 `ReportResult`。
+- 环境执行：通过 process plugin、SWE Runtime 或其他 backend 完成 reset/step/close。
+- 实例池：按需创建并复用环境实例；发布配置默认不在启动时预热。
+- 最终结果 WAL：Server 确认前持久化结果，并在暂时断连时重放。
+- Hub 接入：可选地读取环境元数据并加载已经同步到本机的 EnvPackage。
+
+## 安装部署
+
+发布安装：
 
 ```bash
-# 启动 Worker（M2 实现完整运行时）
-uenv-worker serve --config config/uenv-worker.yaml
-
-uenv-worker version
-uenv-worker health
+sudo bash install.sh \
+  --bundle ./uenv-linux-x86_64.tar.gz \
+  --profile worker \
+  --server 10.0.0.10:50051 \
+  --advertise 10.0.0.21:50054
 ```
+
+`--server` 是 UEnv Server 地址；`--advertise` 是 Server 回连本 Worker 的地址。两个方向都必须可达。
+
+安装后：
+
+```bash
+sudo systemctl is-active uenv-worker.service
+curl -fsS http://127.0.0.1:19090/health
+sudo -u uenv uenv doctor
+```
+
+然后在 Server 主机运行：
+
+```bash
+uenv status
+uenv workers
+```
+
+验收标准是 Worker 状态为 `ready`、endpoint 与 `--advertise` 一致、心跳持续刷新，并且 Server 可连接该 endpoint。
 
 ## 配置
 
-主示例：`config/uenv-worker.yaml`（或 `config/uenv-worker.json`）。
+发布配置路径为 `/etc/uenv/worker.yaml`：
 
-## 环境插件与按需拉起
+```yaml
+server:
+  endpoint: "10.0.0.10:50051"
 
-正式单轮验证环境：`plugins/qa/`（`env_type=qa`，复用 `uenv-math-plugin` 判分）；金标契约见 `plugins/qa/RUBRIC.md`。
-**`math` 已退役**：Worker `env.types` 勿再注册 `math`；误发会得到 Server `no worker supports env type`。插件二进制可留作回滚。
+worker:
+  id: "auto"
+  listen: "0.0.0.0:50054"
+  advertise_endpoint: "10.0.0.21:50054"
+  max_concurrent: 4
 
-默认 **`prewarm_on_startup: false`**：Worker 启动不预创建实例；首条 `DispatchEpisode` 时从池 acquire（池空则 spawn）。Hub 配置只用于元数据解析和已预同步包的版本登记，不是 Episode 调度热路径：
+scheduler:
+  mode: "remote"
 
-```bash
-UENV_HUB_ENDPOINT=http://127.0.0.1:8080
-UENV_ENV_TYPES=qa,code
-UENV_PREWARM_ON_STARTUP=false   # 或 true 恢复启动即 prewarm
-uenv-worker serve --config config/uenv-worker.yaml
+env:
+  types: ["qa", "math", "code"]
+  backend: "process"
+  plugin_dir: "/opt/uenv/current/plugins"
+  package_plugin_dir: "/var/lib/uenv/plugins"
+
+pool:
+  warmup_size: 2
+  prewarm_on_startup: false
+
+wal:
+  dir: "/var/lib/uenv/worker/wal"
+
+observability:
+  metrics_listen: "0.0.0.0:19090"
+  health_listen: "0.0.0.0:19090"
 ```
 
-`uenv-worker/python/` 为历史内嵌环境路径，**非 MVP 主路径**（Phase 1+ 或 legacy）。
+配置优先级是 CLI 日志选项 > 环境变量 > YAML > 代码默认值。环境变量与完整字段表见 [UEnv Server 与 UEnv Worker 配置参考](../Docs/guide/6-查阅参考/02-configuration.md)。
 
-## Mock 联调
-
-MVP 阶段使用独立 crate `uenv-mock-scheduler` 作为 ControlPlane，无需完整 `uenv-server`：
+校验配置：
 
 ```bash
-uenv-mock-scheduler serve --fixture-dir ./fixtures/qa
-uenv-worker serve --config config/uenv-worker.yaml
+sudo -u uenv /opt/uenv/current/bin/uenv-worker \
+  --config /etc/uenv/worker.yaml validate-config
 ```
 
-## M7 联调前配置切换（Worker 侧）
+## 注册、心跳与重新注册
+
+1. Worker 启动后向 Server 注册自己的地址、环境能力和容量。
+2. Worker 定期上报健康状态和当前负载。
+3. Server 通过 Worker 公布的地址派发 Episode。
+4. Worker 完成任务后把最终结果返回 Server。
+5. Server 重启或注册丢失时，Worker 自动重新注册。
+
+面向用户的配置步骤见 [配置并注册 UEnv Worker](../Docs/guide/2-部署UEnv/04-worker-registration.md)；协议字段和可靠性机制见 [协议与调用方向](../Docs/guide/6-查阅参考/04-protocols.md)。
+
+## 源码运行
+
+开发配置示例位于 `config/uenv-worker.yaml`。启动前应把其中的 `server.endpoint`、`worker.listen` 和可选 `worker.advertise_endpoint` 改为当前开发拓扑：
 
 ```bash
-# 真实 Server 控制面地址
-UENV_SERVER_ENDPOINT=<uenv-server-host:50051>
+cargo run -p uenv-worker -- \
+  --config config/uenv-worker.yaml \
+  validate-config
 
-# Worker gRPC 对外可达地址（供 Scheduler 直连 DispatchEpisode）
-UENV_WORKER_LISTEN=0.0.0.0:50052
-
-# 可观测端口（Prometheus + 健康检查）
-UENV_METRICS_LISTEN=0.0.0.0:19090
-UENV_HEALTH_LISTEN=0.0.0.0:19090
+cargo run -p uenv-worker -- \
+  --config config/uenv-worker.yaml \
+  serve
 ```
 
-## 本机预联调（当前决议）
-
-在真实 `uenv-server` 未就绪前，先使用**本机 IP + 端口**模拟 remote 形态进行预联调：
+查看版本和本地健康：
 
 ```bash
-UENV_SCHEDULER_MODE=remote
-UENV_SERVER_ENDPOINT=<LOCAL_IP>:50051
-UENV_WORKER_LISTEN=0.0.0.0:50052
+cargo run -p uenv-worker -- version
+cargo run -p uenv-worker -- \
+  --config config/uenv-worker.yaml \
+  health
 ```
 
-- 目的：验证 Register / Heartbeat / Dispatch / Report 链路与 endpoint 回连可达性。
-- 边界：该方案仅是预联调，**不等同于** M7「真实 Server 联调」验收完成；后续仍需与真实 `uenv-server` 补做一次日志交叉验证。
+## 构建与测试
 
-- `GET /metrics`：Prometheus 文本指标（含 `uenv_warmup_pool_hit_total`、`uenv_warmup_pool_miss_total`、`uenv_instance_pool_size{status}`）
-- `GET /health`：返回 `ok`
+```bash
+cargo check -p uenv-worker
+cargo test -p uenv-worker
+```
 
-## 术语对照
+协议定义：
 
-| 设计文档 | 本仓库 |
-|----------|--------|
-| `uenv-adapter` | `uenv-bridge` |
-| `WarmupPool` | `src/pool/warmup_pool.rs` |
-| `ModelClient` | `src/episode/model_client.rs` |
+- Worker 接收服务：`uenv-worker/proto/worker_service.proto`
+- 注册、心跳和结果：`proto/uenv/v1/scheduler.proto`
+- Episode 数据：`proto/uenv/v1/episode.proto`
+- process plugin：`plugin_proto/uenv/plugin/v1/plugin.proto`

@@ -17,7 +17,7 @@ export UENV_GATEWAY=http://127.0.0.1:28097
 
 echo "== preflight =="
 curl -sf http://127.0.0.1:8777/health && echo " runner_ok" || echo " runner_skip"
-curl -sf -H 'X-API-Key: swe-pro-secret' http://127.0.0.1:28097/runtime/v1/health && echo " gateway_ok"
+curl -sf -H 'X-API-Key: REPLACE_WITH_RANDOM_GATEWAY_API_KEY' http://127.0.0.1:28097/runtime/v1/health && echo " gateway_ok"
 curl -sf "${UENV_TRAJECTORY_ENDPOINT%/}/control/v1/trajectories/health" && echo " server_trj_ok"
 
 echo "== gold run =="

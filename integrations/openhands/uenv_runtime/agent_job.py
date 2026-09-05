@@ -227,7 +227,7 @@ def write_agent_job_template(path: Path, **overrides: Any) -> AgentJob:
         job_id=overrides.get("job_id", "job-local-1"),
         run_id=overrides.get("run_id", "run-local-1"),
         gateway_url=overrides.get("gateway_url", "http://127.0.0.1:28097"),
-        gateway_api_key=overrides.get("gateway_api_key", "swe-pro-secret"),
+        gateway_api_key=overrides.get("gateway_api_key", "REPLACE_WITH_RANDOM_GATEWAY_API_KEY"),
         session_id=overrides.get("session_id"),
         instance_id=overrides["instance_id"],
         benchmark_variant=variant,

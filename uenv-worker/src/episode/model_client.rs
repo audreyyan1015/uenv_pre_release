@@ -451,7 +451,7 @@ fn model_endpoint_generation_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_model_messages, resolve_llm_target, LlmTarget, ModelClient};
+    use super::{LlmTarget, ModelClient, build_model_messages, resolve_llm_target};
     use crate::llm::LlmConfig;
     use crate::proto::v1::ModelEndpoint;
     use serde_json::{Value, json};
@@ -582,13 +582,16 @@ mod tests {
             }
         });
 
-        let messages = build_model_messages(&payload, 1, b"What is 2 + 2?", None)
-            .expect("build QA messages");
+        let messages =
+            build_model_messages(&payload, 1, b"What is 2 + 2?", None).expect("build QA messages");
 
-        assert_eq!(messages, vec![json!({
-            "role": "user",
-            "content": "What is 2 + 2?"
-        })]);
+        assert_eq!(
+            messages,
+            vec![json!({
+                "role": "user",
+                "content": "What is 2 + 2?"
+            })]
+        );
     }
 
     #[test]
@@ -597,8 +600,7 @@ mod tests {
             "question": "Move the robot to the loading bay without collisions.",
             "env_config": {"map": "warehouse-a"}
         });
-        let reset_observation =
-            br#"{"position":[2,3],"available_actions":["north","wait"]}"#;
+        let reset_observation = br#"{"position":[2,3],"available_actions":["north","wait"]}"#;
 
         let messages = build_model_messages(&payload, 1, reset_observation, None)
             .expect("build custom environment messages");
@@ -622,7 +624,10 @@ mod tests {
         )
         .expect("build observation-only messages");
 
-        assert_eq!(messages[0]["content"], "You are at (0, 0). Available actions: east, wait.");
+        assert_eq!(
+            messages[0]["content"],
+            "You are at (0, 0). Available actions: east, wait."
+        );
     }
 
     #[test]

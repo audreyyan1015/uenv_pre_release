@@ -1,0 +1,11 @@
+.git
+target
+frontend
+.tmp
+.playwright-cli
+output
+temp
+fixtures
+Docs
+secrets
+**/*.log

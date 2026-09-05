@@ -16,6 +16,7 @@
 
 pub mod artifact;
 pub mod artifact_store;
+pub mod backend;
 pub mod command_policy;
 pub mod contract_eval;
 pub mod dataset;

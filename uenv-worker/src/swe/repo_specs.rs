@@ -38,6 +38,12 @@ pub enum TestRunner {
     SympyBinTest,
 }
 
+/// Keep the node-id payload well below the host `execve` argument limit. The
+/// session writes the ids to this path before running the command.
+pub const PYTEST_NODE_IDS_FILE: &str = "/tmp/uenv-pytest-nodeids";
+pub const MAX_INLINE_NODE_IDS_BYTES: usize = 32 * 1024;
+pub const TEST_BATCH_TIMEOUT_SECS: u32 = 900;
+
 /// 单个 `repo@version`（或 repo 全版本）的执行规格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoSpec {
@@ -76,6 +82,20 @@ impl RepoSpec {
         fail_to_pass: &[String],
         pass_to_pass: &[String],
     ) -> String {
+        let node_ids_bytes = fail_to_pass
+            .iter()
+            .chain(pass_to_pass.iter())
+            .map(|id| id.len() + 1)
+            .sum::<usize>();
+        let inline_or = |inline: String, prefix: &str| {
+            if node_ids_bytes > MAX_INLINE_NODE_IDS_BYTES {
+                format!(
+                    "xargs -r -0 -n 100 timeout --kill-after=30s {TEST_BATCH_TIMEOUT_SECS}s {prefix} < {PYTEST_NODE_IDS_FILE}"
+                )
+            } else {
+                inline
+            }
+        };
         let ids = fail_to_pass
             .iter()
             .chain(pass_to_pass.iter())
@@ -84,14 +104,29 @@ impl RepoSpec {
             .join(" ");
         match self.runner {
             TestRunner::Pytest => format!(
-                "{conda_activate}; cd {testbed} && python -m pytest {} {ids}",
-                self.pytest_flags
+                "{conda_activate}; cd {testbed} && {}",
+                inline_or(
+                    format!("python -m pytest {} {ids}", self.pytest_flags),
+                    &format!("python -m pytest {}", self.pytest_flags),
+                ),
             ),
             TestRunner::Django => format!(
-                "{conda_activate}; cd {testbed} && ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 {ids}"
+                "{conda_activate}; cd {testbed} && {}",
+                inline_or(
+                    format!(
+                        "./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 {ids}"
+                    ),
+                    "./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1",
+                )
             ),
             TestRunner::SympyBinTest => {
-                format!("{conda_activate}; cd {testbed} && bin/test -C --verbose {ids}")
+                format!(
+                    "{conda_activate}; cd {testbed} && {}",
+                    inline_or(
+                        format!("bin/test -C --verbose {ids}"),
+                        "bin/test -C --verbose"
+                    )
+                )
             }
         }
     }
@@ -255,5 +290,16 @@ mod tests {
             &[],
         );
         assert!(cmd.contains("bin/test -C --verbose"));
+    }
+
+    #[test]
+    fn long_node_lists_use_container_file_and_xargs() {
+        let ids = vec!["pkg/test.py::test_long_name".repeat(2000)];
+        let cmd = DEFAULT_SPEC.build_test_command("source activate", "/testbed", &ids, &[]);
+        assert!(cmd.contains(&format!(
+            "xargs -r -0 -n 100 timeout --kill-after=30s {TEST_BATCH_TIMEOUT_SECS}s"
+        )));
+        assert!(cmd.contains(PYTEST_NODE_IDS_FILE));
+        assert!(!cmd.contains("test_long_name"));
     }
 }

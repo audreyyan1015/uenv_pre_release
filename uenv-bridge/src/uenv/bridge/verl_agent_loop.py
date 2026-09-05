@@ -207,6 +207,7 @@ class UEnvAgentLoopConfig:
     missing_logprobs_as_zero: bool = False
     parallel_mode: str = "sync"
     failed_episode_policy: str = "raise"
+    agent_pool_id_override: str = ""
 
 
 @register("uenv_agent")
@@ -257,6 +258,7 @@ class UEnvAgentLoop(AgentLoopBase):
         missing_logprobs_as_zero: bool | None = None,
         parallel_mode: str = "sync",
         failed_episode_policy: str | None = None,
+        agent_pool_id_override: str = "",
         **kwargs: Any,
     ) -> None:
         if self._needs_compat_agent_loop_base(args, kwargs):
@@ -305,6 +307,7 @@ class UEnvAgentLoop(AgentLoopBase):
             ),
             parallel_mode=_optional_string(parallel_mode) or "sync",
             failed_episode_policy=_failed_episode_policy(failed_episode_policy),
+            agent_pool_id_override=_optional_string(agent_pool_id_override) or "",
         )
         self.model_gateway = ModelGateway(
             ModelGatewayConfig(
@@ -1290,7 +1293,8 @@ class UEnvAgentLoop(AgentLoopBase):
                 "mode": value("agent_mode", value("mode", "llm")),
                 "agent_bridge_id": value("agent_bridge_id", "uenv-agent-openhands"),
                 "agent_bridge_version": value("agent_bridge_version", "1.0.0"),
-                "agent_pool_id": value("agent_pool_id", "openhands-default"),
+                "agent_pool_id": self.config_for_uenv.agent_pool_id_override
+                or value("agent_pool_id", "openhands-default"),
                 "driver_entrypoint": value("driver_entrypoint", "run_swebenchpro_official.py"),
                 "workspace_dir": value("workspace_dir", workspace_default),
                 "llm_config_path": value(

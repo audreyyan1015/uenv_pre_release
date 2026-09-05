@@ -10,7 +10,7 @@ use tonic::transport::Server;
 
 use crate::control_plane::client::{
     ControlPlane, SchedulerControlPlaneClient, SchedulerMode, SharedWorkerCapabilities,
-    detect_resource_spec,
+    detect_cpu_only_resource_spec, detect_resource_spec,
 };
 use crate::episode::executor::EpisodeExecutor;
 use crate::grpc_server::worker_service::{DisconnectDispatchPolicy, WorkerGrpcServiceImpl};
@@ -48,12 +48,15 @@ pub struct WorkerRuntime {
     pub gateway_enabled: bool,
     pub gateway_listen: String,
     pub gateway_capacity: u32,
+    pub gateway_advertise_url: Option<String>,
     pub gateway_api_key: Option<String>,
     pub swe_variants: Vec<String>,
     pub swe_prewarm: Vec<String>,
     pub swe_warm_tag: bool,
     pub swe_seccomp_dir: Option<String>,
     pub swe_env_package_dirs: Vec<String>,
+    pub swe_backend: crate::config::SweBackendKind,
+    pub swe_kubernetes: crate::config::KubernetesSweConfig,
 }
 
 impl WorkerRuntime {
@@ -221,7 +224,10 @@ impl WorkerRuntime {
         let scheduler_mode: SchedulerMode = self.scheduler_mode.parse()?;
         let metrics = MetricsExporter::new();
         let worker_id = self.worker_id.clone();
-        let gw_public = gateway_public_url(&self.gateway_listen);
+        let gw_public = self
+            .gateway_advertise_url
+            .clone()
+            .unwrap_or_else(|| gateway_public_url(&self.gateway_listen));
         let mut synced_packages = load_synced_env_packages(&self.swe_env_package_dirs);
         let package_states = synced_packages
             .iter()
@@ -238,8 +244,7 @@ impl WorkerRuntime {
         if let Some(dir) = self.package_plugin_dir.as_deref() {
             for package in load_active_plugin_packages(std::path::Path::new(dir)) {
                 if !synced_packages.iter().any(|existing| {
-                    existing.package_id == package.package_id
-                        && existing.version == package.version
+                    existing.package_id == package.package_id && existing.version == package.version
                 }) {
                     synced_packages.push(package);
                 }
@@ -253,7 +258,11 @@ impl WorkerRuntime {
             capabilities.clone(),
             self.max_concurrent,
             worker_id.clone(),
-            detect_resource_spec(),
+            if self.swe_backend == crate::config::SweBackendKind::Kubernetes {
+                detect_cpu_only_resource_spec()
+            } else {
+                detect_resource_spec()
+            },
             metrics.clone(),
             gw_public.clone(),
             synced_packages,
@@ -297,7 +306,15 @@ impl WorkerRuntime {
 
         // L2 共享会话池（plan §5.2）：native DispatchEpisode 与 L4 Gateway 同源（M2-2）。
         // 容量取 gateway 并发与 worker 并发上限的较大值，避免 native 路径被低 gateway 容量限流。
-        let swe_capacity = self.gateway_capacity.max(self.max_concurrent).max(1) as usize;
+        let swe_capacity = if self.gateway_enabled {
+            if self.gateway_capacity > self.max_concurrent {
+                return Err("runtime gateway capacity exceeds worker capacity".into());
+            }
+            self.gateway_capacity
+        } else {
+            self.max_concurrent
+        }
+        .max(1) as usize;
         // M2-4：池级 seccomp profile 目录（默认 None，配置后按 command_mode 注入）。
         let swe_seccomp_dir = self.swe_seccomp_dir.as_ref().map(PathBuf::from);
         // M4：加载本地已同步的 Hub EnvPackage（含预制镜像 tar），使池优先从 Hub tar
@@ -316,16 +333,38 @@ impl WorkerRuntime {
                 msg = "swe_env_package_ready_for_image_load"
             );
         }
+        let backend: Arc<dyn crate::swe::backend::SweSessionBackend> = match self.swe_backend {
+            crate::config::SweBackendKind::CliContainer => {
+                Arc::new(crate::swe::backend::cli(swe_runtime))
+            }
+            crate::config::SweBackendKind::Kubernetes => Arc::new(
+                crate::swe::backend::KubernetesSessionBackend::connect(
+                    self.swe_kubernetes.namespace.clone(),
+                    self.worker_id.clone(),
+                )
+                .await
+                .map_err(|e| format!("create Kubernetes SWE backend: {e}"))?
+                .with_image_pull_secrets(self.swe_kubernetes.image_pull_secrets.clone())
+                .with_service_account(self.swe_kubernetes.service_account.clone())
+                .with_resources(
+                    self.swe_kubernetes.cpu.clone(),
+                    self.swe_kubernetes.memory.clone(),
+                    self.swe_kubernetes.ephemeral_storage.clone(),
+                    self.swe_kubernetes.ready_timeout_secs,
+                ),
+            ),
+        };
         let swe_pool = Arc::new(
             crate::swe::instance_pool::SweInstancePool::new(
                 swe_store.clone(),
                 swe_runtime,
                 swe_capacity,
             )
+            .with_backend(backend)
             .with_metrics(metrics.clone())
             .with_seccomp_dir(swe_seccomp_dir)
             .with_env_package(swe_env_package)
-            .with_trajectory_meta(worker_id, gateway_public_url(&self.gateway_listen)),
+            .with_trajectory_meta(worker_id, gw_public.clone()),
         );
 
         // M2-1 / M4-4：启动按 catalog 子集预热镜像（去冷拉延迟）；M0-3/M4-3 可选 warm tag 写回。
@@ -370,11 +409,14 @@ impl WorkerRuntime {
         // 关停清理句柄：warmup_pool 随后被移动进 service，需先克隆一份用于关停回收。
         let warmup_pool_for_shutdown = warmup_pool.clone();
         let plugin_host_for_shutdown = plugin_host.clone();
+        // v2.3：通用 episode 轨迹上传与 SWE pool 共享同一 uploader（本地 store 由 executor 按 env 解析）。
+        let trajectory_uploader = swe_pool.trajectory_uploader();
         let service = WorkerGrpcServiceImpl::new(
             control_plane,
             EpisodeExecutor::new(plugin_host.clone(), warmup_pool.clone(), self.llm.clone())
                 .with_swe_catalog(swe_store, swe_runtime)
-                .with_swe_pool(swe_pool),
+                .with_swe_pool(swe_pool)
+                .with_trajectory_uploader(trajectory_uploader),
             metrics.clone(),
             warmup_pool,
             capabilities,
@@ -895,10 +937,8 @@ mod tests {
 
     #[test]
     fn activated_generic_plugin_is_reported_as_a_synced_package() {
-        let root = std::env::temp_dir().join(format!(
-            "uenv-active-package-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("uenv-active-package-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let package = root.join("envs/demo/1.2.3");
         let plugin = package.join("plugin");

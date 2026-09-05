@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::metrics::MetricsExporter;
+use crate::swe::backend::{self, SweSessionBackend};
 use crate::swe::command_policy::CommandPolicyConfig;
 use crate::swe::dataset::InstanceStore;
 use crate::swe::env_package::EnvPackageDir;
@@ -51,6 +52,7 @@ impl Drop for PendingSlot<'_> {
 pub struct SweInstancePool {
     store: Arc<InstanceStore>,
     runtime: ContainerRuntime,
+    backend: Arc<dyn SweSessionBackend>,
     capacity: usize,
     sessions: Mutex<HashMap<String, Arc<SweSession>>>,
     pending: AtomicUsize,
@@ -72,6 +74,7 @@ impl SweInstancePool {
         Self {
             store,
             runtime,
+            backend: Arc::new(backend::cli(runtime)),
             capacity: capacity.max(1),
             sessions: Mutex::new(HashMap::new()),
             pending: AtomicUsize::new(0),
@@ -91,11 +94,21 @@ impl SweInstancePool {
         self
     }
 
+    pub fn with_backend(mut self, backend: Arc<dyn SweSessionBackend>) -> Self {
+        self.backend = backend;
+        self
+    }
+
     /// 解析某实例对应的、Hub 托管镜像 tar 的绝对路径（按 instance_id 优先，再按 image ref）。
     fn image_tar_for(&self, instance_id: &str, image: &str) -> Option<PathBuf> {
         let pkg = self.env_package.as_ref()?;
         pkg.image_tar_for_instance(instance_id)
             .or_else(|| pkg.image_tar_for_ref(image))
+    }
+
+    /// v2.3：共享上传器给通用 episode executor（clone 廉价，避免重复启动 drainer 线程）。
+    pub fn trajectory_uploader(&self) -> Option<TrajectoryUploader> {
+        self.uploader.clone()
     }
 
     /// Gateway 轨迹元数据（worker_id + 对外 base URL）。
@@ -211,6 +224,7 @@ impl SweInstancePool {
             &instance,
             &session_id,
             self.runtime,
+            self.backend.clone(),
             policy,
             false,
             &self.worker_id,
@@ -430,6 +444,13 @@ impl SweInstancePool {
         Ok(removed)
     }
 
+    /// Kill the container before dropping the session Arc (used by timeout cleanup).
+    pub fn terminate(&self, session_id: &str) -> Result<bool, DynErr> {
+        let session = self.get(session_id)?;
+        session.terminate();
+        self.destroy(session_id)
+    }
+
     /// 回收复用（M0-2）：经 `ResettableInstance` 语义把 session 沙箱重置回 base_commit，
     /// **保留容器**供下一 episode 复用（避免重复 provision 的冷启动）。不改变池计数。
     pub fn recycle(&self, session_id: &str) -> Result<(), DynErr> {
@@ -450,7 +471,12 @@ impl SweInstancePool {
         let variant = self
             .store
             .get(instance_id)
-            .ok_or_else(|| format!("swe instance_id `{instance_id}` not in catalog (size={})", self.store.len()))?
+            .ok_or_else(|| {
+                format!(
+                    "swe instance_id `{instance_id}` not in catalog (size={})",
+                    self.store.len()
+                )
+            })?
             .variant();
         let mut ids = Vec::new();
         for _ in 0..n {

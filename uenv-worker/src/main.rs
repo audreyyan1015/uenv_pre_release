@@ -69,12 +69,15 @@ async fn main() {
                 gateway_enabled: cfg.runtime_gateway.enabled,
                 gateway_listen: cfg.runtime_gateway.listen.clone(),
                 gateway_capacity: cfg.runtime_gateway.capacity,
+                gateway_advertise_url: cfg.runtime_gateway.advertise_url.clone(),
                 gateway_api_key: cfg.runtime_gateway.api_key.clone(),
                 swe_variants: cfg.swe.variants.clone(),
                 swe_prewarm: cfg.swe.prewarm.clone(),
                 swe_warm_tag: cfg.swe.warm_tag,
                 swe_seccomp_dir: cfg.swe.seccomp_profile_dir.clone(),
                 swe_env_package_dirs: cfg.swe.all_env_package_dirs(),
+                swe_backend: cfg.swe.backend,
+                swe_kubernetes: cfg.swe.kubernetes.clone(),
             };
             if let Err(err) = runtime.run().await {
                 eprintln!("uenv-worker serve failed: {err}");
@@ -82,7 +85,10 @@ async fn main() {
             }
         }
         Commands::Version => {
-            println!("uenv-worker {} protocol_version=v1", env!("CARGO_PKG_VERSION"));
+            println!(
+                "uenv-worker {} protocol_version=v1",
+                env!("CARGO_PKG_VERSION")
+            );
         }
         Commands::Health => {
             if let Err(err) = check_health(&cfg.observability.health_listen).await {

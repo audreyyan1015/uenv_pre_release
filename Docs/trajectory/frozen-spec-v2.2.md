@@ -325,3 +325,6 @@ native 路径在 report 前可将 pool 轨迹 seal 为 bundle 并 upload，再�
 | v2.2 | 2026-06-25 | 冻结：Server 聚合、run_id、spool 上传、SQLite 索引 |
 | v2.2-doc | 2026-07-05 | 从 `260625` 抽离为本目录可读规范；补充扩展性章节 |
 | v2.2-doc.1 | 2026-07-05 | §8 补充「当前不必改代码 / 后续扩展改码范围」要点 |
+
+> **后继版本**：v2.3 已发布（`frozen-spec-v2.3.md`）——非 SWE 通用 episode 全终态 seal + 上传、
+> `generic` action kind、`UENV_TRAJECTORY_ARTIFACT_DIR`、run_id metadata 传播约定。新部署以 v2.3 为准。

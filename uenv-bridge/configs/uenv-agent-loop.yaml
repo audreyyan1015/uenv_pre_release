@@ -33,6 +33,7 @@
   require_swe_response_trace: ${oc.env:UENV_REQUIRE_SWE_RESPONSE_TRACE,true}
   missing_logprobs_as_zero: ${oc.env:UENV_MISSING_LOGPROBS_AS_ZERO,false}
   failed_episode_policy: ${oc.env:UENV_AGENT_LOOP_FAILED_EPISODE_POLICY,raise}
+  agent_pool_id_override: ${oc.env:UENV_AGENT_POOL_ID,""}
   parallel_mode: ${oc.env:UENV_AGENT_LOOP_PARALLEL_MODE,sync}
   batch_size: ${oc.env:UENV_AGENT_LOOP_BATCH_SIZE,0}
   batch_retry_attempts: ${oc.env:UENV_AGENT_LOOP_BATCH_RETRY_ATTEMPTS,3}

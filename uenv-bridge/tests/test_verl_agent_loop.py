@@ -469,6 +469,35 @@ class UEnvAgentLoopTest(unittest.TestCase):
         )
         self.assertEqual(override_payload["metadata"]["extra_info"]["effective_max_steps"], 12)
 
+    def test_swe_agent_pool_id_can_be_overridden_at_runtime(self) -> None:
+        loop = UEnvAgentLoop(
+            tokenizer=FakeTokenizer(),
+            client=RecordingEpisodeClient(self._result_with_token_ids()),
+            agent_pool_id_override="openhands-uenv-align-qwen",
+        )
+
+        request = loop.build_episode_request(
+            sampling_params={},
+            prompt_ids=[10],
+            raw_prompt=[{"role": "user", "content": "Fix it"}],
+            sample_kwargs={
+                "data_source": "swesmith",
+                "ability": "swe",
+                "extra_info": {
+                    "batch_id": "batch-swe",
+                    "sample_index": 0,
+                    "dataset": "swesmith",
+                    "instance_id": "repo__project.issue__abc",
+                    "benchmark_variant": "smith",
+                    "agent_pool_id": "openhands-default",
+                },
+            },
+        )
+        payload = json.loads(request.payload.decode("utf-8"))
+
+        self.assertEqual(payload["env_config"]["agent_pool_id"], "openhands-uenv-align-qwen")
+        self.assertEqual(payload["metadata"]["extra_info"]["agent_pool_id"], "openhands-default")
+
     def test_swe_request_requires_explicit_case_identity(self) -> None:
         loop = UEnvAgentLoop(
             tokenizer=FakeTokenizer(),

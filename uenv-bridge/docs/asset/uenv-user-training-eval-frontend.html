@@ -1262,6 +1262,17 @@ ROLLOUT_N=8"></textarea>
       return element ? element.value : "";
     }
 
+    function benchmarkScript(name) {
+      const scripts = {
+        pubmedqa: "./scripts/benchmark/pubmedqa/run_pubmedqa_uenv_baseline.sh",
+        scitab: "./scripts/benchmark/scitab/run_scitab_uenv_baseline.sh",
+        olymmath: "./scripts/benchmark/olymmath/run_olymmath_uenv_baseline.sh",
+        dscodebench: "./scripts/benchmark/dscodebench/run_dscodebench_uenv_baseline.sh",
+        swebenchpro: "./scripts/benchmark/swe/run_swebenchpro_uenv_baseline.sh",
+      };
+      return scripts[name] || "./scripts/benchmark/" + name + "/run_" + name + "_uenv_baseline.sh";
+    }
+
     function updatePreview() {
       const activeSub = activeSubByView[activeView] || "params";
       if (activeView === "train" && activeSub === "upload") {
@@ -1298,7 +1309,7 @@ ROLLOUT_N=8"></textarea>
       }
 
       if (activeView === "eval") {
-        const script = "./scripts/benchmark/run_" + value("benchmarkName") + "_uenv_baseline.sh";
+        const script = benchmarkScript(value("benchmarkName"));
         const lines = [
           "cd /data/ronghao/uenv/uenv-bridge",
           "UENV_ADAPTER_CORE_ENDPOINT=" + value("adapterEndpoint") + " \\",
@@ -1345,8 +1356,8 @@ ROLLOUT_N=8"></textarea>
       }
 
       const script = value("datasetName") === "swesmith"
-        ? "./scripts/train/presets/swe_smith_grpo_train.sh"
-        : "./scripts/benchmark/run_" + value("datasetName") + "_uenv_baseline.sh";
+        ? "./scripts/train/launchers/swe/swe_smith_grpo_train.sh"
+        : benchmarkScript(value("datasetName"));
       const lines = [
         "cd /data/ronghao/uenv/uenv-bridge",
         "RUN_MODE=train \\",

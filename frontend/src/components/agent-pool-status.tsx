@@ -143,7 +143,8 @@ export function AgentPoolStatus() {
   const pools = agents?.pools ?? [];
   const openhandsPool = pools.find((pool) => pool.agent_pool_id === "openhands-default");
   const workerCapacity = Number(fleet?.total_capacity) || 0;
-  const workerLoad = fleet?.workers?.reduce((sum, worker) => sum + (Number(worker.load) || 0), 0) ?? 0;
+  const workerLoad =
+    fleet?.workers?.reduce((sum, worker) => sum + (Number(worker.load) || 0), 0) ?? 0;
   const activeAgentCapacity = activeOpenhandsAgents.reduce(
     (sum, agent) => sum + (Number(agent.max_concurrent) || 0),
     0,
@@ -182,7 +183,7 @@ export function AgentPoolStatus() {
             </div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight">OpenHands Agent 池</h1>
             <p className="mt-2 text-sm text-slate-500">
-              openhands-default · worker capacity {workerCapacity || "—"} · agent capacity{" "}
+              openhands-default · execution node capacity {workerCapacity || "—"} · agent capacity{" "}
               {activeAgentCapacity || "—"}
             </p>
           </div>
@@ -211,9 +212,9 @@ export function AgentPoolStatus() {
             tone={activeAgentLoad > 0 ? "blue" : "emerald"}
           />
           <MetricCard
-            label="Worker capacity"
+            label="Execution node capacity"
             value={`${workerLoad} / ${workerCapacity || "—"}`}
-            helper={`${fleet?.worker_count ?? 0} worker · ${fleet?.active_episodes ?? 0} active episode`}
+            helper={`${fleet?.worker_count ?? 0} execution nodes · ${fleet?.active_episodes ?? 0} active episode`}
             tone={workerLoad > 0 ? "blue" : "slate"}
           />
           <MetricCard
@@ -260,12 +261,18 @@ export function AgentPoolStatus() {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {openhandsAgents.map((agent) => (
-                    <tr key={agent.agent_id} className={agent.stale ? "bg-slate-50/70" : "bg-white"}>
+                    <tr
+                      key={agent.agent_id}
+                      className={agent.stale ? "bg-slate-50/70" : "bg-white"}
+                    >
                       <td className="max-w-[360px] px-4 py-3 font-mono text-xs text-slate-700">
                         {agent.agent_id}
                       </td>
                       <td className="px-4 py-3">
-                        <StatusPill active={!agent.stale} label={agent.stale ? "stale" : "online"} />
+                        <StatusPill
+                          active={!agent.stale}
+                          label={agent.stale ? "stale" : "online"}
+                        />
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-slate-700">
                         {loadOf(agent)} / {agent.max_concurrent ?? "—"}
@@ -337,14 +344,16 @@ export function AgentPoolStatus() {
                     <div className="mt-1 text-slate-500">{shortId(job.agent_id)}</div>
                   </div>
                 ))}
-                {inFlight.length === 0 && <p className="text-sm text-slate-400">当前无执行中 job</p>}
+                {inFlight.length === 0 && (
+                  <p className="text-sm text-slate-400">当前无执行中 job</p>
+                )}
               </div>
             </div>
 
             <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                 <Server className="h-4 w-4 text-slate-600" />
-                Worker 对齐
+                执行节点对齐
               </div>
               <div className="mt-3 space-y-2">
                 {(fleet?.workers ?? []).map((worker) => (

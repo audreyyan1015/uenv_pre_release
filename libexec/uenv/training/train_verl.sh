@@ -48,7 +48,7 @@ SWE 任务（catalog 和实例选择必须显式）：
   --uenv-release DIR         已安装 release 或训练客户端包根目录
   --bundle FILE              兼容旧流程：从完整 release bundle 读取客户端资产
   --bridge-wheel FILE        仅提供 UEnv Bridge wheel
-  --uenv-endpoint HOST:PORT  Adapter gRPC 地址（run-task/run-swe 必填）
+  --uenv-endpoint HOST:PORT  UEnv Server gRPC 地址（run-task/run-swe 必填）
   --gateway-public-url URL   双机时 UEnv 主机访问 VeRL 模型 API 的 URL
   --gateway-port PORT        VeRL 模型 API 监听端口（默认 18080）
   --gateway-bind HOST        监听地址；单机默认 127.0.0.1，双机默认 0.0.0.0

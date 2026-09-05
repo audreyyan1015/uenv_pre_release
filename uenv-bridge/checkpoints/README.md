@@ -29,5 +29,5 @@ checkpoints/
 如需改保存位置，可以在启动训练时设置：
 
 ```bash
-CHECKPOINT_ROOT=/path/to/checkpoints ./scripts/train/presets/swe_smith_grpo_train.sh
+CHECKPOINT_ROOT=/path/to/checkpoints ./scripts/train/launchers/swe/swe_smith_grpo_train.sh
 ```

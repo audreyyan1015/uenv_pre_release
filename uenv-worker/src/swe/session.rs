@@ -9,11 +9,15 @@
 //! `1 session = lease 1 ResettableInstance`（plan §5.2）；Drop 负责销毁容器。
 
 use std::io::Write;
-use std::process::Command;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::swe::artifact::{EpisodeArtifact, TestResults};
+use crate::swe::backend::{
+    ExecRequest, ProvisionRequest, SweBackendHandle, SweSessionBackend, TerminateRequest,
+};
 use crate::swe::command_policy::{CommandPolicy, CommandPolicyConfig};
 use crate::swe::contract_eval::try_external_contract_grade;
 use crate::swe::dataset::SweInstance;
@@ -32,6 +36,22 @@ use crate::swe::trajectory::{
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
 const TESTBED: &str = "/testbed";
+
+fn worker_exec_timeout_secs() -> u64 {
+    std::env::var("UENV_WORKER_EXEC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1200)
+}
+
+fn gateway_exec_timeout_secs() -> u64 {
+    std::env::var("UENV_WORKER_GATEWAY_EXEC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(180)
+}
 
 /// 容器内一次命令执行结果。
 #[derive(Debug, Clone)]
@@ -53,8 +73,8 @@ pub struct SubmitOutcome {
 ///
 /// 方法均 `&self`（容器操作不改 Rust 侧状态），可安全置于 `Arc` 由 Gateway 并发复用。
 pub struct SweSession {
-    runtime: ContainerRuntime,
-    container: String,
+    backend: Arc<dyn SweSessionBackend>,
+    handle: SweBackendHandle,
     instance: SweInstance,
     episode_id: String,
     policy: CommandPolicyConfig,
@@ -66,6 +86,7 @@ pub struct SweSession {
     run_id: Mutex<String>,
     /// Platform episode id when session pre-created via for-episode (SubmitEpisode path).
     platform_episode_id: Mutex<Option<String>>,
+    terminated: AtomicBool,
 }
 
 impl SweSession {
@@ -77,6 +98,7 @@ impl SweSession {
         instance: &SweInstance,
         episode_id: &str,
         runtime: ContainerRuntime,
+        backend: Arc<dyn SweSessionBackend>,
         policy: CommandPolicyConfig,
         keep: bool,
         worker_id: &str,
@@ -103,45 +125,42 @@ impl SweSession {
         // 0) M4：确保镜像本地可用。命中本地即跳过；否则**优先**从 Hub 托管 tar `docker load`
         //    （纯内网零 egress）；仅当无 tar 且策略显式允许时才回退 pull（默认 local_only 会直接报错）。
         //    策略优先级：EnvPackage overlay 声明（权威）> 进程环境（from_env，默认 local_only）。
-        let factory = match pull_policy {
-            Some(p) => ImageCacheFactory::with_policy(runtime, p),
-            None => ImageCacheFactory::from_env(runtime),
+        let (image_state, provision_image) = if backend.uses_local_image_cache() {
+            let factory = match pull_policy {
+                Some(p) => ImageCacheFactory::with_policy(runtime, p),
+                None => ImageCacheFactory::from_env(runtime),
+            };
+            let state = factory.ensure_image_with_tar(&image, image_tar)?;
+            (
+                Some(state),
+                resolve_provision_image(&factory, &image, &instance.instance_id),
+            )
+        } else {
+            (None, image.clone())
         };
-        let image_state = factory.ensure_image_with_tar(&image, image_tar)?;
-        let provision_image = resolve_provision_image(&factory, &image, &instance.instance_id);
 
         // 1) provision：按 CommandPolicy 生成 run flags（cap_drop / network / 可选 seccomp，
         //    M0-1 / M2-4），再 `run -d <flags> <image> sleep infinity`。
         let seccomp = policy.resolve_seccomp_file();
         let policy_mode = policy.mode;
-        let stress_run_id = std::env::var("UENV_SWE_CONTAINER_RUN_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let run_args = build_swe_run_args(
-            &container,
-            &provision_image,
-            policy_mode,
-            Some(ws),
-            seccomp.as_deref(),
-            is_pro,
-            stress_run_id.as_deref(),
-        );
-        let run_out = Command::new(runtime.cli())
-            .args(&run_args)
-            .output()
-            .map_err(|e| format!("{} run spawn failed: {e}", runtime.cli()))?;
-        if !run_out.status.success() {
-            return Err(format!(
-                "{} run failed for {image}: {}",
-                runtime.cli(),
-                String::from_utf8_lossy(&run_out.stderr).trim()
-            )
-            .into());
-        }
+        let entrypoint = if is_pro {
+            "tail -f /dev/null"
+        } else {
+            "sleep infinity"
+        };
+        let provisioned = backend
+            .provision(&ProvisionRequest {
+                image: provision_image.clone(),
+                container_name: container.clone(),
+                entrypoint: entrypoint.to_string(),
+                workdir: Some(ws.to_string()),
+                policy: policy.clone(),
+            })
+            .map_err(|e| format!("SWE backend provision failed: {e}"))?;
 
         let session = Self {
-            runtime,
-            container,
+            backend,
+            handle: provisioned.handle,
             instance: instance.clone(),
             episode_id: episode_id.to_string(),
             policy,
@@ -151,6 +170,7 @@ impl SweSession {
             gateway_base_url: gateway_base_url.to_string(),
             run_id: Mutex::new(String::new()),
             platform_episode_id: Mutex::new(None),
+            terminated: AtomicBool::new(false),
         };
 
         // 2) reset：净化沙箱到 base_commit（Pro 在 /app；Verified/Smith 在 /testbed）。
@@ -176,7 +196,7 @@ impl SweSession {
         tracing::info!(
             episode_id = %session.episode_id,
             instance_id = %instance.instance_id,
-            container = %session.container,
+            container = %session.handle.id,
             image = %image,
             provision_image = %provision_image,
             image_state = ?image_state,
@@ -191,7 +211,15 @@ impl SweSession {
     }
 
     pub fn container(&self) -> &str {
-        &self.container
+        &self.handle.id
+    }
+
+    /// Immediately terminate the sandbox and its process tree.
+    pub fn terminate(&self) {
+        self.terminated.store(true, Ordering::SeqCst);
+        let _ = self.backend.terminate(&TerminateRequest {
+            handle: self.handle.clone(),
+        });
     }
 
     /// v2.2：注入一次评测作业 ID（gateway 在 create_session 时从 X-UEnv-Run-Id 设置）。
@@ -235,7 +263,7 @@ impl SweSession {
             );
             return Ok(result);
         }
-        let result = self.exec_raw(command)?;
+        let result = self.exec_raw_with_timeout(command, gateway_exec_timeout_secs())?;
         self.push_step(
             StepAction::Exec {
                 command: command.to_string(),
@@ -254,16 +282,28 @@ impl SweSession {
 
     /// 不过策略的内部执行（reset / apply_patch / evaluate 内部用）。
     fn exec_raw(&self, command: &str) -> Result<ExecResult, DynErr> {
-        let out = Command::new(self.runtime.cli())
-            .args(["exec", &self.container, "bash", "-lc", command])
-            .output()
-            .map_err(|e| format!("{} exec spawn failed: {e}", self.runtime.cli()))?;
-        let (stdout_bytes, t1) = self.policy.truncate_output(&out.stdout);
-        let (stderr_bytes, t2) = self.policy.truncate_output(&out.stderr);
+        self.exec_raw_with_timeout(command, worker_exec_timeout_secs())
+    }
+
+    fn exec_raw_with_timeout(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<ExecResult, DynErr> {
+        let out = self
+            .backend
+            .exec(&ExecRequest {
+                handle: self.handle.clone(),
+                command: command.to_string(),
+                timeout_secs,
+            })
+            .map_err(|e| format!("SWE backend exec failed: {e}"))?;
+        let (stdout_bytes, t1) = self.policy.truncate_output(out.stdout.as_bytes());
+        let (stderr_bytes, t2) = self.policy.truncate_output(out.stderr.as_bytes());
         Ok(ExecResult {
             stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
             stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
-            exit_code: out.status.code().unwrap_or(-1),
+            exit_code: out.exit_code,
             truncated: t1 || t2,
         })
     }
@@ -476,6 +516,7 @@ impl SweSession {
     /// 调用前 Agent（或 gold patch）已完成源码改动；test_patch 在此处应用，使外部
     /// Agent 不接触/篡改测试文件（对齐官方 harness：model patch → test patch → run）。
     pub fn evaluate(&self) -> Result<EpisodeOutcome, DynErr> {
+        self.ensure_active()?;
         let start = Instant::now();
         let ws = self.instance.workspace_dir();
         let model_diff = self
@@ -486,6 +527,7 @@ impl SweSession {
         // 顺序对齐官方 harness：源码 patch → install → test patch → run。安装失败仅告警
         // （不掩盖后续测试失败的真实根因）。
         if let Some(cmd) = self.install_command() {
+            self.ensure_active()?;
             let r = self.exec_raw(&cmd)?;
             if r.exit_code != 0 {
                 tracing::warn!(
@@ -498,6 +540,7 @@ impl SweSession {
         }
         // 评测前应用 test_patch（Pro 的 setup 已在 provision 完成，避免 wipe agent patch）。
         self.apply_patch(&self.instance.test_patch, "test")?;
+        self.ensure_active()?;
         if let Some(pre) = self.instance.resolved_pre_test_command() {
             let r = self.exec_raw(&pre)?;
             if r.exit_code != 0 {
@@ -509,10 +552,38 @@ impl SweSession {
                 );
             }
         }
+        self.ensure_active()?;
 
         // M1-2 / M1-4：按 repo@version 规格（或实例显式 test_cmd）构造 runner。
+        // pytest node id 很多时不要把列表放进 docker exec argv；先写入容器文件，
+        // 再由 xargs 在容器内分批启动 pytest。
+        if self.instance.test_cmd.is_none()
+            && self.instance.variant() != crate::swe::variant::BenchmarkVariant::Pro
+            && self
+                .instance
+                .fail_to_pass
+                .iter()
+                .chain(self.instance.pass_to_pass.iter())
+                .map(|id| id.len() + 1)
+                .sum::<usize>()
+                > crate::swe::repo_specs::MAX_INLINE_NODE_IDS_BYTES
+        {
+            let node_ids = self
+                .instance
+                .fail_to_pass
+                .iter()
+                .chain(self.instance.pass_to_pass.iter())
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join("\0");
+            self.write_file(
+                crate::swe::repo_specs::PYTEST_NODE_IDS_FILE,
+                &format!("{node_ids}\0"),
+            )?;
+        }
         let test_cmd = self.instance.resolved_test_command(TESTBED);
         let test_run = self.exec_raw(&test_cmd)?;
+        self.ensure_active()?;
         let combined = format!("{}\n{}", test_run.stdout, test_run.stderr);
 
         // M6-4 / runtime contract：外部 reward adapter 可成为权威评分，Rust pytest
@@ -604,6 +675,7 @@ impl SweSession {
             }
         };
 
+        self.ensure_active()?;
         let test_results = TestResults {
             passed: graded.resolved,
             raw_output: truncate(&combined, self.policy.max_output_bytes),
@@ -621,6 +693,13 @@ impl SweSession {
             artifact,
             duration_ms: start.elapsed().as_millis() as u64,
         })
+    }
+
+    fn ensure_active(&self) -> Result<(), DynErr> {
+        if self.terminated.load(Ordering::SeqCst) {
+            return Err("SWE session terminated".into());
+        }
+        Ok(())
     }
 
     /// Pro：`before_repo_set_cmd` 在 provision/recycle 时执行（checkout 测试文件基线）。
@@ -701,18 +780,14 @@ impl SweSession {
     }
 
     fn cp_into(&self, local: &str, dest: &str) -> Result<(), DynErr> {
-        let out = Command::new(self.runtime.cli())
-            .args(["cp", local, &format!("{}:{}", self.container, dest)])
-            .output()
-            .map_err(|e| format!("{} cp spawn failed: {e}", self.runtime.cli()))?;
-        if !out.status.success() {
-            return Err(format!(
-                "{} cp failed: {}",
-                self.runtime.cli(),
-                String::from_utf8_lossy(&out.stderr)
-            )
-            .into());
-        }
+        let content = std::fs::read_to_string(local)?;
+        self.backend
+            .write(&crate::swe::backend::WriteRequest {
+                handle: self.handle.clone(),
+                path: dest.to_string(),
+                content,
+            })
+            .map_err(|e| format!("SWE backend write failed: {e}"))?;
         Ok(())
     }
 }
@@ -752,9 +827,7 @@ impl Drop for SweSession {
         if self.keep {
             return;
         }
-        let _ = Command::new(self.runtime.cli())
-            .args(["rm", "-f", &self.container])
-            .output();
+        self.terminate();
     }
 }
 

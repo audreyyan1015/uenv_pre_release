@@ -39,6 +39,7 @@ snafu = "0.8"
 async-trait = "0.1"
 futures = "0.3"
 bytes = "1"
+base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
@@ -48,6 +49,8 @@ axum = "0.8"
 crc32fast = "1"
 flate2 = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
+kube = { version = "0.98", features = ["client", "rustls-tls", "ws"] }
+k8s-openapi = { version = "0.24", features = ["v1_31"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -11,7 +11,7 @@ Modes:
 
 Usage (7143):
   python3 integrations/openhands/run_pro_agent.py \\
-      --gateway 127.0.0.1:28999 --api-key swe-pro-secret \\
+      --gateway 127.0.0.1:28999 --api-key REPLACE_WITH_RANDOM_GATEWAY_API_KEY \\
       --instance instance_NodeBB__... \\
       --instances config/swe/pro.json \\
       --mode llm \\

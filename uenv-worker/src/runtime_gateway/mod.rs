@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
@@ -48,6 +49,26 @@ enum SubmitState {
     Running,
     Completed(serde_json::Value),
     Failed(String),
+}
+
+fn gateway_exec_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("UENV_WORKER_GATEWAY_EXEC_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(180),
+    )
+}
+
+fn gateway_submit_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("UENV_WORKER_GATEWAY_SUBMIT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1800),
+    )
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResp>)>;
@@ -440,10 +461,20 @@ async fn exec(
     Json(req): Json<ExecReq>,
 ) -> ApiResult<ExecResp> {
     let pool = st.pool.clone();
-    let r = tokio::task::spawn_blocking(move || pool.exec(&id, &req.command))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
-        .map_err(session_error)?;
+    let timeout = gateway_exec_timeout();
+    let r = tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || pool.exec(&id, &req.command)),
+    )
+    .await
+    .map_err(|_| {
+        err(
+            StatusCode::REQUEST_TIMEOUT,
+            format!("gateway exec timeout after {}s", timeout.as_secs()),
+        )
+    })?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?
+    .map_err(session_error)?;
     Ok(Json(ExecResp {
         stdout: r.stdout,
         stderr: r.stderr,
@@ -616,14 +647,24 @@ async fn submit(
 
     let pool = st.pool.clone();
     let submissions = Arc::clone(&st.submissions);
+    let cleanup_pool = pool.clone();
     let session_id = id.clone();
+    let timeout = gateway_submit_timeout();
     tokio::spawn(async move {
         let submit_session_id = session_id.clone();
-        let state = match tokio::task::spawn_blocking(move || pool.submit(&submit_session_id)).await
-        {
-            Ok(Ok(submit)) => SubmitState::Completed(submit_result_value(submit)),
-            Ok(Err(error)) => SubmitState::Failed(error.to_string()),
-            Err(error) => SubmitState::Failed(format!("submit worker task failed: {error}")),
+        let task = tokio::task::spawn_blocking(move || pool.submit(&submit_session_id));
+        let state = match tokio::time::timeout(timeout, task).await {
+            Err(_) => {
+                tracing::warn!(session_id = %session_id, timeout_secs = timeout.as_secs(), msg = "gateway_submit_timeout");
+                let _ = cleanup_pool.terminate(&session_id);
+                SubmitState::Failed(format!(
+                    "gateway submit timeout after {}s",
+                    timeout.as_secs()
+                ))
+            }
+            Ok(Ok(Ok(submit))) => SubmitState::Completed(submit_result_value(submit)),
+            Ok(Ok(Err(error))) => SubmitState::Failed(error.to_string()),
+            Ok(Err(error)) => SubmitState::Failed(format!("submit worker task failed: {error}")),
         };
         submissions
             .lock()

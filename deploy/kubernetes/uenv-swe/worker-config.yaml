@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uenv-worker-config
+data:
+  worker.yaml: |
+    server:
+      endpoint: "uenv-server:50051"
+    worker:
+      id: "uenv-worker-k8s"
+      listen: "0.0.0.0:28888"
+      advertise_endpoint: "uenv-worker-control.<namespace>.svc.cluster.local:28888"
+      max_concurrent: 1
+    scheduler:
+      mode: "remote"
+    env:
+      types: ["swe"]
+      backend: "process"
+      plugin_dir: "/opt/uenv/plugins"
+    pool:
+      warmup_size: 0
+      prewarm_on_startup: false
+      max_idle_time: 300
+      cool_timeout: 60
+      max_episode_count: 1000
+    logging:
+      level: "INFO"
+      file: "/var/log/uenv/worker.log"
+    wal:
+      dir: "/var/lib/uenv/wal"
+    observability:
+      metrics_listen: "0.0.0.0:19090"
+      health_listen: "0.0.0.0:19090"
+    swe:
+      backend: kubernetes
+      variants: ["smith"]
+      kubernetes:
+        namespace: "<platform-assigned-namespace>"
+        service_account: "uenv-worker"
+        session_kind: pod
+        cpu: "2"
+        memory: "4Gi"
+        ephemeral_storage: "20Gi"
+    runtime_gateway:
+      enabled: true
+      listen: "0.0.0.0:28097"
+      capacity: 1
+      advertise_url: "http://uenv-worker-control.<namespace>.svc.cluster.local:28097"

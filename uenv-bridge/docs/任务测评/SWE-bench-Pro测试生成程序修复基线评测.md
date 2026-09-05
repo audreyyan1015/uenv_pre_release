@@ -62,7 +62,7 @@ Adapter 侧 request 中主要传入 `instance_id`、`repo`、`base_commit`、`do
 
 | 配置 | 值 |
 |---|---|
-| Adapter 运行脚本 | `scripts/benchmark/run_swebenchpro_uenv_baseline.sh` |
+| Adapter 运行脚本 | `scripts/benchmark/swe/run_swebenchpro_uenv_baseline.sh` |
 | Adapter Core endpoint | `8.130.75.157:8088` |
 | 数据集 | `data/benchmarks/swebenchpro/test.jsonl` |
 | 样本数 | 731 |
@@ -158,7 +158,7 @@ cd /data/ronghao/uenv/uenv-bridge
 GATEWAY_LOG_DIR=/data/ronghao/uenv/uenv-bridge/temp/benchmarks/swebenchpro/gateway-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$GATEWAY_LOG_DIR"
 
-PYTHONPATH=src python3 scripts/benchmark/run_model_gateway.py \
+PYTHONPATH=src python3 scripts/benchmark/common/run_model_gateway.py \
   --upstream http://127.0.0.1:18081/v1 \
   --bind-host 0.0.0.0 \
   --port 18094 \
@@ -221,7 +221,7 @@ WORKSPACE_DIR=/app \
 LLM_CONFIG_PATH=/root/UEnv/config/openhands-llm-qwen3-thinking-max-token-8192.json \
 MAX_ITERATIONS=60 \
 RESUME=0 \
-./scripts/benchmark/run_swebenchpro_uenv_baseline.sh \
+./scripts/benchmark/swe/run_swebenchpro_uenv_baseline.sh \
 > "$OUT/full-run.log" 2>&1 &
 
 echo $! > "$OUT/full-run.pid"
@@ -260,8 +260,8 @@ cd /data/ronghao/uenv/uenv-bridge
 
 podman rm -f uenv-benchmark-vllm-18081
 
-pgrep -af 'scripts/benchmark/run_model_gateway.py.*--port 18094'
-pkill -f 'scripts/benchmark/run_model_gateway.py.*--port 18094'
+pgrep -af 'scripts/benchmark/common/run_model_gateway.py.*--port 18094'
+pkill -f 'scripts/benchmark/common/run_model_gateway.py.*--port 18094'
 
 ss -ltnp | grep -E ':18081|:18094' || echo "Adapter vLLM/gateway ports are closed"
 ```

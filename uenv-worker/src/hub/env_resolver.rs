@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::plugin::host::{PluginHost, PluginManifest};
 
-use super::{hub_to_plugin_manifest, pull_full_manifest, HubEnvManifest, HubPullSummary};
+use super::{HubEnvManifest, HubPullSummary, hub_to_plugin_manifest, pull_full_manifest};
 
 /// Ensures `env_type` is spawnable before WarmupPool creates instances.
 #[derive(Clone)]
@@ -65,16 +65,12 @@ impl EnvResolver {
                 }
                 self.plugin_host.register_manifest(manifest).await?;
             }
-        } else if !summary
-            .supported_backends
-            .iter()
-            .any(|b| {
-                b == "process"
-                    || b == "openenv_http"
-                    || b == "openenv_http_container"
-                    || b == "generic_openenv_plugin"
-            })
-        {
+        } else if !summary.supported_backends.iter().any(|b| {
+            b == "process"
+                || b == "openenv_http"
+                || b == "openenv_http_container"
+                || b == "generic_openenv_plugin"
+        }) {
             tracing::info!(
                 trace_id = "env_resolver",
                 episode_id = "-",
@@ -203,10 +199,8 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_hub_does_not_block_an_installed_local_plugin() {
-        let root = std::env::temp_dir().join(format!(
-            "uenv-hub-fallback-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("uenv-hub-fallback-test-{}", std::process::id()));
         let env_dir = root.join("demo");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&env_dir).unwrap();
@@ -229,10 +223,8 @@ mod tests {
 
     #[tokio::test]
     async fn hub_latest_does_not_relabel_an_explicitly_installed_old_version() {
-        let root = std::env::temp_dir().join(format!(
-            "uenv-hub-version-pin-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("uenv-hub-version-pin-test-{}", std::process::id()));
         let env_dir = root.join("demo");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&env_dir).unwrap();

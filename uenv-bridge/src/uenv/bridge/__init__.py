@@ -21,10 +21,18 @@ except ImportError:  # pragma: no cover - 轻量部署（无 verl / 无 agent-lo
     UEnvAgentLoop = None  # type: ignore[assignment]
     UEnvAgentLoopConfig = None  # type: ignore[assignment]
 
+try:
+    from .native_swe_agent_loop import NativeSweAgentLoop, NativeSweAgentLoopConfig
+except ImportError:  # pragma: no cover - 轻量部署（无 verl / 无 agent-loop 模块）
+    NativeSweAgentLoop = None  # type: ignore[assignment]
+    NativeSweAgentLoopConfig = None  # type: ignore[assignment]
+
 __all__ = [
     "EpisodeClient",
     "EpisodeRequest",
     "EpisodeResult",
+    "NativeSweAgentLoop",
+    "NativeSweAgentLoopConfig",
     "RustCoreEpisodeClient",
     "RustCoreClientConfig",
     "UEnvAgentLoop",

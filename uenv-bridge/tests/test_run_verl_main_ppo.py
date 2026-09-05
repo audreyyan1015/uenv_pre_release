@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_verl_main_ppo.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "train" / "wrappers" / "run_verl_main_ppo.py"
 
 
 def _load_script_module():

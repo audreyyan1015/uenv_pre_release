@@ -60,7 +60,7 @@ ROLLOUT_GPU_MEMORY_UTILIZATION=0.20 \
 ROLLOUT_ENABLE_SLEEP_MODE=False \
 ROLLOUT_FREE_CACHE_ENGINE=False \
 EXTRA_VERL_ARGS='+actor_rollout_ref.model.override_config.attn_implementation=sdpa actor_rollout_ref.rollout.max_model_len=2048 actor_rollout_ref.rollout.max_num_batched_tokens=384 actor_rollout_ref.actor.fsdp_config.optimizer_offload=True' \
-./scripts/run_layer4_distributed.sh
+./scripts/train/launchers/common/run_verl_uenv_grpo.sh
 ```
 
 10-step 稳定性验证使用的差异如下：
@@ -557,7 +557,7 @@ ROLLOUT_FREE_CACHE_ENGINE=True \
 PODMAN_GPU_ARGS="nvidia.com/gpu=0,1,2,3,4,5,6,7" \
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3,4,5,6,7 \
 NGPUS_PER_NODE=8 \
-./scripts/run_layer4_distributed.sh
+./scripts/train/launchers/common/run_verl_uenv_grpo.sh
 ```
 
 异步训练模板（以 fully async 为例）：
@@ -592,10 +592,10 @@ PODMAN_GPU_ARGS="nvidia.com/gpu=0,1,2,3,4,5,6,7" \
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1,2,3,4,5,6,7 \
 NGPUS_PER_NODE=8 \
 AGENT_NUM_WORKERS=1 \
-./scripts/fully_async_policy/run_verl_grpo_fully_async_uenv.sh
+./scripts/experiments/fully_async_policy/run_verl_grpo_fully_async_uenv.sh
 ```
 
-如果后续需要切换到 one-step off-policy，只需把入口脚本替换为 `./scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh`，并保持 `UENV_AGENT_LOOP_PARALLEL_MODE=one_step_off_policy` 即可。
+如果后续需要切换到 one-step off-policy，只需把入口脚本替换为 `./scripts/experiments/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh`，并保持 `UENV_AGENT_LOOP_PARALLEL_MODE=one_step_off_policy` 即可。
 
 ### 7.3 Open Questions
 

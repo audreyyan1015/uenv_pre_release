@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -23,6 +24,8 @@ DEFAULT_ROOT = Path(os.environ.get("UENV_INSTALL_ROOT", "/opt/uenv/current"))
 DEFAULT_CONFIG = Path(os.environ.get("UENV_CONFIG_DIR", "/etc/uenv"))
 DEFAULT_ADMIN_URL = os.environ.get("UENV_ADMIN_URL", "http://127.0.0.1:50052")
 DEFAULT_WORKER_URL = os.environ.get("UENV_WORKER_HEALTH_URL", "http://127.0.0.1:19090")
+DEFAULT_TRAJECTORY_URL = "http://127.0.0.1:8077"
+TRAJECTORY_CONFIG_PATH = Path.home() / ".config" / "uenv" / "trajectory.toml"
 SERVICES = {
     "server": "uenv-adapter-core.service",
     "worker": "uenv-worker.service",
@@ -368,6 +371,424 @@ def cmd_train(args: argparse.Namespace) -> None:
     os.execv("/usr/bin/env", ["/usr/bin/env", "bash", str(script), *args.train_args])
 
 
+def read_kv_file(path: Path) -> dict[str, str]:
+    """Parse a simple KEY=VALUE env file, ignoring comments and unreadable files."""
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return values
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip().strip('"\'')
+    return values
+
+
+def read_trajectory_config() -> dict[str, str]:
+    """Read ~/.config/uenv/trajectory.toml (hand-written simple TOML)."""
+    try:
+        text = TRAJECTORY_CONFIG_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return {}
+    try:
+        import tomllib
+
+        try:
+            parsed = tomllib.loads(text)
+            return {key: str(value) for key, value in parsed.items()}
+        except tomllib.TOMLDecodeError:
+            pass
+    except ImportError:
+        pass
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip().strip('"\'')
+    return values
+
+
+def resolve_trajectory_connection(args: argparse.Namespace) -> tuple[str, str | None]:
+    """Resolve endpoint/token: CLI > env > ~/.config/uenv/trajectory.toml > /etc/uenv env files > default."""
+    url = getattr(args, "url", None) or ""
+    token = getattr(args, "token", None) or ""
+    if not url:
+        url = os.environ.get("UENV_TRAJECTORY_URL") or os.environ.get("UENV_TRAJECTORY_ENDPOINT") or ""
+    if not token:
+        token = os.environ.get("UENV_TRAJECTORY_TOKEN") or ""
+    config = read_trajectory_config()
+    if not url:
+        url = config.get("endpoint", "")
+    if not token:
+        token = config.get("token", "")
+    if not token:
+        token = read_kv_file(Path("/etc/uenv/secrets/swe.env")).get("UENV_TRAJECTORY_TOKEN", "")
+    if not url:
+        url = read_kv_file(Path("/etc/uenv/swe.env")).get("UENV_TRAJECTORY_ENDPOINT", "")
+    return (url or DEFAULT_TRAJECTORY_URL).rstrip("/"), token or None
+
+
+def trajectory_get_json(
+    base_url: str,
+    token: str | None,
+    path: str,
+    params: dict[str, object] | None = None,
+    timeout: float = 15.0,
+) -> object:
+    url = f"{base_url}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode({key: value for key, value in params.items() if value is not None})
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["X-Trajectory-Token"] = token
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise CliError(
+                f"鉴权失败（HTTP {exc.code}）：token 与 Server 配置不一致；"
+                "可用 `uenv trajectory login --url <URL> --token <TOKEN>` 更新凭据，"
+                "或设置 UENV_TRAJECTORY_TOKEN"
+            ) from exc
+        if exc.code == 404:
+            raise CliError(f"资源不存在（HTTP 404）：{url}") from exc
+        if exc.code >= 500:
+            raise CliError(f"轨迹 Server 内部错误（HTTP {exc.code}）：{url}，请稍后重试或检查服务端日志") from exc
+        raise CliError(f"请求失败（HTTP {exc.code}）：{url}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise CliError(
+            f"无法连接轨迹 Server {base_url}: {exc}；"
+            "可用 --url / UENV_TRAJECTORY_URL / `uenv trajectory login` 指定地址"
+        ) from exc
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise CliError(f"{url} 返回的不是有效 JSON") from exc
+
+
+def normalize_trajectory_list(data: object) -> list[dict]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("items", "trajectories", "results", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def fmt_ms_time(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value / 1000))
+
+
+def shorten(text: object, width: int) -> str:
+    value = str(text) if text is not None else "-"
+    if len(value) <= width:
+        return value
+    return value[: width - 1] + "…"
+
+
+def write_private_json(path: Path, data: object) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
+def print_trajectory_health(base_url: str, data: object) -> None:
+    print(f"Server: {base_url}")
+    if not isinstance(data, dict):
+        print(data)
+        return
+    for key, value in data.items():
+        if isinstance(value, (dict, list)):
+            print(f"  {key}: {json.dumps(value, ensure_ascii=False)}")
+        else:
+            print(f"  {key}: {value}")
+
+
+def cmd_trajectory_health(args: argparse.Namespace) -> None:
+    base_url, token = resolve_trajectory_connection(args)
+    data = trajectory_get_json(base_url, token, "/control/v1/trajectories/health")
+    print_trajectory_health(base_url, data)
+
+
+def cmd_trajectory_list(args: argparse.Namespace) -> None:
+    base_url, token = resolve_trajectory_connection(args)
+    params: dict[str, object] = {
+        "run_id": args.run_id,
+        "batch_id": args.batch_id,
+        "instance_id": args.instance_id,
+        "worker_id": args.worker_id,
+        "episode_id": args.episode_id,
+        "since_ms": args.since_ms,
+        "limit": args.limit,
+    }
+    data = trajectory_get_json(base_url, token, "/control/v1/trajectories", params)
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
+    items = normalize_trajectory_list(data)
+    if not items:
+        print("没有符合条件的轨迹。")
+        return
+    print(f"{'TRAJECTORY_ID':<40} {'INSTANCE_ID':<30} {'REWARD':>6} {'STEPS':>5} SEALED")
+    for item in items:
+        print(
+            f"{shorten(item.get('trajectory_id'), 40):<40} "
+            f"{shorten(item.get('instance_id'), 30):<30} "
+            f"{item.get('reward', '-'):>6} "
+            f"{item.get('step_count', '-'):>5} "
+            f"{fmt_ms_time(item.get('sealed_at_ms'))}"
+        )
+    print(f"\n共 {len(items)} 条。")
+
+
+def step_kind(step: dict) -> str:
+    action = step.get("action")
+    if isinstance(action, dict):
+        return str(action.get("kind", "-"))
+    return "-"
+
+
+def print_bundle_summary(bundle: dict) -> None:
+    print(f"轨迹 {bundle.get('trajectory_id', '-')}")
+    print(f"  run_id:      {bundle.get('run_id', '-')}")
+    print(f"  instance_id: {bundle.get('instance_id', '-')}")
+    print(f"  worker_id:   {bundle.get('worker_id', '-')}")
+    steps = bundle.get("steps")
+    step_count = len(steps) if isinstance(steps, list) else "?"
+    print(
+        f"  steps: {step_count}  reward: {bundle.get('reward', '-')}  "
+        f"resolved: {bundle.get('resolved', '-')}  sealed: {fmt_ms_time(bundle.get('sealed_at_ms'))}"
+    )
+    if isinstance(steps, list) and steps:
+        print("  步骤:")
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            extras = []
+            if "reward" in step:
+                extras.append(f"reward={step['reward']}")
+            observation = step.get("observation")
+            if isinstance(observation, dict) and observation.get("truncated"):
+                extras.append("truncated")
+            suffix = f"  ({', '.join(extras)})" if extras else ""
+            print(
+                f"    #{step.get('step_index', '-')} {step_kind(step)} "
+                f"{step.get('duration_ms', '-')}ms{suffix}"
+            )
+
+
+def cmd_trajectory_get(args: argparse.Namespace) -> None:
+    base_url, token = resolve_trajectory_connection(args)
+    path = f"/control/v1/trajectories/{urllib.parse.quote(args.trajectory_id, safe='')}"
+    bundle = trajectory_get_json(base_url, token, path)
+    if args.output:
+        write_private_json(args.output, bundle)
+        print(f"已写入 {args.output}")
+        return
+    if args.json:
+        print(json.dumps(bundle, ensure_ascii=False, indent=2))
+        return
+    if not isinstance(bundle, dict):
+        raise CliError("Server 返回的 bundle 不是 JSON 对象")
+    print_bundle_summary(bundle)
+
+
+def cmd_trajectory_export(args: argparse.Namespace) -> None:
+    base_url, token = resolve_trajectory_connection(args)
+    args.output.mkdir(parents=True, exist_ok=True)
+    page_size = 200
+    refs: list[dict] = []
+    seen: set[str] = set()
+    cursor: int | None = None
+    while True:
+        params: dict[str, object] = {"run_id": args.run_id, "limit": page_size, "since_ms": cursor}
+        items = normalize_trajectory_list(
+            trajectory_get_json(base_url, token, "/control/v1/trajectories", params)
+        )
+        fresh = []
+        for item in items:
+            trajectory_id = str(item.get("trajectory_id", ""))
+            if trajectory_id and trajectory_id not in seen:
+                seen.add(trajectory_id)
+                fresh.append(item)
+        refs.extend(fresh)
+        if len(items) < page_size or not fresh:
+            break
+        sealed_values = [item.get("sealed_at_ms") for item in items]
+        numeric = [value for value in sealed_values if isinstance(value, (int, float))]
+        if not numeric:
+            break
+        cursor = int(max(numeric)) + 1
+    if not refs:
+        print(f"run_id={args.run_id} 下没有轨迹。")
+        return
+    for index, ref in enumerate(refs, start=1):
+        trajectory_id = str(ref["trajectory_id"])
+        path = f"/control/v1/trajectories/{urllib.parse.quote(trajectory_id, safe='')}"
+        bundle = trajectory_get_json(base_url, token, path, timeout=60.0)
+        write_private_json(args.output / f"{trajectory_id}.json", bundle)
+        print(f"[{index}/{len(refs)}] {trajectory_id}")
+    print(f"\n导出完成：{len(refs)} 条轨迹 -> {args.output}")
+    print(
+        "提醒：导出的轨迹可能包含 prompt、日志与 patch 中的私密信息"
+        "（密钥、内网地址、个人数据等），外发或共享前请人工检查并脱敏。"
+    )
+
+
+def cmd_trajectory_verify(args: argparse.Namespace) -> None:
+    base_url, token = resolve_trajectory_connection(args)
+    path = f"/control/v1/trajectories/{urllib.parse.quote(args.trajectory_id, safe='')}"
+    bundle = trajectory_get_json(base_url, token, path)
+    problems: list[str] = []
+    notes: list[str] = []
+    if not isinstance(bundle, dict):
+        raise CliError("Server 返回的 bundle 不是 JSON 对象")
+
+    steps = bundle.get("steps")
+    if not isinstance(steps, list):
+        problems.append("steps 缺失或不是数组")
+        steps = []
+    if steps:
+        indices = [step.get("step_index") if isinstance(step, dict) else None for step in steps]
+        if any(not isinstance(index, int) or isinstance(index, bool) for index in indices):
+            problems.append("存在缺失或非整数的 step_index")
+        else:
+            start = indices[0]
+            if start not in (0, 1):
+                problems.append(f"首个 step_index={start}，既不是 0 也不是 1")
+            expected = list(range(start, start + len(indices)))
+            if indices != expected:
+                problems.append(f"step_index 不连续：期望 {expected}，实际 {indices}")
+    else:
+        notes.append("steps 为空，跳过 step_index 连续性校验")
+
+    step_rewards: list[float] = []
+    rewards_complete = bool(steps)
+    for position, step in enumerate(steps):
+        if not isinstance(step, dict) or "reward" not in step:
+            rewards_complete = False
+            continue
+        value = step["reward"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            problems.append(f"steps[{position}] 的 reward 无法解析为数值：{value!r}")
+            rewards_complete = False
+            continue
+        step_rewards.append(float(value))
+    if not rewards_complete and steps:
+        notes.append("并非所有 step 都带数值 reward，跳过 reward 汇总一致性校验")
+
+    top_reward = bundle.get("reward")
+    top_reward_numeric = isinstance(top_reward, (int, float)) and not isinstance(top_reward, bool)
+    if not top_reward_numeric:
+        problems.append(f"顶层 reward 无法解析为数值：{top_reward!r}")
+
+    if top_reward_numeric and rewards_complete and steps:
+        total = sum(step_rewards)
+        if abs(total - float(top_reward)) > 1e-6:
+            notes.append(
+                f"顶层 reward={top_reward} 与 steps 求和={total} 不一致；"
+                "两者语义可能不同，仅记录不判失败"
+            )
+
+    sealed = bundle.get("sealed_at_ms")
+    if not isinstance(sealed, int) or isinstance(sealed, bool):
+        problems.append(f"sealed_at_ms 缺失或不是整数：{sealed!r}")
+
+    for note in notes:
+        print(f"[注意] {note}")
+    for problem in problems:
+        print(f"[问题] {problem}")
+    if problems:
+        print(f"FAIL：{args.trajectory_id} 存在 {len(problems)} 个问题")
+        sys.stdout.flush()
+        raise CliError(f"轨迹校验未通过（{len(problems)} 个问题）")
+    print(f"PASS：{args.trajectory_id} 校验通过（steps={len(steps)}）")
+
+
+def cmd_trajectory_status(args: argparse.Namespace) -> None:
+    base_url, token = resolve_trajectory_connection(args)
+    print("== 轨迹 Server ==")
+    try:
+        data = trajectory_get_json(base_url, token, "/control/v1/trajectories/health", timeout=4.0)
+        print_trajectory_health(base_url, data)
+    except CliError as exc:
+        print(f"  不可用：{exc}")
+
+    print("\n== 本机 Worker 上传队列 ==")
+    artifact_dir = (
+        os.environ.get("UENV_TRAJECTORY_ARTIFACT_DIR")
+        or os.environ.get("UENV_SWE_ARTIFACT_DIR")
+        or "/var/lib/uenv/worker/swe-artifacts"
+    )
+    spool = Path(artifact_dir) / "spool"
+    if not spool.is_dir():
+        print(f"  未找到 spool 目录（{spool}），跳过本机队列检查。")
+        return
+    for name in ("pending", "failed"):
+        directory = spool / name
+        try:
+            markers = sorted(directory.glob("*.json")) if directory.is_dir() else []
+        except OSError as exc:
+            print(f"  {name}: 无法读取（{exc}）")
+            continue
+        print(f"  {name}: {len(markers)} 个")
+        if name == "failed":
+            for marker in markers[:3]:
+                last_error = read_kv_file(marker).get("last_error", "")
+                if not last_error:
+                    try:
+                        last_error = str(json.loads(marker.read_text(encoding="utf-8")).get("last_error", ""))
+                    except (OSError, json.JSONDecodeError):
+                        last_error = ""
+                print(f"    - {marker.name}: {shorten(last_error, 80)}")
+    pending_count = len(list((spool / "pending").glob("*.json"))) if (spool / "pending").is_dir() else 0
+    failed_count = len(list((spool / "failed").glob("*.json"))) if (spool / "failed").is_dir() else 0
+    if pending_count:
+        print("  建议：pending 非空说明上传未完成，请检查到 Server 的网络连通性与 token 是否一致。")
+    if failed_count:
+        print("  建议：failed 需按 last_error 修复后重新入队重传。")
+
+
+def cmd_trajectory_login(args: argparse.Namespace) -> None:
+    url = args.url.rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise CliError(f"--url 必须是 http(s) 地址：{args.url}")
+    token = args.token
+    if token is None:
+        if sys.stdin.isatty():
+            import getpass
+
+            token = getpass.getpass("Token: ").strip()
+        else:
+            token = sys.stdin.read().strip()
+    if not token:
+        raise CliError("token 为空；可通过 --token 或 stdin 提供")
+    escaped_url = url.replace("\\", "\\\\").replace('"', '\\"')
+    escaped_token = token.replace("\\", "\\\\").replace('"', '\\"')
+    content = f'endpoint = "{escaped_url}"\ntoken = "{escaped_token}"\n'
+    TRAJECTORY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(TRAJECTORY_CONFIG_PATH.parent, 0o700)
+    except OSError:
+        pass
+    fd = os.open(TRAJECTORY_CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    print(f"已保存到 {TRAJECTORY_CONFIG_PATH}（endpoint={url}）")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="UEnv 安装、运行与环境管理的统一入口")
     parser.add_argument("--admin-url", default=DEFAULT_ADMIN_URL, help="控制面 Admin HTTP 地址")
@@ -400,7 +821,7 @@ def build_parser() -> argparse.ArgumentParser:
     hub.add_argument("hub_args", nargs=argparse.REMAINDER)
     hub.set_defaults(func=cmd_hub)
     evaluate = sub.add_parser(
-        "evaluate", help="通过 Adapter 执行通用评测 JSONL", add_help=False
+        "evaluate", help="通过 UEnv Server 执行通用评测 JSONL", add_help=False
     )
     evaluate.add_argument("evaluate_args", nargs=argparse.REMAINDER)
     evaluate.set_defaults(func=cmd_evaluate)
@@ -409,6 +830,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("train_args", nargs=argparse.REMAINDER)
     train.set_defaults(func=cmd_train)
+
+    trajectory = sub.add_parser("trajectory", help="查询、导出与校验集中存储的轨迹")
+    traj_sub = trajectory.add_subparsers(dest="trajectory_command", required=True)
+
+    def add_conn_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--url", help="轨迹 Server 地址（缺省读 UENV_TRAJECTORY_URL/配置文件）")
+        p.add_argument("--token", help="轨迹访问 token（缺省读 UENV_TRAJECTORY_TOKEN/配置文件）")
+
+    t_health = traj_sub.add_parser("health", help="检查轨迹 Server 健康状态")
+    add_conn_args(t_health)
+    t_health.set_defaults(func=cmd_trajectory_health)
+
+    t_list = traj_sub.add_parser("list", help="按条件列出轨迹")
+    add_conn_args(t_list)
+    t_list.add_argument("--run-id", help="按 run_id 过滤")
+    t_list.add_argument("--batch-id", help="按 batch_id 过滤")
+    t_list.add_argument("--instance-id", help="按 instance_id 过滤")
+    t_list.add_argument("--worker-id", help="按 worker_id 过滤")
+    t_list.add_argument("--episode-id", help="按 episode_id 过滤")
+    t_list.add_argument("--since-ms", type=int, help="只返回 sealed_at_ms 不早于该值的轨迹")
+    t_list.add_argument("--limit", type=int, default=50, help="最多返回条数（默认 50）")
+    t_list.add_argument("--json", action="store_true", help="原样输出 JSON")
+    t_list.set_defaults(func=cmd_trajectory_list)
+
+    t_get = traj_sub.add_parser("get", help="下载并查看单条轨迹")
+    add_conn_args(t_get)
+    t_get.add_argument("trajectory_id", help="轨迹 ID")
+    t_get.add_argument("-o", "--output", type=Path, help="把完整 bundle JSON 写入文件（0600）")
+    t_get.add_argument("--json", action="store_true", help="原样输出完整 JSON")
+    t_get.set_defaults(func=cmd_trajectory_get)
+
+    t_export = traj_sub.add_parser("export", help="导出一个 run 的全部轨迹到目录")
+    add_conn_args(t_export)
+    t_export.add_argument("--run-id", required=True, help="要导出的 run_id")
+    t_export.add_argument("-o", "--output", type=Path, required=True, help="导出目录")
+    t_export.set_defaults(func=cmd_trajectory_export)
+
+    t_verify = traj_sub.add_parser("verify", help="校验单条轨迹的完整性")
+    add_conn_args(t_verify)
+    t_verify.add_argument("trajectory_id", help="轨迹 ID")
+    t_verify.set_defaults(func=cmd_trajectory_verify)
+
+    t_status = traj_sub.add_parser("status", help="查看 Server 健康与本机上传队列概况")
+    add_conn_args(t_status)
+    t_status.set_defaults(func=cmd_trajectory_status)
+
+    t_login = traj_sub.add_parser("login", help="保存轨迹 Server 的地址与 token")
+    t_login.add_argument("--url", required=True, help="轨迹 Server 地址")
+    t_login.add_argument("--token", help="访问 token（缺省从 stdin 读取，避免进入 shell history）")
+    t_login.set_defaults(func=cmd_trajectory_login)
+
     sub.add_parser("version", help="显示已安装版本").set_defaults(func=cmd_version)
     return parser
 

@@ -105,7 +105,7 @@ and file editing tools. When finished, provide the final patch summary.
 
 ### 2.5 Adapter 与 Worker 字段要求
 
-当前 `scripts/benchmark/evaluate_swebenchpro_uenv.py` 已经能构造 `env_type=swe` 的 benchmark request。但 VeRL 训练入口 `UEnvAgentLoop` 当前更偏通用 QA/code/agent 路由，SWE 训练前需要确认下面能力。
+当前 `scripts/benchmark/swe/evaluate_swebenchpro_uenv.py` 已经能构造 `env_type=swe` 的 benchmark request。但 VeRL 训练入口 `UEnvAgentLoop` 当前更偏通用 QA/code/agent 路由，SWE 训练前需要确认下面能力。
 
 | 项目 | 当前状态 | 训练前要求 |
 |---|---|---|
@@ -254,7 +254,7 @@ ROLLOUT_GPU_MEMORY_UTILIZATION=0.20 \
 ROLLOUT_ENABLE_SLEEP_MODE=False \
 ROLLOUT_FREE_CACHE_ENGINE=False \
 EXTRA_VERL_ARGS='+actor_rollout_ref.model.override_config.attn_implementation=sdpa actor_rollout_ref.rollout.max_model_len=6144 actor_rollout_ref.rollout.max_num_batched_tokens=6144 actor_rollout_ref.actor.fsdp_config.optimizer_offload=True' \
-./scripts/run_layer4_distributed.sh
+./scripts/train/launchers/common/run_verl_uenv_grpo.sh
 ```
 
 若出现 OOM，优先将 `actor_rollout_ref.rollout.max_model_len` 和 `DATA_MAX_RESPONSE_LENGTH` 降到 `4096/1024` 组合，再确认链路；若 reward 长期为 0 且大量 `git_diff_bytes=0`，优先检查 prompt、OpenHands LLM config、workspace 映射和工具调用轨迹。
@@ -286,7 +286,7 @@ EXTRA_VERL_ARGS='+actor_rollout_ref.model.override_config.attn_implementation=sd
 
 - 本地稳定训练配置：`docs/Qwen3.6-35B VeRL稳定训练配置.md`
 - 本地 SWE 基线评测：`docs/任务测评/SWE-bench-Pro测试生成程序修复基线评测.md`
-- 本地 SWE request builder：`scripts/benchmark/evaluate_swebenchpro_uenv.py`
+- 本地 SWE request builder：`scripts/benchmark/swe/evaluate_swebenchpro_uenv.py`
 - SWE-bench: <https://github.com/swe-bench/SWE-bench>
 - SWE-Gym: <https://github.com/SWE-Gym/SWE-Gym>
 - SWE-smith: <https://github.com/SWE-bench/SWE-smith>

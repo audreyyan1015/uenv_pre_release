@@ -1,0 +1,124 @@
+<mxfile host="app.diagrams.net" modified="2026-08-24T00:00:00.000Z" agent="Codex" version="24.7.17" type="device">
+  <diagram id="episode-request-result-unified-protocol" name="EpisodeRequest-Result统一协议">
+    <mxGraphModel dx="1880" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="统一 Episode 协议：训练、评测、轨迹采集共用一套数据结构" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=28;fontStyle=1;fontColor=#111111;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1820" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="任务框架只需要把各自输入映射到 EpisodeRequest；环境执行后统一返回 EpisodeResult，再按训练 / 评测 / 轨迹采集的消费口径取字段。" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="220" y="70" width="1460" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="left-header" value="任务框架输入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7F8FA;strokeColor=#D0D7DE;fontSize=18;fontStyle=1;fontColor=#111111;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="120" width="330" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="rl-input" value="&lt;b&gt;强化学习训练&lt;/b&gt;&lt;br&gt;VeRL / GRPO / PPO&lt;br&gt;&lt;br&gt;输入参数：&lt;br&gt;• prompt / sample_index&lt;br&gt;• extra_info.env_type / dataset / instance_id&lt;br&gt;• reward_model / ground_truth&lt;br&gt;• model path / endpoint&lt;br&gt;• temperature / max_new_tokens / rollout.n&lt;br&gt;• max_steps / timeout / seed&lt;br&gt;&lt;br&gt;目标：生成 rollout 并进入 policy update" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#0070F3;fontSize=13;fontColor=#111111;arcSize=8;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="190" width="330" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="eval-input" value="&lt;b&gt;Benchmark 评测&lt;/b&gt;&lt;br&gt;QA / Code / SWE / Math&lt;br&gt;&lt;br&gt;输入参数：&lt;br&gt;• benchmark dataset&lt;br&gt;• task input / expected answer&lt;br&gt;• env_type / dataset id&lt;br&gt;• model endpoint&lt;br&gt;• scoring rule / harness&lt;br&gt;• max_steps / timeout&lt;br&gt;&lt;br&gt;目标：得到 score / resolved / pass rate" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF3;strokeColor=#2DA44E;fontSize=13;fontColor=#111111;arcSize=8;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="430" width="330" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="trace-input" value="&lt;b&gt;轨迹采集&lt;/b&gt;&lt;br&gt;SWE / Web / Tool Agent&lt;br&gt;&lt;br&gt;输入参数：&lt;br&gt;• 轨迹采集数据集&lt;br&gt;• task instance / instruction&lt;br&gt;• agent / runtime config&lt;br&gt;• tool / browser / workspace&lt;br&gt;• LLM config path&lt;br&gt;• trace tags / storage policy&lt;br&gt;&lt;br&gt;目标：保存可回放 trajectory" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#D4A72C;fontSize=13;fontColor=#111111;arcSize=8;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="660" width="330" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="request-header" value="EpisodeRequest：统一任务请求" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#111111;strokeColor=#111111;fontSize=18;fontStyle=1;fontColor=#FFFFFF;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="440" y="120" width="520" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="request-body" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#111111;fontSize=12;fontColor=#111111;arcSize=8;spacing=12;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="440" y="190" width="520" height="670" as="geometry" />
+        </mxCell>
+        <mxCell id="request-card-identity" value="&lt;b&gt;1. 任务身份与路由&lt;/b&gt;&lt;br&gt;episode_id：一次任务执行的唯一编号&lt;br&gt;env_type：环境能力类型，math / qa / code / swe / web&lt;br&gt;env_package_id + version：可选，指定已部署环境包&lt;br&gt;&lt;font color=&quot;#57606A&quot;&gt;作用：让 Server 调度到具备对应环境能力的 Worker。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F6F8FA;strokeColor=#D0D7DE;fontSize=12;fontColor=#111111;arcSize=8;spacing=10;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="462" y="212" width="476" height="112" as="geometry" />
+        </mxCell>
+        <mxCell id="request-card-payload" value="&lt;b&gt;2. 任务输入 payload&lt;/b&gt;&lt;br&gt;随 env_type 变化的业务内容，不按训练 / 测评 / 轨迹拆字段名&lt;br&gt;math / qa：question、dataset、context、题目元信息&lt;br&gt;code：题目说明、函数签名、代码上下文&lt;br&gt;swe：instance_id、issue、仓库 / 环境引用&lt;br&gt;&lt;font color=&quot;#57606A&quot;&gt;作用：承载当前 Episode 要执行的样本内容。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F6F8FA;strokeColor=#D0D7DE;fontSize=12;fontColor=#111111;arcSize=8;spacing=10;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="462" y="336" width="476" height="122" as="geometry" />
+        </mxCell>
+        <mxCell id="request-card-reward" value="&lt;b&gt;3. reward_config（目标与判定输入）&lt;/b&gt;&lt;br&gt;请求只携带 target / gold / rubric / 测试集合等判定输入&lt;br&gt;执行侧由 Worker 本地已部署的环境实现计算 reward / score&lt;br&gt;最大采集步数不放在这里，归入顶层执行约束&lt;br&gt;&lt;font color=&quot;#57606A&quot;&gt;作用：为本条样本提供判定所需数据，而不是在请求中定义判分逻辑。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#0070F3;fontSize=12;fontColor=#111111;arcSize=8;spacing=10;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="462" y="470" width="476" height="128" as="geometry" />
+        </mxCell>
+        <mxCell id="request-card-model" value="&lt;b&gt;4. model_endpoint_config&lt;/b&gt;&lt;br&gt;url：模型服务或 gateway 地址&lt;br&gt;model_name：本次执行使用的模型名称&lt;br&gt;generation_config_json：temperature、max_new_tokens、top_p、logprobs&lt;br&gt;&lt;font color=&quot;#57606A&quot;&gt;作用：把模型端点与采样参数收束到同一配置对象。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F6F8FA;strokeColor=#D0D7DE;fontSize=12;fontColor=#111111;arcSize=8;spacing=10;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="462" y="610" width="476" height="112" as="geometry" />
+        </mxCell>
+        <mxCell id="request-card-control" value="&lt;b&gt;5. 执行约束与 metadata&lt;/b&gt;&lt;br&gt;max_steps / timeout_seconds：最长执行步数和超时&lt;br&gt;metadata：run、batch、sample、tags、业务用途等上下文&lt;br&gt;parallel_mode：可选，训练场景的并行 / 异步语义&lt;br&gt;&lt;font color=&quot;#57606A&quot;&gt;作用：保存调度、观测和训练所需的补充信息。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F6F8FA;strokeColor=#D0D7DE;fontSize=12;fontColor=#111111;arcSize=8;spacing=10;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="462" y="734" width="476" height="106" as="geometry" />
+        </mxCell>
+
+        <mxCell id="chain-header" value="UEnv 执行链路" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7F8FA;strokeColor=#D0D7DE;fontSize=18;fontStyle=1;fontColor=#111111;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="250" width="220" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="adapter" value="Adapter&lt;br&gt;请求转换 / 批量提交" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6E7781;fontSize=13;fontColor=#111111;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="330" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="server" value="Server&lt;br&gt;调度 / 租约 / Obs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6E7781;fontSize=13;fontColor=#111111;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="420" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="worker" value="Worker&lt;br&gt;环境执行 / reward" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6E7781;fontSize=13;fontColor=#111111;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="510" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="agent" value="Agent / Runtime&lt;br&gt;OpenHands / Web / Tool" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6E7781;fontSize=13;fontColor=#111111;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="600" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="llm-note" value="注意：Agent 侧访问 LLM 时，通常读取 Worker / Runtime 落地的 LLM 配置文件；训练侧传入的是模型端点与采样语义，最终会被执行侧转换成可用配置。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8C5;strokeColor=#D4A72C;fontSize=12;fontColor=#111111;arcSize=8;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="995" y="700" width="250" height="105" as="geometry" />
+        </mxCell>
+
+        <mxCell id="result-header" value="EpisodeResult：统一执行结果" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#111111;strokeColor=#111111;fontSize=18;fontStyle=1;fontColor=#FFFFFF;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="120" width="540" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="result-body" value="&lt;b&gt;终态与错误&lt;/b&gt;&lt;br&gt;status ← completed / failed / timeout&lt;br&gt;error_code / error_message ← 系统错误、环境错误、判分错误&lt;br&gt;&lt;br&gt;&lt;b&gt;奖励摘要&lt;/b&gt;&lt;br&gt;summary.total_reward ← RL reward / benchmark score&lt;br&gt;summary.total_steps ← agent 实际执行步数&lt;br&gt;summary.total_duration_ms ← episode 总耗时&lt;br&gt;summary.terminate_reason ← resolved、max_steps、timeout、error&lt;br&gt;&lt;br&gt;&lt;b&gt;轨迹&lt;/b&gt;&lt;br&gt;trajectory.steps[] ← observation、action、reward、duration、info&lt;br&gt;rollout_trace.response_ids / response_mask ← 训练更新时的 token 与 mask&lt;br&gt;rollout_log_probs ← GRPO / PPO old logprob 或重计算校验输入&lt;br&gt;&lt;br&gt;&lt;b&gt;可回放与审计&lt;/b&gt;&lt;br&gt;trajectory_id / trajectory_storage_url ← 轨迹库索引&lt;br&gt;trajectory_checksum / integrity_verified ← 完整性校验&lt;br&gt;gateway_session_id ← 模型会话追踪&lt;br&gt;&lt;br&gt;&lt;b&gt;性能观测&lt;/b&gt;&lt;br&gt;dispatch_ts / worker_start_ts / worker_finish_ts / result_ready_ts&lt;br&gt;server_latency_ms / worker_latency_ms / model_latency_ms" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#111111;fontSize=12;fontColor=#111111;arcSize=8;spacing=12;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="190" width="540" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-rl" value="&lt;b&gt;训练消费&lt;/b&gt;&lt;br&gt;reward + response_ids + response_mask + log_probs&lt;br&gt;→ 计算 advantage / loss / policy update" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF4FF;strokeColor=#0070F3;fontSize=12;fontColor=#111111;arcSize=8;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="740" width="170" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-eval" value="&lt;b&gt;评测消费&lt;/b&gt;&lt;br&gt;status + total_reward + metadata&lt;br&gt;→ score / pass@k / resolved report" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECFDF3;strokeColor=#2DA44E;fontSize=12;fontColor=#111111;arcSize=8;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="1465" y="740" width="170" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="consumer-trace" value="&lt;b&gt;轨迹消费&lt;/b&gt;&lt;br&gt;trajectory_id + steps + checksum&lt;br&gt;→ 回放 / 审计 / 数据集沉淀" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#D4A72C;fontSize=12;fontColor=#111111;arcSize=8;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="1650" y="740" width="170" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="map-note" value="字段映射原则：env_type 决定环境能力；payload / reward_config 承载单条样本数据；训练、测评、轨迹采集是上层业务用途，主要体现在 metadata 和 EpisodeResult 的消费方式。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F6F8FA;strokeColor=#D0D7DE;fontSize=14;fontStyle=1;fontColor=#111111;arcSize=8;spacing=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="890" width="1380" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="edge-rl-request" value="样本 / 采样配置" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#0070F3;fontSize=11;fontColor=#0070F3;" edge="1" parent="1" source="rl-input" target="request-body">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-eval-request" value="benchmark / 判定输入" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#2DA44E;fontSize=11;fontColor=#2DA44E;" edge="1" parent="1" source="eval-input" target="request-body">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-trace-request" value="task / runtime / trace policy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#D4A72C;fontSize=11;fontColor=#A37100;" edge="1" parent="1" source="trace-input" target="request-body">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-request-chain" value="统一请求" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#111111;fontSize=12;fontStyle=1;fontColor=#111111;" edge="1" parent="1" source="request-body" target="adapter">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-adapter-server" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#6E7781;" edge="1" parent="1" source="adapter" target="server">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-server-worker" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#6E7781;" edge="1" parent="1" source="server" target="worker">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-worker-agent" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#6E7781;" edge="1" parent="1" source="worker" target="agent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-chain-result" value="统一结果" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#111111;fontSize=12;fontStyle=1;fontColor=#111111;" edge="1" parent="1" source="worker" target="result-body">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-result-rl" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#0070F3;" edge="1" parent="1" source="result-body" target="consumer-rl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-result-eval" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#2DA44E;" edge="1" parent="1" source="result-body" target="consumer-eval">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-result-trace" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeColor=#D4A72C;" edge="1" parent="1" source="result-body" target="consumer-trace">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

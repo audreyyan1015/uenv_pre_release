@@ -12,7 +12,6 @@ import pandas as pd
 DEFAULT_INPUT_DIR = Path("/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith/raw/data")
 DEFAULT_OUTPUT_DIR = Path("/data/ronghao/uenv/uenv-bridge/data/benchmarks/swesmith_train")
 OFFICIAL_SWESMITH_PREFIX = "swebench/swesmith."
-LEGACY_SWESMITH_PREFIX = "jyangballin/swesmith."
 
 SYSTEM_PROMPT = (
     "You are fixing a real software issue in a checked-out repository. "
@@ -50,8 +49,11 @@ def _smith_image_from_instance_id(instance_id: str) -> str:
 
 def _image_name(row: dict[str, Any]) -> str:
     image = str(row.get("image_cache_key") or row.get("image_name") or "").strip()
-    if image.startswith(LEGACY_SWESMITH_PREFIX):
-        image = OFFICIAL_SWESMITH_PREFIX + image[len(LEGACY_SWESMITH_PREFIX) :]
+    if image and not image.startswith(OFFICIAL_SWESMITH_PREFIX):
+        marker = image.find("swesmith.")
+        if marker < 0:
+            raise ValueError(f"invalid SWE-smith image: {image}")
+        image = OFFICIAL_SWESMITH_PREFIX + image[marker + len("swesmith.") :]
     if not image:
         image = _smith_image_from_instance_id(str(row.get("instance_id") or ""))
     if image and ":" not in image.rsplit("/", 1)[-1]:
@@ -96,6 +98,7 @@ def to_verl_row(
     max_iterations: int,
     env_package_version: str,
     agent_mode: str,
+    agent_pool_id: str,
 ) -> dict[str, Any]:
     instance_id = str(row["instance_id"])
     fail_to_pass = _list_value(row, "FAIL_TO_PASS")
@@ -120,7 +123,7 @@ def to_verl_row(
         "agent_mode": agent_mode,
         "agent_bridge_id": "uenv-agent-openhands",
         "agent_bridge_version": "1.0.0",
-        "agent_pool_id": "openhands-default",
+        "agent_pool_id": agent_pool_id,
         "driver_entrypoint": "run_swesmith_official.py",
         "workspace_dir": workspace_dir,
         "llm_config_path": llm_config_path,
@@ -152,6 +155,7 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=None, help="Alias for --max-iterations.")
     parser.add_argument("--env-package-version", default="0.1.0-local")
     parser.add_argument("--agent-mode", choices=["llm", "gold"], default="llm")
+    parser.add_argument("--agent-pool-id", default="openhands-default")
     args = parser.parse_args()
 
     if args.limit < 0:
@@ -196,6 +200,7 @@ def main() -> None:
             max_iterations=args.max_iterations,
             env_package_version=args.env_package_version,
             agent_mode=args.agent_mode,
+            agent_pool_id=args.agent_pool_id,
         )
         for source_index, row in selected
     ]

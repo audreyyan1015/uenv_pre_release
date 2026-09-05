@@ -7,7 +7,9 @@ server:
 
 worker:
   id: "auto"                    # UENV_WORKER_ID
-  listen: "0.0.0.0:50052"       # UENV_WORKER_LISTEN（供 Scheduler 回连 DispatchEpisode）
+  listen: "0.0.0.0:50054"       # UENV_WORKER_LISTEN（供 Adapter 回连 DispatchEpisode）
+  # 多机部署必须显式填写 Adapter 可路由的地址，例如：
+  # advertise_endpoint: "192.168.56.2:50054"
   max_concurrent: 4             # UENV_MAX_CONCURRENT
 
 scheduler:

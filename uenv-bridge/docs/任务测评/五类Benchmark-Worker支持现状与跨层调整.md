@@ -56,18 +56,18 @@
 |------|------|
 | `fixtures/math/samples/*.json` | pubmedqa / scitab / olymmath-easy smoke payload |
 | `fixtures/code/samples/ds_smoke_001.json` | DSCodeBench inline test |
-| `uenv-bridge/scripts/smoke_math_datasets_grpcurl.py` | math 四 dataset grpcurl E2E |
-| `uenv-bridge/scripts/smoke_code_env_grpcurl.py` | code env grpcurl E2E |
-| `uenv-bridge/scripts/samples/verl_benchmark_samples.json` | 五类 VeRL 单条样本参考 |
+| `uenv-bridge/scripts/smoke/smoke_math_datasets_grpcurl.py` | math 四 dataset grpcurl E2E |
+| `uenv-bridge/scripts/smoke/smoke_code_env_grpcurl.py` | code env grpcurl E2E |
+| `uenv-bridge/docs/asset/verl_benchmark_samples.json` | 五类 VeRL 单条样本参考 |
 | `uenv-bridge/src/uenv/__init__.py` | 修复 async e2e 的 `from uenv.bridge` import |
 
 ```bash
 # 7143 / 实机（需 grpcurl + Worker + adapter-core）
-python3 uenv-bridge/scripts/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
-python3 uenv-bridge/scripts/smoke_code_env_grpcurl.py 8.130.75.157:8088
+python3 uenv-bridge/scripts/smoke/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
+python3 uenv-bridge/scripts/smoke/smoke_code_env_grpcurl.py 8.130.75.157:8088
 
 # VeRL async（需 mock LLM）
-PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/verify_math_datasets_and_async_e2e.py
+PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/smoke/verify_math_datasets_and_async_e2e.py
 ```
 
 > grpcurl smoke 覆盖 **adapter-core + uenv-server 调度 + Worker**；不依赖 VeRL 训练栈。
@@ -294,7 +294,7 @@ env:
 |------|-------------|------|
 | **proto** | ✅ 已完成 | 无需任何改动 |
 | **fixtures / smoke** | ✅ 已入库 | JSON 样本 + math/code grpcurl smoke；SWE textproto 仍缺 |
-| **VeRL 样例** | ✅ 已入库 | `uenv-bridge/scripts/samples/verl_benchmark_samples.json` |
+| **VeRL 样例** | ✅ 已入库 | `uenv-bridge/docs/asset/verl_benchmark_samples.json` |
 | **verify 脚本 import** | ✅ 已修复 | `uenv-bridge/src/uenv/__init__.py` |
 | **CI** | ⚠️ 视流水线 | 可加 `cargo test -p uenv-math-env` 等 job |
 | **运维 / Hub sync** | ❌ 依赖内网 | 需导入机 + Hub + Worker 节点 |
@@ -382,9 +382,9 @@ Bridge 分两层：**Rust Adapter Core**（`uenv-bridge/core/`）负责 L1↔Wor
 #### 1.4 验收方式
 
 ```bash
-python3 uenv-bridge/scripts/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
-python3 uenv-bridge/scripts/smoke_code_env_grpcurl.py 8.130.75.157:8088
-PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/verify_math_datasets_and_async_e2e.py
+python3 uenv-bridge/scripts/smoke/smoke_math_datasets_grpcurl.py 8.130.75.157:8088
+python3 uenv-bridge/scripts/smoke/smoke_code_env_grpcurl.py 8.130.75.157:8088
+PYTHONPATH=uenv-bridge/src python3 uenv-bridge/scripts/smoke/verify_math_datasets_and_async_e2e.py
 ```
 
 ---
@@ -580,7 +580,7 @@ export UENV_DSCODEBENCH_ROOT=/var/lib/uenv/envs/dscodebench/0.1.0/benchmark
 
 | ID | 项 | 状态 |
 |----|-----|------|
-| T-1 | 五类 benchmark VeRL 单条样本 | ✅ `uenv-bridge/scripts/samples/verl_benchmark_samples.json` |
+| T-1 | 五类 benchmark VeRL 单条样本 | ✅ `uenv-bridge/docs/asset/verl_benchmark_samples.json` |
 | T-2 | GRPO / async rollout 实机 | ⚠️ math 有 `verify_math_datasets_and_async_e2e.py`；code/swe 待对等脚本 |
 | T-3 | pass@k 聚合语义文档化 | ⚠️ 训练侧对单 episode 0/1 reward 做 pass@k |
 

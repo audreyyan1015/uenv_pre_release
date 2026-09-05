@@ -185,9 +185,16 @@ pub(crate) struct ForEpisodeSession {
     pub(crate) instance_catalog_json: String,
 }
 
-fn swe_gateway_api_key() -> String {
-    // 默认值用于本地测试和未显式配置的部署；生产环境应通过环境变量覆盖。
-    std::env::var("UENV_SWE_GATEWAY_API_KEY").unwrap_or_else(|_| "swe-pro-secret".to_string())
+fn swe_gateway_api_key() -> anyhow::Result<String> {
+    let key = std::env::var("UENV_SWE_GATEWAY_API_KEY").map_err(|_| {
+        anyhow::anyhow!("UENV_SWE_GATEWAY_API_KEY is required for SWE agent sessions")
+    })?;
+    if key.trim().is_empty() || key == "REPLACE_WITH_RANDOM_GATEWAY_API_KEY" {
+        anyhow::bail!(
+            "UENV_SWE_GATEWAY_API_KEY must contain a generated secret, not a placeholder"
+        );
+    }
+    Ok(key)
 }
 
 async fn create_session_for_episode(

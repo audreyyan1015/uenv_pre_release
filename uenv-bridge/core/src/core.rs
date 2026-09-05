@@ -990,7 +990,10 @@ mod tests {
         assert_eq!(worker_payload["question"], "Choose an action");
         assert_eq!(worker_payload["dataset"], "robotics-v1");
         assert_eq!(worker_payload["env_config"], env_cfg);
-        assert_eq!(worker_payload["env_config"]["arena"]["obstacles"][1]["y"], 4);
+        assert_eq!(
+            worker_payload["env_config"]["arena"]["obstacles"][1]["y"],
+            4
+        );
         assert_eq!(
             worker_payload["env_config"]["domain_options"]["safety"]["thresholds"],
             json!([0.1, 0.5, 0.9])

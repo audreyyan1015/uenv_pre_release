@@ -1,8 +1,8 @@
 # UEnv 轨迹保存规范（冻结 v2.3）
 
-> **状态**：冻结、实机在用  
-> **适用范围**：SWE Runtime Gateway 路径（含 OpenHands driver）、VeRL native DispatchEpisode 路径、**非 SWE 通用 episode 路径（v2.3 新增）**  
-> **Canonical 存储**：Server `8.130.75.157:8077`（HTTP）+ SQLite 索引；Worker 本地为 seal + 上传 spool  
+> **状态**：冻结、实机在用
+> **适用范围**：SWE Runtime Gateway 路径（含 OpenHands driver）、VeRL native DispatchEpisode 路径、**非 SWE 通用 episode 路径（v2.3 新增）**
+> **Canonical 存储**：Server `8.130.75.157:8077`（HTTP）+ SQLite 索引；Worker 本地为 seal + 上传 spool
 > **代码真源**：`uenv-worker/src/swe/trajectory.rs`、`uenv-common/src/trajectory.rs`、`uenv-server/src/trajectory.rs`、`uenv-worker/src/episode/executor.rs`
 >
 > v2.3 相对 v2.2 的增量：**所有任务类型的轨迹都进集中存储**——非 SWE 通用 episode（math/code 等
@@ -61,7 +61,7 @@
 
 ### 3.1 `trajectory_id`
 
-- **格式**：`trj-{worker_id}-{unix_ms}-{seq5}`  
+- **格式**：`trj-{worker_id}-{unix_ms}-{seq5}`
   例：`trj-worker-7143-pro-1783244550494-00001`
 - **生成**：Worker `TrajectoryStore::next_trajectory_id()`，进程内单调递增 seq。
 - **唯一性**：全局 PK（Server SQLite + Worker 文件名）。
@@ -72,7 +72,7 @@
 - **注入（SWE / Gateway）**：HTTP 头 `X-UEnv-Run-Id` → Gateway session → 写入 bundle。
 - **注入（非 SWE 通用 episode，v2.3）**：adapter-core 把 sample context 的 `training_run_id` /
   `batch_id` / `run_id` 写入 `EpisodeRequest.metadata`（proto 字段 21），Server dispatch 原样透传；
-  Worker seal 时按以下优先级解析：  
+  Worker seal 时按以下优先级解析：
   `metadata["run_id"]` → `metadata["training_run_id"]` → `metadata["batch_id"]` → `run-{episode_id}`（兜底）。
 - **run-task 评测路径**：`uenv-bridge` Python `evaluate.py` → adapter-core `ExecuteBatch`；
   `batch_id` 为 envelope 必填字段且必入 metadata，故该路径至少落到 `batch_id` 一级，无需额外补键。
@@ -199,9 +199,9 @@
 
 Server 从 bundle **解析** `TrajectoryHeader`（见 `uenv-common/src/trajectory.rs`），写入可查询列：
 
-`trajectory_id`, `worker_id`, `instance_id`, `benchmark_variant`, `session_id`,  
-`episode_id`, `run_id`, `batch_id`, `correlation_id`, `gateway_base_url`,  
-`step_count`, `reward`, `resolved`, `sealed_at_ms`,  
+`trajectory_id`, `worker_id`, `instance_id`, `benchmark_variant`, `session_id`,
+`episode_id`, `run_id`, `batch_id`, `correlation_id`, `gateway_base_url`,
+`step_count`, `reward`, `resolved`, `sealed_at_ms`,
 `body_path`, `body_sha256`, `body_bytes`, `upload_status`, `body_present`, `created_at_ms`
 
 **未进入索引的字段**（仅存在于 body JSON）：`steps` 全文、`artifact` 详情、以及下文所述扩展字段。
@@ -328,16 +328,16 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 
 ### 8.6 推荐扩展做法（后续演进时采用）
 
-1. **向后兼容字段（首选）**  
+1. **向后兼容字段（首选）**
    在 `TrajectoryBundle` 或 `EpisodeArtifact` 增加 `Option<T>` / 带 `default` 的字段 → 发版 Worker + 更新本文档版本号。
 
-2. **命名空间式扩展（中期）**  
+2. **命名空间式扩展（中期）**
    增加正式字段如 `extensions: { "openhands": { ... } }`（需在 Rust 中显式建模为 `serde_json::Value` 或 nested struct），避免与顶层索引字段冲突。
 
-3. **非规范数据**  
+3. **非规范数据**
    放入 `artifact`（如 `artifact_uri` 指向对象存储）或 `stdout_log` / `test_results.raw_output`，不破坏索引契约。
 
-4. **禁止**  
+4. **禁止**
    在未升级 `TrajectoryHeader` 的情况下依赖自定义顶层字段做 Server 端 LIST 过滤或 retention 策略。
 
 ### 8.7 版本演进
@@ -349,8 +349,8 @@ POST 成功条件：必填字段齐全、`run_id` 非空、blob 落盘 + INSERT 
 
 ## 9. 与 proto `Trajectory` 的关系
 
-VeRL native 路径在 gRPC `ReportResult` 中另有一套 `Trajectory` / `StepRecord`（bytes observation/action，见 `proto/uenv/v1/episode.proto`）。  
-SWE Gateway 路径 **不使用** proto Trajectory 落盘，而使用本文 **JSON TrajectoryBundle**。  
+VeRL native 路径在 gRPC `ReportResult` 中另有一套 `Trajectory` / `StepRecord`（bytes observation/action，见 `proto/uenv/v1/episode.proto`）。
+SWE Gateway 路径 **不使用** proto Trajectory 落盘，而使用本文 **JSON TrajectoryBundle**。
 native 路径在 report 前将轨迹 seal 为 bundle 并 upload，再填 `EpisodeResult.trajectory_id`：SWE 复用
 pool submit 的 seal 结果；**非 SWE 通用 episode（v2.3）由 executor 把 proto StepRecord 映射为
 `generic` StepTrace 后 seal**（失败/超时终态 seal 部分轨迹）。

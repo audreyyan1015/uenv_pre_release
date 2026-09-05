@@ -29,6 +29,10 @@ pub struct WorkerConfig {
 /// SWE 变体加载（plan §5.4.3）：M1–M4 默认 `["verified"]`，M6 可加 `"pro"`，训练加 `"smith"`。
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct SweSection {
+    #[serde(default)]
+    pub backend: SweBackendKind,
+    #[serde(default)]
+    pub kubernetes: KubernetesSweConfig,
     #[serde(default = "default_swe_variants")]
     pub variants: Vec<String>,
     /// 启动预热的 instance_id 列表（M2-1 / M4-4：仅预热镜像缓存）。
@@ -53,6 +57,52 @@ pub struct SweSection {
     pub env_package_dirs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SweBackendKind {
+    #[default]
+    CliContainer,
+    Kubernetes,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct KubernetesSweConfig {
+    pub namespace: String,
+    pub service_account: String,
+    pub session_service_account: Option<String>,
+    pub image_pull_secrets: Vec<String>,
+    pub session_kind: String,
+    pub cpu: String,
+    pub memory: String,
+    pub ephemeral_storage: String,
+    pub schedule_timeout_secs: u64,
+    pub ready_timeout_secs: u64,
+    pub exec_timeout_secs: u64,
+    pub cleanup_timeout_secs: u64,
+    pub orphan_ttl_secs: u64,
+}
+
+impl Default for KubernetesSweConfig {
+    fn default() -> Self {
+        Self {
+            namespace: String::new(),
+            service_account: String::new(),
+            session_service_account: None,
+            image_pull_secrets: Vec::new(),
+            session_kind: "pod".to_string(),
+            cpu: "2".to_string(),
+            memory: "4Gi".to_string(),
+            ephemeral_storage: "20Gi".to_string(),
+            schedule_timeout_secs: 180,
+            ready_timeout_secs: 300,
+            exec_timeout_secs: 180,
+            cleanup_timeout_secs: 60,
+            orphan_ttl_secs: 900,
+        }
+    }
+}
+
 fn default_swe_variants() -> Vec<String> {
     vec!["verified".to_string()]
 }
@@ -60,6 +110,8 @@ fn default_swe_variants() -> Vec<String> {
 impl Default for SweSection {
     fn default() -> Self {
         Self {
+            backend: SweBackendKind::CliContainer,
+            kubernetes: KubernetesSweConfig::default(),
             variants: default_swe_variants(),
             prewarm: Vec::new(),
             warm_tag: false,
@@ -101,6 +153,8 @@ pub struct RuntimeGatewayConfig {
     /// 并发 session 上限。
     #[serde(default = "default_gateway_capacity")]
     pub capacity: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_url: Option<String>,
     /// 可选 `X-API-Key`（M5-5）：设置后所有非 health 路由强制校验。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -120,6 +174,7 @@ impl Default for RuntimeGatewayConfig {
             enabled: false,
             listen: default_gateway_listen(),
             capacity: default_gateway_capacity(),
+            advertise_url: None,
             api_key: None,
         }
     }
@@ -335,6 +390,50 @@ impl WorkerConfig {
         if self.worker.max_concurrent == 0 {
             return Err("worker.max_concurrent must be greater than 0".to_string());
         }
+        if self.runtime_gateway.enabled
+            && self.runtime_gateway.capacity > self.worker.max_concurrent
+        {
+            return Err(
+                "runtime_gateway.capacity must not exceed worker.max_concurrent".to_string(),
+            );
+        }
+        if self.swe.backend == SweBackendKind::Kubernetes {
+            let k = &self.swe.kubernetes;
+            if k.namespace.trim().is_empty() || k.namespace == "default" {
+                return Err("swe.kubernetes.namespace must be explicit and non-default".to_string());
+            }
+            if k.service_account.trim().is_empty() {
+                return Err("swe.kubernetes.service_account must not be empty".to_string());
+            }
+            if !matches!(
+                k.session_kind.as_str(),
+                "pod" | "volcano_job" | "platform_job"
+            ) {
+                return Err(
+                    "swe.kubernetes.session_kind must be pod, volcano_job, or platform_job"
+                        .to_string(),
+                );
+            }
+            if k.schedule_timeout_secs == 0 || k.ready_timeout_secs == 0 || k.exec_timeout_secs == 0
+            {
+                return Err("swe.kubernetes timeouts must be positive".to_string());
+            }
+            if self.swe.seccomp_profile_dir.is_some() {
+                return Err(
+                    "swe.seccomp_profile_dir is unsupported by Kubernetes backend".to_string(),
+                );
+            }
+            if std::env::var("UENV_WORKER_GPU_COUNT")
+                .ok()
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0)
+                != 0
+            {
+                return Err(
+                    "UENV_WORKER_GPU_COUNT must be 0 for Kubernetes SWE backend".to_string()
+                );
+            }
+        }
         if !matches!(self.scheduler.mode.as_str(), "remote" | "mock") {
             return Err(format!(
                 "scheduler.mode must be remote or mock, got {}",
@@ -361,15 +460,7 @@ impl WorkerConfig {
                 self.observability.health_listen
             ));
         }
-        if self.hub.enabled
-            && self
-                .hub
-                .endpoint
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .is_empty()
-        {
+        if self.hub.enabled && self.hub.endpoint.as_deref().unwrap_or("").trim().is_empty() {
             return Err("hub.endpoint is required when hub.enabled is true".to_string());
         }
         Ok(())
@@ -495,6 +586,11 @@ impl WorkerConfig {
                 self.runtime_gateway.capacity = p;
             }
         }
+        if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_ADVERTISE_URL") {
+            if !v.trim().is_empty() {
+                self.runtime_gateway.advertise_url = Some(v);
+            }
+        }
         if let Ok(v) = std::env::var("UENV_RUNTIME_GATEWAY_API_KEY") {
             if !v.trim().is_empty() {
                 self.runtime_gateway.api_key = Some(v);
@@ -519,6 +615,18 @@ impl WorkerConfig {
             if !variants.is_empty() {
                 self.swe.variants = variants;
             }
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_BACKEND") {
+            self.swe.backend = match v.trim().to_ascii_lowercase().as_str() {
+                "kubernetes" | "k8s" => SweBackendKind::Kubernetes,
+                _ => SweBackendKind::CliContainer,
+            };
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_K8S_NAMESPACE") {
+            self.swe.kubernetes.namespace = v;
+        }
+        if let Ok(v) = std::env::var("UENV_SWE_K8S_SERVICE_ACCOUNT") {
+            self.swe.kubernetes.service_account = v;
         }
         if let Ok(v) = std::env::var("UENV_SWE_WARM_TAG") {
             self.swe.warm_tag =
@@ -578,7 +686,9 @@ impl WorkerConfig {
         {
             use std::os::unix::fs::PermissionsExt;
             if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(format!("hub.token_file {path} must have mode 0600 or stricter").into());
+                return Err(
+                    format!("hub.token_file {path} must have mode 0600 or stricter").into(),
+                );
             }
         }
         let token = fs::read_to_string(path)
@@ -734,13 +844,10 @@ trajectory_upload:
         }
     }
 
-
     #[test]
     fn hub_token_can_be_read_from_a_dedicated_file() {
-        let path = std::env::temp_dir().join(format!(
-            "uenv-worker-hub-token-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("uenv-worker-hub-token-{}", std::process::id()));
         std::fs::write(&path, "reader-secret\n").unwrap();
         #[cfg(unix)]
         {

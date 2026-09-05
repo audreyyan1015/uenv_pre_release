@@ -143,15 +143,15 @@ export function WorkerStatusOverview({
           <div>
             <div className="flex items-center gap-2 text-sm font-medium text-blue-700">
               <Cpu className="h-4 w-4" />
-              Worker 状态
+              执行节点状态
             </div>
             <h2 className="mt-1 text-xl font-semibold tracking-tight">运行资源概览</h2>
             <p className="mt-2 text-sm text-slate-500 2xl:hidden">
-              状态来自 Server 注册、心跳、调度负载与健康判定；点击卡片查看对应 Worker。
+              状态来自 Server 注册、心跳、调度负载与健康判定；点击卡片查看对应执行节点。
             </p>
           </div>
           <div className="w-fit rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 2xl:flex 2xl:items-center 2xl:gap-2 2xl:px-3 2xl:py-2">
-            <p className="text-xs font-medium text-slate-500">Worker 总数</p>
+            <p className="text-xs font-medium text-slate-500">执行节点总数</p>
             <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900 2xl:mt-0 2xl:text-xl">
               {summary.total}
             </p>
@@ -219,7 +219,7 @@ export function WorkerStatusOverview({
 
         {idleCount > 0 && (
           <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2.5 text-xs leading-5 text-blue-800 2xl:mt-2 2xl:truncate 2xl:py-1">
-            当前 {busyCount} 个 Worker 正在执行、{idleCount} 个在线等待；空闲通常表示上游 Agent
+            当前 {busyCount} 个执行节点正在执行、{idleCount} 个在线等待；空闲通常表示上游 Agent
             并发槽位已占满，并非没有待处理 Episode。
           </div>
         )}
@@ -228,9 +228,9 @@ export function WorkerStatusOverview({
       <section className="flex min-h-0 flex-1 flex-col rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6 2xl:overflow-hidden 2xl:p-3">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between 2xl:gap-2">
           <div>
-            <p className="text-sm font-medium text-slate-500">Worker 列表</p>
+            <p className="text-sm font-medium text-slate-500">执行节点列表</p>
             <h2 className="mt-1 text-xl font-semibold tracking-tight 2xl:text-base">
-              查看每个 Worker 的运行状态
+              查看每个执行节点的运行状态
             </h2>
           </div>
           <div className="flex flex-wrap justify-end rounded-xl bg-slate-100 p-1 text-xs font-medium">
@@ -320,7 +320,7 @@ export function WorkerStatusOverview({
           </div>
         ) : (
           <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-400">
-            当前没有符合“{workerFilterLabels[filter]}”筛选条件的 Worker
+            当前没有符合“{workerFilterLabels[filter]}”筛选条件的执行节点
           </div>
         )}
 

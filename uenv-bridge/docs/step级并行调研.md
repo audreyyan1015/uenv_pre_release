@@ -250,9 +250,9 @@ Fully async 的准确性依赖“样本携带生成时的 log prob + 队列按�
 
 | 项目 | 脚本 | 说明 |
 |---|---|---|
-| 同步 VeRL baseline | `scripts/onestep_offpolicy/run_verl_grpo_sync_native.sh` | 标准同步 GRPO |
-| VeRL one-step off-policy | `scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy.sh` | `verl.experimental.one_step_off_policy.main_ppo` |
-| VeRL fully async policy | `scripts/fully_async_policy/run_verl_grpo_fully_async.sh` | VeRL fully async experimental |
+| 同步 VeRL baseline | `scripts/experiments/onestep_offpolicy/run_verl_grpo_sync_native.sh` | 标准同步 GRPO |
+| VeRL one-step off-policy | `scripts/experiments/onestep_offpolicy/run_verl_grpo_onestep_offpolicy.sh` | `verl.experimental.one_step_off_policy.main_ppo` |
+| VeRL fully async policy | `scripts/experiments/fully_async_policy/run_verl_grpo_fully_async.sh` | VeRL fully async experimental |
 
 统一配置：
 
@@ -361,20 +361,20 @@ fully async 4/4 的 2026-06-22 首次运行停在 1/5，原因是 VeRL experimen
 
 本节记录 2026-06-24 对 ROLL 的最小复现实验。目标是先确认 ROLL 在当前镜像和本机资源下能跑通 RLVR sync / async training。此前还额外做过一次 FrozenLake 的 Agentic async rollout 1-step smoke，但它只用于验证 ROLL Agentic pipeline 可以启动，不纳入本节的 GSM8K/RLVR step 并行正式对比。
 
-本次没有修改 `/data/zhangzhiyuan/codes/ROLL-main`，复现脚本和配置都放在 `uenv-bridge/scripts/roll_step_parallel/` 下，通过只读挂载 ROLL 源码运行。
+本次没有修改 `/data/zhangzhiyuan/codes/ROLL-main`，复现脚本放在 `uenv-bridge/scripts/experiments/roll_step_parallel/` 下，Hydra 配置放在 `uenv-bridge/configs/roll_step_parallel/` 下，通过只读挂载 ROLL 源码运行。
 
 ### 8.1 复现脚本
 
 | 文件 | 作用 |
 |---|---|
-| `scripts/roll_step_parallel/run_roll_reproduction.sh` | 用 podman 启动 ROLL 复现实验，统一挂载模型、ROLL 源码和当前项目目录 |
-| `scripts/roll_step_parallel/start_roll_pipeline.py` | 从 `uenv-bridge` 下的 Hydra 配置启动 ROLL pipeline，避免修改 ROLL 源码目录 |
-| `scripts/roll_step_parallel/summarize_roll_metrics.py` | 从 ROLL stdout 日志中提取 `metrics_tag` 和 JSON metrics |
-| `scripts/roll_step_parallel/configs/roll_rlvr_sync.yaml` | ROLL RLVR 同步训练 smoke 配置 |
-| `scripts/roll_step_parallel/configs/roll_rlvr_async_training.yaml` | ROLL RLVR async training smoke 配置 |
-| `scripts/roll_step_parallel/configs/roll_agentic_async_rollout.yaml` | ROLL Atropos/GSM8K async rollout 尝试配置；当前缺少 Atropos 依赖，未作为成功结果 |
-| `scripts/roll_step_parallel/configs/roll_agentic_async_rollout_frozenlake.yaml` | 历史 FrozenLake 1-step smoke 配置；仅验证 Agentic pipeline 启动，不纳入 RLVR/8GPU 资源切分主线对比 |
-| `scripts/roll_step_parallel/gem/` | 本地 GEM compatibility shim，用于补齐当前 ROLL 源码中 `gem.tools` 和 `gem.Env` 兼容问题 |
+| `scripts/experiments/roll_step_parallel/run_roll_reproduction.sh` | 用 podman 启动 ROLL 复现实验，统一挂载模型、ROLL 源码和当前项目目录 |
+| `scripts/experiments/roll_step_parallel/start_roll_pipeline.py` | 从 `uenv-bridge` 下的 Hydra 配置启动 ROLL pipeline，避免修改 ROLL 源码目录 |
+| `scripts/experiments/roll_step_parallel/summarize_roll_metrics.py` | 从 ROLL stdout 日志中提取 `metrics_tag` 和 JSON metrics |
+| `configs/roll_step_parallel/roll_rlvr_sync.yaml` | ROLL RLVR 同步训练 smoke 配置 |
+| `configs/roll_step_parallel/roll_rlvr_async_training.yaml` | ROLL RLVR async training smoke 配置 |
+| `configs/roll_step_parallel/roll_agentic_async_rollout.yaml` | ROLL Atropos/GSM8K async rollout 尝试配置；当前缺少 Atropos 依赖，未作为成功结果 |
+| `configs/roll_step_parallel/roll_agentic_async_rollout_frozenlake.yaml` | 历史 FrozenLake 1-step smoke 配置；仅验证 Agentic pipeline 启动，不纳入 RLVR/8GPU 资源切分主线对比 |
+| `scripts/experiments/roll_step_parallel/gem/` | 本地 GEM compatibility shim，用于补齐当前 ROLL 源码中 `gem.tools` 和 `gem.Env` 兼容问题 |
 
 ### 8.2 统一配置
 
@@ -422,7 +422,7 @@ ROLL_ACTOR_INFER_END_GPU=2 \
 ROLL_NUM_GPUS_PER_NODE=2 \
 PODMAN_GPU_ARGS="nvidia.com/gpu=0,1" \
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1 \
-./scripts/roll_step_parallel/run_roll_reproduction.sh
+./scripts/experiments/roll_step_parallel/run_roll_reproduction.sh
 ```
 
 ROLL async training：
@@ -443,7 +443,7 @@ ROLL_ACTOR_INFER_END_GPU=2 \
 ROLL_NUM_GPUS_PER_NODE=2 \
 PODMAN_GPU_ARGS="nvidia.com/gpu=0,1" \
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1 \
-./scripts/roll_step_parallel/run_roll_reproduction.sh
+./scripts/experiments/roll_step_parallel/run_roll_reproduction.sh
 ```
 
 ROLL Agentic async rollout 历史 smoke（FrozenLake，仅验证 pipeline 启动）：
@@ -463,13 +463,13 @@ ROLL_REFERENCE_START_GPU=1 \
 ROLL_REFERENCE_END_GPU=2 \
 PODMAN_GPU_ARGS="nvidia.com/gpu=0,1" \
 CUDA_VISIBLE_DEVICES_IN_CONTAINER=0,1 \
-./scripts/roll_step_parallel/run_roll_reproduction.sh
+./scripts/experiments/roll_step_parallel/run_roll_reproduction.sh
 ```
 
 指标汇总命令：
 
 ```bash
-python3 scripts/roll_step_parallel/summarize_roll_metrics.py \
+python3 scripts/experiments/roll_step_parallel/summarize_roll_metrics.py \
   temp/logs/roll_step_parallel/sync/roll_sync_fsdp2_2gpu_aligned_20260624_140715.log \
   temp/logs/roll_step_parallel/async_training/roll_async_training_fsdp2_2gpu_aligned_20260624_141458.log \
   temp/logs/roll_step_parallel/agentic_async_rollout_frozenlake/roll_agentic_async_rollout_frozenlake_fsdp2_20260624_135901.log
@@ -510,7 +510,7 @@ python3 scripts/roll_step_parallel/summarize_roll_metrics.py \
 
 | 问题 | 处理 |
 |---|---|
-| ROLL 自带 `gem` stub 缺少 `gem.tools.tool_env_wrapper` | 在 `scripts/roll_step_parallel/gem/` 中提供本地 shim，并通过 `PYTHONPATH` 优先加载 |
+| ROLL 自带 `gem` stub 缺少 `gem.tools.tool_env_wrapper` | 在 `scripts/experiments/roll_step_parallel/gem/` 中提供本地 shim，并通过 `PYTHONPATH` 优先加载 |
 | `gem.Env` 继承 `gymnasium.Env` 会导致 FrozenLake 多继承 MRO 冲突 | 本地 shim 将 `gem.Env` 改成轻量基类，并补齐 `reset()` |
 | Atropos/GSM8K async rollout 缺依赖 | 已确认缺 `atroposlib` / `environments.gsm8k_server`，因此本轮只用 ROLL 内置 FrozenLake 做 Agentic pipeline 启动 smoke |
 | 当前镜像优先使用 FSDP2 | 本轮 ROLL 复现实验采用 `fsdp2_train` / `fsdp2_infer`，避免引入额外 Megatron/DeepSpeed 兼容变量 |
@@ -775,7 +775,7 @@ UEnv 负责：
 | 模式 | VeRL 入口 | UEnv 接入方式 | 预期用途 |
 |---|---|---|---|
 | 同步 GRPO | `verl.trainer.main_ppo` | 当前 pre-rollout AgentLoop 接出 | 稳定基线，验证 UEnv 全链路正确性 |
-| One-step off-policy | `verl.experimental.one_step_off_policy.main_ppo` | 仍使用同一个 UEnv AgentLoop shim，由 VeRL 控制一拍流水线；adapter 入口为 `scripts/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh` | 验证 rollout 与 update 的部分重叠 |
+| One-step off-policy | `verl.experimental.one_step_off_policy.main_ppo` | 仍使用同一个 UEnv AgentLoop shim，由 VeRL 控制一拍流水线；adapter 入口为 `scripts/experiments/onestep_offpolicy/run_verl_grpo_onestep_offpolicy_uenv.sh` | 验证 rollout 与 update 的部分重叠 |
 | Fully async | `verl.experimental.fully_async_policy.fully_async_main` | VeRL fully async rollouter 本身基于 AgentLoop server mode；UEnv 可复用 AgentLoop shim，但需要单独验证请求/结果队列与异步回填语义 | 验证更强异步队列下的吞吐变化 |
 
 关键原则是：UEnv 不判断当前该不该训练某个旧 batch，也不决定 stale sample 是否可用。这些逻辑必须留在 VeRL 内部。

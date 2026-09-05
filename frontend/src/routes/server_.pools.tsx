@@ -58,7 +58,8 @@ function EnvironmentPoolsRoute() {
               </div>
               <h1 className="mt-1 text-2xl font-semibold tracking-tight">环境资源池</h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-                跨所有执行节点聚合的环境运行时资源。这里展示的是全局统计视图，不是某个执行节点上的实际进程池。
+                跨所有执行节点聚合的环境运行时资源，同时覆盖通用预热池与 SWE
+                等专用实例池。这里是全局统计视图，不是某个执行节点上的实际进程池。
               </p>
             </div>
             <Link
@@ -121,19 +122,59 @@ function EnvironmentPoolsRoute() {
                         : ""}
                     </p>
                   </div>
-                  <span className="inline-flex w-fit items-center gap-1.5 rounded-full bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200">
-                    <Server className="h-3.5 w-3.5" />
-                    {pool.workerCount} 个执行节点
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`inline-flex w-fit items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium ring-1 ${
+                        pool.source === "specialized_pool"
+                          ? "bg-blue-50 text-blue-700 ring-blue-100"
+                          : "bg-slate-50 text-slate-600 ring-slate-200"
+                      }`}
+                    >
+                      {pool.source === "specialized_pool" ? "专用实例池" : "通用预热池"}
+                    </span>
+                    <span className="inline-flex w-fit items-center gap-1.5 rounded-full bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200">
+                      <Server className="h-3.5 w-3.5" />
+                      {pool.workerCount} 个执行节点
+                    </span>
+                  </div>
                 </div>
 
                 <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-5">
                   <Stat label="容量" value={pool.capacity} />
                   <Stat label="运行时" value={pool.runtimeCount} />
-                  <Stat label="就绪" value={pool.ready} tone="text-emerald-600" />
+                  <Stat
+                    label={pool.source === "specialized_pool" ? "就绪包" : "就绪"}
+                    value={pool.ready}
+                    tone="text-emerald-600"
+                  />
                   <Stat label="执行中" value={pool.busy} tone="text-blue-600" />
                   <Stat label="预热中" value={pool.warming} tone="text-amber-600" />
                 </div>
+
+                {pool.packages.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {pool.packages.map((pkg) => (
+                      <span
+                        key={`${pkg.packageId}@${pkg.version ?? ""}`}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600 ring-1 ring-slate-200"
+                      >
+                        <span className="font-medium text-slate-800">
+                          {pkg.packageId}
+                          {pkg.version ? `@${pkg.version}` : ""}
+                        </span>
+                        {pkg.state ? <span className="text-slate-400">{pkg.state}</span> : null}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {pool.source === "specialized_pool" && (
+                  <p className="mt-3 text-[11px] leading-5 text-slate-400">
+                    该类型由专用实例池管理（例如 SweInstancePool），未进入通用 warmup
+                    pool_summary。运行时只统计环境实例（执行中 + 预热中）；就绪包是 EnvPackage
+                    目录就绪数，不计入运行时。
+                  </p>
+                )}
 
                 <div className="mt-5 space-y-2 border-t border-slate-100 pt-4">
                   <p className="text-xs font-medium text-slate-500">执行节点本地池明细</p>
@@ -152,6 +193,9 @@ function EnvironmentPoolsRoute() {
                           </span>
                           <span className="mt-1 block truncate text-[11px] text-slate-400">
                             {worker.endpoint || "端点未上报"}
+                            {worker.packages && worker.packages.length > 0
+                              ? ` · ${worker.packages.length} packages`
+                              : ""}
                           </span>
                         </span>
                       </span>

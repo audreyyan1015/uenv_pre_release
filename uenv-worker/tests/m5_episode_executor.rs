@@ -32,7 +32,9 @@ async fn m5_single_round_qa_matches_expected_reward_and_status() {
     // `qa` is the public environment identity. The same scoring binary still
     // accepts `math` as a compatibility alias for existing deployments.
     request.env_type = "qa".to_string();
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock llm");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock llm");
     let addr = listener.local_addr().expect("mock llm addr");
     request.model_endpoint_config = Some(ModelEndpoint {
         endpoint_type: "http".to_string(),
